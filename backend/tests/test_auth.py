@@ -882,40 +882,44 @@ def test_login_response_includes_needs_setup():
 # ── Rate Limiting ──────────────────────────────────────────────────────────
 
 
-def test_rate_limiter_allows_under_limit():
+@pytest.mark.asyncio
+async def test_rate_limiter_allows_under_limit():
     """Requests under the limit are allowed."""
     from app.gateway.routers.auth import _check_rate_limit, _login_attempts
 
     _login_attempts.clear()
-    _check_rate_limit("192.168.1.1")  # Should not raise
+    await _check_rate_limit("192.168.1.1")  # Should not raise
 
 
-def test_rate_limiter_blocks_after_max_failures():
+@pytest.mark.asyncio
+async def test_rate_limiter_blocks_after_max_failures():
     """IP is blocked after 5 consecutive failures."""
     from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
 
     _login_attempts.clear()
     ip = "10.0.0.1"
     for _ in range(5):
-        _record_login_failure(ip)
+        await _record_login_failure(ip)
     with pytest.raises(HTTPException) as exc_info:
-        _check_rate_limit(ip)
+        await _check_rate_limit(ip)
     assert exc_info.value.status_code == 429
 
 
-def test_rate_limiter_resets_on_success():
+@pytest.mark.asyncio
+async def test_rate_limiter_resets_on_success():
     """Successful login clears the failure counter."""
     from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure, _record_login_success
 
     _login_attempts.clear()
     ip = "10.0.0.2"
     for _ in range(4):
-        _record_login_failure(ip)
+        await _record_login_failure(ip)
     _record_login_success(ip)
-    _check_rate_limit(ip)  # Should not raise
+    await _check_rate_limit(ip)  # Should not raise
 
 
-def test_rate_limiter_honors_configured_attempts_and_lockout(monkeypatch):
+@pytest.mark.asyncio
+async def test_rate_limiter_honors_configured_attempts_and_lockout(monkeypatch):
     """auth.local.max_login_attempts / lockout_seconds drive the throttle policy."""
     from app.gateway.routers import auth as auth_router
     from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
@@ -932,17 +936,17 @@ def test_rate_limiter_honors_configured_attempts_and_lockout(monkeypatch):
     )
     try:
         ip = "10.0.0.3"
-        _record_login_failure(ip)
-        _check_rate_limit(ip)  # 1 failure < 2: allowed
-        _record_login_failure(ip)
+        await _record_login_failure(ip)
+        await _check_rate_limit(ip)  # 1 failure < 2: allowed
+        await _record_login_failure(ip)
         with pytest.raises(HTTPException) as exc_info:
-            _check_rate_limit(ip)
+            await _check_rate_limit(ip)
         assert exc_info.value.status_code == 429
         # The lockout window comes from lockout_seconds (60s), not the 300s
         # default: at locked_at + 61 the lock must already be released.
         _, locked_at, _ = _login_attempts[ip]
         monkeypatch.setattr(auth_router.time, "time", lambda: locked_at + 61.0)
-        _check_rate_limit(ip)
+        await _check_rate_limit(ip)
         assert ip not in _login_attempts
     finally:
         reset_app_config()
@@ -984,7 +988,8 @@ def test_rate_limiter_malformed_config_propagates(monkeypatch):
         auth_router._login_throttle_policy()
 
 
-def test_rate_limiter_clean_ip_skips_config_read(monkeypatch):
+@pytest.mark.asyncio
+async def test_rate_limiter_clean_ip_skips_config_read(monkeypatch):
     """A clean IP pays zero config reads: the record-None early return must
     come before policy resolution (get_app_config re-hashes config.yaml on
     every call, and login_local is an unauthenticated async endpoint)."""
@@ -996,10 +1001,11 @@ def test_rate_limiter_clean_ip_skips_config_read(monkeypatch):
 
     monkeypatch.setattr(app_config_module, "get_app_config", _must_not_load)
     auth_router._login_attempts.clear()
-    auth_router._check_rate_limit("192.0.2.7")  # returns quietly → no config read
+    await auth_router._check_rate_limit("192.0.2.7")  # returns quietly → no config read
 
 
-def test_rate_limiter_policy_change_semantics():
+@pytest.mark.asyncio
+async def test_rate_limiter_policy_change_semantics():
     """Pin the emergent semantics of a live-read policy under config reload.
 
     Raising max_login_attempts mid-lockout immediately unblocks IPs whose
@@ -1026,12 +1032,12 @@ def test_rate_limiter_policy_change_semantics():
         ip = "10.0.0.4"
         _set_policy(2)
         for _ in range(2):
-            _record_login_failure(ip)
+            await _record_login_failure(ip)
         with pytest.raises(HTTPException):
-            _check_rate_limit(ip)  # locked under the old policy
+            await _check_rate_limit(ip)  # locked under the old policy
 
         _set_policy(5)  # operator raises the ceiling mid-lockout
-        _check_rate_limit(ip)  # immediately allowed: 2 < 5, no restart needed
+        await _check_rate_limit(ip)  # immediately allowed: 2 < 5, no restart needed
 
         # max_login_attempts=1 never reaches the endpoint: config load rejects
         # it (ge=2). A legal value of 1 previously disabled lockout entirely —
@@ -1045,11 +1051,11 @@ def test_rate_limiter_policy_change_semantics():
         # The strictest legal value still locks, at the second failure.
         _login_attempts.pop(ip, None)
         _set_policy(2)
-        _record_login_failure(ip)
-        _check_rate_limit(ip)  # 1 failure < 2: allowed
-        _record_login_failure(ip)
+        await _record_login_failure(ip)
+        await _check_rate_limit(ip)  # 1 failure < 2: allowed
+        await _record_login_failure(ip)
         with pytest.raises(HTTPException):
-            _check_rate_limit(ip)
+            await _check_rate_limit(ip)
     finally:
         reset_app_config()
         _login_attempts.clear()
@@ -1075,7 +1081,8 @@ def test_local_auth_throttle_config_validation():
         LocalAuthConfig(lockout_seconds=float("inf"))
 
 
-def test_rate_limiter_active_lockout_honors_live_lockout_seconds_change(monkeypatch):
+@pytest.mark.asyncio
+async def test_rate_limiter_active_lockout_honors_live_lockout_seconds_change(monkeypatch):
     """A live lockout_seconds change applies to in-flight lockouts, in the
     direction that serves the operator, without resurrecting served sentences.
 
@@ -1108,44 +1115,45 @@ def test_rate_limiter_active_lockout_honors_live_lockout_seconds_change(monkeypa
 
         # Lowering mid-lockout releases early.
         _set_policy(60.0)
-        _record_login_failure(ip)
-        _record_login_failure(ip)
+        await _record_login_failure(ip)
+        await _record_login_failure(ip)
         _, locked_at, _ = _login_attempts[ip]
         _freeze_clock_at(locked_at + 2.0)
         with pytest.raises(HTTPException):
-            _check_rate_limit(ip)  # 2s into the 60s window: still locked
+            await _check_rate_limit(ip)  # 2s into the 60s window: still locked
         _set_policy(1.0)  # operator shortens the window
-        _check_rate_limit(ip)  # 2s > 1s: unlocked on the very next login
+        await _check_rate_limit(ip)  # 2s > 1s: unlocked on the very next login
         assert ip not in _login_attempts
 
         # Raising while the lock is still active extends it.
         _set_policy(1.0)
-        _record_login_failure(ip)
-        _record_login_failure(ip)
+        await _record_login_failure(ip)
+        await _record_login_failure(ip)
         _, locked_at, _ = _login_attempts[ip]
         _freeze_clock_at(locked_at + 0.5)  # still inside the 1s sentence
         _set_policy(60.0)  # operator lengthens the window mid-sentence
         with pytest.raises(HTTPException):
-            _check_rate_limit(ip)  # active, and 0.5 < 60: extended
+            await _check_rate_limit(ip)  # active, and 0.5 < 60: extended
         _freeze_clock_at(locked_at + 2.0)  # past the original 1s sentence
         with pytest.raises(HTTPException):
-            _check_rate_limit(ip)  # extended: 2 < 60, still locked
+            await _check_rate_limit(ip)  # extended: 2 < 60, still locked
 
         # A sentence that already elapsed before the raise is not resurrected.
         _set_policy(1.0)
-        _record_login_failure(ip)
-        _record_login_failure(ip)
+        await _record_login_failure(ip)
+        await _record_login_failure(ip)
         _, locked_at, _ = _login_attempts[ip]
         _freeze_clock_at(locked_at + 2.0)  # past the 1s sentence, no check yet
         _set_policy(60.0)  # operator lengthens the window for *future* locks
-        _check_rate_limit(ip)  # the served 1s sentence is not resurrected
+        await _check_rate_limit(ip)  # the served 1s sentence is not resurrected
         assert ip not in _login_attempts
     finally:
         reset_app_config()
         _login_attempts.clear()
 
 
-def test_rate_limiter_lowered_then_raised_duration_not_resurrected(monkeypatch):
+@pytest.mark.asyncio
+async def test_rate_limiter_lowered_then_raised_duration_not_resurrected(monkeypatch):
     """A shortened duration observed during the sentence is committed, so a
     later raise cannot resurrect time already served under the short policy.
 
@@ -1171,8 +1179,8 @@ def test_rate_limiter_lowered_then_raised_duration_not_resurrected(monkeypatch):
     try:
         ip = "10.0.0.8"
         _set_policy(60.0)
-        _record_login_failure(ip)
-        _record_login_failure(ip)
+        await _record_login_failure(ip)
+        await _record_login_failure(ip)
         _, locked_at, _ = _login_attempts[ip]
 
         def _freeze(t: float) -> None:
@@ -1181,19 +1189,61 @@ def test_rate_limiter_lowered_then_raised_duration_not_resurrected(monkeypatch):
         _freeze(locked_at + 6.0)
         _set_policy(10.0)
         with pytest.raises(HTTPException):
-            _check_rate_limit(ip)  # 6 < 10: still locked, and the 10s sentence is committed
+            await _check_rate_limit(ip)  # 6 < 10: still locked, and the 10s sentence is committed
         assert _login_attempts[ip][2] == 10.0
 
         _freeze(locked_at + 20.0)
         _set_policy(30.0)  # raised after the 10s sentence was served at +10s
-        _check_rate_limit(ip)  # not resurrected: allowed
+        await _check_rate_limit(ip)  # not resurrected: allowed
         assert ip not in _login_attempts
     finally:
         reset_app_config()
         _login_attempts.clear()
 
 
-def test_rate_limiter_tightened_threshold_preserves_failures():
+@pytest.mark.asyncio
+async def test_rate_limiter_eviction_expires_by_stored_sentence_not_current_threshold(monkeypatch):
+    """The capacity sweep must expire records by their own committed sentence,
+    with no gate on the current threshold.
+
+    A record locked under an old, lower threshold has a count below the live
+    max after the operator raises it; gating expiry on ``count >= max`` keeps
+    that served record resident while the capacity fallback evicts live
+    counters first (they sort earliest), handing an active offender a fresh
+    budget. Reproduction from review: cap 2, live ``(1, 0, 0)`` plus expired
+    ``(2, 10, 1)`` under max=3, clock at 100.
+    """
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _login_attempts, _record_login_failure
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    monkeypatch.setattr(auth_router, "_MAX_TRACKED_IPS", 2)
+    monkeypatch.setattr(auth_router.time, "time", lambda: 100.0)
+    set_app_config(
+        AppConfig(
+            sandbox=SandboxConfig(use="test"),
+            auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=3, lockout_seconds=60.0)),
+        )
+    )
+    _login_attempts.clear()
+    try:
+        _login_attempts["live-counter"] = (1, 0.0, 0.0)  # active offender, counting
+        _login_attempts["expired-lock"] = (2, 10.0, 1.0)  # locked under old max=2; served at 11.0
+
+        await _record_login_failure("fresh-ip")  # hits the capacity sweep
+
+        assert "expired-lock" not in _login_attempts  # served sentence is swept
+        assert _login_attempts["live-counter"] == (1, 0.0, 0.0)  # live counter survives
+        assert _login_attempts["fresh-ip"][0] == 1
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_tightened_threshold_preserves_failures():
     """Tightening max_login_attempts mid-count keeps the accumulated failures.
 
     An IP with four failures under max_login_attempts=5 must not get a fresh
@@ -1218,27 +1268,28 @@ def test_rate_limiter_tightened_threshold_preserves_failures():
         ip = "10.0.0.6"
         _set_policy(5)
         for _ in range(4):
-            _record_login_failure(ip)  # 4 failures: counting, never locked
+            await _record_login_failure(ip)  # 4 failures: counting, never locked
 
         _set_policy(2)  # operator tightens the policy mid-count
-        _check_rate_limit(ip)  # allowed this once — but the count survives
+        await _check_rate_limit(ip)  # allowed this once — but the count survives
         assert _login_attempts[ip][0] == 4
 
-        _record_login_failure(ip)  # 4 + 1 >= 2: locks on the very next failure
+        await _record_login_failure(ip)  # 4 + 1 >= 2: locks on the very next failure
         with pytest.raises(HTTPException):
-            _check_rate_limit(ip)
+            await _check_rate_limit(ip)
 
         # A correct password still clears everything (no retroactive lockout
         # of a legitimate user who fat-fingered the password four times).
         _record_login_success(ip)
-        _check_rate_limit(ip)
+        await _check_rate_limit(ip)
         assert ip not in _login_attempts
     finally:
         reset_app_config()
         _login_attempts.clear()
 
 
-def test_rate_limiter_counts_failure_when_config_breaks(monkeypatch):
+@pytest.mark.asyncio
+async def test_rate_limiter_counts_failure_when_config_breaks(monkeypatch):
     """A malformed config hot-edit must not hand out unlimited verification.
 
     Endpoint order per failed login: _check_rate_limit (clean IPs skip the
@@ -1262,15 +1313,15 @@ def test_rate_limiter_counts_failure_when_config_breaks(monkeypatch):
 
         # First failed login: still allowed through to authenticate(), then
         # the record call fails loudly — but the failure is counted first.
-        _check_rate_limit(ip)  # clean IP: no config read, allowed
+        await _check_rate_limit(ip)  # clean IP: no config read, allowed
         with pytest.raises(ValueError, match="config validation error"):
-            _record_login_failure(ip)
+            await _record_login_failure(ip)
         assert _login_attempts[ip] == (1, 0.0, 0.0)
 
         # Second login: the now-dirty IP's check reads the broken config and
         # fails closed *before* authenticate() — no more password verification.
         with pytest.raises(ValueError, match="config validation error"):
-            _check_rate_limit(ip)
+            await _check_rate_limit(ip)
     finally:
         _login_attempts.clear()
 

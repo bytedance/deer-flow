@@ -268,18 +268,22 @@ def _get_client_ip(request: Request) -> str:
     return peer_host or "unknown"
 
 
-def _check_rate_limit(ip: str) -> None:
+async def _check_rate_limit(ip: str) -> None:
     """Raise 429 if the IP is currently locked out.
 
     The record lookup comes before policy resolution on purpose: a clean IP
     (no failed attempts recorded — the overwhelming majority of logins) must
     not pay a config read, and ``get_app_config`` re-hashes config.yaml on
-    every call while this endpoint is unauthenticated.
+    every call while this endpoint is unauthenticated. When a record exists
+    the policy is resolved off the event loop via ``asyncio.to_thread``:
+    every request from a recorded IP — including an already-locked attacker
+    flooding the endpoint — pays that read on the way to its answer, and the
+    stat + hash must not block the loop.
     """
     record = _login_attempts.get(ip)
     if record is None:
         return
-    max_attempts, lockout_seconds = _login_throttle_policy()
+    max_attempts, lockout_seconds = await asyncio.to_thread(_login_throttle_policy)
     fail_count, locked_at, locked_duration = record
     if fail_count < max_attempts:
         return
@@ -318,18 +322,24 @@ _MAX_TRACKED_IPS = 10000
 
 def _record_failure_under_policy(ip: str, max_attempts: int, lockout_seconds: float) -> None:
     """Apply one failed login to the counter under an explicit policy."""
-    # Evict expired lockouts when dict grows too large. Each record expires by
-    # its own locked_duration, so eviction is immune to live policy changes.
+    # Evict expired lockouts when dict grows too large. Expiry is a property
+    # of each record's own committed sentence — `t > 0 and now >= t + d` —
+    # independent of the live threshold: a record locked under an old, lower
+    # threshold must still be swept once its sentence is served, even if the
+    # current max has moved past its count. Gating on the current threshold
+    # here would retain expired records while the capacity fallback below
+    # evicts live counters (they sort first), granting active offenders
+    # fresh budgets.
     if len(_login_attempts) >= _MAX_TRACKED_IPS:
         now = time.time()
-        expired = [k for k, (c, t, d) in _login_attempts.items() if c >= max_attempts and t > 0.0 and now >= t + d]
+        expired = [k for k, (c, t, d) in _login_attempts.items() if t > 0.0 and now >= t + d]
         for k in expired:
             del _login_attempts[k]
-        # If still too large, evict cheapest-to-lose half: below-threshold
-        # IPs (locked_at=0.0) sort first, then earliest-locked (≈ earliest
-        # to expire under its own duration).
+        # If still too large, evict cheapest-to-lose half ordered by each
+        # record's own expiry: never-locked counters (t + d == 0.0) first,
+        # then locked records whose committed sentence expires earliest.
         if len(_login_attempts) >= _MAX_TRACKED_IPS:
-            by_time = sorted(_login_attempts.items(), key=lambda kv: kv[1][1])
+            by_time = sorted(_login_attempts.items(), key=lambda kv: kv[1][1] + kv[1][2])
             for k, _ in by_time[: len(by_time) // 2]:
                 del _login_attempts[k]
 
@@ -344,10 +354,15 @@ def _record_failure_under_policy(ip: str, max_attempts: int, lockout_seconds: fl
             _login_attempts[ip] = (new_count, 0.0, 0.0)
 
 
-def _record_login_failure(ip: str) -> None:
-    """Record a failed login attempt for the given IP."""
+async def _record_login_failure(ip: str) -> None:
+    """Record a failed login attempt for the given IP.
+
+    Policy resolution runs off the event loop (see ``_check_rate_limit``):
+    this is the first config read for a previously clean IP, and the login
+    endpoint is unauthenticated.
+    """
     try:
-        max_attempts, lockout_seconds = _login_throttle_policy()
+        max_attempts, lockout_seconds = await asyncio.to_thread(_login_throttle_policy)
     except Exception:
         # A malformed config keeps failing loudly, but dropping the failure
         # here would leave the IP clean — and a clean IP skips the config
@@ -381,12 +396,12 @@ async def login_local(
 ):
     """Local email/password login."""
     client_ip = _get_client_ip(request)
-    _check_rate_limit(client_ip)
+    await _check_rate_limit(client_ip)
 
     user = await get_local_provider().authenticate({"email": form_data.username, "password": form_data.password})
 
     if user is None:
-        _record_login_failure(client_ip)
+        await _record_login_failure(client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Incorrect email or password").model_dump(),
