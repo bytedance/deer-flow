@@ -474,6 +474,48 @@ async def test_neutralize_pchar_segments_cancel_whole():
     assert neutralize("see /api/threads/t1/u/.. end") == "see [private artifact omitted].. end"
 
 
+async def test_neutralize_split_layer_encodings():
+    """``api`` may arrive raw/entity/unicode while ``threads`` arrives
+    percent-encoded (or vice versa): the token anchor must fire on any
+    separator-ish follower, and the classifier must never resolve entity
+    dots into a cancellation that browsers — which do not entity-decode
+    URLs — would not perform (dual-view classification)."""
+    neutralize = _neutralize_private_references
+    # split-layer anchor: api literal, threads percent-encoded
+    assert neutralize("see api/%74%68%72%65%61%64%73/t1/u now") == "see [private artifact omitted] now"
+    assert neutralize("see \\u0061\\u0070\\u0069/%74%68%72%65%61%64%73/t1/u now") == "see [private artifact omitted] now"
+    assert neutralize("see &#97;&#112;&#105;/%74%68%72%65%61%64%73/t1/u now") == "see [private artifact omitted] now"
+    # entity dot-tail on a percent phrase: href keeps &#46;&#46; literal
+    assert neutralize("[x](api/%74%68%72%65%61%64%73/t1/u/&#46;&#46;)") == "x [private artifact omitted]"
+    assert neutralize("see %6D%6E%74/%75%73%65%72%2D%64%61%74%61/&#46;&#46; now") == "see [private artifact omitted]&#46;&#46; now"
+    # controls: a percent sign in prose does not make a private token
+    assert neutralize("api%usage and 100%api notes") == "api%usage and 100%api notes"
+
+
+async def test_neutralize_encoded_glue_before_phrase():
+    """An encoded glue character immediately before a phrase decodes in the
+    shadow to a word/dot/hyphen char and trips the phrase-boundary
+    lookbehind into the pinned-public identifier shape — while the original
+    bytes end in ``;``, a phrase boundary. The boundary is therefore judged
+    in original coordinates, where the pre-decode byte decides."""
+    neutralize = _neutralize_private_references
+    # entity glue: original boundary is ';' — cut (the glue bytes decode to
+    # a single harmless character and stay public, like any public head)
+    assert neutralize("&#46;api/threads/t1/u") == "&#46;[private artifact omitted]"
+    assert neutralize("&#46;mnt/user-data") == "&#46;[private artifact omitted]"
+    assert neutralize("z9&#46;mnt/user-data") == "z9&#46;[private artifact omitted]"
+    assert neutralize("&amp;#46;api/threads/t1/u") == "&amp;#46;[private artifact omitted]"
+    assert neutralize("&#97;api/threads/t1/u") == "&#97;[private artifact omitted]"
+    assert neutralize("x&sol;api/threads/t1/u") == "x[private artifact omitted]"
+    # entity glue + unicode-encoded phrase
+    assert neutralize("&#46;api/\\u0074hreads/1/") == "&#46;[private artifact omitted]"
+    assert neutralize("&#46;mnt/\\u0075ser-data") == "&#46;[private artifact omitted]"
+    # controls: the blocking char is real in every consumer view — keep
+    assert neutralize("foo.api/threads/t1/u") == "foo.api/threads/t1/u"
+    assert neutralize("\\u002eapi/threads/t1/u") == "\\u002eapi/threads/t1/u"
+    assert neutralize("%2Eapi/threads/t1/u") == "%2Eapi/threads/t1/u"
+
+
 async def test_neutralize_preserves_public_content_with_separators():
     neutralize = _neutralize_private_references
     # normalization exists only for classification; public text is emitted

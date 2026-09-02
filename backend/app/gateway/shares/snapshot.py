@@ -33,13 +33,15 @@ _FENCED_CODE_RE = re.compile(
 )
 _INLINE_CODE_RE = re.compile(r"(?P<ticks>`+).*?(?P=ticks)", re.DOTALL)
 _MARKDOWN_LINK_RE = re.compile(r"!?\[(?P<label>[^\]]*)\]\((?P<target>[^)]+)\)")
-# Word-initial branches (``api/…``, ``mnt/…``) only fire at a token boundary:
-# ``fooapi/threads/…`` is public text, not a relative reference — and so are
-# ``foo.api``/``foo-mnt``, which name a longer identifier or host across the
-# dot/hyphen adjacency. The separator-led branches need no guard — a private
-# path starting mid-token still classifies on its own shape.
+# Word-initial branches (``api/…``, ``mnt/…``) anchor a token on any
+# separator-ish follower — raw, backslash, or percent; layers mix freely
+# (literal ``api`` ahead of a percent-encoded ``threads``). No lookbehind
+# here: admissibility is judged downstream in fed coordinates, where an
+# encoded glue character (``&#46;api/…``) cannot masquerade as the pinned
+# ``foo.api`` identifier shape. The separator-led branches need no guard —
+# a private path starting mid-token still classifies on its own shape.
 _REFERENCE_RE = re.compile(
-    r"(?:https?://|/|%[0-9A-Fa-f]{2}|(?<![\w.\-])(?:api(?=/threads/)|mnt(?=[\\/]|%[0-9A-Fa-f]{2})))[^\s<>\"]+",
+    r"(?:https?://|/|%[0-9A-Fa-f]{2}|(?:api|mnt)(?=[/\\%]))[^\s<>\"]+",
     re.IGNORECASE,
 )
 _PRIVATE_REFERENCE_MARKER = "[private artifact omitted]"
@@ -433,7 +435,7 @@ def _collapse_separators_with_offsets(text: str, *, resolve_dots: bool = True) -
     return normalized, spans
 
 
-def _decoded_reference(value: str) -> str:
+def _decoded_reference(value: str, *, resolve_dots: bool = True) -> str:
     """Decode a bounded number of URL-encoding layers for classification."""
     decoded = value
     for _ in range(3):
@@ -441,7 +443,7 @@ def _decoded_reference(value: str) -> str:
         if candidate == decoded:
             break
         decoded = candidate
-    normalized, _ = _collapse_separators_with_offsets(decoded)
+    normalized, _ = _collapse_separators_with_offsets(decoded, resolve_dots=resolve_dots)
     return normalized
 
 
@@ -473,14 +475,36 @@ _REFERENCE_CUT_TERMINATORS = ",;:!?)\\]}\"'`*_~(|[<"
 # in running text classifies identically instead of publishing a
 # live-looking private link.
 #
-# The phrase boundary is a lookbehind — the phrase starts wherever any
-# non-word, non-dot, non-hyphen character (or nothing) precedes it. Any
-# join character can head a whitespace-free token (``/docs&api/…``,
-# ``/docs，api/…``), while ``foo_api``/``foo.api``/``foo-mnt`` stay public
-# identifiers. Dot segments are resolved away inside the shadow, so the
-# surfaces match their literal resolved shapes here.
+# The phrase boundary is judged in the coordinates of the bytes actually
+# fed to classification — the phrase starts wherever any non-word,
+# non-dot, non-hyphen character (or nothing) precedes it there. Any join
+# character can head a whitespace-free token (``/docs&api/…``, fullwidth
+# commas), while ``foo_api``/``foo.api``/``foo-mnt`` stay public
+# identifiers. Judging pre-decode matters: an encoded glue character
+# (``&#46;api/…`` — the original ends in ``;``, a boundary) must not decode
+# into a ``.``/word char and shield the phrase behind the lookbehind. The
+# span-checked sites use the lookbehind-free cores plus ``_boundary_ok``;
+# the anchored probe keeps the lookbehind form (its window starts at a
+# boundary by construction).
+_BOUNDARY_BLOCK_RE = re.compile(r"[\w.\-]\Z")
+_CORE_API_THREAD_REFERENCE_RE = re.compile(r"api/threads/[^/?#\s]+/", re.IGNORECASE)
+_CORE_MNT_USER_DATA_RE = re.compile(r"mnt/user-data", re.IGNORECASE)
 _API_THREAD_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/threads/[^/?#\s]+/", re.IGNORECASE)
 _MNT_USER_DATA_RE = re.compile(r"(?<![\w.\-])mnt/user-data", re.IGNORECASE)
+
+
+def _boundary_ok(fed_text: str, fed_spans: list[tuple[int, int]], shadow_index: int) -> bool:
+    """Is the phrase starting at ``shadow_index`` boundary-admissible?
+
+    ``fed_spans`` map shadow positions back into ``fed_text`` — the bytes
+    classification was fed (original text for the shadow pipeline,
+    percent-decoded text inside the classifier). The byte just before the
+    phrase's first character decides, so decoding can never manufacture a
+    ``foo.api``-shaped shield that the original bytes do not carry."""
+    origin = fed_spans[shadow_index][0]
+    if origin <= 0:
+        return True
+    return _BOUNDARY_BLOCK_RE.match(fed_text[origin - 1]) is None
 
 
 def _trim_reference_punctuation(value: str) -> str:
@@ -488,8 +512,27 @@ def _trim_reference_punctuation(value: str) -> str:
 
 
 def _is_private_reference(value: str) -> bool:
-    decoded = _trim_reference_punctuation(_decoded_reference(value)).lower()
-    return _MNT_USER_DATA_RE.search(decoded) is not None or _API_THREAD_REFERENCE_RE.search(decoded) is not None
+    """Dual-view, mirroring the dual shadow: the dot-resolved decode catches
+    references that only reach the surface through ``.``/``..`` cancellation,
+    and the as-written decode guarantees resolution can never erase a
+    phrase — browsers do not entity-decode URLs, so an entity dot-tail
+    (``…/u/&#46;&#46;``) stays literal in the href and resolves to the
+    owner-scoped route even though the resolved view popped the segment.
+    Phrase hits use the lookbehind-free cores with the boundary judged in
+    fed coordinates (see ``_boundary_ok``)."""
+    for resolve_dots in (True, False):
+        fed = value
+        for _ in range(3):
+            candidate = unquote(fed)
+            if candidate == fed:
+                break
+            fed = candidate
+        shadow, fed_spans = _collapse_separators_with_offsets(fed, resolve_dots=resolve_dots)
+        for core in (_CORE_API_THREAD_REFERENCE_RE, _CORE_MNT_USER_DATA_RE):
+            for match in core.finditer(shadow):
+                if _boundary_ok(fed, fed_spans, match.start()):
+                    return True
+    return False
 
 
 def _phrase_end(value: str, end: int) -> int:
@@ -547,11 +590,21 @@ _PROBE_SLASH_RUN_RE = re.compile(r"(?<!:)/{2,}")
 _SEGMENT_PROBE_WINDOW = 1024
 
 
-def _private_reference_segments(value: str, *, conservative_gaps: bool = True) -> list[tuple[int, int]]:
+def _private_reference_segments(
+    value: str,
+    *,
+    conservative_gaps: bool = True,
+    fed_text: str,
+    fed_spans: list[tuple[int, int]],
+    offset: int,
+) -> list[tuple[int, int]]:
     """Shadow-coordinate ``[start, end)`` spans of every private phrase in
     one matched token. Public head/middle/tail bytes between the segments
     are part of no span and survive the cut; the joining terminators stay
-    public too.
+    public too. ``fed_text``/``fed_spans``/``offset`` anchor the token in
+    the coordinates classification was fed, so every candidate's phrase
+    boundary is judged on pre-decode bytes (``_boundary_ok``) — an encoded
+    glue character cannot decode into a ``foo.api``-shaped shield.
 
     Percent-encoded phrases never decode in the shadow (their decoded
     positions cannot map back to original bytes), so they are caught two
@@ -566,8 +619,8 @@ def _private_reference_segments(value: str, *, conservative_gaps: bool = True) -
     segments: list[tuple[int, int]] = []
     # Both match streams are computed once: re-searching per iteration
     # rescans the token tail every time and is quadratic on joined lists.
-    api_matches = list(_API_THREAD_REFERENCE_RE.finditer(value))
-    mnt_matches = list(_MNT_USER_DATA_RE.finditer(value))
+    api_matches = [m for m in _CORE_API_THREAD_REFERENCE_RE.finditer(value) if _boundary_ok(fed_text, fed_spans, offset + m.start())]
+    mnt_matches = [m for m in _CORE_MNT_USER_DATA_RE.finditer(value) if _boundary_ok(fed_text, fed_spans, offset + m.start())]
     api_index = 0
     mnt_index = 0
     pos = 0
@@ -605,7 +658,7 @@ def _private_reference_segments(value: str, *, conservative_gaps: bool = True) -
         if candidate is not None and (candidate[0] == probe or (candidate[0] == probe + 1 and value[probe] == "/")):
             probed = True
         else:
-            probed = probe > pos and probe < n and not value[probe].isspace() and _starts_with_private_reference(value[probe : probe + _SEGMENT_PROBE_WINDOW])
+            probed = probe > pos and probe < n and not value[probe].isspace() and _boundary_ok(fed_text, fed_spans, offset + probe) and _starts_with_private_reference(value[probe : probe + _SEGMENT_PROBE_WINDOW])
         if candidate is None and not probed:
             break
         # A regex phrase starting strictly before the probe wins (public
@@ -699,16 +752,43 @@ def _collect_edits(text: str, normalized: str, spans: list[tuple[int, int]], edi
 
     def replace_raw(match: re.Match[str]) -> None:
         value = match.group(0)
+        # A word-branch token starting mid-word (``fooapi/threads/…``) is a
+        # public fragment: the classifier sees its slice starting at
+        # ``api`` and would misread slice-start as a boundary, so the fed-
+        # coordinate check gates the whole token, fallback included.
+        if value[:3].lower() in ("api", "mnt") and not _boundary_ok(text, spans, match.start()):
+            return
         # Every private phrase in the token is cut on its own segment, so a
         # public head/middle/tail (and the joining terminators) survive. The
         # whole-token fallback still covers phrases the shadow cannot
         # position at all — percent-encoding decodes for classification, not
         # in the shadow, and a probe window may have missed the shape.
-        segments = _private_reference_segments(value, conservative_gaps=conservative_gaps)
+        segments = _private_reference_segments(
+            value,
+            conservative_gaps=conservative_gaps,
+            fed_text=text,
+            fed_spans=spans,
+            offset=match.start(),
+        )
         if not segments:
-            if not conservative_gaps or not _is_private_reference(value):
+            if not _is_private_reference(value):
                 return
-            segments = [(0, _phrase_end(value, 0))]
+            end = _phrase_end(value, 0)
+            kept = _trim_reference_punctuation(value[:end])
+            begin, stop = original_span(match.start(), match.start() + len(kept))
+            if not conservative_gaps and (
+                # As-written fallback: only cover tokens the resolved pass
+                # left untouched — wherever resolution positioned a precise
+                # cut, this wider cut must not swallow its public head — and
+                # only cut a prefix that is itself private, never a public
+                # first item of a mixed token whose private content lives
+                # behind a terminator.
+                any(e_begin < stop and begin < e_stop for e_begin, e_stop, _ in edits) or not kept or not _is_private_reference(kept)
+            ):
+                return
+            if kept:
+                edits.append((begin, stop, _PRIVATE_REFERENCE_MARKER))
+            return
         for start, end in segments:
             # Trailing sentence punctuation is kept out of the cut so the
             # public text keeps its own ``.``/``,``/``)`` after the marker.
