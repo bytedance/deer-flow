@@ -199,6 +199,18 @@ def test_program_argument_path_predicate_covers_rooted_drive_and_traversal_forms
     assert is_program_argument_path(value)
 
 
-@pytest.mark.parametrize("value", ["--mode=release", "relative/file.txt", "https://example.test/path", "url:http://example.test/path"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "--mode=release",
+        "relative/file.txt",
+        "https://example.test/path",
+        "url:http://example.test/path",
+        "https://example.test/?next=file:///C:/Windows/secret.txt",
+        "--url=https://example.test/?next=file:///C:/Windows/secret.txt",
+        "http://example.test/?x=file:///etc/passwd",
+        "@https://example.test/?x=file:///etc/passwd",
+    ],
+)
 def test_program_argument_path_predicate_keeps_non_path_arguments_opaque(value: str) -> None:
     assert not is_program_argument_path(value)

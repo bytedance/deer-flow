@@ -79,8 +79,15 @@ def view_image_tool(
 
     thread_data = get_thread_data(runtime)
     local_runtime = is_local_sandbox(runtime)
-    if local_runtime:
-        image_path = normalize_local_tool_path(image_path)
+    try:
+        if local_runtime:
+            image_path = normalize_local_tool_path(image_path)
+    except (PermissionError, SandboxError):
+        # Host-path normalization can fail before a virtual path is available;
+        # keep the raw host spelling out of the model-visible ToolMessage.
+        return Command(
+            update={"messages": [ToolMessage("Error: Image path is not allowed", tool_call_id=tool_call_id)]},
+        )
 
     if not _is_allowed_image_virtual_path(image_path, allow_custom_mount=local_runtime):
         return Command(

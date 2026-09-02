@@ -235,6 +235,24 @@ def test_view_image_custom_mount_converts_acquisition_error_to_tool_message() ->
     assert _message_content(result) == "Error: Sandbox not found"
 
 
+def test_view_image_normalization_error_returns_sanitized_tool_message() -> None:
+    runtime = _runtime()
+    host_path = r"C:\Users\lichen\private-mount\chart.png"
+    with (
+        patch("deerflow.sandbox.tools.get_thread_data", return_value=_THREAD_DATA),
+        patch("deerflow.sandbox.tools.is_local_sandbox", return_value=True),
+        patch(
+            "deerflow.sandbox.tools.normalize_local_tool_path",
+            side_effect=PermissionError(f"Host path is not allowed: {host_path} (outside configured mounts)"),
+        ),
+    ):
+        result = view_image_tool.func(runtime, host_path, "call-normalize-error")
+
+    message = _message_content(result)
+    assert message == "Error: Image path is not allowed"
+    assert host_path not in message
+
+
 def test_view_image_custom_mount_read_error_does_not_leak_host_path(tmp_path, monkeypatch) -> None:
     from base64 import b64decode
 

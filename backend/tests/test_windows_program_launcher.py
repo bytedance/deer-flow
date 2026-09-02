@@ -197,7 +197,16 @@ def test_run_host_program_normalizes_shared_option_path_candidates(argument: str
     assert run_host_program_module._normalize_program_argument(argument) == expected
 
 
-@pytest.mark.parametrize("argument", ["--mode=release", "relative/file.txt", "https://example.test/path"])
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "--mode=release",
+        "relative/file.txt",
+        "https://example.test/path",
+        "https://example.test/?next=file:///C:/Windows/secret.txt",
+        "--url=https://example.test/?next=file:///C:/Windows/secret.txt",
+    ],
+)
 def test_execute_program_allows_non_path_arguments(argument: str, monkeypatch) -> None:
     monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     calls: list[list[str] | str] = []

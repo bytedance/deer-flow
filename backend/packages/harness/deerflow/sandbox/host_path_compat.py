@@ -20,6 +20,7 @@ _GIT_BASH_DRIVE_PATH = re.compile(r"^/(?P<drive>[A-Za-z])(?:/|$)")
 _PROGRAM_ARGUMENT_DRIVE = re.compile(r"^[A-Za-z]:")
 _PROGRAM_ARGUMENT_TRAVERSAL = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
 _URL_SCHEME_ANYWHERE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+_URL_SCHEME_AT_START = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _FILE_URL_SCHEME = re.compile(r"^file://", re.IGNORECASE)
 
 # Match only absolute Windows drive spellings in command text.  POSIX paths
@@ -61,14 +62,22 @@ def _contains_file_url(value: str) -> bool:
     """Return whether an argument's path candidate is a local ``file://`` URL."""
     if not isinstance(value, str) or not value:
         return False
+
+    # A network URL is opaque even when its query or fragment happens to
+    # contain the text ``file://``. Only inspect nested values after an
+    # argument separator, response-file marker, or option-colon prefix.
     if _FILE_URL_SCHEME.match(value):
         return True
+    if _URL_SCHEME_AT_START.match(value):
+        return False
+    if value.startswith("@"):
+        return _contains_file_url(value[1:])
     if "=" in value:
-        _, candidate = value.split("=", 1)
-        if _contains_file_url(candidate):
-            return True
-    if value.startswith("@") and _contains_file_url(value[1:]):
-        return True
+        candidate = value.split("=", 1)[1]
+        if _URL_SCHEME_AT_START.match(candidate) and not _FILE_URL_SCHEME.match(candidate):
+            return False
+        return _contains_file_url(candidate)
+
     for index, character in enumerate(value):
         if character == ":" and _FILE_URL_SCHEME.match(value[index + 1 :]):
             return True
