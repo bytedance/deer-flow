@@ -19,7 +19,6 @@ from skill_review_waivers import (
     EMPTY_MANIFEST,
     WaiverManifest,
     WaiverManifestError,
-    finding_key,
     load_manifest_at_ref,
     matching_waiver,
     validate_manifest_against_facts,
@@ -52,7 +51,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     print(f"[skill-review] Trusted waivers: {len(effective_manifest.waivers)}")
-    print(f"[skill-review] Proposed waivers validated but not trusted in this run: {len(proposed_manifest.waivers)}")
+    print(
+        f"[skill-review] Proposed waivers validated but not trusted in this run: {len(proposed_manifest.waivers)}"
+    )
     if validate_proposed_manifest(proposed_manifest, repo_root, args.python) != 0:
         return 1
 
@@ -100,8 +101,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"[skill-review] Reviewing {len(packages)} changed public skill package(s).")
 
-    base_ref = args.base_ref or args.before
-    use_baseline = bool(base_ref)
+    # Baseline differential gating is a PR-mode feature (--base-ref/--head-ref):
+    # a push run (--before/--after) keeps the original run_review semantics so
+    # existing push-time behavior and tests are preserved unchanged.
+    use_baseline = bool(args.base_ref and args.head_ref)
+    base_ref = str(args.base_ref or "")
 
     failed = False
     for package in packages:
@@ -112,7 +116,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if base_pkg is not None:
                 base_facts = collect_review_facts(base_pkg, repo_root, args.python)
                 if base_facts is not None:
-                    base_keys = {finding_key(f) for f in base_facts.get("findings", []) if finding_key(f) is not None}
+                    base_keys = {
+                        baseline_finding_key(f)
+                        for f in base_facts.get("findings", [])
+                        if isinstance(f, dict)
+                    }
                 else:
                     # Baseline review itself failed.  Do not silently pass:
                     # treat every head finding as new (fail-closed).
@@ -132,13 +140,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"[skill-review] Baseline: {len(base_keys)} existing finding(s) at {base_ref}"
                 )
             else:
-                base_keys = set()
+                # Baseline extraction failed: we cannot know what was
+                # pre-existing, so fall back to the original full review,
+                # which fail-closes on every error/incomplete finding.
                 print(
-                    f"[skill-review] Could not extract baseline at {base_ref}; treating all findings as new"
+                    f"[skill-review] Could not extract baseline at {base_ref}; "
+                    f"falling back to full review"
                 )
+                if run_review(package, repo_root, args.python, effective_manifest) != 0:
+                    failed = True
+                continue
 
             head_facts = collect_review_facts(package, repo_root, args.python)
-            if head_facts is None:
+            if head_facts is None or not isinstance(head_facts, dict):
                 # Head review crashed or produced invalid output.  This is NOT
                 # "no findings" — fail closed so the gate never silently passes.
                 print(
@@ -152,14 +166,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f for f in head_facts.get("findings", []) if isinstance(f, dict)
             ]
             new_findings = [
-                f
-                for f in head_findings
-                if (key := finding_key(f)) is None or key not in base_keys
+                f for f in head_findings if baseline_finding_key(f) not in base_keys
             ]
             gate_findings = [
-                f for f in new_findings
+                f
+                for f in new_findings
                 if f.get("severity") in {"blocker", "error"}
-                and matching_waiver(f, package=package_rel, manifest=effective_manifest, repo_root=repo_root) is None
+                and matching_waiver(
+                    f,
+                    package=package_rel,
+                    manifest=effective_manifest,
+                    repo_root=repo_root,
+                )
+                is None
             ]
             incomplete = bool(head_facts.get("completeness", {}).get("not_assessed"))
 
@@ -199,20 +218,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def load_waiver_manifests(args: argparse.Namespace, repo_root: Path) -> tuple[WaiverManifest, WaiverManifest]:
+def load_waiver_manifests(
+    args: argparse.Namespace, repo_root: Path
+) -> tuple[WaiverManifest, WaiverManifest]:
     """Load effective waivers only from the trusted side of the comparison."""
     if args.base_ref and args.head_ref:
-        effective = load_manifest_at_ref(repo_root, str(args.base_ref), label="trusted base")
-        proposed = load_manifest_at_ref(repo_root, str(args.head_ref), label="proposed head")
+        effective = load_manifest_at_ref(
+            repo_root, str(args.base_ref), label="trusted base"
+        )
+        proposed = load_manifest_at_ref(
+            repo_root, str(args.head_ref), label="proposed head"
+        )
         return effective, proposed
 
     before = str(args.before)
-    effective = EMPTY_MANIFEST if is_zero_sha(before) else load_manifest_at_ref(repo_root, before, label="trusted before")
+    effective = (
+        EMPTY_MANIFEST
+        if is_zero_sha(before)
+        else load_manifest_at_ref(repo_root, before, label="trusted before")
+    )
     proposed = load_manifest_at_ref(repo_root, str(args.after), label="proposed after")
     return effective, proposed
 
 
-def validate_proposed_manifest(manifest: WaiverManifest, repo_root: Path, python_executable: str) -> int:
+def validate_proposed_manifest(
+    manifest: WaiverManifest, repo_root: Path, python_executable: str
+) -> int:
     """Verify every proposed entry still identifies one current error finding."""
     if not manifest.waivers:
         return 0
@@ -226,7 +257,9 @@ def validate_proposed_manifest(manifest: WaiverManifest, repo_root: Path, python
             return 1
         facts_by_package[package_rel] = facts
 
-    errors = validate_manifest_against_facts(manifest, facts_by_package=facts_by_package, repo_root=repo_root)
+    errors = validate_manifest_against_facts(
+        manifest, facts_by_package=facts_by_package, repo_root=repo_root
+    )
     for error in errors:
         sys.stderr.write(f"[skill-review] Invalid proposed waiver: {error}\n")
     return 1 if errors else 0
@@ -425,6 +458,22 @@ def _is_eval_fixture_skill_md(path: PurePosixPath) -> bool:
     return is_eval_fixture_skill_md(path)
 
 
+def baseline_finding_key(finding: dict[str, Any]) -> tuple[str, str, str]:
+    """Stable identity for diffing findings across refs (baseline mode).
+
+    Distinct from the waiver ``finding_key``: the waiver key requires exact
+    ``source``/``evidence`` digests, which baseline review facts do not carry.
+    Line numbers are excluded because unrelated edits shift them for
+    pre-existing findings; path + rule_id + message is a stable identity that
+    survives typical code churn.
+    """
+    return (
+        str(finding.get("path", "")),
+        str(finding.get("rule_id", "")),
+        str(finding.get("message", "")),
+    )
+
+
 def extract_package_at_ref(package_rel: str, ref: str, repo_root: Path) -> Path | None:
     """Extract skill package at a git ref to a dedicated temp root.
 
@@ -444,7 +493,9 @@ def extract_package_at_ref(package_rel: str, ref: str, repo_root: Path) -> Path 
             shutil.rmtree(tmp_root, ignore_errors=True)
             return None
         try:
-            subprocess.run(["tar", "-x"], cwd=tmp_root, input=result.stdout, check=False)
+            subprocess.run(
+                ["tar", "-x"], cwd=tmp_root, input=result.stdout, check=False
+            )
         except OSError:
             shutil.rmtree(tmp_root, ignore_errors=True)
             return None
@@ -458,7 +509,9 @@ def extract_package_at_ref(package_rel: str, ref: str, repo_root: Path) -> Path 
         return None
 
 
-def collect_review_facts(package: Path, repo_root: Path, python_executable: str) -> dict[str, Any] | None:
+def collect_review_facts(
+    package: Path, repo_root: Path, python_executable: str
+) -> dict[str, Any] | None:
     package_rel = package.relative_to(repo_root).as_posix()
     command = [
         python_executable,
@@ -479,24 +532,37 @@ def collect_review_facts(package: Path, repo_root: Path, python_executable: str)
         check=False,
     )
     if result.returncode != 0:
-        sys.stderr.write(f"[skill-review] Analyzer failed for {package_rel} (exit {result.returncode}).\n")
+        sys.stderr.write(
+            f"[skill-review] Analyzer failed for {package_rel} (exit {result.returncode}).\n"
+        )
         sys.stderr.write(result.stderr)
         return None
     try:
         facts = json.loads(result.stdout)
     except (json.JSONDecodeError, TypeError) as exc:
-        sys.stderr.write(f"[skill-review] Analyzer returned invalid JSON for {package_rel}: {exc}\n")
+        sys.stderr.write(
+            f"[skill-review] Analyzer returned invalid JSON for {package_rel}: {exc}\n"
+        )
         return None
     if not isinstance(facts, dict):
-        sys.stderr.write(f"[skill-review] Analyzer returned a non-object payload for {package_rel}.\n")
+        sys.stderr.write(
+            f"[skill-review] Analyzer returned a non-object payload for {package_rel}.\n"
+        )
         return None
     return facts
 
 
-def run_review(package: Path, repo_root: Path, python_executable: str, manifest: WaiverManifest = EMPTY_MANIFEST) -> int:
+def run_review(
+    package: Path,
+    repo_root: Path,
+    python_executable: str,
+    manifest: WaiverManifest = EMPTY_MANIFEST,
+) -> int:
     package_rel = package.relative_to(repo_root).as_posix()
     print(f"[skill-review] Reviewing package: {package_rel}")
-    print(f"[skill-review] $ python -m deerflow.skills.review.cli {package_rel} --format json --fail-on never")
+    print(
+        f"[skill-review] $ python -m deerflow.skills.review.cli {package_rel} --format json --fail-on never"
+    )
     facts = collect_review_facts(package, repo_root, python_executable)
     if facts is None:
         print(f"[skill-review] Failed: {package_rel}")
@@ -504,11 +570,15 @@ def run_review(package: Path, repo_root: Path, python_executable: str, manifest:
 
     summary = facts.get("summary", {})
     completeness = facts.get("completeness", {})
-    print(f"[skill-review] Summary: {summary.get('blockers')} blocker(s), {summary.get('errors')} error(s), {summary.get('warnings')} warning(s), {summary.get('infos')} info(s)")
+    print(
+        f"[skill-review] Summary: {summary.get('blockers')} blocker(s), {summary.get('errors')} error(s), {summary.get('warnings')} warning(s), {summary.get('infos')} info(s)"
+    )
     not_assessed = completeness.get("not_assessed") or []
     failed = bool(not_assessed)
     if not_assessed:
-        print(f"[skill-review] Incomplete review: {', '.join(str(item) for item in not_assessed)}")
+        print(
+            f"[skill-review] Incomplete review: {', '.join(str(item) for item in not_assessed)}"
+        )
 
     waived_count = 0
     for finding in facts.get("findings", []):
@@ -518,14 +588,20 @@ def run_review(package: Path, repo_root: Path, python_executable: str, manifest:
         location = finding.get("path") or "<package>"
         if finding.get("line") is not None:
             location = f"{location}:{finding['line']}"
-        waiver = matching_waiver(finding, package=package_rel, manifest=manifest, repo_root=repo_root)
+        waiver = matching_waiver(
+            finding, package=package_rel, manifest=manifest, repo_root=repo_root
+        )
         waiver_suffix = ""
         if waiver is not None:
             waived_count += 1
-            waiver_suffix = f" [WAIVED until {waiver.expires_on.isoformat()}: {waiver.reason}]"
+            waiver_suffix = (
+                f" [WAIVED until {waiver.expires_on.isoformat()}: {waiver.reason}]"
+            )
         elif finding.get("severity") in {"blocker", "error"}:
             failed = True
-        print(f"- {finding.get('severity')} {finding.get('rule_id')} at {location}: {finding.get('message')}{waiver_suffix}")
+        print(
+            f"- {finding.get('severity')} {finding.get('rule_id')} at {location}: {finding.get('message')}{waiver_suffix}"
+        )
 
     if failed:
         print(f"[skill-review] Failed: {package_rel}")
