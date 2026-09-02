@@ -43,6 +43,8 @@ diverge.
 
 from __future__ import annotations
 
+import csv
+import ctypes
 import hashlib
 import io
 import json
@@ -51,6 +53,7 @@ import os
 import posixpath
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -59,7 +62,9 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from contextlib import contextmanager
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -298,31 +303,362 @@ def _lark_cli_credential_root(user_id: str) -> Path:
 
 
 def ensure_lark_cli_credential_tree(user_id: str, *, paths: Paths | None = None) -> None:
-    """Make the user's secret-bearing Lark CLI tree owner-only.
+    """Harden access to the user's secret-bearing Lark CLI credential tree.
 
     The CLI writes plaintext app secrets and OAuth tokens beneath this tree.
-    Reject links before changing modes so a compromised tree cannot redirect a
-    chmod or subsequent CLI write outside the user's integration directory.
+    Reject symlinks / reparse points before creating or changing modes so a
+    compromised tree cannot redirect an ACL change or subsequent CLI write
+    outside the user's integration directory.
     """
     paths = paths or get_paths()
     root = paths.user_dir(user_id) / "integrations" / INTEGRATION_ID
-    if root.is_symlink():
-        raise ValueError(f"Lark CLI credential path must not be a symlink: {root}")
+    _reject_credential_reparse_chain(paths.base_dir, root)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    root.chmod(0o700)
     for required in (root / "config", root / "config" / "locks", root / "data"):
-        if required.is_symlink():
-            raise ValueError(f"Lark CLI credential path must not be a symlink: {required}")
+        _reject_credential_reparse(required)
         required.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for path in root.rglob("*"):
-        if path.is_symlink():
-            raise ValueError(f"Lark CLI credential path must not be a symlink: {path}")
-        if path.is_dir():
-            path.chmod(0o700)
-        elif path.is_file():
-            path.chmod(0o600)
-        else:
-            raise ValueError(f"Unsupported file type in Lark CLI credential tree: {path}")
+    _apply_lark_cli_credential_tree_permissions(root)
+
+
+def _apply_lark_cli_credential_tree_permissions(root: Path) -> None:
+    """Restrict access on the secret-bearing Lark CLI tree per platform.
+
+    POSIX: directories ``0o700``, files ``0o600``.
+
+    Windows: build a protected owner-only security descriptor in memory and
+    apply it to each entry with a single Windows ACL update (``SetFileSecurityW``).
+    No intermediate parent-inherited DACL is installed, so an ACL failure leaves
+    the prior DACL unchanged. Identity or ACL failures are surfaced and never
+    silently ignored.
+    """
+    if os.name == "nt":
+        _harden_windows_credential_tree(root)
+    else:
+        _harden_posix_credential_tree(root)
+
+
+@contextmanager
+def _private_lark_temp_dir(*, prefix: str, dir: Path | None = None):
+    """Yield an empty, owner-only temp directory for secret-bearing work.
+
+    The root is hardened (owner-only) *before* any child or credential is
+    created, so ``config`` / ``data`` / snapshot directories and the secrets
+    written or copied into them inherit the owner-only ACL boundary on Windows
+    and the ``0700`` mode on POSIX.
+    """
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=str(dir) if dir else None) as temp_dir:
+        root = Path(temp_dir)
+        # No credential has been written yet — establish the boundary first.
+        _establish_private_directory_boundary(root)
+        yield root
+
+
+def _harden_posix_credential_tree(root: Path) -> None:
+    def _chmod(path: Path, kind: str) -> None:
+        path.chmod(0o700 if kind == "dir" else 0o600)
+
+    _walk_and_harden(root, _chmod)
+
+
+def _harden_windows_credential_tree(root: Path) -> None:
+    owner_sid = _resolve_current_user_sid()
+
+    def _grant(path: Path, kind: str) -> None:
+        _set_windows_private_dacl(path, owner_sid, inheritable_full=(kind == "dir"))
+
+    _walk_and_harden(root, _grant)
+
+
+def _walk_and_harden(root: Path, apply_: Callable[[Path, str], None]) -> None:
+    """Lstat-before-descent walk over *root* and each descendant.
+
+    Every discovered path is validated (symlink / reparse-point / unsupported
+    type rejected) *before* any descent, so a reparse point can never redirect
+    the walk outside the credential tree. We only ``iterdir()`` a path after it
+    is confirmed to be a real directory.
+    """
+    pending: list[Path] = [root]
+    while pending:
+        path = pending.pop()
+        kind = _credential_tree_path_kind(path)
+        apply_(path, kind)
+        if kind == "dir":
+            pending.extend(path.iterdir())
+
+
+def _credential_tree_path_kind(path: Path) -> str:
+    """Return ``"dir"`` or ``"file"`` for a safe real entry, else raise.
+
+    Rejects any symlink and any Windows reparse point *before* the caller may
+    descend, so a junction cannot redirect traversal outside the tree.
+    """
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        raise ValueError(f"Lark CLI credential path must not be a symlink: {path}")
+    if os.name == "nt" and (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        raise ValueError(f"Lark CLI credential path must not be a reparse point: {path}")
+    if stat.S_ISDIR(info.st_mode):
+        return "dir"
+    if stat.S_ISREG(info.st_mode):
+        return "file"
+    raise ValueError(f"Unsupported file type in Lark CLI credential tree: {path}")
+
+
+def _reject_reparse_stat(path: Path, info: os.stat_result) -> None:
+    """Reject a symlink or Windows reparse point *path* with stat *info*."""
+    if stat.S_ISLNK(info.st_mode):
+        raise ValueError(f"Lark CLI credential path must not be a symlink: {path}")
+    if os.name == "nt" and (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+        raise ValueError(f"Lark CLI credential path must not be a reparse point: {path}")
+
+
+def _reject_credential_reparse(path: Path) -> None:
+    """Reject an already-existing symlink / reparse point before ``mkdir``.
+
+    ``mkdir(exist_ok=True)`` would accept an existing junction, so a reparse
+    root or required directory must be rejected up front rather than after it is
+    used. Non-existent paths are fine to create.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    _reject_reparse_stat(path, info)
+
+
+def _reject_credential_reparse_chain(trusted_base: Path, target: Path) -> None:
+    """Lexically reject a symlink / reparse point on every component of *target*.
+
+    Walks each component below *trusted_base* (e.g. ``users``, ``alice``,
+    ``integrations``, ``lark-cli``) and rejects it before *target* is created or
+    used. This catches a reparse ancestor (e.g. ``integrations`` junction) that
+    would otherwise redirect the whole credential path outside the trust root;
+    it does not ``resolve()`` the target, which would follow the junction and
+    defeat the check.
+    """
+    current = trusted_base
+    for component in target.relative_to(trusted_base).parts:
+        current = current / component
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            # Once a component is absent, deeper components cannot currently
+            # hold a static reparse point.
+            break
+        _reject_reparse_stat(current, info)
+
+
+def _resolve_current_user_sid() -> str:
+    """Return the current process user's Windows SID, e.g. ``S-1-5-21-...``.
+
+    ``whoami /user /fo csv /nh`` prints ``"<domain>\\<user>","<sid>"`` — the SID
+    is the *second* CSV field — so we parse it with ``csv.reader`` rather than
+    guessing a field position. SIDs are locale/display-name independent and
+    are the single principal granted in the Windows allowlist below.
+    """
+    result = subprocess.run(
+        ["whoami", "/user", "/fo", "csv", "/nh"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"failed to resolve current Windows user SID: {result.stderr.strip() or result.stdout.strip()}")
+    try:
+        fields = next(csv.reader([result.stdout.strip()]))
+    except (csv.Error, StopIteration) as exc:
+        raise RuntimeError(f"unexpected whoami /user output: {result.stdout.strip()!r}") from exc
+    if len(fields) < 2 or not fields[1].startswith("S-"):
+        raise RuntimeError(f"unexpected whoami /user output: {result.stdout.strip()!r}")
+    return fields[1]
+
+
+def _windows_private_sddl(owner_sid: str, *, inheritable_full: bool) -> str:
+    """SDDL for a protected owner-only descriptor that also transfers ownership.
+
+    ``O:<owner SID>D:P(A;...;FA;;;<owner SID>)`` sets the security descriptor's
+    owner to *owner_sid* and installs a protected DACL granting only *owner_sid*
+    Full Access. The ``O:`` prefix is what lets the successor (attacker) lose
+    implicit ``WRITE_DAC``.
+    """
+    ace = "(A;OICI;FA;;;" if inheritable_full else "(A;;FA;;;"
+    return f"O:{owner_sid}D:P{ace}{owner_sid})"
+
+
+def _windows_private_security_information() -> int:
+    """Security-information flags: OWNER | DACL | PROTECTED_DACL."""
+    return 0x00000001 | 0x00000004 | 0x80000000
+
+
+def _apply_file_security_descriptor(path: Path, security_information: int, descriptor: ctypes.c_void_p) -> None:
+    """Final Win32 ``SetFileSecurityW`` call (thin seam for failure regressions)."""
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.SetFileSecurityW.restype = wintypes.BOOL
+    advapi32.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+    if not advapi32.SetFileSecurityW(str(path), security_information, descriptor):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _set_windows_private_dacl(path: Path, owner_sid: str, *, inheritable_full: bool) -> None:
+    """Build an owner+protected-DACL descriptor in memory and apply it once.
+
+    The descriptor is constructed fully in memory with
+    ``ConvertStringSecurityDescriptorToSecurityDescriptorW`` and applied in a
+    single ``SetFileSecurityW`` call with ``OWNER | DACL | PROTECTED_DACL``, so
+    ownership is transferred together with the DACL. No intermediate
+    parent-inherited DACL is installed; if the final call fails the prior owner
+    and DACL are unchanged.
+    """
+    sddl = _windows_private_sddl(owner_sid, inheritable_full=inheritable_full)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    descriptor = ctypes.c_void_p()
+    size = wintypes.DWORD()
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl,
+        1,  # SDDL_REVISION_1
+        ctypes.byref(descriptor),
+        ctypes.byref(size),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        _apply_file_security_descriptor(path, _windows_private_security_information(), descriptor)
+    finally:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        kernel32.LocalFree(descriptor)
+
+
+def _set_windows_private_inheritable_directory_dacl(path: Path, owner_sid: str) -> None:
+    """Make *path* an owner-only inheritable directory boundary (Windows).
+
+    Uses ``SetNamedSecurityInfoW`` with an ``O:<owner>D:P(A;OICI;FA;;;<owner>)``
+    descriptor so ownership is transferred and the OI|CI owner Full Access ACE is
+    inheritable by children created afterwards. Legal only on an empty directory;
+    see ``_establish_private_directory_boundary``.
+    """
+    sddl = _windows_private_sddl(owner_sid, inheritable_full=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    descriptor = ctypes.c_void_p()
+    size = wintypes.DWORD()
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl,
+        1,
+        ctypes.byref(descriptor),
+        ctypes.byref(size),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    try:
+        dacl_present = wintypes.BOOL()
+        dacl_defaulted = wintypes.BOOL()
+        dacl = ctypes.c_void_p()
+        advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+        advapi32.GetSecurityDescriptorDacl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.BOOL),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        if not advapi32.GetSecurityDescriptorDacl(
+            descriptor,
+            ctypes.byref(dacl_present),
+            ctypes.byref(dacl),
+            ctypes.byref(dacl_defaulted),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not dacl_present.value or not dacl.value:
+            raise RuntimeError("private security descriptor has no DACL")
+
+        owner_defaulted = wintypes.BOOL()
+        owner = ctypes.c_void_p()
+        advapi32.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+        advapi32.GetSecurityDescriptorOwner.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        if not advapi32.GetSecurityDescriptorOwner(
+            descriptor,
+            ctypes.byref(owner),
+            ctypes.byref(owner_defaulted),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not owner.value:
+            raise RuntimeError("private security descriptor has no owner")
+
+        advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+        advapi32.SetNamedSecurityInfoW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        result = advapi32.SetNamedSecurityInfoW(
+            str(path),
+            1,  # SE_FILE_OBJECT
+            _windows_private_security_information(),
+            owner,
+            None,
+            dacl,
+            None,
+        )
+        if result != 0:
+            raise ctypes.WinError(result)
+    finally:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        kernel32.LocalFree(descriptor)
+
+
+def _establish_private_directory_boundary(path: Path) -> None:
+    """Make *path* an owner-only inheritable directory boundary.
+
+    Only legal while *path* is an empty directory, so the OI|CI owner ACE can
+    propagate to objects created underneath afterwards. Windows uses
+    ``SetNamedSecurityInfoW``; POSIX uses ``chmod 0o700``.
+    """
+    if _credential_tree_path_kind(path) != "dir":
+        raise ValueError(f"Lark CLI private boundary must be a directory: {path}")
+    if next(path.iterdir(), None) is not None:
+        raise ValueError("Lark CLI private directory boundary must be established while empty")
+    if os.name == "nt":
+        _set_windows_private_inheritable_directory_dacl(path, _resolve_current_user_sid())
+    else:
+        path.chmod(0o700)
+
+
+def _mkdir_under_private_boundary(path: Path) -> None:
+    """Create a child directory beneath an already-private boundary.
+
+    On Windows, do not pass ``mode=0o700``: Python 3.12.4+ synthesizes its own
+    Windows ACL for that mode, replacing the owner-only ACL inherited from the
+    private parent. A plain ``mkdir()`` lets the child inherit the parent's
+    inheritable owner-only ACE.
+    """
+    if os.name == "nt":
+        path.mkdir()
+    else:
+        path.mkdir(mode=0o700)
 
 
 def lark_cli_managed_gateway_dir() -> Path:
@@ -1466,12 +1802,11 @@ def _save_lark_app_config_with_cli(user_id: str, *, app_id: str, app_secret: str
 
 def _validate_lark_app_credentials_with_cli(*, app_id: str, app_secret: str, brand: str) -> None:
     """Validate credentials through config init's live tenant-token probe."""
-    with tempfile.TemporaryDirectory(prefix=".validating-lark-app-") as temp_dir:
-        root = Path(temp_dir)
+    with _private_lark_temp_dir(prefix=".validating-lark-app-") as root:
         config_dir = root / "config"
         data_dir = root / "data"
-        config_dir.mkdir(mode=0o700)
-        data_dir.mkdir(mode=0o700)
+        _mkdir_under_private_boundary(config_dir)
+        _mkdir_under_private_boundary(data_dir)
         _run_lark_config_init(
             app_id=app_id,
             app_secret=app_secret,
@@ -1503,9 +1838,11 @@ def _clear_directory_contents(directory: Path) -> None:
 @contextmanager
 def _lark_credential_transaction(user_id: str, root: Path):
     """Restore the active credential tree if a switch step fails."""
-    with tempfile.TemporaryDirectory(prefix=".switching-lark-app-", dir=str(root.parent)) as temp_dir:
-        snapshot = Path(temp_dir) / "credentials"
-        shutil.copytree(root, snapshot, symlinks=False)
+    with _private_lark_temp_dir(prefix=".switching-lark-app-", dir=root.parent) as temp_root:
+        snapshot = temp_root / "credentials"
+        _mkdir_under_private_boundary(snapshot)
+        _establish_private_directory_boundary(snapshot)
+        shutil.copytree(root, snapshot, dirs_exist_ok=True, symlinks=False)
         try:
             yield snapshot
         except Exception:
