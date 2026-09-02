@@ -11,11 +11,13 @@ import pytest
 
 from deerflow.uploads import companion_map as companion_map_mod
 from deerflow.uploads.companion_map import (
+    COMPANION_ID_DIRNAME,
     COMPANION_MAP_FILENAME,
     COMPANION_MAP_LOCK_FILENAME,
     CompanionEntry,
     CompanionMapLockError,
     companion_entry_matches,
+    companion_identity_path,
     companion_map_lock_path,
     forget_companion_mapping,
     forget_companion_mappings,
@@ -49,6 +51,7 @@ class TestCompanionMapFilePredicate:
         assert is_companion_map_file(COMPANION_MAP_FILENAME)
         assert is_companion_map_file(".deer-flow-companions.lock")
         assert is_companion_map_file(".deer-flow-companions.abc.tmp")
+        assert is_companion_map_file(".deer-flow-companions.id." + "a" * 32)
         assert not is_companion_map_file("report.md")
         assert not is_companion_map_file(".env")
 
@@ -85,19 +88,24 @@ class TestRecordAndLoad:
         record_companion_mapping(tmp_path, "a.docx", "a.md")
 
         entries = load_companion_entries(tmp_path)
-        assert entries["a.docx"] == CompanionEntry(
-            name="a.md",
-            size=expected.st_size,
-            mtime_ns=expected.st_mtime_ns,
-            dev=expected.st_dev,
-            ino=expected.st_ino,
-        )
+        recorded = entries["a.docx"]
+        assert recorded.name == "a.md"
+        assert recorded.size == expected.st_size
+        assert recorded.mtime_ns == expected.st_mtime_ns
+        assert recorded.dev == expected.st_dev
+        assert recorded.ino == expected.st_ino
+        assert recorded.id is not None
+        pin = companion_identity_path(tmp_path, recorded.id)
+        assert pin.is_file()
+        assert not pin.is_symlink()
+        assert pin.stat().st_ino == expected.st_ino
         raw = json.loads((tmp_path / COMPANION_MAP_FILENAME).read_text(encoding="utf-8"))
         assert raw["version"] == 2
         assert raw["companions"]["a.docx"]["name"] == "a.md"
         assert raw["companions"]["a.docx"]["size"] == expected.st_size
         assert raw["companions"]["a.docx"]["dev"] == expected.st_dev
         assert raw["companions"]["a.docx"]["ino"] == expected.st_ino
+        assert raw["companions"]["a.docx"]["id"] == recorded.id
 
     def test_record_requires_an_existing_regular_companion(self, tmp_path):
         with pytest.raises(FileNotFoundError):
@@ -131,6 +139,7 @@ class TestRecordAndLoad:
                 "legacy.pdf": "legacy.md",
                 "bad-name.pdf": {"name": "../escape.md", "size": 1, "mtime_ns": 1},
                 "bad-size.pdf": {"name": "b.md", "size": "huge", "mtime_ns": True, "dev": "x", "ino": True},
+                "bad-id.pdf": {"name": "c.md", "id": "../escape"},
                 "not-dict.pdf": 42,
                 "../evil.pdf": "x.md",
             },
@@ -141,11 +150,13 @@ class TestRecordAndLoad:
             "ok.pdf": "ok.md",
             "legacy.pdf": "legacy.md",
             "bad-size.pdf": "b.md",
+            "bad-id.pdf": "c.md",
         }
         entries = load_companion_entries(tmp_path)
         assert entries["ok.pdf"] == CompanionEntry(name="ok.md", size=3, mtime_ns=123, dev=1, ino=99)
         # Malformed fingerprint fields degrade to "no fingerprint", not a dropped row.
         assert entries["bad-size.pdf"] == CompanionEntry(name="b.md")
+        assert entries["bad-id.pdf"] == CompanionEntry(name="c.md")
 
     def test_ignores_symlink_sidecar(self, tmp_path):
         target = tmp_path / "outside.json"
@@ -178,9 +189,12 @@ class TestForget:
     def test_forget_original_and_empty_file_is_removed(self, tmp_path):
         (tmp_path / "a.md").write_text("# pdf\n", encoding="utf-8")
         record_companion_mapping(tmp_path, "a.pdf", "a.md")
+        recorded = load_companion_entries(tmp_path)["a.pdf"]
         forget_companion_mapping(tmp_path, original="a.pdf")
         assert load_companion_map(tmp_path) == {}
         assert not (tmp_path / COMPANION_MAP_FILENAME).exists()
+        if recorded.id is not None:
+            assert not companion_identity_path(tmp_path, recorded.id).exists()
 
     def test_forget_by_companion_name(self, tmp_path):
         (tmp_path / "a.md").write_text("# docx\n", encoding="utf-8")
@@ -243,12 +257,12 @@ class TestFingerprintStaleness:
         text = "# PDF\n"
         companion.write_text(text, encoding="utf-8")
         record_companion_mapping(tmp_path, "a.pdf", "a_1.md")
-        recorded_ino = load_companion_entries(tmp_path)["a.pdf"].ino
+        recorded = load_companion_entries(tmp_path)["a.pdf"]
         companion.unlink()
         replacement = tmp_path / "a_1.md"
         replacement.write_text(text, encoding="utf-8")
-        if recorded_ino is not None and replacement.stat().st_ino == recorded_ino:
-            pytest.skip("filesystem reused the inode after unlink")
+        if recorded.id is None and recorded.ino is not None and replacement.stat().st_ino == recorded.ino:
+            pytest.skip("filesystem reused the inode and identity pin was unavailable")
 
         assert lookup_companion_mapping(tmp_path, "a.pdf") is None
         assert mapped_companion_names(tmp_path) == set()
@@ -640,3 +654,101 @@ class TestLockWaitIsBounded:
             os.close(fd)
 
         assert load_companion_map(uploads) == {"a.pdf": "a.md"}
+
+
+class TestIdentityPinSurvivesInodeReuse:
+    def test_production_layout_pins_identity_beside_user_data(self, tmp_path):
+        uploads = _thread_uploads(tmp_path)
+        (uploads / "a.md").write_text("# pdf\n", encoding="utf-8")
+        record_companion_mapping(uploads, "a.pdf", "a.md")
+
+        entry = load_companion_entries(uploads)["a.pdf"]
+        assert entry.id is not None
+        pin = companion_identity_path(uploads, entry.id)
+        assert pin.parent == tmp_path / COMPANION_ID_DIRNAME
+        assert pin.is_file()
+        assert not pin.is_symlink()
+        assert pin.stat().st_ino == (uploads / "a.md").stat().st_ino
+        assert not list(uploads.glob(".deer-flow-companions.id.*"))
+
+    def test_inode_number_reuse_does_not_attach_replacement(self, tmp_path):
+        companion = tmp_path / "a_1.md"
+        companion.write_text("# FROM PDF\n", encoding="utf-8")
+        record_companion_mapping(tmp_path, "a.pdf", "a_1.md")
+        recorded = load_companion_entries(tmp_path)["a.pdf"]
+        companion.unlink()
+        replacement = tmp_path / "a_1.md"
+        replacement.write_text("# My own notes, unrelated to any PDF\n", encoding="utf-8")
+
+        assert lookup_companion_mapping(tmp_path, "a.pdf") is None
+        assert mapped_companion_names(tmp_path) == set()
+        if recorded.id is not None:
+            pin = companion_identity_path(tmp_path, recorded.id)
+            assert pin.exists()
+            assert pin.stat().st_ino != replacement.stat().st_ino
+
+
+class TestSidecarReadBounds:
+    def test_oversized_sidecar_is_ignored(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_BYTES", 64)
+        payload = {"version": 2, "companions": {"a.pdf": {"name": "a.md", "size": 1, "mtime_ns": 1}}}
+        (tmp_path / COMPANION_MAP_FILENAME).write_text(json.dumps(payload) + ("x" * 200), encoding="utf-8")
+
+        assert load_companion_map(tmp_path) == {}
+
+    def test_entry_cap_drops_the_tail(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_ENTRIES", 2)
+        payload = {
+            "version": 2,
+            "companions": {
+                "a.pdf": "a.md",
+                "b.pdf": "b.md",
+                "c.pdf": "c.md",
+            },
+        }
+        (tmp_path / COMPANION_MAP_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+        (tmp_path / "a.md").write_text("a", encoding="utf-8")
+        (tmp_path / "b.md").write_text("b", encoding="utf-8")
+        (tmp_path / "c.md").write_text("c", encoding="utf-8")
+
+        assert load_companion_map(tmp_path) == {"a.pdf": "a.md", "b.pdf": "b.md"}
+
+
+class TestReplacementCleansPreviousCompanion:
+    def test_rerecord_unlinks_unmodified_previous_companion(self, tmp_path):
+        (tmp_path / "report.md").write_text("# v1\n", encoding="utf-8")
+        record_companion_mapping(tmp_path, "report.pdf", "report.md")
+        previous = load_companion_entries(tmp_path)["report.pdf"]
+        (tmp_path / "report_1.md").write_text("# v2\n", encoding="utf-8")
+        record_companion_mapping(tmp_path, "report.pdf", "report_1.md")
+
+        assert not (tmp_path / "report.md").exists()
+        assert lookup_companion_mapping(tmp_path, "report.pdf") == "report_1.md"
+        if previous.id is not None:
+            assert not companion_identity_path(tmp_path, previous.id).exists()
+
+    def test_rerecord_keeps_edited_previous_companion(self, tmp_path):
+        companion = tmp_path / "report.md"
+        companion.write_text("# v1\n", encoding="utf-8")
+        record_companion_mapping(tmp_path, "report.pdf", "report.md")
+        companion.write_text("# v1\nedited in the sandbox\n", encoding="utf-8")
+        (tmp_path / "report_1.md").write_text("# v2\n", encoding="utf-8")
+        record_companion_mapping(tmp_path, "report.pdf", "report_1.md")
+
+        assert companion.read_text(encoding="utf-8") == "# v1\nedited in the sandbox\n"
+        assert lookup_companion_mapping(tmp_path, "report.pdf") == "report_1.md"
+        assert "report.md" not in mapped_companion_names(tmp_path)
+
+
+class TestDeleteSidecarCleanupIsAdvisory:
+    def test_delete_succeeds_when_forget_raises(self, tmp_path, monkeypatch):
+        target = tmp_path / "notes.txt"
+        target.write_text("keep-me-deleted", encoding="utf-8")
+
+        def boom(*_args, **_kwargs):
+            raise OSError("sidecar exploded")
+
+        monkeypatch.setattr("deerflow.uploads.manager.forget_companion_mapping", boom)
+        result = delete_file_safe(tmp_path, "notes.txt")
+        assert result["success"] is True
+        assert not target.exists()

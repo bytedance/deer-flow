@@ -143,6 +143,8 @@ def reserve_unique_filename(directory: Path, name: str, seen: set[str]) -> str:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_BINARY"):
@@ -413,30 +415,37 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     mapped = lookup_companion_mapping(base_dir, safe_name)
     file_path.unlink()
 
-    # Clean up companion markdown generated during upload conversion.
-    if convertible_extensions and file_path.suffix.lower() in convertible_extensions:
-        companion_name: str | None
-        if mapped is not None:
-            companion_name = mapped
-        elif has_companion_entry(base_dir, safe_name):
-            # Stale entry: the recorded companion was deleted or replaced
-            # outside this API, so no file may be removed in its name.
-            companion_name = None
-        else:
-            companion_name = file_path.with_suffix(".md").name
-        if companion_name is not None and companion_name != safe_name:
-            companion_path = file_path.with_name(companion_name)
-            try:
-                validate_path_traversal(companion_path.resolve(), base_dir)
-            except PathTraversalError:
-                companion_path = None
-            if companion_path is not None:
-                companion_path.unlink(missing_ok=True)
-                forget_companion_mapping(base_dir, companion=companion_name)
+    try:
+        # Clean up companion markdown generated during upload conversion.
+        if convertible_extensions and file_path.suffix.lower() in convertible_extensions:
+            companion_name: str | None
+            if mapped is not None:
+                companion_name = mapped
+            elif has_companion_entry(base_dir, safe_name):
+                # Stale entry: the recorded companion was deleted or replaced
+                # outside this API, so no file may be removed in its name.
+                companion_name = None
+            else:
+                companion_name = file_path.with_suffix(".md").name
+            if companion_name is not None and companion_name != safe_name:
+                companion_path = file_path.with_name(companion_name)
+                try:
+                    validate_path_traversal(companion_path.resolve(), base_dir)
+                except PathTraversalError:
+                    companion_path = None
+                if companion_path is not None:
+                    companion_path.unlink(missing_ok=True)
+                    forget_companion_mapping(base_dir, companion=companion_name)
 
-    forget_companion_mapping(base_dir, original=safe_name)
-    if file_path.suffix.lower() == ".md":
-        forget_companion_mapping(base_dir, companion=safe_name)
+        forget_companion_mapping(base_dir, original=safe_name)
+        if file_path.suffix.lower() == ".md":
+            forget_companion_mapping(base_dir, companion=safe_name)
+    except (OSError, ValueError):
+        logger.warning(
+            "Companion sidecar cleanup failed after deleting %s",
+            filename,
+            exc_info=True,
+        )
 
     return {"success": True, "message": f"Deleted {filename}"}
 

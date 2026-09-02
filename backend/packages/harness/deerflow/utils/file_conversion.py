@@ -16,6 +16,8 @@ No FastAPI or HTTP dependencies — pure utility functions.
 
 import asyncio
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 from deerflow.config.app_config import get_app_config
@@ -140,6 +142,32 @@ def _do_convert(file_path: Path, pdf_converter: str) -> str:
     return _convert_with_markitdown(file_path)
 
 
+def _write_text_atomic(path: Path, text: str) -> None:
+    """Write *text* to *path* without following a destination symlink.
+
+    ``Path.write_text`` follows a planted symlink and can overwrite a host
+    file with Gateway privileges. A same-directory temp file plus ``os.replace``
+    replaces the destination directory entry (including a symlink) atomically
+    and never writes through it. Staging names match Gateway upload leftovers
+    so a crash mid-write is swept on startup.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".upload-", suffix=".part", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 async def convert_file_to_markdown(file_path: Path, output_path: Path | None = None) -> Path | None:
     """Convert a supported document file to Markdown.
 
@@ -168,7 +196,7 @@ async def convert_file_to_markdown(file_path: Path, output_path: Path | None = N
             text = _do_convert(file_path, pdf_converter)
 
         md_path = output_path if output_path is not None else file_path.with_suffix(".md")
-        md_path.write_text(text, encoding="utf-8")
+        _write_text_atomic(md_path, text)
 
         logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, len(text))
         return md_path

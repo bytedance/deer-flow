@@ -7,6 +7,8 @@ import sys
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from deerflow.utils.file_conversion import (
     _ASYNC_THRESHOLD_BYTES,
     _MIN_CHARS_PER_PAGE,
@@ -316,6 +318,60 @@ class TestConvertFileToMarkdown:
 
         assert md_path is not None
         assert md_path.read_text(encoding="utf-8") == chinese_content
+
+    def test_does_not_follow_symlink_at_output_path(self, tmp_path):
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        outside = tmp_path / "secret.txt"
+        outside.write_text("untouched", encoding="utf-8")
+        dest = tmp_path / "report.md"
+        try:
+            dest.symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+            raise
+
+        with (
+            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+            patch("deerflow.utils.file_conversion._do_convert", return_value="# converted"),
+        ):
+            md_path = _run(convert_file_to_markdown(pdf, output_path=dest))
+
+        assert md_path == dest
+        assert dest.is_file()
+        assert not dest.is_symlink()
+        assert dest.read_text(encoding="utf-8") == "# converted"
+        assert outside.read_text(encoding="utf-8") == "untouched"
+
+    def test_reserved_then_replaced_with_symlink_does_not_write_through(self, tmp_path):
+        from deerflow.uploads.manager import reserve_unique_filename
+
+        pdf = tmp_path / "notes.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        outside = tmp_path / "host-secret.txt"
+        outside.write_text("secret", encoding="utf-8")
+        reserved = reserve_unique_filename(tmp_path, "notes.md", set())
+        dest = tmp_path / reserved
+        dest.unlink()
+        try:
+            dest.symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+            raise
+
+        with (
+            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+            patch("deerflow.utils.file_conversion._do_convert", return_value="# notes"),
+        ):
+            md_path = _run(convert_file_to_markdown(pdf, output_path=dest))
+
+        assert md_path == dest
+        assert dest.is_file()
+        assert not dest.is_symlink()
+        assert dest.read_text(encoding="utf-8") == "# notes"
+        assert outside.read_text(encoding="utf-8") == "secret"
 
 
 # ---------------------------------------------------------------------------

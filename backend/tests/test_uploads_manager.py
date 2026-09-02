@@ -343,6 +343,18 @@ class TestDeleteFileSafe:
         assert result["success"] is True
         assert not f.exists()
 
+    def test_delete_succeeds_when_sidecar_forget_raises(self, tmp_path, monkeypatch):
+        f = tmp_path / "test.txt"
+        f.write_text("data")
+
+        def boom(*_args, **_kwargs):
+            raise OSError("sidecar exploded")
+
+        monkeypatch.setattr("deerflow.uploads.manager.forget_companion_mapping", boom)
+        result = delete_file_safe(tmp_path, "test.txt")
+        assert result["success"] is True
+        assert not f.exists()
+
     def test_delete_nonexistent_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             delete_file_safe(tmp_path, "nope.txt")

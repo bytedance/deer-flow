@@ -334,7 +334,7 @@
 
 ### 修复
 
-- **上传：** 把转换后的 Markdown companion 暴露给 `<current_uploads>` 与 `list_uploaded_files`，并转发前端的 `markdown_file`，使智能体对 UTF-8 文本调用 `read_file`，而不是去读二进制原件。转换时写入的 `.deer-flow-companions.json` 保留碰撞改名映射（`a.pdf` → `a_1.md`）；指纹同时记录 inode，原地编辑仍挂在原文件上，删后同名重建则失效。sidecar 写入在 Gateway 与 `DeerFlowClient` 上都是建议性的，映射失败不会 500 或回滚已写入的文件。([#4981]，相关 [#3750])
+- **上传：** 把转换后的 Markdown companion 暴露给 `<current_uploads>` 与 `list_uploaded_files`，并转发前端的 `markdown_file`，使智能体对 UTF-8 文本调用 `read_file`，而不是去读二进制原件。转换时写入的 `.deer-flow-companions.json` 保留碰撞改名映射（`a.pdf` → `a_1.md`）；身份用私有 hard-link 钉住转换时 inode，原地编辑仍挂在原文件上，删后同名重建（含 Linux inode 复用）则失效。sidecar 读取有字节/条目上限；转换用 temp+`os.replace` 写出，不跟随预占后被换成的 symlink。([#4981]，相关 [#3750])
 - **运行时：** 会话元数据现在仅在 run 通过启动屏障后才切换为 `running`，待取消的
   run 不再短暂呈现 `running` 状态；worker 启动期间客户端可能观察到先前的会话状态
   。([#4450])

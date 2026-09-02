@@ -2,15 +2,20 @@
 
 Written at convert time so historical listing can recover collision-renamed
 companions (``a.pdf`` → ``a_1.md``) after summarization drops message metadata.
-Each entry also carries the companion's convert-time fingerprint (size, mtime,
-and inode) so a same-named file that later replaces the companion — for example
-after the companion was deleted inside the sandbox — is not mistaken for it,
-while an in-place edit of the converted markdown stays attached.
+Each entry also carries a convert-time fingerprint (size, mtime, inode) and,
+when the filesystem allows, a private hard-link identity pin. Linux can reuse
+an inode number immediately after ``unlink`` + recreate, so ``(st_dev, st_ino)``
+alone is not an identity. The pin holds the convert-time inode outside the
+sandbox-visible uploads directory (or as a hidden name in test layouts), so a
+replacement file cannot masquerade as the companion even when the number is
+reused, while an in-place edit of the same inode stays attached.
 The sidecar JSON lives beside the files it describes and is hidden from
-listings. The lock file lives *outside* sandbox-visible directories (beside
-``user-data``, not inside ``uploads``), is opened with no-follow semantics,
-and is acquired with a bounded non-blocking flock so a held lock cannot pin
-the shared Gateway file-IO pool.
+listings. Reads open it no-follow with a byte and entry cap so a sandbox
+cannot turn the mapping file into an unbounded Gateway parse. The lock file
+lives *outside* sandbox-visible directories (beside ``user-data``, not inside
+``uploads``), is opened with no-follow semantics, and is acquired with a
+bounded non-blocking flock so a held lock cannot pin the shared Gateway
+file-IO pool.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import errno
 import json
 import logging
 import os
+import secrets
 import stat
 import tempfile
 import threading
@@ -32,8 +38,12 @@ logger = logging.getLogger(__name__)
 
 COMPANION_MAP_FILENAME = ".deer-flow-companions.json"
 COMPANION_MAP_LOCK_FILENAME = ".deer-flow-companions.lock"
+COMPANION_ID_DIRNAME = ".deer-flow-companion-ids"
 _COMPANION_MAP_PREFIX = ".deer-flow-companions"
 _MAP_VERSION = 2
+_IDENTITY_TOKEN_LENGTH = 32
+MAX_COMPANION_MAP_BYTES = 256 * 1024
+MAX_COMPANION_MAP_ENTRIES = 2048
 _LOCK_RETRY_ATTEMPTS = 10
 _LOCK_RETRY_INTERVAL_S = 0.02
 _UNSAFE_LOCK_OPEN_ERRNOS = {errno.ELOOP, errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}
@@ -70,8 +80,9 @@ class CompanionEntry:
 
     ``size`` / ``mtime_ns`` are ``None`` for rows written before the map
     started recording fingerprints; those verify by existence only.
-    ``dev`` / ``ino`` identify the convert-time inode so an in-place edit
-    stays attached while a delete-and-recreate under the same name goes stale.
+    ``id`` is the basename of a private hard-link pin that holds the
+    convert-time inode so Linux cannot reuse that number for a replacement.
+    ``dev`` / ``ino`` are recorded for diagnostics; matching prefers the pin.
     """
 
     name: str
@@ -79,6 +90,7 @@ class CompanionEntry:
     mtime_ns: int | None = None
     dev: int | None = None
     ino: int | None = None
+    id: str | None = None
 
 
 def is_companion_map_file(filename: str) -> bool:
@@ -100,6 +112,73 @@ def _is_safe_companion(name: str) -> bool:
 
 def _is_safe_original(name: str) -> bool:
     return _is_safe_basename(name)
+
+
+def _is_safe_identity_token(token: str) -> bool:
+    return isinstance(token, str) and len(token) == _IDENTITY_TOKEN_LENGTH and all(c in "0123456789abcdef" for c in token)
+
+
+def _sanitize_identity_token(value: object) -> str | None:
+    if not isinstance(value, str) or not _is_safe_identity_token(value):
+        return None
+    return value
+
+
+def companion_identity_dir(uploads_dir: Path) -> Path:
+    """Return the directory that holds hard-link identity pins.
+
+    Production uploads live at ``.../user-data/uploads``. Pins sit beside
+    ``user-data`` (with the lock) so AIO mounts and ``/mnt/user-data`` cannot
+    unlink them to free the convert-time inode. Test layouts that pass a bare
+    temp dir keep pins as hidden files inside *uploads_dir* so they do not
+    leak into a shared pytest parent.
+    """
+    resolved = uploads_dir.resolve()
+    if resolved.parent.name == "user-data":
+        return resolved.parent.parent / COMPANION_ID_DIRNAME
+    return resolved
+
+
+def companion_identity_path(uploads_dir: Path, token: str) -> Path:
+    """Return the pin path for *token* under *uploads_dir*'s layout."""
+    if not _is_safe_identity_token(token):
+        raise ValueError(f"Unsafe companion identity token: {token!r}")
+    directory = companion_identity_dir(uploads_dir)
+    if directory.resolve() == uploads_dir.resolve():
+        return directory / f"{_COMPANION_MAP_PREFIX}.id.{token}"
+    return directory / token
+
+
+_PIN_UNSUPPORTED_ERRNOS = {errno.EXDEV, errno.EPERM, errno.ENOTSUP}
+if hasattr(errno, "ENOSYS"):
+    _PIN_UNSUPPORTED_ERRNOS.add(errno.ENOSYS)
+if hasattr(errno, "EOPNOTSUPP"):
+    _PIN_UNSUPPORTED_ERRNOS.add(errno.EOPNOTSUPP)
+
+
+def _pin_companion(uploads_dir: Path, companion_path: Path) -> str | None:
+    """Hard-link *companion_path* to a private pin. Return the token, or None."""
+    token = secrets.token_hex(_IDENTITY_TOKEN_LENGTH // 2)
+    pin = companion_identity_path(uploads_dir, token)
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(companion_path, pin)
+    except OSError as exc:
+        if exc.errno in _PIN_UNSUPPORTED_ERRNOS:
+            return None
+        raise
+    return token
+
+
+def _unpin_companion(uploads_dir: Path, token: str | None) -> None:
+    if not token or not _is_safe_identity_token(token):
+        return
+    try:
+        companion_identity_path(uploads_dir, token).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("Failed to remove companion identity pin %s", token, exc_info=True)
 
 
 def _lock_for(uploads_dir: Path) -> threading.Lock:
@@ -273,17 +352,19 @@ def _sanitize_entry(key: object, value: object) -> tuple[str, CompanionEntry] | 
         # Version-1 rows stored the bare companion basename (no fingerprint).
         name: object = value
         size = mtime_ns = dev = ino = None
+        identity = None
     elif isinstance(value, dict):
         name = value.get("name")
         size = _sanitize_fingerprint(value.get("size"))
         mtime_ns = _sanitize_fingerprint(value.get("mtime_ns"))
         dev = _sanitize_fingerprint(value.get("dev"))
         ino = _sanitize_fingerprint(value.get("ino"))
+        identity = _sanitize_identity_token(value.get("id"))
     else:
         return None
     if not isinstance(name, str) or not _is_safe_companion(name):
         return None
-    return key, CompanionEntry(name=name, size=size, mtime_ns=mtime_ns, dev=dev, ino=ino)
+    return key, CompanionEntry(name=name, size=size, mtime_ns=mtime_ns, dev=dev, ino=ino, id=identity)
 
 
 def _sanitize_mapping(raw: object) -> dict[str, CompanionEntry]:
@@ -293,24 +374,81 @@ def _sanitize_mapping(raw: object) -> dict[str, CompanionEntry]:
     if not isinstance(companions, dict):
         return {}
     out: dict[str, CompanionEntry] = {}
+    truncated = False
     for key, value in companions.items():
+        if len(out) >= MAX_COMPANION_MAP_ENTRIES:
+            truncated = True
+            break
         sanitized = _sanitize_entry(key, value)
         if sanitized is not None:
             original, entry = sanitized
             out[original] = entry
+    if truncated:
+        logger.warning("Companion map exceeds %s entries; ignoring the rest", MAX_COMPANION_MAP_ENTRIES)
     return out
+
+
+def _open_sidecar_no_follow(path: Path) -> int:
+    """Open *path* read-only without following a symlink. Caller closes the fd."""
+    has_nofollow = hasattr(os, "O_NOFOLLOW")
+    flags = os.O_RDONLY
+    if has_nofollow:
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+
+    if not has_nofollow:
+        try:
+            pre_open = os.lstat(path)
+        except FileNotFoundError:
+            raise
+        if stat.S_ISLNK(pre_open.st_mode) or not stat.S_ISREG(pre_open.st_mode):
+            raise OSError(errno.ELOOP, "companion map is not a regular file", str(path))
+
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno in _UNSAFE_LOCK_OPEN_ERRNOS:
+            raise OSError(errno.ELOOP, "cannot open companion map without following a link", str(path)) from exc
+        raise
+
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(errno.ELOOP, "companion map is not a regular file", str(path))
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _load_unlocked(uploads_dir: Path) -> dict[str, CompanionEntry]:
     path = _map_path(uploads_dir)
+    fd = -1
+    raw_bytes = b""
     try:
-        if path.is_symlink() or not path.is_file():
+        fd = _open_sidecar_no_follow(path)
+        info = os.fstat(fd)
+        if info.st_size <= 0:
             return {}
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        logger.warning("Ignoring corrupt companion map at %s", path)
+        if info.st_size > MAX_COMPANION_MAP_BYTES:
+            logger.warning("Ignoring oversized companion map at %s (%s bytes)", path, info.st_size)
+            return {}
+        raw_bytes = os.read(fd, info.st_size)
+    except FileNotFoundError:
         return {}
     except OSError:
+        return {}
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+    try:
+        raw = json.loads(raw_bytes.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        logger.warning("Ignoring corrupt companion map at %s", path)
         return {}
     return _sanitize_mapping(raw)
 
@@ -335,6 +473,7 @@ def _persist_unlocked(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> 
                 "mtime_ns": entry.mtime_ns,
                 "dev": entry.dev,
                 "ino": entry.ino,
+                **({"id": entry.id} if entry.id else {}),
             }
             for original, entry in mapping.items()
         },
@@ -370,39 +509,87 @@ def load_companion_entries(uploads_dir: Path) -> dict[str, CompanionEntry]:
     return _load_unlocked(uploads_dir)
 
 
-def _has_usable_identity(entry: CompanionEntry) -> bool:
-    """Return whether *entry* recorded a trustworthy convert-time inode.
+def _stat_regular_companion(uploads_dir: Path, entry: CompanionEntry) -> os.stat_result | None:
+    candidate = uploads_dir / entry.name
+    try:
+        current = os.lstat(candidate)
+    except OSError:
+        return None
+    if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode):
+        return None
+    return current
 
-    ``st_ino == 0`` is treated as missing: some Windows volumes report it for
-    every file, which cannot distinguish an in-place edit from a recreate.
-    """
-    return entry.dev is not None and entry.ino is not None and entry.ino != 0
+
+def _identity_pin_matches(uploads_dir: Path, entry: CompanionEntry, current: os.stat_result) -> bool:
+    if not entry.id or not _is_safe_identity_token(entry.id):
+        return False
+    pin = companion_identity_path(uploads_dir, entry.id)
+    try:
+        pin_st = os.lstat(pin)
+    except OSError:
+        return False
+    if stat.S_ISLNK(pin_st.st_mode) or not stat.S_ISREG(pin_st.st_mode):
+        return False
+    return current.st_dev == pin_st.st_dev and current.st_ino == pin_st.st_ino
 
 
 def companion_entry_matches(uploads_dir: Path, entry: CompanionEntry) -> bool:
     """Return whether *entry*'s companion file is still the converted original.
 
-    When a convert-time inode was recorded, a same-inode file stays attached
-    even after an in-place edit (``echo >>``, ``write_file``, ``str_replace``).
-    Delete-then-recreate under the same name gets a new inode and is stale.
-    Legacy rows without an inode fall back to size/mtime, so an in-place edit
-    of those rows is still stale. Rows with no fingerprint verify by existence
-    only.
+    A hard-link identity pin is conclusive: the pin holds the convert-time
+    inode, so an in-place edit stays attached and a delete-then-recreate is
+    stale even when Linux reuses the inode number. Legacy rows without a pin
+    fall back to size/mtime (inode numbers are not trusted). Rows with no
+    fingerprint verify by existence only.
     """
-    candidate = uploads_dir / entry.name
-    try:
-        if candidate.is_symlink() or not candidate.is_file():
-            return False
-        current = candidate.stat()
-    except OSError:
+    current = _stat_regular_companion(uploads_dir, entry)
+    if current is None:
         return False
-    if _has_usable_identity(entry):
-        return current.st_dev == entry.dev and current.st_ino == entry.ino
+    if entry.id:
+        return _identity_pin_matches(uploads_dir, entry, current)
     if entry.size is None and entry.mtime_ns is None:
         return True
     if entry.size is not None and current.st_size != entry.size:
         return False
     return entry.mtime_ns is None or current.st_mtime_ns == entry.mtime_ns
+
+
+def _unlink_unmodified_companion(uploads_dir: Path, entry: CompanionEntry, *, keep_name: str) -> None:
+    """Remove a still-current, unmodified conversion artifact being replaced.
+
+    Edited or stale files are left in place so a later re-upload cannot delete
+    user notes that reused or mutated the previous companion name.
+    """
+    if entry.name == keep_name:
+        return
+    if not companion_entry_matches(uploads_dir, entry):
+        return
+    path = uploads_dir / entry.name
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    fd = -1
+    try:
+        fd = os.open(path, flags)
+        current = os.fstat(fd)
+        if not stat.S_ISREG(current.st_mode):
+            return
+        if entry.id and not _identity_pin_matches(uploads_dir, entry, current):
+            return
+        if entry.size is not None and current.st_size != entry.size:
+            return
+        if entry.mtime_ns is not None and current.st_mtime_ns != entry.mtime_ns:
+            return
+        os.close(fd)
+        fd = -1
+        os.unlink(path)
+    except OSError:
+        return
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def lookup_companion_mapping(uploads_dir: Path, original: str) -> str | None:
@@ -448,9 +635,12 @@ def mapped_companion_names(
 def record_companion_mapping(uploads_dir: Path, original: str, companion: str) -> None:
     """Persist ``original → companion`` after a successful conversion.
 
-    Captures the companion's current size, mtime, and inode as its fingerprint
-    so a later same-named replacement is not mistaken for the converted file,
-    while an in-place edit of the same inode stays attached.
+    Captures the companion's current size, mtime, and inode, and pins the
+    convert-time inode with a private hard link so a later same-named
+    replacement cannot reuse that number. An in-place edit of the same inode
+    stays attached. Re-recording the same original drops the previous mapping
+    and unlinks the prior companion only when it is still the unmodified
+    conversion artifact.
 
     Raises:
         ValueError: If either name is unsafe.
@@ -472,22 +662,40 @@ def record_companion_mapping(uploads_dir: Path, original: str, companion: str) -
             try:
                 if companion_path.is_symlink() or not companion_path.is_file():
                     raise FileNotFoundError(f"Companion file does not exist: {companion!r}")
-                companion_stat = companion_path.stat()
             except OSError as exc:
                 raise FileNotFoundError(f"Companion file does not exist: {companion!r}") from exc
 
+            pin_token = _pin_companion(uploads_dir, companion_path)
+            try:
+                companion_stat = companion_path.stat()
+            except OSError as exc:
+                _unpin_companion(uploads_dir, pin_token)
+                raise FileNotFoundError(f"Companion file does not exist: {companion!r}") from exc
             mapping = _load_unlocked(uploads_dir)
+            previous = mapping.get(original)
+            displaced: list[CompanionEntry] = []
             for key, entry in list(mapping.items()):
                 if entry.name == companion and key != original:
-                    del mapping[key]
+                    displaced.append(mapping.pop(key))
             mapping[original] = CompanionEntry(
                 name=companion,
                 size=companion_stat.st_size,
                 mtime_ns=companion_stat.st_mtime_ns,
                 dev=companion_stat.st_dev,
                 ino=companion_stat.st_ino,
+                id=pin_token,
             )
-            _persist_unlocked(uploads_dir, mapping)
+            try:
+                _persist_unlocked(uploads_dir, mapping)
+            except Exception:
+                _unpin_companion(uploads_dir, pin_token)
+                raise
+            if previous is not None and previous.id != pin_token:
+                _unlink_unmodified_companion(uploads_dir, previous, keep_name=companion)
+                _unpin_companion(uploads_dir, previous.id)
+            for entry in displaced:
+                if entry.id != pin_token:
+                    _unpin_companion(uploads_dir, entry.id)
     except CompanionMapLockTimeout:
         logger.warning(
             "Skipping companion-map write for %s → %s; lock busy at %s",
@@ -522,9 +730,10 @@ def forget_companion_mappings(
             stale = [key for key, entry in mapping.items() if (key, entry.name) in wanted]
             if not stale:
                 return
-            for key in stale:
-                del mapping[key]
+            dropped = [mapping.pop(key) for key in stale]
             _persist_unlocked(uploads_dir, mapping)
+            for entry in dropped:
+                _unpin_companion(uploads_dir, entry.id)
     except CompanionMapLockTimeout:
         logger.warning("Skipping companion-map rollback; lock busy at %s", companion_map_lock_path(uploads_dir))
 
@@ -541,16 +750,16 @@ def forget_companion_mapping(
     try:
         with _map_write_lock(uploads_dir):
             mapping = _load_unlocked(uploads_dir)
-            changed = False
+            dropped: list[CompanionEntry] = []
             if original is not None and original in mapping:
-                del mapping[original]
-                changed = True
+                dropped.append(mapping.pop(original))
             if companion is not None:
                 for key, entry in list(mapping.items()):
                     if entry.name == companion:
-                        del mapping[key]
-                        changed = True
-            if changed:
+                        dropped.append(mapping.pop(key))
+            if dropped:
                 _persist_unlocked(uploads_dir, mapping)
+                for entry in dropped:
+                    _unpin_companion(uploads_dir, entry.id)
     except CompanionMapLockTimeout:
         logger.warning("Skipping companion-map forget; lock busy at %s", companion_map_lock_path(uploads_dir))
