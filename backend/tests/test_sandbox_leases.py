@@ -91,6 +91,68 @@ def test_last_execution_lease_is_the_only_provider_releaser() -> None:
     assert provider.sandbox.released_scopes == ["child-a", "parent", "child-b"]
 
 
+def test_non_releasing_holder_defers_parent_release_until_its_scope_is_clean() -> None:
+    provider = _LeaseProvider()
+    manager = SandboxLeaseManager(provider)
+    manager.retain(
+        "parent",
+        "shared",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+    manager.retain(
+        "fork-child",
+        "shared",
+        thread_id="thread-1",
+        user_id="user-1",
+        release_on_last=False,
+    )
+
+    manager.release("parent")
+    assert provider.release_calls == []
+
+    manager.release("fork-child")
+
+    assert provider.release_calls == ["shared"]
+    assert provider.sandbox.released_scopes == ["parent", "fork-child"]
+
+
+def test_lone_non_releasing_holder_does_not_park_warm_sandbox() -> None:
+    provider = _LeaseProvider()
+    manager = SandboxLeaseManager(provider)
+    manager.retain(
+        "upload",
+        "shared",
+        thread_id="thread-1",
+        user_id="user-1",
+        release_on_last=False,
+    )
+
+    manager.release("upload")
+
+    assert provider.release_calls == []
+    assert provider.sandbox.released_scopes == ["upload"]
+
+
+def test_normal_acquire_upgrades_existing_non_releasing_holder() -> None:
+    provider = _LeaseProvider()
+    manager = SandboxLeaseManager(provider)
+    manager.retain(
+        "child",
+        "shared",
+        thread_id="thread-1",
+        user_id="user-1",
+        release_on_last=False,
+    )
+
+    sandbox_id = manager.acquire("child", "thread-1", user_id="user-1")
+    manager.release("child")
+
+    assert sandbox_id == "shared"
+    assert provider.acquire_calls == []
+    assert provider.release_calls == ["shared"]
+
+
 def test_release_is_idempotent_for_executor_finally_safety_net() -> None:
     provider = _LeaseProvider()
     manager = SandboxLeaseManager(provider)
@@ -383,6 +445,65 @@ async def test_cancelled_async_acquire_keeps_same_thread_serialized_through_reco
     assert provider.release_calls == ["shared"]
     assert manager.binding_for("cancelled") is None
     assert manager.binding_for("next") == "shared"
+
+
+@pytest.mark.anyio
+async def test_cancelled_async_acquire_logs_reconciliation_failure(caplog) -> None:
+    acquire_started = asyncio.Event()
+    allow_acquire_failure = asyncio.Event()
+
+    class _FailingCancelledAcquireProvider(_LeaseProvider):
+        async def acquire_async(self, thread_id=None, *, user_id=None):
+            self.acquire_calls.append((thread_id, user_id))
+            acquire_started.set()
+            await allow_acquire_failure.wait()
+            raise RuntimeError("provider acquire failed")
+
+    provider = _FailingCancelledAcquireProvider()
+    manager = SandboxLeaseManager(provider)
+    acquire_task = asyncio.create_task(manager.acquire_async("cancelled", "thread-1", user_id="user-1"))
+    await acquire_started.wait()
+
+    with caplog.at_level("WARNING", logger="deerflow.sandbox.lease"):
+        acquire_task.cancel()
+        allow_acquire_failure.set()
+        with pytest.raises(asyncio.CancelledError):
+            await acquire_task
+
+    assert "Cancelled sandbox acquire failed during reconciliation" in caplog.text
+    assert "provider acquire failed" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_cancelled_async_release_logs_reconciliation_failure(caplog) -> None:
+    release_started = threading.Event()
+    allow_release_failure = threading.Event()
+
+    class _FailingCancelledReleaseProvider(_LeaseProvider):
+        def release(self, sandbox_id):
+            release_started.set()
+            assert allow_release_failure.wait(timeout=1)
+            raise RuntimeError("provider release failed")
+
+    provider = _FailingCancelledReleaseProvider()
+    manager = SandboxLeaseManager(provider)
+    manager.retain(
+        "cancelled",
+        "shared",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+    release_task = asyncio.create_task(manager.release_async("cancelled"))
+    assert await asyncio.to_thread(release_started.wait, 1)
+
+    with caplog.at_level("WARNING", logger="deerflow.sandbox.lease"):
+        release_task.cancel()
+        allow_release_failure.set()
+        with pytest.raises(asyncio.CancelledError):
+            await release_task
+
+    assert "Cancelled sandbox release failed during reconciliation" in caplog.text
+    assert "provider release failed" in caplog.text
 
 
 def test_new_acquire_waits_until_last_release_transition_finishes() -> None:

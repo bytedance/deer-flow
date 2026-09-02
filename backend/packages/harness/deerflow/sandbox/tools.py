@@ -1486,10 +1486,10 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             app_config=safe_app_config(),
         )
 
-    # Check if sandbox already exists in state
-    # Discarding fork_restored is safe: after_agent short-circuits on the
-    # still-wrapped state before the context-based release branch, so this
-    # reuse path never releases the parent sandbox.
+    # Check if sandbox already exists in state. A fork-restored execution keeps
+    # the wrapper so after_agent cannot park the parent's sandbox, but it still
+    # binds a non-releasing holder: parent cleanup cannot close the client under
+    # the child, and the child's outer fence can clean its command scope.
     sandbox_state, fork_restored = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
@@ -1497,14 +1497,16 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             provider = get_sandbox_provider()
             owner_id = sandbox_lease_owner(runtime.context)
             thread_id = _resolve_runtime_thread_id(runtime)
-            if owner_id is not None and thread_id is not None and not fork_restored:
+            if owner_id is not None and thread_id is not None:
                 sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
                     owner_id,
                     sandbox_id,
                     thread_id=thread_id,
                     user_id=resolve_runtime_user_id(runtime),
+                    release_on_last=not fork_restored,
                 )
-                runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+                if not fork_restored:
+                    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
             sandbox = provider.get(sandbox_id)
             if sandbox is not None:
                 if runtime.context is not None:
@@ -1563,8 +1565,8 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             app_config=await safe_app_config_async(),
         )
 
-    # Same discard as the sync path above: the reuse path never releases,
-    # because after_agent short-circuits on the still-wrapped state first.
+    # Same borrowed-holder rule as the sync path above: keep the fork wrapper
+    # while counting the child as an active client user.
     sandbox_state, fork_restored = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
@@ -1572,14 +1574,16 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             provider = get_sandbox_provider()
             owner_id = sandbox_lease_owner(runtime.context)
             thread_id = _resolve_runtime_thread_id(runtime)
-            if owner_id is not None and thread_id is not None and not fork_restored:
+            if owner_id is not None and thread_id is not None:
                 sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
                     owner_id,
                     sandbox_id,
                     thread_id=thread_id,
                     user_id=resolve_runtime_user_id(runtime),
+                    release_on_last=not fork_restored,
                 )
-                runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+                if not fork_restored:
+                    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
             sandbox = provider.get(sandbox_id)
             if sandbox is not None:
                 if runtime.context is not None:

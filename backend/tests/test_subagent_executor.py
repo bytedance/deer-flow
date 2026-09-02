@@ -1536,6 +1536,63 @@ class TestAsyncExecutionPath:
         provider.release.assert_called_once_with("shared")
 
     @pytest.mark.anyio
+    async def test_aexecute_fork_restored_state_cleans_scope_without_parking_parent(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        monkeypatch,
+    ):
+        """A fork-restored child is a client user even though it cannot park the parent."""
+        from langgraph.types import Overwrite
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        sandbox = MagicMock()
+        provider = MagicMock()
+        provider.get.return_value = sandbox
+        manager = SandboxLeaseManager(provider)
+        captured_owner: list[str] = []
+
+        async def failing_stream(state, *args, context, **kwargs):
+            assert isinstance(state["sandbox"], Overwrite)
+            owner_id = context["sandbox_lease_owner_id"]
+            captured_owner.append(owner_id)
+            manager.retain(
+                owner_id,
+                "shared",
+                thread_id=context["thread_id"],
+                user_id=context.get("user_id") or "default",
+                release_on_last=False,
+            )
+            context["sandbox_id"] = "shared"
+            raise RuntimeError("forked child failed after opening a scope")
+            yield  # pragma: no cover - make this an async generator
+
+        mock_agent.astream = failing_stream
+        sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = provider
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(lease_module, "get_sandbox_lease_manager", lambda _provider: manager)
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            sandbox_state=Overwrite({"sandbox_id": "shared"}),
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.FAILED
+        assert "forked child failed after opening a scope" in result.error
+        assert len(captured_owner) == 1
+        assert manager.binding_for(captured_owner[0]) is None
+        sandbox.release_command_scope.assert_called_once_with(captured_owner[0])
+        provider.release.assert_not_called()
+
+    @pytest.mark.anyio
     async def test_aexecute_recursion_error_with_partial_surfaces_completed_turn_capped(self, classes, base_config, mock_agent, msg):
         """#3875 Phase 2: ``GraphRecursionError`` (``recursion_limit`` ==
         ``max_turns``) with usable partial work surfaces as ``completed`` +

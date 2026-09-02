@@ -14,6 +14,10 @@ from deerflow.sandbox.tools import ensure_sandbox_initialized, ensure_sandbox_in
 
 
 class _StubSandbox(Sandbox):
+    def __init__(self, sandbox_id: str) -> None:
+        super().__init__(sandbox_id)
+        self.released_scopes: list[str] = []
+
     def execute_command(self, command: str, env: dict | None = None, timeout: float | None = None) -> str:
         del env, timeout
         return "OK"
@@ -48,10 +52,14 @@ class _StubSandbox(Sandbox):
     def update_file(self, path: str, content: bytes) -> None:
         return None
 
+    def release_command_scope(self, scope_id: str) -> None:
+        self.released_scopes.append(scope_id)
+
 
 class _RecordingProvider(SandboxProvider):
     def __init__(self) -> None:
         self.sandbox = _StubSandbox("stub")
+        self.released: list[str] = []
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         raise AssertionError("state already carries a sandbox; acquire must not run")
@@ -65,7 +73,7 @@ class _RecordingProvider(SandboxProvider):
         return None
 
     def release(self, sandbox_id: str) -> None:
-        return None
+        self.released.append(sandbox_id)
 
 
 class _FallthroughProvider(SandboxProvider):
@@ -74,6 +82,7 @@ class _FallthroughProvider(SandboxProvider):
     def __init__(self) -> None:
         self.sandbox = _StubSandbox("fresh")
         self.acquired: list[str | None] = []
+        self.released: list[str] = []
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         self.acquired.append(thread_id)
@@ -89,7 +98,7 @@ class _FallthroughProvider(SandboxProvider):
         return None
 
     def release(self, sandbox_id: str) -> None:
-        return None
+        self.released.append(sandbox_id)
 
 
 def _make_runtime(state: dict) -> ToolRuntime:
@@ -135,6 +144,63 @@ async def test_ensure_sandbox_initialized_async_unwraps_overwrite_state() -> Non
     assert runtime.context["sandbox_id"] == "parent-sandbox"
 
 
+def test_fork_restored_owner_holds_non_releasing_scope_lease() -> None:
+    provider = _RecordingProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": Overwrite({"sandbox_id": "parent-sandbox"})})
+        runtime.context.update(
+            {
+                SANDBOX_LEASE_OWNER_CONTEXT_KEY: "fork-child",
+                "thread_id": "thread-1",
+                "user_id": "user-1",
+            }
+        )
+
+        sandbox = ensure_sandbox_initialized(runtime)
+        manager = get_sandbox_lease_manager(provider)
+
+        assert sandbox is provider.sandbox
+        assert manager.binding_for("fork-child") == "parent-sandbox"
+        assert isinstance(runtime.state["sandbox"], Overwrite)
+
+        manager.release("fork-child")
+
+        assert provider.sandbox.released_scopes == ["fork-child"]
+        assert provider.released == []
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+async def test_async_fork_restored_owner_holds_non_releasing_scope_lease() -> None:
+    provider = _RecordingProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": Overwrite({"sandbox_id": "parent-sandbox"})})
+        runtime.context.update(
+            {
+                SANDBOX_LEASE_OWNER_CONTEXT_KEY: "fork-child",
+                "thread_id": "thread-1",
+                "user_id": "user-1",
+            }
+        )
+
+        sandbox = await ensure_sandbox_initialized_async(runtime)
+        manager = get_sandbox_lease_manager(provider)
+
+        assert sandbox is provider.sandbox
+        assert manager.binding_for("fork-child") == "parent-sandbox"
+        assert isinstance(runtime.state["sandbox"], Overwrite)
+
+        await manager.release_async("fork-child")
+
+        assert provider.sandbox.released_scopes == ["fork-child"]
+        assert provider.released == []
+    finally:
+        reset_sandbox_provider()
+
+
 def test_ensure_sandbox_initialized_plain_state_unchanged() -> None:
     provider = _RecordingProvider()
     set_sandbox_provider(provider)
@@ -165,6 +231,59 @@ def test_ensure_sandbox_initialized_acquires_fresh_when_parent_missing() -> None
     assert sandbox is provider.sandbox
     assert runtime.state["sandbox"] == {"sandbox_id": "fresh-sandbox"}
     assert runtime.context["sandbox_id"] == "fresh-sandbox"
+
+
+def test_fork_restored_owner_normally_releases_fresh_replacement() -> None:
+    provider = _FallthroughProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": Overwrite({"sandbox_id": "parent-sandbox"})})
+        runtime.context.update(
+            {
+                SANDBOX_LEASE_OWNER_CONTEXT_KEY: "fork-child",
+                "thread_id": "thread-1",
+                "user_id": "user-1",
+            }
+        )
+
+        sandbox = ensure_sandbox_initialized(runtime)
+        manager = get_sandbox_lease_manager(provider)
+
+        assert sandbox is provider.sandbox
+        assert manager.binding_for("fork-child") == "fresh-sandbox"
+        manager.release("fork-child")
+
+        assert provider.sandbox.released_scopes == ["fork-child"]
+        assert provider.released == ["fresh-sandbox"]
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+async def test_async_fork_restored_owner_normally_releases_fresh_replacement() -> None:
+    provider = _FallthroughProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": Overwrite({"sandbox_id": "parent-sandbox"})})
+        runtime.context.update(
+            {
+                SANDBOX_LEASE_OWNER_CONTEXT_KEY: "fork-child",
+                "thread_id": "thread-1",
+                "user_id": "user-1",
+            }
+        )
+
+        sandbox = await ensure_sandbox_initialized_async(runtime)
+        manager = get_sandbox_lease_manager(provider)
+
+        assert sandbox is provider.sandbox
+        assert manager.binding_for("fork-child") == "fresh-sandbox"
+        await manager.release_async("fork-child")
+
+        assert provider.sandbox.released_scopes == ["fork-child"]
+        assert provider.released == ["fresh-sandbox"]
+    finally:
+        reset_sandbox_provider()
 
 
 @pytest.mark.anyio

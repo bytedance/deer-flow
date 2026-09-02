@@ -10,6 +10,7 @@ client.  The last execution lease is the only one allowed to call
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import uuid
 import weakref
@@ -21,6 +22,8 @@ from deerflow.sandbox.acquire_serialization import AcquireSerializer
 if TYPE_CHECKING:
     from deerflow.sandbox.sandbox_provider import SandboxProvider
 
+logger = logging.getLogger(__name__)
+
 
 SANDBOX_LEASE_OWNER_CONTEXT_KEY = "sandbox_lease_owner_id"
 SANDBOX_COMMAND_SCOPE_CONTEXT_KEY = "sandbox_command_scope_id"
@@ -30,6 +33,7 @@ SANDBOX_COMMAND_SCOPE_CONTEXT_KEY = "sandbox_command_scope_id"
 class _LeaseBinding:
     sandbox_id: str
     thread_key: tuple[str, str]
+    release_on_last: bool = True
 
 
 class SandboxLeaseManager:
@@ -48,35 +52,63 @@ class SandboxLeaseManager:
         )
         self._bindings_by_owner: dict[str, _LeaseBinding] = {}
         self._owners_by_sandbox: dict[str, set[str]] = {}
+        self._release_pending_by_sandbox: set[str] = set()
 
     @staticmethod
     def _thread_key(thread_id: str, user_id: str) -> tuple[str, str]:
         return user_id, thread_id
 
-    def _remove_binding_locked(self, owner_id: str) -> tuple[_LeaseBinding | None, bool]:
+    def _remove_binding_locked(
+        self,
+        owner_id: str,
+        *,
+        request_release: bool = True,
+    ) -> tuple[_LeaseBinding | None, bool]:
         binding = self._bindings_by_owner.pop(owner_id, None)
         if binding is None:
             return None, False
+        if request_release and binding.release_on_last:
+            # Closing responsibility belongs to the sandbox lifecycle, not to
+            # whichever holder happens to finish last. A normal owner may
+            # leave while a fork/upload borrower is still using the client;
+            # remember its close request until every holder is gone.
+            self._release_pending_by_sandbox.add(binding.sandbox_id)
         owners = self._owners_by_sandbox.get(binding.sandbox_id)
         if owners is None:
-            return binding, False
+            release_provider = binding.sandbox_id in self._release_pending_by_sandbox
+            self._release_pending_by_sandbox.discard(binding.sandbox_id)
+            return binding, release_provider
         owners.discard(owner_id)
         if owners:
             return binding, False
         self._owners_by_sandbox.pop(binding.sandbox_id, None)
-        return binding, True
+        release_provider = binding.sandbox_id in self._release_pending_by_sandbox
+        self._release_pending_by_sandbox.discard(binding.sandbox_id)
+        return binding, release_provider
 
     def _bind_locked(
         self,
         owner_id: str,
         sandbox_id: str,
         key: tuple[str, str],
+        *,
+        release_on_last: bool,
     ) -> tuple[_LeaseBinding | None, bool]:
         existing = self._bindings_by_owner.get(owner_id)
-        if existing == _LeaseBinding(sandbox_id=sandbox_id, thread_key=key):
-            return None, False
         if existing is not None and existing.thread_key != key:
             raise RuntimeError(f"Sandbox lease owner {owner_id!r} cannot move between thread identities")
+        if existing is not None and existing.sandbox_id == sandbox_id:
+            # Ownership is monotonic for one execution. A normal owner may
+            # later encounter a fork-restored view, but must not lose its
+            # responsibility to park the provider. A borrowed owner can be
+            # upgraded when it later performs a normal acquisition.
+            if release_on_last and not existing.release_on_last:
+                self._bindings_by_owner[owner_id] = _LeaseBinding(
+                    sandbox_id=sandbox_id,
+                    thread_key=key,
+                    release_on_last=True,
+                )
+            return None, False
 
         release_previous = False
         previous: _LeaseBinding | None = None
@@ -86,6 +118,7 @@ class SandboxLeaseManager:
         self._bindings_by_owner[owner_id] = _LeaseBinding(
             sandbox_id=sandbox_id,
             thread_key=key,
+            release_on_last=release_on_last,
         )
         self._owners_by_sandbox.setdefault(sandbox_id, set()).add(owner_id)
 
@@ -104,7 +137,13 @@ class SandboxLeaseManager:
         if not has_owners:
             self._provider.release(sandbox_id)
 
-    def _active_owner_binding(self, owner_id: str, key: tuple[str, str]) -> str | None:
+    def _active_owner_binding(
+        self,
+        owner_id: str,
+        key: tuple[str, str],
+        *,
+        release_on_last: bool,
+    ) -> str | None:
         """Return one live owner binding while the caller holds ``key``.
 
         Middleware may retain a checkpointed id before the provider discovers
@@ -118,20 +157,37 @@ class SandboxLeaseManager:
         if existing.thread_key != key:
             raise RuntimeError(f"Sandbox lease owner {owner_id!r} cannot move between thread identities")
         if self._provider.get(existing.sandbox_id) is not None:
+            if release_on_last and not existing.release_on_last:
+                with self._metadata_lock:
+                    if self._bindings_by_owner.get(owner_id) == existing:
+                        self._bindings_by_owner[owner_id] = _LeaseBinding(
+                            sandbox_id=existing.sandbox_id,
+                            thread_key=existing.thread_key,
+                            release_on_last=True,
+                        )
             return existing.sandbox_id
 
         with self._metadata_lock:
             if self._bindings_by_owner.get(owner_id) == existing:
-                self._remove_binding_locked(owner_id)
+                self._remove_binding_locked(owner_id, request_release=False)
         return None
 
-    def _acquire_and_bind(self, owner_id: str, thread_id: str, user_id: str, key: tuple[str, str]) -> str:
+    def _acquire_and_bind(
+        self,
+        owner_id: str,
+        thread_id: str,
+        user_id: str,
+        key: tuple[str, str],
+        *,
+        release_on_last: bool,
+    ) -> str:
         sandbox_id = self._provider.acquire(thread_id, user_id=user_id)
         with self._metadata_lock:
             previous, release_previous = self._bind_locked(
                 owner_id,
                 sandbox_id,
                 key,
+                release_on_last=release_on_last,
             )
         if release_previous and previous is not None:
             self._provider.release(previous.sandbox_id)
@@ -143,6 +199,8 @@ class SandboxLeaseManager:
         thread_id: str,
         user_id: str,
         key: tuple[str, str],
+        *,
+        release_on_last: bool,
     ) -> str:
         acquire_task = asyncio.create_task(self._provider.acquire_async(thread_id, user_id=user_id))
         try:
@@ -154,6 +212,10 @@ class SandboxLeaseManager:
             try:
                 sandbox_id = await acquire_task
             except Exception:
+                logger.warning(
+                    "Cancelled sandbox acquire failed during reconciliation",
+                    exc_info=True,
+                )
                 raise cancellation
             await asyncio.to_thread(
                 self._release_unbound_acquire,
@@ -165,6 +227,7 @@ class SandboxLeaseManager:
                 owner_id,
                 sandbox_id,
                 key,
+                release_on_last=release_on_last,
             )
         if release_previous and previous is not None:
             await asyncio.to_thread(
@@ -180,8 +243,14 @@ class SandboxLeaseManager:
         *,
         thread_id: str,
         user_id: str,
+        release_on_last: bool = True,
     ) -> None:
-        """Attach ``owner_id`` to an inherited or checkpointed sandbox id."""
+        """Attach an execution to an inherited or checkpointed sandbox id.
+
+        ``release_on_last=False`` is for a borrower: it fences the client and
+        owns command-scope cleanup without requesting a park itself. A normal
+        owner's earlier park request can still be deferred until it drains.
+        """
         key = self._thread_key(thread_id, user_id)
         with self._serializer.hold(key):
             with self._metadata_lock:
@@ -189,6 +258,7 @@ class SandboxLeaseManager:
                     owner_id,
                     sandbox_id,
                     key,
+                    release_on_last=release_on_last,
                 )
             if release_previous and previous is not None:
                 self._provider.release(previous.sandbox_id)
@@ -200,6 +270,7 @@ class SandboxLeaseManager:
         *,
         thread_id: str,
         user_id: str,
+        release_on_last: bool = True,
     ) -> None:
         """Async attach without blocking the event loop on a lifecycle lock."""
         key = self._thread_key(thread_id, user_id)
@@ -209,6 +280,7 @@ class SandboxLeaseManager:
                     owner_id,
                     sandbox_id,
                     key,
+                    release_on_last=release_on_last,
                 )
             if release_previous and previous is not None:
                 await asyncio.to_thread(
@@ -216,14 +288,31 @@ class SandboxLeaseManager:
                     previous.sandbox_id,
                 )
 
-    def acquire(self, owner_id: str, thread_id: str, *, user_id: str) -> str:
+    def acquire(
+        self,
+        owner_id: str,
+        thread_id: str,
+        *,
+        user_id: str,
+        release_on_last: bool = True,
+    ) -> str:
         """Acquire and bind a sandbox, idempotently for one execution owner."""
         key = self._thread_key(thread_id, user_id)
         with self._serializer.hold(key):
-            existing_sandbox_id = self._active_owner_binding(owner_id, key)
+            existing_sandbox_id = self._active_owner_binding(
+                owner_id,
+                key,
+                release_on_last=release_on_last,
+            )
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
-            return self._acquire_and_bind(owner_id, thread_id, user_id, key)
+            return self._acquire_and_bind(
+                owner_id,
+                thread_id,
+                user_id,
+                key,
+                release_on_last=release_on_last,
+            )
 
     def reuse_or_acquire(
         self,
@@ -232,11 +321,22 @@ class SandboxLeaseManager:
         *,
         thread_id: str,
         user_id: str,
+        release_on_last: bool = True,
+        acquire_release_on_last: bool = True,
     ) -> str:
-        """Atomically retain a live persisted sandbox or acquire a replacement."""
+        """Atomically retain a live persisted sandbox or acquire a replacement.
+
+        A fork-restored live client is borrowed with ``release_on_last=False``;
+        if that persisted client is gone, its freshly acquired replacement is
+        owned normally unless ``acquire_release_on_last`` is also disabled.
+        """
         key = self._thread_key(thread_id, user_id)
         with self._serializer.hold(key):
-            existing_sandbox_id = self._active_owner_binding(owner_id, key)
+            existing_sandbox_id = self._active_owner_binding(
+                owner_id,
+                key,
+                release_on_last=release_on_last,
+            )
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
 
@@ -246,21 +346,45 @@ class SandboxLeaseManager:
                         owner_id,
                         sandbox_id,
                         key,
+                        release_on_last=release_on_last,
                     )
                 if release_previous and previous is not None:
                     self._provider.release(previous.sandbox_id)
                 return sandbox_id
 
-            return self._acquire_and_bind(owner_id, thread_id, user_id, key)
+            return self._acquire_and_bind(
+                owner_id,
+                thread_id,
+                user_id,
+                key,
+                release_on_last=acquire_release_on_last,
+            )
 
-    async def acquire_async(self, owner_id: str, thread_id: str, *, user_id: str) -> str:
+    async def acquire_async(
+        self,
+        owner_id: str,
+        thread_id: str,
+        *,
+        user_id: str,
+        release_on_last: bool = True,
+    ) -> str:
         """Async acquire while preserving the provider's own async hook."""
         key = self._thread_key(thread_id, user_id)
         async with self._serializer.hold_async(key):
-            existing_sandbox_id = self._active_owner_binding(owner_id, key)
+            existing_sandbox_id = self._active_owner_binding(
+                owner_id,
+                key,
+                release_on_last=release_on_last,
+            )
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
-            return await self._acquire_and_bind_async(owner_id, thread_id, user_id, key)
+            return await self._acquire_and_bind_async(
+                owner_id,
+                thread_id,
+                user_id,
+                key,
+                release_on_last=release_on_last,
+            )
 
     async def reuse_or_acquire_async(
         self,
@@ -269,11 +393,17 @@ class SandboxLeaseManager:
         *,
         thread_id: str,
         user_id: str,
+        release_on_last: bool = True,
+        acquire_release_on_last: bool = True,
     ) -> str:
         """Async atomic retain-or-replace transition for a persisted sandbox."""
         key = self._thread_key(thread_id, user_id)
         async with self._serializer.hold_async(key):
-            existing_sandbox_id = self._active_owner_binding(owner_id, key)
+            existing_sandbox_id = self._active_owner_binding(
+                owner_id,
+                key,
+                release_on_last=release_on_last,
+            )
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
 
@@ -283,6 +413,7 @@ class SandboxLeaseManager:
                         owner_id,
                         sandbox_id,
                         key,
+                        release_on_last=release_on_last,
                     )
                 if release_previous and previous is not None:
                     await asyncio.to_thread(
@@ -291,7 +422,13 @@ class SandboxLeaseManager:
                     )
                 return sandbox_id
 
-            return await self._acquire_and_bind_async(owner_id, thread_id, user_id, key)
+            return await self._acquire_and_bind_async(
+                owner_id,
+                thread_id,
+                user_id,
+                key,
+                release_on_last=acquire_release_on_last,
+            )
 
     def release(self, owner_id: str) -> None:
         """Release one execution and park the sandbox only after the last user."""
@@ -327,6 +464,10 @@ class SandboxLeaseManager:
             try:
                 await release_task
             except Exception:
+                logger.warning(
+                    "Cancelled sandbox release failed during reconciliation",
+                    exc_info=True,
+                )
                 raise cancellation
             raise cancellation
 
