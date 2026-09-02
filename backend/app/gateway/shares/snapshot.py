@@ -73,12 +73,55 @@ _PRIVATE_REFERENCE_MARKER = "[private artifact omitted]"
 # separator, ``%``/``&`` feed the percent/entity paths); everything else
 # lands literally for classification. Public text keeps its original bytes
 # either way — decoding only feeds classification.
+_ENTITY_CODEPOINTS = {0x2F: "/", 0x5C: "/", 0x25: "%", 0x26: "&"}
+# Named references: the full HTML5/CommonMark table has 2200+ entries, but
+# only the entities decoding to a single ASCII character can manufacture a
+# path shape — separators (``sol``/``bsol``), introducers (``percnt``/
+# ``amp``), dots (``period``), boundary/terminator characters (``num``/
+# ``quest``/``colon``/``comma``/...), and identifier characters
+# (``lowbar``). Everything else decodes to non-ASCII, lands literally for
+# classification (round-9 design), and can at most extend an id run — so
+# this enumerable single-ASCII set is the complete attack surface
+# (``&period;&period;`` → ``..`` is the round-12 shape that proved it).
+# ``bsol`` keeps the existing separator mapping to ``/`` (Windows-style
+# separators collapse), and ``Tab``/``NewLine`` decode to real whitespace:
+# the renderer line-breaks there too, so the shadow splitting the token is
+# display-truthful, and boundary admissibility still judges pre-decode
+# bytes.
+_ENTITY_NAMES = {
+    "tab": "\t",
+    "newline": "\n",
+    "excl": "!",
+    "quot": '"',
+    "num": "#",
+    "dollar": "$",
+    "percnt": "%",
+    "amp": "&",
+    "apos": "'",
+    "lpar": "(",
+    "rpar": ")",
+    "ast": "*",
+    "plus": "+",
+    "comma": ",",
+    "period": ".",
+    "sol": "/",
+    "colon": ":",
+    "semi": ";",
+    "lt": "<",
+    "equals": "=",
+    "gt": ">",
+    "quest": "?",
+    "commat": "@",
+    "bsol": "/",
+    "Hat": "^",
+    "lowbar": "_",
+    "grave": "`",
+    "verbar": "|",
+}
 _HTML_ENTITY_RE = re.compile(
-    r"&(?:#0*\d+|#x0*[0-9a-f]+|sol|bsol|percnt|amp);",
+    r"&(?:#0*\d+|#x0*[0-9a-f]+|" + "|".join(_ENTITY_NAMES) + r");",
     re.IGNORECASE,
 )
-_ENTITY_CODEPOINTS = {0x2F: "/", 0x5C: "/", 0x25: "%", 0x26: "&"}
-_ENTITY_NAMES = {"sol": "/", "bsol": "/", "percnt": "%", "amp": "&"}
 # ``uXXXX`` / ``u{X...}`` escapes decode the same way (JSON consumers decode
 # letters as readily as separators); the 2-digit form keeps round-8 parity.
 _UNICODE_ESCAPE_RE = re.compile(r"u(?:\{0*[0-9a-f]{1,6}\}|[0-9a-f]{4}|[0-9a-f]{2})", re.IGNORECASE)

@@ -1030,3 +1030,18 @@ async def test_snapshot_rendered_bytes_cap_counts_encoded_bytes():
 
     assert excinfo.value.limit_kind == "rendered-bytes"
     assert excinfo.value.cap == 256
+
+
+async def test_neutralize_decodes_named_entities_in_private_phrases():
+    """Named character references are CommonMark-decoded exactly like the
+    numeric forms: ``&period;`` renders as ``.`` and the browser resolves
+    ``/api/a/&period;&period;/threads/SECRET`` onto the owner-scoped route,
+    so the shadow must decode the ASCII-decoding named entities too."""
+    out = _neutralize_private_references("[x](/api/a/&period;&period;/threads/thread-secret)")
+    assert "thread-secret" not in out
+    assert "private artifact omitted" in out
+    assert _neutralize_private_references("raw /api/a/&period;&period;/threads/thread-secret end") == "raw [private artifact omitted] end"
+    # named separators and boundaries compose with the numeric forms
+    assert _neutralize_private_references("see /api&sol;threads&sol;thread-secret&num;x now") == "see [private artifact omitted] now"
+    # a public path keeps its named-entity bytes verbatim
+    assert _neutralize_private_references("temperature is 20&deg;C, humidity 50&percnt;") == "temperature is 20&deg;C, humidity 50&percnt;"
