@@ -1576,6 +1576,15 @@ def test_execute_command_returns_stdout_on_success():
     assert sb.is_dead is False
 
 
+def test_execute_command_appends_exit_marker_when_failure_has_output():
+    """LocalSandbox parity: a nonzero exit must survive in the output text
+    even when the command produced output, so evidence consumers (acceptance
+    checklist) recover the actual shell status."""
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="5 passed, 1 error\n", stderr="", exit_code=1)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
 def test_execute_command_does_not_mark_dead_on_unrelated_error():
 
     def boom(_cmd: str, **kwargs) -> Any:
@@ -4890,3 +4899,25 @@ def test_stable_seed_matches_shared_identity():
     ).hexdigest()[:16]
 
     assert provider._stable_seed("t-1", "u-1") == expected
+
+
+def test_list_dir_preserves_trailing_space_in_filename():
+    # "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    # verbatim, one entry per line, so a per-line strip() corrupts the name and
+    # every follow-up file API call on the listed path misses the real file.
+    listing = SimpleNamespace(stdout="/home/user/notes.txt \n/home/user/sub\n", stderr="", exit_code=0)
+    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    sb = _make_sandbox(client)
+
+    assert sb.list_dir("/home/user") == ["/home/user/notes.txt ", "/home/user/sub"]
+
+
+def test_glob_preserves_trailing_space_in_filename():
+    listing = SimpleNamespace(stdout="/home/user/notes.txt \n", stderr="", exit_code=0)
+    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    sb = _make_sandbox(client)
+
+    matches, truncated = sb.glob("/home/user", "notes*")
+
+    assert matches == ["/home/user/notes.txt "]
+    assert truncated is False

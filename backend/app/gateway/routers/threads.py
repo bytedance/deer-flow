@@ -56,6 +56,7 @@ from deerflow.runtime.context_compaction import (
     ThreadCompactionResult,
     compact_thread_context,
 )
+from deerflow.runtime.events.message_seq import stamp_messages_with_seq
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     build_goal_state,
@@ -77,6 +78,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
 
 _CHECKPOINT_MODE_ERRORS = (CheckpointModeMismatchError, CheckpointModeReconfigurationError)
+
+
+def _optional_run_event_store(request: Request) -> Any:
+    """Return the run event store, or ``None`` when the app has none wired.
+
+    Reads must not start depending on the feed: seq is placement metadata, and a
+    response without it degrades to the client's own ordering rule rather than
+    failing. ``get_run_event_store`` raises instead, which is right for the
+    endpoints that cannot work without a feed.
+    """
+    return getattr(request.app.state, "run_event_store", None)
 
 
 def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException:
@@ -1326,8 +1338,15 @@ async def get_thread_state(thread_id: ThreadId, request: Request) -> ThreadState
     tasks_raw = snapshot.tasks or ()
     tasks = [{"id": getattr(task, "id", ""), "name": getattr(task, "name", "")} for task in tasks_raw]
 
+    values = serialize_channel_values_for_api(snapshot.values)
+    messages = values.get("messages")
+    if isinstance(messages, list) and messages:
+        # Same reason as the history endpoint: a client reading the checkpoint
+        # over REST needs the feed position the stream would have stamped.
+        values["messages"] = await stamp_messages_with_seq(_optional_run_event_store(request), thread_id, messages)
+
     return ThreadStateResponse(
-        values=serialize_channel_values_for_api(snapshot.values),
+        values=values,
         next=list(snapshot.next or ()),
         metadata=metadata,
         checkpoint={"id": checkpoint_id, "ts": coerce_iso(created_at)},
@@ -1718,7 +1737,15 @@ async def get_thread_history(
                     except Exception:
                         logger.warning("Failed to inject turn_duration for thread %s", sanitize_log_param(thread_id), exc_info=True)
 
-                    values["messages"] = serialized_msgs
+                    # The stream stamps `values` frames as they are published, but a
+                    # client that only opens a conversation never sees one — this is
+                    # the read it does instead, and without a seq a rescued early turn
+                    # has no absolute position to be placed at (#4666).
+                    values["messages"] = await stamp_messages_with_seq(
+                        _optional_run_event_store(request),
+                        thread_id,
+                        serialized_msgs,
+                    )
 
             is_latest_checkpoint = False
 

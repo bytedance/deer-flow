@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import ntpath
 import os
 import posixpath
 import re
@@ -32,7 +33,7 @@ from deerflow.sandbox.exceptions import (
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.overwrite import unwrap_sandbox
-from deerflow.sandbox.path_patterns import build_output_mask_pattern
+from deerflow.sandbox.path_patterns import build_output_mask_pattern, replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -429,20 +430,17 @@ def _get_custom_mount_for_path(path: str):
 def _extract_thread_id_from_thread_data(thread_data: "ThreadDataState | None") -> str | None:
     """Extract thread_id from thread_data by inspecting workspace_path.
 
-    The workspace_path has the form
-    ``{base_dir}/threads/{thread_id}/user-data/workspace``, so
-    ``Path(workspace_path).parent.parent.name`` yields the thread_id.
+    The workspace path ends with
+    ``threads/{thread_id}/user-data/workspace``.
     """
     if thread_data is None:
         return None
     workspace_path = thread_data.get("workspace_path")
     if not workspace_path:
         return None
-    try:
-        # {base_dir}/threads/{thread_id}/user-data/workspace → parent.parent = threads/{thread_id}
-        return Path(workspace_path).parent.parent.name
-    except Exception:
-        return None
+    normalized = workspace_path.replace("\\", "/").rstrip("/")
+    parts = normalized.rsplit("/", 3)
+    return parts[-3] if len(parts) == 4 and parts[-3] else None
 
 
 def _get_acp_workspace_host_path(thread_id: str | None = None) -> str | None:
@@ -640,6 +638,13 @@ def _join_path_preserving_style(base: str, relative: str) -> str:
     return f"{stripped_base}{separator}{normalized_relative}"
 
 
+def _path_parent(path: str) -> str:
+    """Return a lexical parent without interning high-cardinality path parts."""
+    if "\\" in path and "/" not in path:
+        return ntpath.dirname(path)
+    return posixpath.dirname(path)
+
+
 def _sanitize_error(error: Exception, runtime: Runtime | None = None) -> str:
     """Sanitize an error message to avoid leaking host filesystem paths.
 
@@ -742,10 +747,10 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
         mappings[f"{VIRTUAL_PATH_PREFIX}/outputs"] = outputs
 
     # Also map the virtual root when all known dirs share the same parent.
-    actual_dirs = [Path(p) for p in (workspace, uploads, outputs) if p]
+    actual_dirs = [p for p in (workspace, uploads, outputs) if p]
     if actual_dirs:
-        common_parent = str(Path(actual_dirs[0]).parent)
-        if all(str(path.parent) == common_parent for path in actual_dirs):
+        common_parent = _path_parent(actual_dirs[0])
+        if all(_path_parent(path) == common_parent for path in actual_dirs):
             mappings[VIRTUAL_PATH_PREFIX] = common_parent
 
     return mappings
@@ -756,37 +761,38 @@ def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str
     return {actual: virtual for virtual, actual in _thread_virtual_to_actual_mappings(thread_data).items()}
 
 
-@lru_cache(maxsize=512)
-def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple[re.Pattern[str], str, str], ...]:
-    """Compile the host→virtual masking patterns once per source set.
+@lru_cache(maxsize=256)
+def _mask_source_roots(host_base: str) -> tuple[str, ...]:
+    """Return lexical and filesystem-resolved spellings without ``pathlib``.
 
-    ``sources`` is an ordered tuple of ``(host_base, virtual_base)`` pairs
-    (skills, then ACP workspace, then per-thread user-data mappings sorted by
-    host-path length, longest first). The patterns derive only from
-    config-stable + per-thread inputs, so they're cached and reused instead of
-    being rebuilt — ``re.escape`` + ``re.compile`` + ``Path.resolve`` (a
-    syscall) — on every call. ``mask_local_paths_in_output`` runs once per
-    glob/grep match, so without this the same patterns are recompiled per
-    match.
+    ``PurePath`` interns every path component. That is useful for long-lived
+    paths but wasteful for one-off thread IDs, because evicting DeerFlow's LRU
+    does not shrink the interpreter's intern/allocator high-water mark. The
+    bounded cache avoids repeating ``realpath`` walks for every glob/grep match
+    without retaining an unbounded set of thread roots.
     """
-    # The segment boundary and path tail are shared with
-    # ``LocalSandbox._reverse_output_patterns`` — see
-    # ``deerflow.sandbox.path_patterns``, which owns that rule so the two copies
-    # cannot drift again (#4035 fixed one and missed the other; #4053 fixed the
-    # other).
+    raw = os.path.normpath(host_base)
+    resolved = os.path.realpath(host_base)
+    return (raw,) if resolved == raw else (raw, resolved)
+
+
+@lru_cache(maxsize=16)
+def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple[re.Pattern[str], str, str], ...]:
+    """Compile patterns for the small, process-stable source set.
+
+    Per-user and per-thread sources must never be passed here; they are handled
+    by the non-retaining scanner in ``replace_output_path_matches``.
+    """
+    # The segment boundary and path tail are owned by
+    # ``deerflow.sandbox.path_patterns`` so the static regex path and dynamic
+    # scanner cannot drift.
     #
     # ``separator_agnostic=True`` is the one thing this site does differently:
-    # its bases come from ``_path_variants``, which yields Windows-style
-    # spellings, and they are matched against output whose separators this layer
-    # does not control.
+    # output separators are outside this layer's control.
     compiled: list[tuple[re.Pattern[str], str, str]] = []
     for host_base, virtual_base in sources:
         seen: set[str] = set()
-        # Same base set as ``_path_variants(raw) | _path_variants(resolved)``;
-        # ordered deterministically so the cached tuple is stable (variants of
-        # one host map to the same virtual and don't overlap after substitution,
-        # so order within a source is irrelevant to the result).
-        for root in (str(Path(host_base)), str(Path(host_base).resolve())):
+        for root in _mask_source_roots(host_base):
             for variant in sorted(_path_variants(root)):
                 if variant in seen:
                     continue
@@ -806,11 +812,12 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     # custom/integration skills, then ACP workspace, then user-data mappings (longest
     # host path first). Custom mount host paths are masked by
     # LocalSandbox._reverse_resolve_paths_in_output().
-    sources: list[tuple[str, str]] = []
+    stable_sources: list[tuple[str, str]] = []
+    dynamic_sources: list[tuple[str, str]] = []
 
     skills_host = _get_skills_host_path()
     if skills_host:
-        sources.append((skills_host, _get_skills_container_path()))
+        stable_sources.append((skills_host, _get_skills_container_path()))
 
     # Per-user custom skills: mask host paths under the user's custom
     # skills directory back to /mnt/skills/custom. The sandbox's
@@ -826,27 +833,28 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
         integrations_dir = get_paths().integration_skills_dir()
         if user_custom_dir.exists():
             skills_container = _get_skills_container_path()
-            sources.append((str(user_custom_dir), f"{skills_container}/custom"))
+            dynamic_sources.append((str(user_custom_dir), f"{skills_container}/custom"))
         if integrations_dir.exists():
             skills_container = _get_skills_container_path()
-            sources.append((str(integrations_dir), f"{skills_container}/integrations"))
+            stable_sources.append((str(integrations_dir), f"{skills_container}/integrations"))
     except Exception:
         pass
 
     acp_host = _get_acp_workspace_host_path(_extract_thread_id_from_thread_data(thread_data))
     if acp_host:
-        sources.append((acp_host, _ACP_WORKSPACE_VIRTUAL_PATH))
+        dynamic_sources.append((acp_host, _ACP_WORKSPACE_VIRTUAL_PATH))
 
     if thread_data is not None:
         mappings = _thread_actual_to_virtual_mappings(thread_data)
         for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
-            sources.append((actual_base, virtual_base))
+            dynamic_sources.append((actual_base, virtual_base))
 
-    if not sources:
+    if not stable_sources and not dynamic_sources:
         return output
 
     result = output
-    for pattern, base, virtual in _compiled_mask_patterns(tuple(sources)):
+    static_patterns = _compiled_mask_patterns(tuple(stable_sources)) if stable_sources else ()
+    for pattern, base, virtual in static_patterns:
 
         def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual) -> str:
             matched_path = match.group(0)
@@ -856,6 +864,15 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
             return f"{_virtual}/{relative}" if relative else _virtual
 
         result = pattern.sub(replace_match, result)
+
+    for host_base, virtual_base in dynamic_sources:
+        for root in _mask_source_roots(host_base):
+            result = replace_output_path_matches(
+                result,
+                root,
+                virtual_base,
+                separator_agnostic=True,
+            )
 
     return result
 
@@ -1635,32 +1652,65 @@ def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
     return output
 
 
+#: Providers append the shell's authoritative exit marker at the very end of
+#: failing output (local ``Exit Code: N`` incl. timeout 124; remote
+#: ``Command exited with code N`` when output was empty). Truncation must
+#: never cut it away — evidence consumers (acceptance checklist) parse the
+#: marker to recover the actual shell status.
+_BASH_EXIT_MARKER_TAIL_RE = re.compile(r"(?:\nExit Code: -?\d+|\n?Command exited with code -?\d+)\s*$")
+
+#: Floor for the bash output limit: the longest exit marker
+#: (``Command exited with code -128``) is 30 chars, so any smaller configured
+#: limit is raised to keep a failing command's marker preservable. The config
+#: accepts any nonnegative value; below this floor truncation would destroy
+#: the failure evidence it exists to measure.
+_BASH_OUTPUT_MIN_LIMIT_CHARS = 32
+
+
 def _truncate_bash_output(output: str, max_chars: int) -> str:
     """Middle-truncate bash output, preserving head and tail (50/50 split).
 
     bash output may have errors at either end (stderr/stdout ordering is
-    non-deterministic), so both ends are preserved equally.
+    non-deterministic), so both ends are preserved equally. A trailing
+    shell exit marker is always preserved (see
+    ``_BASH_EXIT_MARKER_TAIL_RE``): its budget comes out of the tail, not
+    out of the status evidence.
 
-    The returned string (including the truncation marker) is guaranteed to be
-    no longer than max_chars characters. Pass max_chars=0 to disable truncation
-    and return the full output unchanged.
+    The returned string (including the truncation marker) is no longer than
+    the EFFECTIVE limit, ``max(max_chars, _BASH_OUTPUT_MIN_LIMIT_CHARS)`` —
+    the 32-char floor is applied before anything else (even when the output
+    carries no exit marker) so a trailing marker always stays preservable,
+    meaning a configured limit in 1..31 yields up to 32 chars. Pass
+    max_chars=0 to disable truncation and return the full output unchanged.
     """
     if max_chars == 0:
         return output
+    # Clamp the effective limit to the marker-preserving floor (see
+    # ``_BASH_OUTPUT_MIN_LIMIT_CHARS``): a configured limit smaller than the
+    # exit marker would silently discard failure status.
+    max_chars = max(max_chars, _BASH_OUTPUT_MIN_LIMIT_CHARS)
     if len(output) <= max_chars:
         return output
+    preserved = ""
+    marker_match = _BASH_EXIT_MARKER_TAIL_RE.search(output)
+    if marker_match is not None and len(marker_match.group(0)) < max_chars:
+        preserved = marker_match.group(0)
+        output = output[: marker_match.start()]
+        max_chars -= len(preserved)
+        if len(output) <= max_chars:
+            return output + preserved
     total_len = len(output)
     # Compute the exact worst-case marker length: skipped chars is at most
     # total_len, so this is a tight upper bound.
     marker_max_len = len(f"\n... [middle truncated: {total_len} chars skipped] ...\n")
     kept = max(0, max_chars - marker_max_len)
     if kept == 0:
-        return output[:max_chars]
+        return output[:max_chars] + preserved
     head_len = kept // 2
     tail_len = kept - head_len
     skipped = total_len - kept
     marker = f"\n... [middle truncated: {skipped} chars skipped] ...\n"
-    return f"{output[:head_len]}{marker}{output[-tail_len:] if tail_len > 0 else ''}"
+    return f"{output[:head_len]}{marker}{output[-tail_len:] if tail_len > 0 else ''}" + preserved
 
 
 def _truncate_read_file_output(output: str, max_chars: int) -> str:
@@ -1835,7 +1885,7 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
 
 
 @tool("bash", parse_docstring=True)
-def bash_tool(runtime: Runtime, description: str, command: str) -> str:
+def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
     """Execute a bash command in a Linux environment.
 
 
@@ -1848,8 +1898,8 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
       it is killed at the command timeout.
 
     Args:
-        description: Explain why you are running this command in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         command: The bash command to execute. Always use absolute paths for files and directories.
+        description: Optional short explanation of this command shown in the UI.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
@@ -1911,20 +1961,20 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
 
 
-async def _bash_tool_async(runtime: Runtime, description: str, command: str) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, description, command)
+async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str:
+    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, command, description)
 
 
 bash_tool.coroutine = _bash_tool_async
 
 
 @tool("ls", parse_docstring=True)
-def ls_tool(runtime: Runtime, description: str, path: str) -> str:
+def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
     """List the contents of a directory up to 2 levels deep in tree format.
 
     Args:
-        description: Explain why you are listing this directory in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the directory to list.
+        description: Optional short explanation of this listing shown in the UI.
     """
     try:
         user_id = resolve_runtime_user_id(runtime)
@@ -1979,8 +2029,8 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
 
 
-async def _ls_tool_async(runtime: Runtime, description: str, path: str) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(ls_tool.func, runtime, description, path)
+async def _ls_tool_async(runtime: Runtime, path: str, description: str = "") -> str:
+    return await _run_sync_tool_after_async_sandbox_init(ls_tool.func, runtime, path, description)
 
 
 ls_tool.coroutine = _ls_tool_async
@@ -1989,18 +2039,18 @@ ls_tool.coroutine = _ls_tool_async
 @tool("glob", parse_docstring=True)
 def glob_tool(
     runtime: Runtime,
-    description: str,
     pattern: str,
     path: str,
+    description: str = "",
     include_dirs: bool = False,
     max_results: int = _DEFAULT_GLOB_MAX_RESULTS,
 ) -> str:
     """Find files or directories that match a glob pattern under a root directory.
 
     Args:
-        description: Explain why you are searching for these paths in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         pattern: The glob pattern to match relative to the root path, for example `**/*.py`.
         path: The **absolute** root directory to search under.
+        description: Optional short explanation of this search shown in the UI.
         include_dirs: Whether matching directories should also be returned. Default is False.
         max_results: Maximum number of paths to return. Default is 200.
     """
@@ -2046,18 +2096,18 @@ def glob_tool(
 
 async def _glob_tool_async(
     runtime: Runtime,
-    description: str,
     pattern: str,
     path: str,
+    description: str = "",
     include_dirs: bool = False,
     max_results: int = _DEFAULT_GLOB_MAX_RESULTS,
 ) -> str:
     return await _run_sync_tool_after_async_sandbox_init(
         glob_tool.func,
         runtime,
-        description,
         pattern,
         path,
+        description,
         include_dirs,
         max_results,
     )
@@ -2069,9 +2119,9 @@ glob_tool.coroutine = _glob_tool_async
 @tool("grep", parse_docstring=True)
 def grep_tool(
     runtime: Runtime,
-    description: str,
     pattern: str,
     path: str,
+    description: str = "",
     glob: str | None = None,
     literal: bool = False,
     case_sensitive: bool = False,
@@ -2080,9 +2130,9 @@ def grep_tool(
     """Search for matching lines inside a text file or files under a root directory.
 
     Args:
-        description: Explain why you are searching file contents in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         pattern: The string or regex pattern to search for.
         path: The **absolute** file or root directory to search.
+        description: Optional short explanation of this search shown in the UI.
         glob: Optional glob filter for candidate files, for example `**/*.py`.
         literal: Whether to treat `pattern` as a plain string. Default is False.
         case_sensitive: Whether matching is case-sensitive. Default is False.
@@ -2147,9 +2197,9 @@ def grep_tool(
 
 async def _grep_tool_async(
     runtime: Runtime,
-    description: str,
     pattern: str,
     path: str,
+    description: str = "",
     glob: str | None = None,
     literal: bool = False,
     case_sensitive: bool = False,
@@ -2158,9 +2208,9 @@ async def _grep_tool_async(
     return await _run_sync_tool_after_async_sandbox_init(
         grep_tool.func,
         runtime,
-        description,
         pattern,
         path,
+        description,
         glob,
         literal,
         case_sensitive,
@@ -2202,16 +2252,16 @@ def read_current_file_content(runtime: Runtime | None, path: str) -> str:
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: Runtime,
-    description: str,
     path: str,
+    description: str = "",
     start_line: int | None = None,
     end_line: int | None = None,
 ) -> str:
     """Read the contents of a text file. Use this to examine source code, configuration files, logs, or any text-based file.
 
     Args:
-        description: Explain why you are reading this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the file to read.
+        description: Optional short explanation of this read shown in the UI.
         start_line: Optional starting line number (1-indexed, inclusive). Omit to start at the first line.
         end_line: Optional ending line number (1-indexed, inclusive). Omit to read through the last line.
     """
@@ -2266,12 +2316,12 @@ def read_file_tool(
 
 async def _read_file_tool_async(
     runtime: Runtime,
-    description: str,
     path: str,
+    description: str = "",
     start_line: int | None = None,
     end_line: int | None = None,
 ) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, description, path, start_line, end_line)
+    return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, path, description, start_line, end_line)
 
 
 read_file_tool.coroutine = _read_file_tool_async
@@ -2297,9 +2347,9 @@ def _effective_write_file_max_bytes() -> int:
 @tool("write_file", parse_docstring=True)
 def write_file_tool(
     runtime: Runtime,
-    description: str,
     path: str,
     content: str,
+    description: str = "",
     append: bool = False,
 ) -> str:
     """Write text content to a file. By default this overwrites the target file; set append=True to add content to the end without replacing existing content.
@@ -2331,9 +2381,9 @@ def write_file_tool(
     (0 disables the guard entirely). Raising it risks streaming timeouts.
 
     Args:
-        description: Explain why you are writing to this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
-        content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        path: The **absolute** path to the file to write to.
+        content: The content to write to the file.
+        description: Optional short explanation of this write shown in the UI.
         append: Whether to append content to the end of the file instead of overwriting it. Defaults to False.
     """
     if not append:
@@ -2382,12 +2432,12 @@ def write_file_tool(
 
 async def _write_file_tool_async(
     runtime: Runtime,
-    description: str,
     path: str,
     content: str,
+    description: str = "",
     append: bool = False,
 ) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, description, path, content, append)
+    return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, path, content, description, append)
 
 
 write_file_tool.coroutine = _write_file_tool_async
@@ -2396,10 +2446,10 @@ write_file_tool.coroutine = _write_file_tool_async
 @tool("str_replace", parse_docstring=True)
 def str_replace_tool(
     runtime: Runtime,
-    description: str,
     path: str,
     old_str: str,
     new_str: str,
+    description: str = "",
     replace_all: bool = False,
 ) -> str:
     """Replace a substring in a file with another substring.
@@ -2409,10 +2459,10 @@ def str_replace_tool(
     version with read_file first; any write invalidates earlier reads.
 
     Args:
-        description: Explain why you are replacing the substring in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        path: The **absolute** path to the file to replace the substring in. ALWAYS PROVIDE THIS PARAMETER SECOND.
-        old_str: The substring to replace. ALWAYS PROVIDE THIS PARAMETER THIRD.
-        new_str: The new substring. ALWAYS PROVIDE THIS PARAMETER FOURTH.
+        path: The **absolute** path to the file to replace the substring in.
+        old_str: The substring to replace.
+        new_str: The new substring.
+        description: Optional short explanation of this replacement shown in the UI.
         replace_all: Whether to replace all occurrences of the substring. If False, only the first occurrence will be replaced. Default is False.
     """
     try:
@@ -2451,19 +2501,19 @@ def str_replace_tool(
 
 async def _str_replace_tool_async(
     runtime: Runtime,
-    description: str,
     path: str,
     old_str: str,
     new_str: str,
+    description: str = "",
     replace_all: bool = False,
 ) -> str:
     return await _run_sync_tool_after_async_sandbox_init(
         str_replace_tool.func,
         runtime,
-        description,
         path,
         old_str,
         new_str,
+        description,
         replace_all,
     )
 

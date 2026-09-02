@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import logging
+import threading
 import time
 import uuid
 from contextvars import ContextVar
@@ -22,6 +23,7 @@ from deerflow.extensions import resolve_run_extensions
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
+from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import resolve_subagent_model_name
 from deerflow.subagents.executor import (
@@ -39,7 +41,7 @@ from deerflow.subagents.status_contract import (
     make_subagent_additional_kwargs,
 )
 from deerflow.tools.types import Runtime
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
 from deerflow.utils.custom_events import aemit_custom_event
 
 if TYPE_CHECKING:
@@ -72,6 +74,63 @@ _explicit_app_config: ContextVar[Any | None] = ContextVar(
     "deerflow_explicit_subagent_app_config",
     default=None,
 )
+
+
+def _record_middleware_on_parent_loop(journal: Any, kwargs: dict[str, Any]) -> None:
+    """Run one subagent middleware-journal append on the journal owner's loop."""
+    try:
+        journal.record_middleware(**kwargs)
+    except Exception:
+        logger.warning("Failed to record subagent middleware event", exc_info=True)
+
+
+class _ParentLoopMiddlewareRecorderProxy:
+    """Forward subagent loop-detection events to the parent run's event loop.
+
+    ``RunJournal`` owns parent-loop tasks and may wrap an event store backed by
+    a loop-bound SQL pool. Subagents execute on a persistent isolated loop, so
+    the journal object itself must never be called there.
+    """
+
+    def __init__(self, journal: Any, loop: asyncio.AbstractEventLoop) -> None:
+        self._journal = journal
+        self._loop = loop
+        self._state_lock = threading.Lock()
+        self._closed = False
+
+    def record_middleware(self, **kwargs: Any) -> None:
+        with self._state_lock:
+            if self._closed or self._loop.is_closed():
+                logger.debug("Dropping subagent middleware event after parent loop shutdown")
+                return
+            try:
+                self._loop.call_soon_threadsafe(
+                    _record_middleware_on_parent_loop,
+                    self._journal,
+                    dict(kwargs),
+                )
+            except RuntimeError:
+                # The loop may close between is_closed() and scheduling.
+                logger.debug("Dropping subagent middleware event after parent loop shutdown")
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the task-tool boundary has fenced new child events."""
+        with self._state_lock:
+            return self._closed
+
+    async def aclose(self) -> None:
+        """Fence late child events and drain every append accepted before it."""
+        if asyncio.get_running_loop() is not self._loop:
+            logger.warning("Cannot drain subagent middleware recorder from a non-owner loop")
+            return
+        with self._state_lock:
+            self._closed = True
+        if self._loop.is_closed():
+            return
+        # record_middleware holds _state_lock through call_soon_threadsafe, so
+        # all accepted callbacks are already ahead of this continuation.
+        await asyncio.sleep(0)
 
 
 def _is_subagent_terminal(result: Any) -> bool:
@@ -540,8 +599,13 @@ def _task_result_command(
     usage: dict[str, int] | None = None,
     tool_receipts: list[dict] | None = None,
     receipt_verdict: dict | None = None,
+    acceptance_verdict: dict | None = None,
 ) -> Command:
     content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
+    if acceptance_verdict is not None:
+        # RFC #4651 PR4: the rendered checklist rides the model-visible result
+        # text; metadata carries the structured verdict for the ledger/judge.
+        content = f"{content}\n\n{render_acceptance_section(acceptance_verdict)}"
     return Command(
         update={
             "messages": [
@@ -558,6 +622,7 @@ def _task_result_command(
                         token_usage=usage,
                         tool_receipts=tool_receipts,
                         receipt_verdict=receipt_verdict,
+                        acceptance_verdict=acceptance_verdict,
                     ),
                 )
             ]
@@ -568,12 +633,12 @@ def _task_result_command(
 @tool("task", parse_docstring=True)
 async def task_tool(
     runtime: Runtime,
-    description: str,
     prompt: str,
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
     *,
     acceptance_criteria: list[str] | None = None,
+    description: str = "",
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -629,21 +694,30 @@ async def task_tool(
     - A resolved citation means the cited call happened with the recorded status
       — it does not validate that the adjacent claim is correct. Before relying
       on a load-bearing claim, spot-check its verifiable handle yourself.
+    - When you attach `acceptance_criteria`, the result includes a deterministic
+      acceptance checklist: decidable criteria (`file:<path> exists|non-empty`,
+      `file_written:<path>`, `tests_passed:<command>`) are checked in code
+      against the shared thread workspace and the recorded bash executions, and
+      every criterion that cannot be checked deterministically is marked
+      UNVERIFIED — never silently passed. A `holds` leaf is execution evidence,
+      not a guarantee that the deliverable is correct.
 
     Args:
-        description: A short (3-5 word) description of the task for logging/display. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        prompt: The task description for the subagent. Be specific and clear about what needs to be done. ALWAYS PROVIDE THIS PARAMETER SECOND.
-        subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        prompt: The task description for the subagent. Be specific and clear about what needs to be done.
+        subagent_type: The type of subagent to use.
         acceptance_criteria: Optional list of completion requirements, handed to
             the subagent as untrusted data appended to its task input (never as
             system-prompt authority) and addressed one by one in its final
             report. Attach them when
             the outcome is objectively checkable; prefer the canonical forms
             `file:<path> exists`, `file:<path> non-empty`, `file_written:<path>`,
-            and `tests_passed:<command>` so each criterion stays objectively
-            decidable. Example for a report-writing delegation:
+            and `tests_passed:<command>` — these are checked deterministically
+            against the shared thread workspace and the recorded execution
+            evidence when the subagent completes, while any other wording comes
+            back marked UNVERIFIED. Example for a report-writing delegation:
             ["file:../outputs/report.md non-empty"]. Omit for open-ended
             exploration where no crisp acceptance condition exists.
+        description: Optional short (3-5 word) description of the task for logging/display.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
@@ -735,7 +809,11 @@ async def task_tool(
     # None outside that path (embedded client, standalone LangGraph Server), where
     # the executor keeps its process-singleton fallback.
     run_extensions = resolve_run_extensions(parent_context)
-    deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
+    # Request-level correlation id, distinct from the short ``trace_id`` above
+    # that labels this one subagent execution in log prefixes. The parent
+    # runtime context is authoritative (worker._bind_trace_id always fills it);
+    # the ambient fallback covers tools invoked outside a Gateway run.
+    deerflow_trace_id = resolve_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY))
 
     parent_available_skills = metadata.get("available_skills")
     if parent_available_skills is not None:
@@ -795,6 +873,17 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    loop_detection_recorder = None
+    parent_journal = parent_context.get("__run_journal")
+    if parent_journal is not None:
+        # The task tool runs on the parent run's loop. Pass only a proxy across
+        # the isolated-subagent boundary so middleware persistence is delivered
+        # on the loop that owns the RunJournal and its event store.
+        loop_detection_recorder = _ParentLoopMiddlewareRecorderProxy(
+            parent_journal,
+            asyncio.get_running_loop(),
+        )
+        executor_kwargs["loop_detection_recorder"] = loop_detection_recorder
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
     if run_extensions is not None:
@@ -827,7 +916,7 @@ async def task_tool(
             {
                 "type": "task_started",
                 "task_id": tool_call_id,
-                "description": description,
+                "description": description or prompt,
                 "model_name": effective_model,
             },
             writer=writer,
@@ -909,6 +998,23 @@ async def task_tool(
                 # harvest (zero stamped calls) and still gets a verdict.
                 receipts = getattr(result, "tool_receipts", None)
                 receipt_verdict = verify_receipt_citations(result.result or "", receipts) if receipts is not None else None
+                # RFC #4651 PR4: deterministic acceptance checklist. Runs only
+                # when the delegation carried criteria; offloaded because the
+                # file leaves perform sandbox IO. Failure-isolated like the
+                # citation check — a checker error never changes the outcome,
+                # the result just flows back without a checklist verdict.
+                acceptance_verdict = None
+                if acceptance_criteria:
+                    try:
+                        acceptance_verdict = await asyncio.to_thread(
+                            check_acceptance_criteria,
+                            acceptance_criteria,
+                            runtime=runtime,
+                            thread_data=thread_data,
+                            bash_executions=getattr(result, "bash_executions", None),
+                        )
+                    except Exception:
+                        logger.warning(f"[trace={trace_id}] Acceptance checklist failed for task {tool_call_id}; result flows back unchecked", exc_info=True)
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="completed",
@@ -918,6 +1024,7 @@ async def task_tool(
                     usage=usage,
                     tool_receipts=receipts,
                     receipt_verdict=receipt_verdict,
+                    acceptance_verdict=acceptance_verdict,
                 )
             elif result.status == SubagentStatus.FAILED:
                 _report_subagent_usage(runtime, result)
@@ -1067,3 +1174,6 @@ async def task_tool(
             # must end as an interrupted run, not a failed tool call.
             raise asyncio.CancelledError
         raise
+    finally:
+        if loop_detection_recorder is not None:
+            await loop_detection_recorder.aclose()

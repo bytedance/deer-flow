@@ -36,6 +36,82 @@ from deerflow.subagents.status_contract import (
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
 
+def test_parent_loop_middleware_recorder_proxy_delivers_on_owner_loop():
+    """Subagent middleware events must never call RunJournal from the child loop."""
+    calls: list[tuple[object, dict]] = []
+    delivered = threading.Event()
+
+    class LoopPinnedJournal:
+        def record_middleware(self, **kwargs):
+            calls.append((asyncio.get_running_loop(), dict(kwargs)))
+            delivered.set()
+
+    parent_loop = asyncio.new_event_loop()
+    parent_thread = threading.Thread(
+        target=parent_loop.run_forever,
+        name="test-middleware-journal-parent-loop",
+        daemon=True,
+    )
+    parent_thread.start()
+    try:
+        proxy = task_tool_module._ParentLoopMiddlewareRecorderProxy(
+            LoopPinnedJournal(),
+            parent_loop,
+        )
+        proxy.record_middleware(
+            tag="loop_detection",
+            name="LoopDetectionMiddleware",
+            hook="after_model",
+            action="warn",
+            changes={"detection_layer": "identical_call_set"},
+        )
+
+        assert delivered.wait(timeout=5)
+        assert len(calls) == 1
+        observed_loop, kwargs = calls[0]
+        assert observed_loop is parent_loop
+        assert kwargs["tag"] == "loop_detection"
+        assert kwargs["action"] == "warn"
+
+        asyncio.run_coroutine_threadsafe(proxy.aclose(), parent_loop).result(timeout=5)
+        proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="hard_stop", changes={})
+        time.sleep(0.05)
+        assert len(calls) == 1, "events emitted after the parent task boundary must be dropped"
+    finally:
+        parent_loop.call_soon_threadsafe(parent_loop.stop)
+        parent_thread.join(timeout=5)
+        parent_loop.close()
+
+
+def test_parent_loop_middleware_recorder_proxy_drops_after_loop_closed():
+    """A child event after asyncio.run teardown is a quiet no-op."""
+    loop = asyncio.new_event_loop()
+    loop.close()
+    proxy = task_tool_module._ParentLoopMiddlewareRecorderProxy(MagicMock(), loop)
+
+    proxy.record_middleware(
+        tag="loop_detection",
+        name="LoopDetectionMiddleware",
+        hook="after_model",
+        action="warn",
+        changes={},
+    )
+
+
+def test_parent_loop_middleware_recorder_close_is_fail_open_off_owner_loop(caplog):
+    """A bad close caller must not replace the task tool's original outcome."""
+    owner_loop = asyncio.new_event_loop()
+    proxy = task_tool_module._ParentLoopMiddlewareRecorderProxy(MagicMock(), owner_loop)
+    try:
+        with caplog.at_level("WARNING"):
+            asyncio.run(proxy.aclose())
+
+        assert proxy.is_closed is False
+        assert "Cannot drain subagent middleware recorder from a non-owner loop" in caplog.text
+    finally:
+        owner_loop.close()
+
+
 class FakeSubagentStatus(Enum):
     # Match production enum values so branch comparisons behave identically.
     PENDING = "pending"
@@ -84,6 +160,7 @@ def _make_result(
     stop_reason: str | None = None,
     token_usage_records: list[dict] | None = None,
     tool_receipts: list[dict] | None = None,
+    bash_executions: list[dict] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         status=status,
@@ -94,6 +171,7 @@ def _make_result(
         token_usage_records=token_usage_records or [],
         usage_reported=False,
         tool_receipts=tool_receipts,
+        bash_executions=bash_executions,
     )
 
 
@@ -349,6 +427,40 @@ def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-ext")
 
     assert captured["executor_kwargs"]["extensions"] is loaded
+
+
+def test_task_tool_installs_and_closes_narrow_loop_detection_recorder(monkeypatch):
+    journal = MagicMock()
+    runtime = _make_runtime()
+    runtime.context["__run_journal"] = journal
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-journal")
+
+    kwargs = captured["executor_kwargs"]
+    proxy = kwargs["loop_detection_recorder"]
+    assert proxy.is_closed is True
+    proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="warn", changes={})
+    journal.record_middleware.assert_not_called()
 
 
 def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):
@@ -715,7 +827,6 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
 
     output = _run_task_tool(
         runtime=runtime,
-        description="运行子任务",
         prompt="collect diagnostics",
         subagent_type="general-purpose",
         tool_call_id="tc-123",
@@ -741,6 +852,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert polled_execution_ids == ["execution-456", "execution-456"]
     assert cleaned_execution_ids == ["execution-456"]
     assert {event["task_id"] for event in events} == {"tc-123"}
+    assert events[0]["description"] == "collect diagnostics"
     assert events[0]["model_name"] == "ark-model"
     assert events[-1]["result"] == "all done"
 
@@ -2784,7 +2896,7 @@ def _receipt_fixture(rid: str = "r1", tool: str = "write_file", status: str = "s
     }
 
 
-def _run_completed_task_tool(monkeypatch, *, result_text: str, tool_receipts: list[dict] | None) -> ToolMessage:
+def _run_completed_task_tool(monkeypatch, *, result_text: str, tool_receipts: list[dict] | None, **result_kwargs) -> ToolMessage:
     """Drive the completed branch and return the terminal ToolMessage."""
 
     class DummyExecutor:
@@ -2800,7 +2912,7 @@ def _run_completed_task_tool(monkeypatch, *, result_text: str, tool_receipts: li
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
-        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result=result_text, tool_receipts=tool_receipts),
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result=result_text, tool_receipts=tool_receipts, **result_kwargs),
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
@@ -2814,6 +2926,120 @@ def _run_completed_task_tool(monkeypatch, *, result_text: str, tool_receipts: li
         tool_call_id="tc-verify",
     )
     return _task_tool_message(command)
+
+
+def _run_completed_task_tool_with_criteria(monkeypatch, *, criteria: list[str], bash_executions: list[dict] | None = None) -> ToolMessage:
+    """Drive the completed branch with acceptance criteria attached.
+
+    The workspace-scoped file leaves read through the lazily imported
+    ``read_current_file_content``; patching the sandbox module attribute swaps
+    in a fake reader without touching the sandbox provider stack.
+    """
+    # The checklist reads through the sandbox-native virtual path form.
+    files = {"/mnt/user-data/outputs/report.md": "report body"}
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.read_current_file_content",
+        lambda _runtime, path: files[path] if path in files else (_ for _ in ()).throw(FileNotFoundError(path)),
+    )
+    # A bounded size is established before any read; fake the prober over the
+    # same fake filesystem.
+    monkeypatch.setattr(
+        "deerflow.subagents.acceptance_checks._probe_file_size",
+        lambda _runtime, path, _thread_data: len(files[path].encode("utf-8")) if path in files else (_ for _ in ()).throw(FileNotFoundError(path)),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done", tool_receipts=None, bash_executions=bash_executions),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    command = _run_task_tool(
+        runtime=_make_runtime(),
+        description="test",
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-acceptance",
+        acceptance_criteria=criteria,
+    )
+    return _task_tool_message(command)
+
+
+def test_task_tool_completed_stamps_acceptance_verdict(monkeypatch):
+    message = _run_completed_task_tool_with_criteria(
+        monkeypatch,
+        criteria=["file:../outputs/report.md non-empty", "tests_passed:make test", "open ended"],
+        bash_executions=[{"tool_call_id": "tc-1", "tool_name": "bash", "command": "make test", "output_tail": "12 passed", "status": "success", "shell_persistent": False}],
+    )
+
+    verdict = message.additional_kwargs["subagent_acceptance_verdict"]
+    assert verdict["source"] == "acceptance_checklist"
+    assert [leaf["holds"] for leaf in verdict["leaves"]] == [True, True, False]
+    assert verdict["unchecked"] == ["open ended"]
+    # The rendered checklist section rides the model-visible result text.
+    assert "- [holds] file:../outputs/report.md non-empty" in message.content
+    assert "- [holds] tests_passed:make test" in message.content
+    assert "- [UNVERIFIED] open ended" in message.content
+
+
+def test_task_tool_completed_without_criteria_stamps_no_acceptance_verdict(monkeypatch):
+    message = _run_completed_task_tool(monkeypatch, result_text="done", tool_receipts=None)
+
+    assert "subagent_acceptance_verdict" not in message.additional_kwargs
+    assert "Acceptance checklist" not in message.content
+
+
+def test_task_tool_acceptance_check_failure_is_isolated(monkeypatch):
+    def exploding_check(*_args, **_kwargs):
+        raise RuntimeError("checker blew up")
+
+    monkeypatch.setattr(task_tool_module, "check_acceptance_criteria", exploding_check)
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done", tool_receipts=None),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    command = _run_task_tool(
+        runtime=_make_runtime(),
+        description="test",
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-acceptance-fail",
+        acceptance_criteria=["file:../outputs/report.md exists"],
+    )
+    message = _task_tool_message(command)
+
+    # The checker error never changes the outcome: completed result, no verdict.
+    assert message.content.startswith("Task Succeeded.")
+    assert "subagent_acceptance_verdict" not in message.additional_kwargs
 
 
 def test_task_tool_completed_attaches_receipts_and_verdict(monkeypatch):
