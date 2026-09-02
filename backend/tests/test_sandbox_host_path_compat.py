@@ -210,6 +210,8 @@ def test_program_argument_path_predicate_covers_rooted_drive_and_traversal_forms
         "--url=https://example.test/?next=file:///C:/Windows/secret.txt",
         "http://example.test/?x=file:///etc/passwd",
         "@https://example.test/?x=file:///etc/passwd",
+        "https://example.test/../etc/passwd",
+        "--url=https://example.test/../etc/passwd",
     ],
 )
 def test_program_argument_path_predicate_keeps_non_path_arguments_opaque(value: str) -> None:

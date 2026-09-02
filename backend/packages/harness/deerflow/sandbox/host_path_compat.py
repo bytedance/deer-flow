@@ -123,6 +123,8 @@ def program_argument_candidate(value: str) -> str:
 
 def is_program_argument_path(value: str) -> bool:
     """Return whether a program argument contains a rooted, drive, or escape path."""
+    if _URL_SCHEME_ANYWHERE.search(value):
+        return _contains_file_url(value)
     if _contains_file_url(value):
         return True
     return _has_program_path_syntax(program_argument_candidate(value))
