@@ -96,10 +96,15 @@ describe("ComposerSkillPicker", () => {
     expect((onPick.mock.calls[0]![0] as Skill).name).toBe("web-design");
 
     cleanup();
+    // Production always passes a boolean (`disabled={composerLocked}` in
+    // input-box.tsx) — `disabled={false}` is the shape under which the
+    // original `??` swallowed the no-skills fallback (`false ?? …` is
+    // `false`), so pin that shape, not the prop-omitted `undefined` one.
     render(
       <ComposerSkillPicker
         skills={[makeSkill("pdf", "x", false)]}
         onPick={onPick}
+        disabled={false}
       />,
     );
     const noSkillsButton = screen.getByRole("button", {
