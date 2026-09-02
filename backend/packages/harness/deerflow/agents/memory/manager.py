@@ -90,10 +90,6 @@ class MemoryReadError(MemoryManagerError):
     """A required memory read failed, so callers must not continue without it."""
 
 
-class MemoryAccessError(MemoryManagerError):
-    """Memory access was denied or resolved to an incompatible identity."""
-
-
 class MemoryConflictError(MemoryManagerError):
     """The requested write lost an optimistic-concurrency race."""
 
@@ -947,9 +943,6 @@ def memory_read_failures_are_fatal(
     """
 
     try:
-        manager = _memory_manager
-        if manager is not None:
-            return manager.read_failures_are_fatal
         return _resolve_manager_class(manager_class).read_failures_are_fatal_for_config(
             backend_config,
         )

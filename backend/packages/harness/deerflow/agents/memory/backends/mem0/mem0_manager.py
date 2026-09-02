@@ -15,14 +15,9 @@ from typing import Any, ClassVar, Literal
 from pydantic import PrivateAttr
 
 # ABC contract -- the ONE allowed `from deerflow` import in this backend folder.
-from deerflow.agents.memory.manager import (
-    MemoryAccessError,
-    MemoryManager,
-    MemoryManagerError,
-    MemoryReadError,
-)
+from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError, MemoryReadError
 
-from .client import Mem0APIError, Mem0AuthError, Mem0Client
+from .client import Mem0APIError, Mem0Client
 from .config import Mem0Config
 from .message_filtering import extract_message_text, filter_messages_for_memory
 
@@ -122,8 +117,6 @@ class Mem0Manager(MemoryManager):
     def _read_or_fallback(self, fallback: Any, fn: Any) -> Any:
         try:
             return fn()
-        except Mem0AuthError as e:
-            raise MemoryAccessError("mem0 memory access was denied") from e
         except Mem0APIError as e:
             if self._config.read_policy == "fail_open":
                 logger.warning("mem0 read failed (%s); continuing without memory", e)
@@ -133,8 +126,6 @@ class Mem0Manager(MemoryManager):
     def _write_or_drop(self, fn: Any) -> None:
         try:
             fn()
-        except Mem0AuthError as e:
-            raise MemoryAccessError("mem0 memory access was denied") from e
         except Mem0APIError as e:
             if self._config.write_policy == "log_and_drop":
                 logger.warning("mem0 write failed (%s); dropping update", e)

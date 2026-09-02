@@ -19,7 +19,6 @@ import pytest
 from pydantic import PrivateAttr
 
 from deerflow.agents.memory import (
-    MemoryAccessError,
     MemoryManager,
     MemoryManagerError,
     MemoryReadError,
@@ -219,9 +218,8 @@ def test_callbacks_field_optional_and_noop_default():
     assert manager.callbacks is noop
 
 
-def test_required_read_and_access_errors_share_manager_boundary():
+def test_required_read_error_shares_manager_boundary():
     assert issubclass(MemoryReadError, MemoryManagerError)
-    assert issubclass(MemoryAccessError, MemoryManagerError)
     assert _MinimalBackend(backend_config={}).read_failures_are_fatal is False
     assert (
         memory_read_failures_are_fatal(
@@ -232,17 +230,23 @@ def test_required_read_and_access_errors_share_manager_boundary():
     )
 
 
-def test_read_failure_capability_prefers_cached_manager():
+def test_read_failure_capability_uses_requested_backend_config(
+    monkeypatch: pytest.MonkeyPatch,
+):
     set_memory_config(MemoryConfig(manager_class=f"{__name__}:_MinimalBackend"))
     manager = get_memory_manager()
+    monkeypatch.setenv("OPENVIKING_API_KEY", "test-key")
 
     assert isinstance(manager, _MinimalBackend)
     assert (
         memory_read_failures_are_fatal(
-            "missing.backend:Manager",
-            {"failure_policy": {"read": "raise"}},
+            "openviking",
+            {
+                "owner_user_id": "alice",
+                "failure_policy": {"read": "raise"},
+            },
         )
-        is False
+        is True
     )
 
 

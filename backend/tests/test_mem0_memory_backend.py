@@ -424,25 +424,6 @@ class TestMem0ManagerAdd:
         with pytest.raises(MemoryManagerError):
             mgr.add("thread-1", [HumanMessage(content="hi")], user_id="u1")
 
-    @pytest.mark.parametrize("write_policy", ["log_and_drop", "raise"])
-    def test_add_auth_error_always_fails_closed(
-        self,
-        write_policy: str,
-    ) -> None:
-        from deerflow.agents.memory.manager import MemoryAccessError
-
-        mgr, fake = _manager({"failure_policy": {"write": write_policy}})
-        fake.error = Mem0AuthError("denied")
-
-        with pytest.raises(MemoryAccessError) as exc_info:
-            mgr.add(
-                "thread-1",
-                [HumanMessage(content="hi")],
-                user_id="u1",
-            )
-
-        assert isinstance(exc_info.value.__cause__, Mem0AuthError)
-
     def test_async_add_offloads_sync_http_client(self) -> None:
         mgr, fake = _manager(mode="tool")
         event_loop_thread = threading.get_ident()
@@ -507,17 +488,6 @@ class TestMem0ManagerGetContext:
         fake.error = Mem0APIError("down")
         with pytest.raises(MemoryReadError):
             mgr.get_context("u1")
-
-    @pytest.mark.parametrize("read_policy", ["fail_open", "fail_closed"])
-    def test_auth_error_always_fails_closed(self, read_policy: str) -> None:
-        from deerflow.agents.memory.manager import MemoryAccessError
-
-        mgr, fake = _manager({"failure_policy": {"read": read_policy}})
-        fake.error = Mem0AuthError("denied")
-        with pytest.raises(MemoryAccessError) as exc_info:
-            mgr.get_context("u1")
-
-        assert isinstance(exc_info.value.__cause__, Mem0AuthError)
 
     def test_truncates_to_max_injection_chars(self) -> None:
         mgr, fake = _manager({"max_injection_chars": 20})

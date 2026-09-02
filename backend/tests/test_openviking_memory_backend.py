@@ -17,7 +17,6 @@ from typing import Any
 import pytest
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
-from openviking_sdk.errors import PermissionDeniedError, UnauthenticatedError
 
 from deerflow.agents.memory.backends.openviking.config import OpenVikingConfig
 from deerflow.agents.memory.backends.openviking.openviking_manager import (
@@ -26,7 +25,6 @@ from deerflow.agents.memory.backends.openviking.openviking_manager import (
     _session_id,
 )
 from deerflow.agents.memory.manager import (
-    MemoryAccessError,
     MemoryManagerError,
     MemoryReadError,
     _scan_backends,
@@ -394,6 +392,38 @@ def test_unreachable_context_read_raise_aborts_dynamic_context_injection(
     assert exc_info.value.__cause__ is not None
 
 
+def test_strict_scope_mismatch_uses_required_read_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"read": "raise"},
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.get_memory_manager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id",
+        lambda runtime: "bob",
+    )
+    middleware = DynamicContextMiddleware()
+    state = {"messages": [HumanMessage("answer this", id="message-1")]}
+
+    with pytest.raises(MemoryReadError, match="owner_user_id 'alice'") as exc_info:
+        middleware.before_agent(state, None)
+    with pytest.raises(MemoryReadError, match="owner_user_id 'alice'") as search_error:
+        manager.search("preferences", user_id="bob", agent_name="research")
+
+    for error in (exc_info.value, search_error.value):
+        assert isinstance(error.__cause__, MemoryManagerError)
+        assert "owner_user_id 'alice'" in str(error.__cause__)
+    assert manager._retriever.calls == []
+
+
 def test_unreachable_context_read_fail_open_returns_no_injected_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -477,137 +507,6 @@ async def test_unreachable_context_read_raise_aborts_async_dynamic_context_injec
     assert exc_info.value.__cause__ is not None
 
 
-@pytest.mark.parametrize(
-    "access_error",
-    [
-        pytest.param(UnauthenticatedError(), id="unauthenticated"),
-        pytest.param(PermissionDeniedError(), id="permission_denied"),
-    ],
-)
-@pytest.mark.parametrize("read_policy", ["raise", "fail_open"])
-def test_access_denial_always_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    official_integration: None,
-    access_error: Exception,
-    read_policy: str,
-) -> None:
-    manager = _manager(
-        tmp_path,
-        monkeypatch,
-        failure_policy={"read": read_policy},
-    )
-
-    def raise_access_error(self: _Retriever, query: str) -> list[Document]:
-        raise access_error
-
-    monkeypatch.setattr(
-        _Retriever,
-        "invoke",
-        raise_access_error,
-    )
-
-    with pytest.raises(MemoryAccessError) as exc_info:
-        manager.get_context("alice", agent_name="research")
-
-    assert exc_info.value.__cause__ is access_error
-
-
-@pytest.mark.parametrize(
-    "access_error",
-    [
-        pytest.param(UnauthenticatedError(), id="unauthenticated"),
-        pytest.param(PermissionDeniedError(), id="permission_denied"),
-    ],
-)
-@pytest.mark.parametrize("write_policy", ["raise", "log_and_drop"])
-def test_write_access_denial_always_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    official_integration: None,
-    access_error: Exception,
-    write_policy: str,
-) -> None:
-    manager = _manager(
-        tmp_path,
-        monkeypatch,
-        failure_policy={"write": write_policy},
-    )
-    manager._recorder.failures.append(access_error)
-
-    with pytest.raises(MemoryAccessError) as exc_info:
-        manager.add(
-            "thread-1",
-            [HumanMessage("private", id="h1")],
-            user_id="alice",
-            agent_name="research",
-        )
-
-    assert exc_info.value.__cause__ is access_error
-
-
-@pytest.mark.parametrize(
-    "access_error",
-    [
-        pytest.param(UnauthenticatedError(), id="unauthenticated"),
-        pytest.param(PermissionDeniedError(), id="permission_denied"),
-    ],
-)
-@pytest.mark.parametrize("write_policy", ["raise", "log_and_drop"])
-def test_partial_write_access_denial_always_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    official_integration: None,
-    access_error: Exception,
-    write_policy: str,
-) -> None:
-    manager = _manager(
-        tmp_path,
-        monkeypatch,
-        failure_policy={"write": write_policy},
-    )
-    partial_error = _PartialWriteError(1)
-    partial_error.__cause__ = access_error
-    manager._recorder.failures.append(partial_error)
-
-    with pytest.raises(MemoryAccessError) as exc_info:
-        manager.add(
-            "thread-1",
-            [
-                HumanMessage("private", id="h1"),
-                AIMessage("noted", id="a1"),
-            ],
-            user_id="alice",
-            agent_name="research",
-        )
-
-    assert exc_info.value.__cause__ is partial_error
-    assert partial_error.__cause__ is access_error
-
-
-def test_transient_write_failure_still_logs_and_drops(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    official_integration: None,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    manager = _manager(
-        tmp_path,
-        monkeypatch,
-        failure_policy={"write": "log_and_drop"},
-    )
-    manager._recorder.failures.append(ConnectionError("server down"))
-
-    manager.add(
-        "thread-1",
-        [HumanMessage("remember this", id="h1")],
-        user_id="alice",
-        agent_name="research",
-    )
-
-    assert "capture cursor was not advanced" in caplog.text
-
-
 def test_manager_refuses_to_share_single_user_key_across_deerflow_users(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -615,9 +514,9 @@ def test_manager_refuses_to_share_single_user_key_across_deerflow_users(
 ) -> None:
     manager = _manager(tmp_path, monkeypatch)
 
-    with pytest.raises(MemoryAccessError, match="owner_user_id 'alice'"):
+    with pytest.raises(MemoryManagerError, match="owner_user_id 'alice'"):
         manager.get_context("bob", agent_name="research")
-    with pytest.raises(MemoryAccessError, match="owner_user_id 'alice'"):
+    with pytest.raises(MemoryManagerError, match="owner_user_id 'alice'"):
         manager.add(
             "thread-1",
             [HumanMessage("private", id="h1")],

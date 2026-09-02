@@ -16,7 +16,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
 
-from deerflow.agents.memory.manager import MemoryAccessError, MemoryManager, MemoryManagerError, MemoryReadError
+from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError, MemoryReadError
 
 from .config import OpenVikingConfig
 from .session import (
@@ -170,7 +170,7 @@ class OpenVikingMemoryManager(MemoryManager):
         if not self._begin_operation():
             return ""
         try:
-            peer_id = self._resolve_scope(user_id, agent_name)
+            peer_id = self._resolve_read_scope(user_id, agent_name)
             retriever = copy.copy(self._retriever)
             retriever.target_uri = _memory_target_uris(peer_id)
             if thread_id:
@@ -184,8 +184,6 @@ class OpenVikingMemoryManager(MemoryManager):
                 with self._actor_peer_scope(peer_id):
                     documents = retriever.invoke(self._config.injection_query)
             except Exception as exc:
-                if _is_access_error(exc):
-                    raise MemoryAccessError("OpenViking context retrieval was denied") from exc
                 if self._config.read_failure_policy == "raise":
                     raise MemoryReadError("OpenViking context retrieval failed") from exc
                 logger.warning(
@@ -226,7 +224,7 @@ class OpenVikingMemoryManager(MemoryManager):
         if not query.strip() or not self._begin_operation():
             return []
         try:
-            peer_id = self._resolve_scope(user_id, agent_name)
+            peer_id = self._resolve_read_scope(user_id, agent_name)
             retriever = copy.copy(self._retriever)
             retriever.target_uri = _memory_target_uris(peer_id)
             retriever.search_mode = "find"
@@ -242,8 +240,6 @@ class OpenVikingMemoryManager(MemoryManager):
                 with self._actor_peer_scope(peer_id):
                     documents = retriever.invoke(query.strip())
             except Exception as exc:
-                if _is_access_error(exc):
-                    raise MemoryAccessError("OpenViking memory search was denied") from exc
                 if self._config.read_failure_policy == "raise":
                     raise MemoryReadError("OpenViking memory search failed") from exc
                 logger.warning(
@@ -461,8 +457,20 @@ class OpenVikingMemoryManager(MemoryManager):
     ) -> str:
         resolved_user = str(user_id or "default")
         if resolved_user != self._config.owner_user_id:
-            raise MemoryAccessError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
+            raise MemoryManagerError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
         return _canonical_peer_id(agent_name, self._config.default_peer_id)
+
+    def _resolve_read_scope(
+        self,
+        user_id: str | None,
+        agent_name: str | None,
+    ) -> str:
+        try:
+            return self._resolve_scope(user_id, agent_name)
+        except MemoryManagerError as exc:
+            if self._config.read_failure_policy == "raise":
+                raise MemoryReadError(str(exc)) from exc
+            raise
 
     def _actor_peer_scope(
         self,
@@ -547,8 +555,6 @@ class OpenVikingMemoryManager(MemoryManager):
         session_id: str,
     ) -> None:
         detail = f"{message} (session={session_id})"
-        if _is_access_error(exc):
-            raise MemoryAccessError(detail) from exc
         if self._config.write_failure_policy == "raise":
             raise MemoryManagerError(detail) from exc
         logger.error(detail, exc_info=True)
@@ -575,21 +581,6 @@ def _load_official_integration() -> dict[str, Any]:
         "OpenVikingSessionRecorder": OpenVikingSessionRecorder,
         "use_actor_peer": use_actor_peer,
     }
-
-
-def _is_access_error(exc: BaseException) -> bool:
-    try:
-        from openviking_sdk.errors import PermissionDeniedError, UnauthenticatedError
-    except ImportError:
-        return False
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        if isinstance(current, (UnauthenticatedError, PermissionDeniedError)):
-            return True
-        seen.add(id(current))
-        current = current.__cause__
-    return False
 
 
 def _format_documents(documents: list[Any], *, max_chars: int) -> str:

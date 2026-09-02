@@ -159,9 +159,6 @@ boundary; peers separate memory scopes within that user.
   recalled OpenViking context. `read: raise` aborts the turn when recall fails.
 - `write: log_and_drop` logs capture failures without failing an already
   generated answer. `write: raise` propagates them.
-- Authentication, authorization, permission, and `owner_user_id` mismatch
-  failures are always fatal for reads and writes. They indicate invalid
-  credentials or identity configuration, not transient backend unavailability.
 - DeerFlow stores only hashes and counters in a bounded local capture cursor
   under `{storage_path}/openviking/sessions/`. It never stores message text
   there.

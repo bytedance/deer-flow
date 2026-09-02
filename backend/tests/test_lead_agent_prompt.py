@@ -425,6 +425,27 @@ def test_get_memory_context_swallows_ordinary_manager_error(monkeypatch):
     assert prompt_module._get_memory_context("agent-a", app_config=explicit_config) == ""
 
 
+def test_get_memory_context_preserves_legacy_fail_closed_contract(monkeypatch):
+    from deerflow.agents.memory import MemoryManagerError
+
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(
+            enabled=True,
+            injection_enabled=True,
+            backend_config={"failure_policy": {"read": "fail_closed"}},
+        ),
+    )
+    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryManagerError("down")))
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+
+    with pytest.raises(MemoryManagerError, match="down"):
+        prompt_module._get_memory_context(
+            "agent-a",
+            app_config=explicit_config,
+            user_id="user-1",
+        )
+
+
 def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
     explicit_config = SimpleNamespace(
         memory=SimpleNamespace(enabled=True, injection_enabled=True),
