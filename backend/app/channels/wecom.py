@@ -34,6 +34,42 @@ def _open_binary(path: str):
     return open(path, "rb")
 
 
+# The WeCom bot protocol caps message content at 20480 UTF-8 bytes, for both
+# passive stream replies and active markdown pushes.
+_WECOM_MAX_CONTENT_BYTES = 20480
+_TRUNCATION_MARKER = "\n\n... (truncated)"
+
+
+def _clip_to_byte_limit(text: str, limit: int) -> str:
+    """Clip text to a UTF-8 byte budget, never splitting a character."""
+    if len(text.encode("utf-8")) <= limit:
+        return text
+    budget = limit - len(_TRUNCATION_MARKER.encode("utf-8"))
+    clipped = text.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+    return clipped + _TRUNCATION_MARKER
+
+
+def _split_for_byte_limit(text: str, limit: int) -> list[str]:
+    """Split text into chunks within the UTF-8 byte limit.
+
+    Prefers newline boundaries so markdown structure survives the split.
+    """
+    if len(text.encode("utf-8")) <= limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining.encode("utf-8")) > limit:
+        window = remaining.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+        cut = window.rfind("\n")
+        if cut <= 0:
+            cut = len(window)
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
 class WeComChannel(Channel):
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="wecom", bus=bus, config=config)
@@ -462,19 +498,23 @@ class WeComChannel(Channel):
                 return
 
             await self._send_with_retry(
-                lambda: self._ws_client.reply_stream(frame, stream_id, msg.text, bool(msg.is_final)),
+                lambda: self._ws_client.reply_stream(frame, stream_id, _clip_to_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES), bool(msg.is_final)),
                 max_retries=_max_retries,
                 log_prefix="[WeCom]",
                 operation_name="stream send",
             )
             return
 
-        body = {"msgtype": "markdown", "markdown": {"content": msg.text}}
-        await self._send_with_retry(
-            lambda: self._ws_client.send_message(msg.chat_id, body),
-            max_retries=_max_retries,
-            log_prefix="[WeCom]",
-        )
+        # No replyable frame (e.g. a scheduled-task push): a stream reply is one
+        # stream per reply and cannot split mid-way, but this path can, so the
+        # full text goes out as sequential markdown messages.
+        for chunk in _split_for_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES):
+            body = {"msgtype": "markdown", "markdown": {"content": chunk}}
+            await self._send_with_retry(
+                lambda body=body: self._ws_client.send_message(msg.chat_id, body),
+                max_retries=_max_retries,
+                log_prefix="[WeCom]",
+            )
 
     async def _upload_media_ws(
         self,
