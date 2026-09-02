@@ -44,6 +44,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 The cached value is reused for both the blocking (`runs.wait`) and streaming (`_handle_streaming_chat`) paths, so uploads and artifact delivery always target the same bucket even if a channel returns a rewritten `InboundMessage` from `receive_file`. The bucket id matches the memory bucket resolved by `_resolve_memory_user_id` (both normalize through `make_safe_user_id`).
 
 **Configuration** (`config.yaml` -> `channels`):
+- Channel run defaults deliberately omit `subagent_enabled`: the lead-agent factory applies the runtime default only after loading a custom agent, so a custom agent's own delegation default is not shadowed. An explicit channel, user, or request context value still overrides that agent default.
 - `langgraph_url` - LangGraph-compatible Gateway API base URL (default: `http://localhost:8001/api`)
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
 - In Docker Compose, IM channels run inside the `gateway` container, so `localhost` points back to that container. Use `http://gateway:8001/api` for `langgraph_url` and `http://gateway:8001` for `gateway_url`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` / `DEER_FLOW_CHANNELS_GATEWAY_URL`.
