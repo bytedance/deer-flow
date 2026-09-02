@@ -193,6 +193,7 @@ def test_split_program_argument_preserves_option_prefix(value: str, expected: tu
         "@file:///C:/Windows/args.rsp",
         "FILE:///etc/passwd",
         "/out:file:///C:/Windows/secret.txt",
+        " file:///etc/passwd ",
     ],
 )
 def test_program_argument_path_predicate_covers_rooted_drive_and_traversal_forms(value: str) -> None:
@@ -215,6 +216,7 @@ def test_program_argument_path_predicate_covers_rooted_drive_and_traversal_forms
         "HTTPS://example.test/../etc/passwd",
         "--url=HTTPS://example.test/../etc/passwd",
         "HTTPS://example.test/?next=FILE:///C:/Windows/secret.txt",
+        " https://example.test/?next=file:///C:/Windows/secret.txt ",
     ],
 )
 def test_program_argument_path_predicate_keeps_non_path_arguments_opaque(value: str) -> None:

@@ -62,6 +62,10 @@ def _contains_file_url(value: str) -> bool:
     if not isinstance(value, str) or not value:
         return False
 
+    value = value.strip()
+    if not value:
+        return False
+
     # A network URL is opaque even when its query or fragment happens to
     # contain the text ``file://``. Only inspect nested values after an
     # argument separator, response-file marker, or option-colon prefix.
