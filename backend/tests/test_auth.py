@@ -1,6 +1,5 @@
 """Tests for authentication module: JWT, password hashing, AuthContext, and authz decorators."""
 
-import time
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -916,8 +915,9 @@ def test_rate_limiter_resets_on_success():
     _check_rate_limit(ip)  # Should not raise
 
 
-def test_rate_limiter_honors_configured_attempts_and_lockout():
+def test_rate_limiter_honors_configured_attempts_and_lockout(monkeypatch):
     """auth.local.max_login_attempts / lockout_seconds drive the throttle policy."""
+    from app.gateway.routers import auth as auth_router
     from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
     from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
     from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
@@ -938,9 +938,12 @@ def test_rate_limiter_honors_configured_attempts_and_lockout():
         with pytest.raises(HTTPException) as exc_info:
             _check_rate_limit(ip)
         assert exc_info.value.status_code == 429
-        # The lockout window comes from lockout_seconds, not the 300s default.
-        _, lock_until = _login_attempts[ip]
-        assert 30.0 < lock_until - time.time() <= 60.0
+        # The lockout window comes from lockout_seconds (60s), not the 300s
+        # default: at locked_at + 61 the lock must already be released.
+        _, locked_at = _login_attempts[ip]
+        monkeypatch.setattr(auth_router.time, "time", lambda: locked_at + 61.0)
+        _check_rate_limit(ip)
+        assert ip not in _login_attempts
     finally:
         reset_app_config()
         _login_attempts.clear()
@@ -1003,7 +1006,7 @@ def test_rate_limiter_policy_change_semantics():
     fail_count falls below the new threshold — that is the issue #5108 use
     case (shared-egress-IP office unblocked by raising the limit, no restart).
     Lowering the threshold clears in-flight below-threshold counters once
-    (fail_count >= new max but lock_until == 0.0 hits the expired branch);
+    (fail_count >= new max but locked_at == 0.0 hits the expired branch);
     subsequent failures accumulate under the new, stricter policy.
     """
     from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
@@ -1031,11 +1034,23 @@ def test_rate_limiter_policy_change_semantics():
         _set_policy(5)  # operator raises the ceiling mid-lockout
         _check_rate_limit(ip)  # immediately allowed: 2 < 5, no restart needed
 
-        _set_policy(1)
-        for _ in range(2):
-            _record_login_failure(ip)
+        # max_login_attempts=1 never reaches the endpoint: config load rejects
+        # it (ge=2). A legal value of 1 previously disabled lockout entirely —
+        # the (1, 0.0) first-failure record expired immediately, and every
+        # subsequent failure re-created it, so the IP was never locked.
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            _set_policy(1)
+
+        # The strictest legal value still locks, at the second failure.
+        _login_attempts.pop(ip, None)
+        _set_policy(2)
+        _record_login_failure(ip)
+        _check_rate_limit(ip)  # 1 failure < 2: allowed
+        _record_login_failure(ip)
         with pytest.raises(HTTPException):
-            _check_rate_limit(ip)  # strict policy locks at the very next failure
+            _check_rate_limit(ip)
     finally:
         reset_app_config()
         _login_attempts.clear()
@@ -1050,9 +1065,72 @@ def test_local_auth_throttle_config_validation():
     with pytest.raises(pydantic.ValidationError):
         LocalAuthConfig(max_login_attempts=0)
     with pytest.raises(pydantic.ValidationError):
+        # 1 would mean a single typo locks the whole shared egress, and before
+        # ge=2 it actually disabled lockout entirely (the (1, 0.0) record
+        # expired immediately and every failure re-created it).
+        LocalAuthConfig(max_login_attempts=1)
+    LocalAuthConfig(max_login_attempts=2)  # strictest legal value
+    with pytest.raises(pydantic.ValidationError):
         LocalAuthConfig(lockout_seconds=0)
     with pytest.raises(pydantic.ValidationError):
         LocalAuthConfig(lockout_seconds=float("inf"))
+
+
+def test_rate_limiter_active_lockout_honors_live_lockout_seconds_change(monkeypatch):
+    """A live lockout_seconds change applies to in-flight lockouts in both
+    directions: expiry is derived at check time as locked_at + the currently
+    configured duration, not an absolute deadline baked in at lock creation.
+
+    This pins the documented "reload applies on the next login" claim for
+    durations: lowering 60 → 1 releases an active lock after 1s (not the
+    original 60s), and raising 1 → 60 before the next login keeps a lock
+    alive past its original 1-second window.
+    """
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    def _set_policy(lockout_seconds: float) -> None:
+        set_app_config(
+            AppConfig(
+                sandbox=SandboxConfig(use="test"),
+                auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=2, lockout_seconds=lockout_seconds)),
+            )
+        )
+
+    def _freeze_clock_at(t: float) -> None:
+        monkeypatch.setattr(auth_router.time, "time", lambda: t)
+
+    _login_attempts.clear()
+    try:
+        ip = "10.0.0.5"
+
+        # Lowering mid-lockout releases early.
+        _set_policy(60.0)
+        _record_login_failure(ip)
+        _record_login_failure(ip)
+        _, locked_at = _login_attempts[ip]
+        _freeze_clock_at(locked_at + 2.0)
+        with pytest.raises(HTTPException):
+            _check_rate_limit(ip)  # 2s into the 60s window: still locked
+        _set_policy(1.0)  # operator shortens the window
+        _check_rate_limit(ip)  # 2s > 1s: unlocked on the very next login
+        assert ip not in _login_attempts
+
+        # Raising mid-lockout extends.
+        _set_policy(1.0)
+        _record_login_failure(ip)
+        _record_login_failure(ip)
+        _, locked_at = _login_attempts[ip]
+        _freeze_clock_at(locked_at + 2.0)  # past the original 1s expiry...
+        _set_policy(60.0)  # ...but the operator lengthened the window first
+        with pytest.raises(HTTPException):
+            _check_rate_limit(ip)  # 2s < 60s: still locked
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
 
 
 # ── Client IP extraction ─────────────────────────────────────────────────
