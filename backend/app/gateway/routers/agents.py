@@ -20,7 +20,7 @@ from deerflow.config.agents_config import (
 )
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
-from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
+from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, AgentStore, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -593,7 +593,7 @@ async def delete_agent(name: str) -> None:
     logger.info(f"Deleted agent '{name}'")
 
 
-def _delete_agent_with_memory_cancel(store: object, name: str, user_id: str | None) -> str:
+def _delete_agent_with_memory_cancel(store: AgentStore, name: str, user_id: str | None) -> AgentDeleteOutcome:
     """Cancel buffered memory, delete the agent, then cancel again on success.
 
     Runs entirely in a worker thread so blocking memory/config I/O stays off the
@@ -602,7 +602,7 @@ def _delete_agent_with_memory_cancel(store: object, name: str, user_id: str | No
     still drop buffered work; that update is re-fed on the next turn.
     """
     _cancel_pending_memory_for_agent(name, user_id)
-    outcome = store.delete(name, user_id=user_id)  # type: ignore[attr-defined]
+    outcome = store.delete(name, user_id=user_id)
     if outcome == "deleted":
         _cancel_pending_memory_for_agent(name, user_id)
     return outcome

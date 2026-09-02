@@ -78,13 +78,18 @@ def test_base_memory_manager_cancel_by_agent_defaults_to_zero() -> None:
     assert _Bare().cancel_by_agent("x", user_id="u") == 0
 
 
-def test_cancel_by_agent_contract_documents_legacy_user_none_scope() -> None:
-    """Contract must not promise whole-queue cancel for user_id=None."""
-    doc = MemoryManager.cancel_by_agent.__doc__ or ""
-    assert "legacy no-user root" in doc
-    assert "never" in doc and "every user" in doc
-    # Positive wording about what None means; must not claim a process-wide cancel API.
-    assert "There is no" in doc and "broader sweep" in doc
+def test_deermem_cancel_by_agent_forwards_scoped_queue_kwargs(tmp_path) -> None:
+    """Manager mapping: None agent → all_agents; named agent → canonical bucket."""
+    mem = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    queue = MagicMock()
+    queue.cancel_by_agent.return_value = 0
+    mem._queue = queue
+
+    mem.cancel_by_agent(None, user_id=None)
+    queue.cancel_by_agent.assert_called_with(user_id=None, all_agents=True)
+
+    mem.cancel_by_agent("Research-Agent", user_id="u1")
+    queue.cancel_by_agent.assert_called_with("research-agent", user_id="u1", all_agents=False)
 
 
 def test_delete_agent_cancels_before_and_after_successful_delete(tmp_path) -> None:
