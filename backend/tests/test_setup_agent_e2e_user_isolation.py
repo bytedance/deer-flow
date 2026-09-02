@@ -531,6 +531,7 @@ def test_setup_agent_clears_deleted_marker_after_recreate(tmp_path: Path) -> Non
     ``store.update`` — the same drift guard as the REST create route, so the
     REST and tool surfaces cannot diverge again."""
     from langchain.agents import create_agent
+    from langgraph.runtime import Runtime
 
     from deerflow.tools.builtins.setup_agent_tool import setup_agent
 

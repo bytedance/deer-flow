@@ -34,10 +34,10 @@ from langchain_core.tools import tool
 from langgraph.types import Command
 from pydantic import BaseModel, BeforeValidator
 
+from deerflow.agents.memory import clear_deleted_agent_marker
 from deerflow.config.agents_config import load_agent_config, preserve_non_managed_fields, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
-from deerflow.agents.memory import clear_deleted_agent_marker
 from deerflow.persistence.agents import get_agent_store
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime

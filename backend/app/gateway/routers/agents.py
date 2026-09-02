@@ -578,20 +578,26 @@ async def delete_agent(name: str) -> None:
         pass
 
     if get_memory_config().enabled:
-        # Pre-check that this really is a deletable custom agent (mirrors
-        # FileAgentStore.delete's agent_dir + config.yaml test) before we drop
-        # pending updates. For the legacy / missing / not-custom-agent outcomes
-        # the directory is deliberately preserved, so discarding first would
-        # throw away queued memory updates for an agent that still exists
-        # (issue #3364 review).
-        paths_for_check = get_paths()
-        target_agent_dir = paths_for_check.user_agent_dir(user_id, name)
-        if target_agent_dir.exists() and (target_agent_dir / "config.yaml").is_file():
+        # Cancel any pending debounced memory writes for this agent before
+        # removing the directory. Otherwise a lagging write can recreate the
+        # agent dir (with a stray memory.json) and block recreating a
+        # same-named agent (issue #3364).
+        #
+        # The file backend only discards for genuine custom agents (guards on
+        # the dir containing a config.yaml, mirroring FileAgentStore.delete) so
+        # a no-op delete doesn't drop queued updates for an agent that ends up
+        # preserved. SqlAgentStore never writes config.yaml on disk (config/SOUL
+        # live in the row), so that guard is always False there and the discard
+        # would silently no-op — skip the filesystem pre-check for db-backend
+        # stores so db-mode deletions still drop pending updates.
+        from deerflow.persistence.agents.file import FileAgentStore
+
+        should_discard = True
+        if isinstance(store, FileAgentStore):
+            target_agent_dir = get_paths().user_agent_dir(user_id, name)
+            should_discard = target_agent_dir.exists() and (target_agent_dir / "config.yaml").is_file()
+        if should_discard:
             try:
-                # Cancel any pending debounced memory writes for this agent before
-                # removing the directory. Otherwise a lagging write can recreate the
-                # agent dir (with a stray memory.json) and block recreating a
-                # same-named agent (issue #3364).
                 from deerflow.agents.memory import get_memory_manager
 
                 manager = await asyncio.to_thread(get_memory_manager)

@@ -443,14 +443,8 @@ class MemoryUpdateQueue:
         Returns the number of pending contexts removed from the queue.
         """
         with self._lock:
-            matching = [
-                c for c in self._items
-                if c.user_id == user_id and c.agent_name == agent_name
-            ]
-            self._items = [
-                c for c in self._items
-                if not (c.user_id == user_id and c.agent_name == agent_name)
-            ]
+            matching = [c for c in self._items if c.user_id == user_id and c.agent_name == agent_name]
+            self._items = [c for c in self._items if not (c.user_id == user_id and c.agent_name == agent_name)]
             if self._processing:
                 self._deleted_agents.add((user_id, agent_name))
         return len(matching)
