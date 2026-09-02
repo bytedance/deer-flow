@@ -24,8 +24,9 @@ DynamicContext (reminder/memory), DurableContext (contract/data),
 SystemMessageCoalescing, ViewImage, SkillActivation. Summarization/Title use
 `SystemOperationKind.SUMMARIZATION`/`.TITLE` model-call attribution; summaries
 enter via DurableContext's stamped `durable_context_data`, not separate
-messages. Memory only queues extraction; recall uses DynamicContext's
-`dynamic_context_memory` stamp.
+messages. Memory only queues extraction; recalled context uses DynamicContext's
+`dynamic_context_memory` stamp for the baseline snapshot and
+`dynamic_turn_memory` for query-aware turn recall.
 
 **Middleware self-description.** Behaviour-configurable middleware implements
 `release_policy_parameters() -> dict[str, object]` (duck-typed
