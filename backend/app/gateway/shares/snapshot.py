@@ -34,11 +34,12 @@ _FENCED_CODE_RE = re.compile(
 _INLINE_CODE_RE = re.compile(r"(?P<ticks>`+).*?(?P=ticks)", re.DOTALL)
 _MARKDOWN_LINK_RE = re.compile(r"!?\[(?P<label>[^\]]*)\]\((?P<target>[^)]+)\)")
 # Word-initial branches (``api/…``, ``mnt/…``) only fire at a token boundary:
-# ``fooapi/threads/…`` is public text, not a relative reference. The
-# separator-led branches need no guard — a private path starting mid-token
-# still classifies on its own shape.
+# ``fooapi/threads/…`` is public text, not a relative reference — and so are
+# ``foo.api``/``foo-mnt``, which name a longer identifier or host across the
+# dot/hyphen adjacency. The separator-led branches need no guard — a private
+# path starting mid-token still classifies on its own shape.
 _REFERENCE_RE = re.compile(
-    r"(?:https?://|/|%[0-9A-Fa-f]{2}|(?<!\w)(?:api(?=/threads/)|mnt(?=[\\/]|%[0-9A-Fa-f]{2})))[^\s<>\"]+",
+    r"(?:https?://|/|%[0-9A-Fa-f]{2}|(?<![\w.\-])(?:api(?=/threads/)|mnt(?=[\\/]|%[0-9A-Fa-f]{2})))[^\s<>\"]+",
     re.IGNORECASE,
 )
 _PRIVATE_REFERENCE_MARKER = "[private artifact omitted]"
@@ -413,12 +414,23 @@ _REFERENCE_CUT_TERMINATORS = ",;:!?)\\]}\"'`*_~(|[<"
 #
 # The boundary before ``api``/``mnt`` is the token start, a real separator,
 # or a joining terminator (tool-style comma lists: a public head may not
-# shield the private tail behind it) — never mid-word, where the bytes name
-# a longer public identifier or host (``foo_api/threads``, ``foo.api``).
-# ``_`` is a cut terminator but stays a non-boundary for the same reason.
+# shield the private tail behind it) — never mid-word or across a dot or
+# hyphen, where the bytes name a longer public identifier or host
+# (``foo_api/threads``, ``foo.api``, ``foo-mnt``). ``_`` is a cut
+# terminator but stays a non-boundary for the same reason.
 _PHRASE_BOUNDARY = f"(?:^|[{re.escape('/' + _REFERENCE_CUT_TERMINATORS.replace('_', ''))}])"
-_API_THREAD_REFERENCE_RE = re.compile(_PHRASE_BOUNDARY + r"api/threads/[^/?#\s]+/", re.IGNORECASE)
-_MNT_USER_DATA_RE = re.compile(_PHRASE_BOUNDARY + r"mnt/user-data", re.IGNORECASE)
+# Dot-segment groups resolve away at the same layers that merge ``//``
+# (browser URL shortening folds ``.``/``%2E`` segments, nginx normalizes
+# ``..``), so ``/api/x/../threads/…`` and ``/mnt/./user-data`` reach the
+# owner-scoped route exactly like their collapsed forms. Each group cancels
+# exactly one segment — a lone ``..`` cannot cancel two, so
+# ``/api/ab/cd/../threads`` stays public (it resolves to ``ab/threads``) —
+# and the group is a lazy optional so the zero-dot phrase (every common
+# case) matches without exploring cancellations; the greedy multi-segment
+# form backtracked to the token end at every phrase position.
+_DOT_SEGMENTS = r"(?:/(?:\.|%2e){1,2}|/[^/?#\s]+/(?:\.|%2e){1,2})"
+_API_THREAD_REFERENCE_RE = re.compile(_PHRASE_BOUNDARY + r"api(?:" + _DOT_SEGMENTS + r")??/threads/[^/?#\s]+/", re.IGNORECASE)
+_MNT_USER_DATA_RE = re.compile(_PHRASE_BOUNDARY + r"mnt(?:" + _DOT_SEGMENTS + r")??/user-data", re.IGNORECASE)
 
 
 def _trim_reference_punctuation(value: str) -> str:
@@ -452,49 +464,112 @@ def _starts_with_private_reference(window: str) -> bool:
     Used by the segment walker's percent probe. Percent-encoded phrases
     never decode in the shadow (their decoded positions cannot map back to
     original bytes), so after each terminator run the upcoming window is
-    decoded for classification alone."""
-    decoded = _trim_reference_punctuation(_decoded_reference(window)).lower()
+    decoded for classification alone. The window is a slice of the
+    separator-normalized shadow, so entities and unicode escapes are
+    already decoded and only percent layers remain — a cheap bounded
+    unquote plus slash-run collapse; no offsets are needed for a yes/no."""
+    decoded = window
+    for _ in range(3):
+        candidate = unquote(decoded)
+        if candidate == decoded:
+            break
+        decoded = _PROBE_SLASH_RUN_RE.sub("/", candidate)
+    decoded = _trim_reference_punctuation(decoded).lower()
     return _MNT_USER_DATA_RE.match(decoded) is not None or _API_THREAD_REFERENCE_RE.match(decoded) is not None
 
 
+# Probe windows may contain a URL scheme (``https://…`` tail); its ``//``
+# is not a path separator.
+_PROBE_SLASH_RUN_RE = re.compile(r"(?<!:)/{2,}")
+
+
 # One bounded probe per terminator join keeps the walk linear — re-decoding
-# the whole tail at every terminator was quadratic on joined lists.
-_SEGMENT_PROBE_WINDOW = 256
+# the whole tail at every terminator was quadratic on joined lists. The
+# window must still admit a fully-encoded phrase (three percent layers ≈ 8
+# bytes per decoded char, so a ``uuid`` + segment needs several hundred).
+_SEGMENT_PROBE_WINDOW = 1024
 
 
 def _private_reference_segments(value: str) -> list[tuple[int, int]]:
     """Shadow-coordinate ``[start, end)`` spans of every private phrase in
     one matched token. Public head/middle/tail bytes between the segments
     are part of no span and survive the cut; the joining terminators stay
-    public too."""
+    public too.
+
+    Percent-encoded phrases never decode in the shadow (their decoded
+    positions cannot map back to original bytes), so they are caught two
+    ways: an anchored probe at the terminator run that directly follows a
+    cut, and — because junk items can shield a later encoded tail from the
+    anchored probe — classification of every unconsumed gap, cut
+    conservatively when its decoded form carries a private phrase."""
     segments: list[tuple[int, int]] = []
+    # Both match streams are computed once: re-searching per iteration
+    # rescans the token tail every time and is quadratic on joined lists.
+    api_matches = list(_API_THREAD_REFERENCE_RE.finditer(value))
+    mnt_matches = list(_MNT_USER_DATA_RE.finditer(value))
+    api_index = 0
+    mnt_index = 0
     pos = 0
     n = len(value)
+
+    def next_match(start: int) -> tuple[int, int] | None:
+        nonlocal api_index, mnt_index
+        while api_index < len(api_matches) and api_matches[api_index].start() < start:
+            api_index += 1
+        while mnt_index < len(mnt_matches) and mnt_matches[mnt_index].start() < start:
+            mnt_index += 1
+        options: list[tuple[int, int]] = []
+        if api_index < len(api_matches):
+            options.append((api_matches[api_index].start(), api_matches[api_index].end()))
+        if mnt_index < len(mnt_matches):
+            options.append((mnt_matches[mnt_index].start(), mnt_matches[mnt_index].end()))
+        return min(options) if options else None
+
+    def cut_gap(start: int, stop: int) -> None:
+        begin = start
+        while begin < stop and value[begin] in _REFERENCE_CUT_TERMINATORS:
+            begin += 1
+        if begin < stop and _is_private_reference(value[begin:stop]):
+            segments.append((begin, stop))
+
     while pos < n:
-        candidates: list[tuple[int, int]] = []
-        for match in (_API_THREAD_REFERENCE_RE.search(value, pos), _MNT_USER_DATA_RE.search(value, pos)):
-            if match is not None:
-                candidates.append((match.start(), match.end()))
+        candidate = next_match(pos)
         probe = pos
         while probe < n and value[probe] in _REFERENCE_CUT_TERMINATORS:
             probe += 1
-        if probe > pos and probe < n and not value[probe].isspace() and _starts_with_private_reference(value[probe : probe + _SEGMENT_PROBE_WINDOW]):
-            candidates.append((probe, probe))
-        if not candidates:
+        if candidate is not None and candidate[0] == probe:
+            # The regex already proves the phrase sits exactly at the probe
+            # position — no window decode needed. This is the common joined
+            # list shape; decoding per item here was the quadratic hotspot.
+            probed = True
+        else:
+            probed = probe > pos and probe < n and not value[probe].isspace() and _starts_with_private_reference(value[probe : probe + _SEGMENT_PROBE_WINDOW])
+        if candidate is None and not probed:
             break
-        start, walk_from = min(candidates)
-        if start > 0 and walk_from > start:
-            # The boundary character before the phrase (a separator or a
-            # joining terminator) is public structure: cut from the phrase
-            # itself, so ``/docs,api/...`` keeps its comma and a public host
-            # keeps the separator that introduced the private subpath.
-            start += 1
-        end = _phrase_end(value, walk_from)
-        if end <= start:
-            pos = start + 1
-            continue
-        segments.append((start, end))
-        pos = end
+        # A regex phrase starting strictly before the probe wins (public
+        # head keeps its comma); a tie — the phrase directly follows the
+        # terminator run behind its own separator — goes to the probe, which
+        # cuts the separator with the phrase (`,/mnt/…` → `,` + marker).
+        if candidate is not None and (not probed or candidate[0] < probe):
+            start, walk_from = candidate
+            cut_gap(pos, start)
+            if start > 0 and walk_from > start:
+                # The boundary character before the phrase (a separator or a
+                # joining terminator) is public structure: cut from the phrase
+                # itself, so ``/docs,api/...`` keeps its comma and a public
+                # host keeps the separator that introduced the private subpath.
+                start += 1
+            end = _phrase_end(value, walk_from)
+            if end <= start:
+                pos = start + 1
+                continue
+            segments.append((start, end))
+            pos = end
+        else:
+            end = _phrase_end(value, probe)
+            segments.append((probe, end))
+            pos = end
+    cut_gap(pos, n)
     return segments
 
 

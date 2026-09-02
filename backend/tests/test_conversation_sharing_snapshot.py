@@ -325,6 +325,74 @@ async def test_neutralize_stable_under_rerun_and_heals_overlap_drops():
     assert "xx" in result  # public middle bytes between the cuts survive
 
 
+async def test_neutralize_junk_shielded_percent_tails():
+    """Junk items between the join and a percent-encoded private tail must
+    not shield it (round-10 regression): the walker's anchored probe sees
+    only the first tail item, so the unconsumed gaps are classified too and
+    the residual is cut when its decoded form carries a private phrase —
+    at mint time, not just across bounded re-runs."""
+    neutralize = _neutralize_private_references
+    attack = "/mnt/user-data" + ",/x" * 5 + ",%2Fapi%2Fthreads%2F2f0c9a34-9d1e-4f30-b1c2-7c21e6b0a55d%2Fartifacts"
+    out = neutralize(attack)
+    assert "2f0c9a34" not in out
+    assert "%2Fapi" not in out
+    assert "[private artifact omitted]" in out
+    assert neutralize(out) == out
+    # percent middle between two shadow-visible phrases
+    out = neutralize("/mnt/user-data/a,%6Dnt%2Fuser%2Ddata%2Fb,/mnt/user-data/c")
+    assert "user" not in out.replace("[private artifact omitted]", "")
+    # public junk between visible phrases stays public (the separator that
+    # introduces a later phrase after junk is public structure, same as the
+    # pinned middle-item case)
+    assert neutralize("/mnt/user-data/a,/x,/mnt/user-data/c") == "[private artifact omitted],/x,/[private artifact omitted]"
+    # title path is covered identically
+    from app.gateway.shares.snapshot import sanitize_share_title
+
+    title = sanitize_share_title("Export,/x,%2Fapi%2Fthreads%2F2f0c9a34%2Fuploads%2Fq.pdf")
+    assert "2f0c9a34" not in title
+    assert "%2F" not in title
+
+
+async def test_neutralize_dot_segment_resolution():
+    """``.``/``..``/``%2E`` segments resolve away at the same layers that
+    merge ``//`` (browser URL shortening, nginx URI normalization), so
+    ``/api/x/../threads/…`` reaches the owner-scoped route."""
+    neutralize = _neutralize_private_references
+    assert neutralize("/api/x/../threads/th1/artifacts") == "[private artifact omitted]"
+    assert neutralize("/api/./threads/th1/artifacts") == "[private artifact omitted]"
+    assert neutralize("/api/%2E/threads/th1/artifacts") == "[private artifact omitted]"
+    assert neutralize("/mnt/./user-data") == "[private artifact omitted]"
+    assert neutralize("/mnt/x/../user-data") == "[private artifact omitted]"
+    assert neutralize("[doc](/api/x/../threads/th1/artifacts)") == "doc [private artifact omitted]"
+    # a lone ``..`` cancels one segment only: ``ab/cd/..`` resolves to
+    # ``ab/…``, not the owner-scoped surface — and dot paths that resolve
+    # somewhere public stay public likewise
+    assert neutralize("/api/ab/cd/../threads/th1/artifacts") == "/api/ab/cd/../threads/th1/artifacts"
+    assert neutralize("see /api/threads-guide/../docs next") == "see /api/threads-guide/../docs next"
+
+
+async def test_neutralize_wordlike_public_prefixes_stay_public():
+    """``foo.api``/``foo-mnt`` are longer public identifiers or hosts, same
+    as the pinned ``foo_api`` form — the phrase must not match across a
+    dot/hyphen adjacency."""
+    neutralize = _neutralize_private_references
+    assert neutralize("see foo.api/threads/th1/artifacts") == "see foo.api/threads/th1/artifacts"
+    assert neutralize("see foo-mnt/user-data") == "see foo-mnt/user-data"
+    assert neutralize("see foo_api/threads/th1/artifacts") == "see foo_api/threads/th1/artifacts"
+
+
+async def test_neutralize_large_joined_tokens_stay_tractable():
+    """A hostile joined list must stay linear: every private item is cut,
+    the public junk between them survives, and the walk does not rescan
+    the token per item."""
+    neutralize = _neutralize_private_references
+    pathological = "/mnt/user-data/a," + ",/x,/mnt/user-data/b" * 3000
+    result = neutralize(pathological)
+    assert "user-data" not in result
+    assert "user" not in result.replace("[private artifact omitted]", "")
+    assert ",/x," in result  # public junk between the cuts survives
+
+
 async def test_neutralize_preserves_public_content_with_separators():
     neutralize = _neutralize_private_references
     # normalization exists only for classification; public text is emitted
