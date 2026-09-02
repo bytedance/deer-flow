@@ -381,7 +381,13 @@ class AioSandbox(Sandbox):
                 result = self._client.shell.exec_command(command=f"find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500", no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
                 output = result.data.output if result.data else ""
                 if output:
-                    return [line.strip() for line in output.strip().split("\n") if line.strip()]
+                    # find delimits records with "\n" and nothing else, so split
+                    # on that alone: splitlines() would also break on \v, \f,
+                    # \x1c-\x1e and \x85, all of which are legal inside a Linux
+                    # filename. Do NOT strip entries either — a filename that
+                    # legitimately ends in whitespace would be corrupted and
+                    # never resolve again.
+                    return [line for line in output.split("\n") if line]
                 return []
             except Exception as e:
                 logger.error(f"Failed to list directory in sandbox: {e}")
