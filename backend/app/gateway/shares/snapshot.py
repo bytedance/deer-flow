@@ -22,10 +22,13 @@ logger = logging.getLogger(__name__)
 
 _SNAPSHOT_SCAN_PAGE_SIZE = 200
 _SNAPSHOT_MAX_MESSAGES = 2000
-# Total renderable-text budget: the persisted snapshot duplicates the whole
-# transcript and every anonymous resolution deserializes AND re-sanitizes
-# it, so a "few huge messages" thread must fail 413 exactly like a
-# many-messages one instead of turning each public read into unbounded work.
+# Total renderable-text budget, measured in UTF-8 encoded bytes (round 11):
+# the persisted snapshot duplicates the whole transcript and every anonymous
+# resolution deserializes AND re-sanitizes it, so a "few huge messages"
+# thread must fail 413 exactly like a many-messages one instead of turning
+# each public read into unbounded work. Encoded bytes, not code points: an
+# astral-plane character costs four bytes on disk (more once JSON-escaped),
+# so a code-point budget would under-count emoji-heavy transcripts 4x+.
 _SNAPSHOT_MAX_RENDERED_BYTES = 2 * 1024 * 1024
 # Independent safety bound on RAW scanned rows: a tool-heavy thread can carry
 # far more rows than public messages, and without this the backward scan
@@ -194,7 +197,7 @@ async def build_share_snapshot(
         if page_messages:
             pages.append(page_messages)
             public_messages += len(page_messages)
-            rendered_bytes += sum(len(message["content"]) for message in page_messages)
+            rendered_bytes += sum(len(message["content"].encode("utf-8")) for message in page_messages)
         if rendered_bytes > _SNAPSHOT_MAX_RENDERED_BYTES:
             logger.warning(
                 "Share snapshot for thread %s exceeded the %d rendered-bytes cap; refusing partial share",
@@ -486,12 +489,18 @@ _REFERENCE_TRAILING_PUNCTUATION = ".,;:!?)]}\"'`*_~(|[<"
 # token, and the first cut must not publish the tail items.
 _REFERENCE_CUT_TERMINATORS = ",;:!?)\\]}\"'`*_~(|[<"
 
-# Owner-scoped API surface (round 8): every ``/api/threads/{id}/<segment>``
-# route is private, not just the artifacts/uploads pair — each carries the
-# internal thread id and several are owner-only exports. The leading
-# separator is optional so a relative Markdown destination or a bare path
-# in running text classifies identically instead of publishing a
-# live-looking private link.
+# Owner-scoped API surface (round 8): every ``/api/threads/{id}`` route is
+# private, not just the artifacts/uploads pair — each carries the internal
+# thread id and several are owner-only exports. The id ends at a path/query/
+# fragment/whitespace boundary or at the end of the token: the bare
+# ``/api/threads/SECRET`` shape (round 11) leaks the identifier exactly like
+# the ``/<segment>`` form, and an id-shaped word cannot be told apart from a
+# secret, so both classify. The leading separator is optional so a relative
+# Markdown destination or a bare path in running text classifies identically
+# instead of publishing a live-looking private link. The mount name requires
+# the same kind of trailing boundary (round 11): ``mnt/user-data`` ends the
+# private mount, while ``user-database``/``user-data-v2``/``user-data.backup``
+# are different, public names an unbounded prefix would have swallowed.
 #
 # The phrase boundary is judged in the coordinates of the bytes actually
 # fed to classification — the phrase starts wherever any non-word,
@@ -505,10 +514,10 @@ _REFERENCE_CUT_TERMINATORS = ",;:!?)\\]}\"'`*_~(|[<"
 # the anchored probe keeps the lookbehind form (its window starts at a
 # boundary by construction).
 _BOUNDARY_BLOCK_RE = re.compile(r"[\w.\-]\Z")
-_CORE_API_THREAD_REFERENCE_RE = re.compile(r"api/threads/[^/?#\s]+/", re.IGNORECASE)
-_CORE_MNT_USER_DATA_RE = re.compile(r"mnt/user-data", re.IGNORECASE)
-_API_THREAD_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/threads/[^/?#\s]+/", re.IGNORECASE)
-_MNT_USER_DATA_RE = re.compile(r"(?<![\w.\-])mnt/user-data", re.IGNORECASE)
+_CORE_API_THREAD_REFERENCE_RE = re.compile(r"api/threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
+_CORE_MNT_USER_DATA_RE = re.compile(r"mnt/user-data(?![\w.\-])", re.IGNORECASE)
+_API_THREAD_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
+_MNT_USER_DATA_RE = re.compile(r"(?<![\w.\-])mnt/user-data(?![\w.\-])", re.IGNORECASE)
 
 
 def _boundary_ok(fed_text: str, fed_spans: list[tuple[int, int]], shadow_index: int) -> bool:

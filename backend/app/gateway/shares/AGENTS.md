@@ -24,8 +24,11 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   thinking, and tool-call blocks are ignored, and inline assistant `<think>`
   sections are stripped outside Markdown code examples. Owner-only
   `/mnt/user-data` and thread-route references — any
-  `/api/threads/{id}/<segment>` path, not just artifacts/uploads, with or
-  without a leading separator — are replaced with a
+  `/api/threads/{id}` route, bare or with a `<segment>` subpath, not just
+  artifacts/uploads, with or without a leading separator; the id ends at a
+  path/query/fragment/whitespace/end boundary, and the mount name ends the
+  same way (a public sibling like `/mnt/user-database` is a different name
+  and stays) — are replaced with a
   public omission marker in both messages and
   titles (at create time and again on public read). Classification runs on a
   separator-normalized shadow of the text that also decodes percent-encoding,
@@ -41,7 +44,9 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   **public messages**, not raw rows (tool output never consumes budget). At
   exactly 2000 public messages the scan continues only to prove that no older
   public message exists; older tool/hidden rows do not make a complete share
-  fail. A 2 MiB rendered-bytes budget bounds the total public text — a
+  fail. A 2 MiB rendered-bytes budget bounds the total public text, counted
+  in UTF-8 encoded bytes (code points would under-count astral-plane text
+  4x) — a
   "few huge messages" thread fails 413 like a many-messages one, because
   every anonymous resolution deserializes and re-sanitizes the stored
   snapshot. An independent 50k raw-scan budget is consumed inside the canonical

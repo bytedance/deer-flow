@@ -469,9 +469,12 @@ async def test_neutralize_pchar_segments_cancel_whole():
     assert neutralize("\\/api\\/x,y\\/..\\/threads/t1/u") == "[private artifact omitted]"
     # a literal-space segment cancels as one (browsers percent-encode it)
     assert neutralize("[x](</api/x y/../threads/t1/u>)") == "x [private artifact omitted]"
-    # ``..`` cancelling the phrase's own final segment still publishes no
-    # bytes: the as-written shadow carries the phrase
-    assert neutralize("see /api/threads/t1/u/.. end") == "see [private artifact omitted].. end"
+    # ``..`` cancelling the phrase's own final segment: round 11 lets the
+    # resolved shadow pin the bare id precisely, so the id still publishes
+    # no bytes — the cancelled ``/u/..`` tail is route structure without
+    # identifiers and yields to the precise resolved cut (the as-written
+    # wider cut must not swallow what resolution already positioned).
+    assert neutralize("see /api/threads/t1/u/.. end") == "see [private artifact omitted]/u/.. end"
 
 
 async def test_neutralize_split_layer_encodings():
@@ -907,8 +910,10 @@ def test_owner_scoped_thread_routes_are_redacted():
     assert neutralize("/api/threads/8f3a/subagent-batches/b1/results.jsonl exported") == "[private artifact omitted] exported"
     assert neutralize("state at /api/threads/8f3a/state, ok") == "state at [private artifact omitted], ok"
     assert neutralize("history /api/threads/8f3a/history.") == "history [private artifact omitted]."
-    # A bare thread path names no owner-scoped subresource and stays public.
-    assert neutralize("thread /api/threads/8f3a mentioned") == "thread /api/threads/8f3a mentioned"
+    # Round 11: the bare path IS the owner-scoped GET/PATCH/DELETE route and
+    # carries the internal thread id, so it redacts like the subresource
+    # form — the id ends at a query/fragment/whitespace/end boundary.
+    assert neutralize("thread /api/threads/8f3a mentioned") == "thread [private artifact omitted] mentioned"
 
 
 async def test_snapshot_neutralizes_entity_and_unicode_escaped_private_references():
@@ -972,3 +977,56 @@ def test_neutralize_composed_separator_encodings():
     # public API path whose separators are entity-encoded.
     assert neutralize("save &#37;20 today &amp; enjoy") == "save &#37;20 today &amp; enjoy"
     assert neutralize("public API at &#37;2Fapi&#37;2Fv1&#37;2Fstatus stays") == "public API at &#37;2Fapi&#37;2Fv1&#37;2Fstatus stays"
+
+
+async def test_neutralize_redacts_thread_route_that_ends_at_the_id():
+    """The owner-scoped route is equally valid without a trailing slash or
+    subresource: the bare ID shape leaks the thread identifier exactly like
+    the ``/<segment>`` form, so the ID must end at a path/query/fragment/
+    whitespace/end boundary — never only at ``/``."""
+    assert _neutralize_private_references("see /api/threads/thread-secret now") == "see [private artifact omitted] now"
+    assert _neutralize_private_references("api/threads/thread-secret") == "[private artifact omitted]"
+    assert _neutralize_private_references("/api/threads/thread-secret?tab=1") == "[private artifact omitted]"
+    assert _neutralize_private_references("/api/threads/thread-secret#frag") == "[private artifact omitted]"
+    # markdown destination and label shapes leak the same identifier
+    destination = _neutralize_private_references("[link](/api/threads/thread-secret)")
+    assert "thread-secret" not in destination
+    assert "private artifact omitted" in destination
+    assert _neutralize_private_references("[/api/threads/thread-secret](https://example.com/pub)") == "[private artifact omitted]"
+
+
+async def test_neutralize_mount_name_requires_identifier_boundary():
+    """A public sibling path must not be swallowed by an unbounded mount-name
+    prefix: ``mnt/user-data`` classifies only when the name ends (end of
+    token, query, fragment) or is followed by a path separator — identifier-
+    continuing bytes (``user-database``, ``user-data-v2``, ``user-data.backup``)
+    are a different, public name."""
+    assert _neutralize_private_references("/mnt/user-database/report.md") == "/mnt/user-database/report.md"
+    assert _neutralize_private_references("see mnt/user-data-v2/x.png here") == "see mnt/user-data-v2/x.png here"
+    assert _neutralize_private_references("/mnt/user-data.backup") == "/mnt/user-data.backup"
+    # the real mount still classifies at every accepted boundary
+    assert _neutralize_private_references("/mnt/user-data") == "[private artifact omitted]"
+    assert _neutralize_private_references("/mnt/user-data?x=1") == "[private artifact omitted]"
+    assert _neutralize_private_references("/mnt/user-data#s") == "[private artifact omitted]"
+
+
+async def test_snapshot_rendered_bytes_cap_counts_encoded_bytes():
+    """The budget must measure encoded bytes, not code points: astral-plane
+    characters occupy four UTF-8 bytes each, so a transcript far under the
+    cap by character count still exceeds the byte budget the persisted
+    snapshot actually pays."""
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        # 80 code points, 320 UTF-8 bytes — passes a code-point cap of 256.
+        return [_row(1, {"type": "human", "content": "\U0001f389" * 80})], False
+
+    from app.gateway.shares import snapshot as snapshot_module
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(snapshot_module, "_SNAPSHOT_MAX_RENDERED_BYTES", 256)
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        with pytest.raises(ShareSnapshotTooLarge) as excinfo:
+            await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert excinfo.value.limit_kind == "rendered-bytes"
+    assert excinfo.value.cap == 256
