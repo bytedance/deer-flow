@@ -89,6 +89,20 @@ CI.
 
 **Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
 
+### AIO Sandbox Network Policy
+
+Restricted local AIO sandboxes use a per-sandbox Docker internal bridge plus a
+trusted `network_proxy.py` sidecar. The sandbox container itself must never
+publish its API port or join an egress-capable network; only the sidecar publishes
+the fixed API relay. The proxy must resolve destinations itself and reject any
+answer set containing loopback, private, link-local, metadata, or other
+non-global addresses before connecting. Approval events come only from the
+sidecar policy database, never from model-controlled tool output. Middleware
+may present one trusted event through the generic Human Input protocol, but it
+must not replay the failed tool call automatically. Restricted-mode lifecycle
+changes must cover create, discover, list/reconcile, health, and destroy for the
+sandbox container, sidecar, and internal network together.
+
 ### E2B Mount Uploads
 
 The E2B provider uploads host mounts during sandbox creation. It passes binary file objects to the E2B SDK.

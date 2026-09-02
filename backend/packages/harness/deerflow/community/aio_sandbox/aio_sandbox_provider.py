@@ -248,6 +248,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """
         provisioner_url = self._config.get("provisioner_url")
         if provisioner_url:
+            if self.sandbox_network_mode() != "open":
+                raise RuntimeError("sandbox.network restricted modes are currently supported only by the local Docker AIO backend")
             logger.info(f"Using remote sandbox backend with provisioner at {provisioner_url}")
             api_key = self._config.get("provisioner_api_key", "")
             return RemoteSandboxBackend(provisioner_url=provisioner_url, api_key=api_key)
@@ -259,6 +261,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             container_prefix=self._config["container_prefix"],
             config_mounts=self._config["mounts"],
             environment=self._config["environment"],
+            network_config=self._config["network"],
         )
 
     # ── Configuration ────────────────────────────────────────────────────
@@ -287,6 +290,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "mounts": sandbox_config.mounts or [],
             "thread_data_mounts": getattr(sandbox_config, "thread_data_mounts", None),
             "environment": self._resolve_env_vars(sandbox_config.environment or {}),
+            "network": sandbox_config.network.model_dump(),
             "ownership": getattr(sandbox_config, "ownership", None),
             # A redis stream bridge means the deployment is multi-instance, which
             # is what the ownership store must default to. Read the same source
@@ -299,6 +303,22 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 configured_skills_path,
             ),
         }
+
+    def sandbox_network_mode(self) -> str:
+        return str(self._config.get("network", {}).get("mode", "open"))
+
+    def sandbox_network_temporary_grant_ttl(self) -> int:
+        return int(self._config.get("network", {}).get("temporary_grant_ttl", 300))
+
+    def consume_network_policy_events(self, sandbox_id: str, *, since: float) -> list[dict[str, object]]:
+        if not isinstance(self._backend, LocalContainerBackend):
+            return []
+        return self._backend.consume_network_policy_events(sandbox_id, since=since)
+
+    def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        if not isinstance(self._backend, LocalContainerBackend):
+            return False
+        return self._backend.decide_network_policy_request(sandbox_id, request_id, decision)
 
     @staticmethod
     def _resolve_env_vars(env_config: dict[str, str]) -> dict[str, str]:

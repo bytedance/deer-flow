@@ -2,6 +2,7 @@ import logging
 import os
 import socket
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,8 @@ from deerflow.community.aio_sandbox.local_backend import (
     _redact_container_command_for_log,
     _resolve_docker_bind_host,
 )
+from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+from deerflow.utils.network import get_free_port, release_port
 
 
 def test_format_container_mount_uses_mount_syntax_for_docker_windows_paths():
@@ -126,6 +129,116 @@ def test_start_container_logs_redacted_env_values(monkeypatch, caplog):
     assert "NORMAL=<redacted>" in log_output
     assert "secret-value" not in log_output
     assert "visible-value" not in log_output
+
+
+def test_restricted_network_requires_docker_engine_28(monkeypatch):
+    monkeypatch.setattr(LocalContainerBackend, "_detect_runtime", lambda _self: "docker")
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="27.5.1\n", stderr="", returncode=0),
+    )
+
+    with pytest.raises(RuntimeError, match="Docker Engine 28 or newer"):
+        LocalContainerBackend(
+            image="sandbox:latest",
+            base_port=8080,
+            container_prefix="sandbox",
+            config_mounts=[],
+            environment={},
+            network_config={"mode": "isolated"},
+        )
+
+
+def test_restricted_sandbox_has_no_published_port_and_forces_proxy_env(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={"HTTP_PROXY": "http://operator-proxy:3128"},
+    )
+    monkeypatch.setattr(backend, "_runtime", "docker")
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        return SimpleNamespace(stdout="container-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._start_container(
+        "sandbox-test",
+        18080,
+        network_override="deer-flow-sandbox-net-test",
+        publish_port=False,
+        extra_environment={"HTTP_PROXY": "http://deer-flow-netproxy-test:3128"},
+    )
+
+    assert "-p" not in captured_cmd
+    assert captured_cmd[captured_cmd.index("--network") + 1] == "deer-flow-sandbox-net-test"
+    proxy_values = [captured_cmd[index + 1] for index, value in enumerate(captured_cmd) if value == "-e" and captured_cmd[index + 1].startswith("HTTP_PROXY=")]
+    assert proxy_values[-1] == "HTTP_PROXY=http://deer-flow-netproxy-test:3128"
+
+
+def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    backend._network_mode = "allowlist"
+    monkeypatch.setattr(backend, "_create_internal_network", lambda _name: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
+    captured: dict[str, object] = {}
+
+    def fake_start(*_args, **kwargs):
+        captured.update(kwargs)
+        return "container-id"
+
+    monkeypatch.setattr(backend, "_start_container", fake_start)
+
+    assert backend._start_restricted_sandbox("id", "sandbox-id", 18080, None, config_mount_exclusion_root=None) == "container-id"
+
+    proxy_name, network_name = backend._resource_names("id")
+    assert captured["network_override"] == network_name
+    assert captured["publish_port"] is False
+    environment = captured["extra_environment"]
+    assert environment["HTTPS_PROXY"] == f"http://{proxy_name}:3128"
+    assert environment["ALL_PROXY"] == f"http://{proxy_name}:3128"
+    assert environment["PROXY_SERVER"] == f"{proxy_name}:3128"
+
+
+def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    backend._network_mode = "allowlist"
+    backend._network_config = {
+        "mode": "allowlist",
+        "allow_domains": [],
+        "approval": "prompt",
+        "proxy_image": "proxy:latest",
+    }
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(stdout="proxy-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    backend._start_network_proxy("proxy-name", "network-name", "sandbox-name", 18080, "sandbox-id")
+
+    create = commands[0]
+    assert "--read-only" in create
+    assert create[create.index("--tmpfs") + 1] == "/tmp:rw,noexec,nosuid,size=16m"
+    assert "--cap-drop=ALL" in create
+    assert "no-new-privileges" in create
 
 
 def test_start_container_filters_nested_config_mounts_for_policy_scoped_skills(
@@ -731,6 +844,48 @@ def test_discover_returns_none_when_runtime_check_times_out(monkeypatch):
     assert backend.discover("sandbox-timeout") is None
 
 
+def test_restricted_discovery_uses_proxy_relay_port(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._network_mode = "allowlist"
+    proxy_name, _ = backend._resource_names("existing")
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+    monkeypatch.setattr(backend, "_get_container_port", lambda name: 18080 if name == proxy_name else None)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
+
+    info = backend.discover("existing")
+
+    assert info is not None
+    assert info.container_name == "sandbox-existing"
+    assert info.sandbox_url == "http://localhost:18080"
+
+
+def test_restricted_destroy_stops_pair_and_removes_internal_network(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._network_mode = "isolated"
+    proxy_name, network_name = backend._resource_names("existing")
+    stopped: list[str] = []
+    commands: list[list[str]] = []
+    monkeypatch.setattr(backend, "_stop_container", stopped.append)
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend.destroy(
+        SandboxInfo(
+            sandbox_id="existing",
+            sandbox_url="http://localhost:18080",
+            container_name="sandbox-existing",
+            container_id="sandbox-container-id",
+        )
+    )
+
+    assert stopped == ["sandbox-container-id", proxy_name]
+    assert ["docker", "rm", "-f", proxy_name] in commands
+    assert ["docker", "network", "rm", network_name] in commands
+
+
 def test_is_container_running_false_on_apple_container_not_found(monkeypatch):
     """Apple Container's generic "not found" is trusted when it names the container."""
     backend = _backend_for_inspect_tests()
@@ -1041,6 +1196,117 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
         assert backend.is_alive(info)
     finally:
         backend.destroy(info)
+
+
+@pytest.mark.live
+def test_restricted_network_proxy_enforces_and_approves_real_traffic(monkeypatch):
+    """Exercise the Engine-28 bridge, API relay, proxy, event, and grant path."""
+    if not _docker_daemon_available():
+        pytest.skip("requires a running Docker daemon")
+
+    image = os.environ.get("DEER_FLOW_SANDBOX_NETWORK_SMOKE_IMAGE", "python:3.12-alpine")
+    backend = LocalContainerBackend(
+        image=image,
+        base_port=18310,
+        container_prefix="sandbox-policy-smoke",
+        config_mounts=[],
+        environment={},
+        network_config={
+            "mode": "allowlist",
+            "allow_domains": ["pypi.org"],
+            "approval": "prompt",
+            "temporary_grant_ttl": 300,
+            "proxy_image": image,
+        },
+    )
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    sandbox_id = "network-live"
+    container_name = f"sandbox-policy-smoke-{sandbox_id}"
+    proxy_name, network_name = backend._resource_names(sandbox_id)
+    port = get_free_port(start_port=18310)
+    started_at = time.time()
+    proxy_url = f"http://{proxy_name}:3128"
+
+    try:
+        backend._create_internal_network(network_name)
+        backend._start_network_proxy(proxy_name, network_name, container_name, port, sandbox_id)
+        sandbox = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "-d",
+                "--network",
+                network_name,
+                "--name",
+                container_name,
+                "-e",
+                f"HTTP_PROXY={proxy_url}",
+                "-e",
+                f"HTTPS_PROXY={proxy_url}",
+                "-e",
+                f"http_proxy={proxy_url}",
+                "-e",
+                f"https_proxy={proxy_url}",
+                image,
+                "python",
+                "-m",
+                "http.server",
+                "8080",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert sandbox.returncode == 0, sandbox.stderr
+
+        sandbox_url = f"http://127.0.0.1:{port}"
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            relay = subprocess.run(
+                ["curl", "--fail", "--silent", "--max-time", "2", sandbox_url],
+                capture_output=True,
+                text=True,
+            )
+            if relay.returncode == 0:
+                break
+            time.sleep(0.25)
+        assert relay.returncode == 0, relay.stderr
+
+        def sandbox_fetch(url: str, *, use_proxy: bool = True) -> subprocess.CompletedProcess[str]:
+            proxy_handler = "urllib.request.ProxyHandler()" if use_proxy else "urllib.request.ProxyHandler({})"
+            code = f"import urllib.request; opener=urllib.request.build_opener({proxy_handler}); print(opener.open({url!r}, timeout=15).status)"
+            return subprocess.run(
+                ["docker", "exec", container_name, "python", "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=25,
+            )
+
+        allowed = sandbox_fetch("https://pypi.org/simple/")
+        assert allowed.returncode == 0, allowed.stderr
+        assert allowed.stdout.strip() == "200"
+
+        denied = sandbox_fetch("https://example.com/")
+        assert denied.returncode != 0
+        events = backend.consume_network_policy_events(sandbox_id, since=started_at)
+        assert [(event["host"], event["port"]) for event in events] == [("example.com", 443)]
+
+        request_id = str(events[0]["request_id"])
+        assert backend.decide_network_policy_request(sandbox_id, request_id, "allow_temporary")
+        approved = sandbox_fetch("https://example.com/")
+        assert approved.returncode == 0, approved.stderr
+        assert approved.stdout.strip() == "200"
+
+        metadata = sandbox_fetch("http://169.254.169.254/latest/meta-data/")
+        assert metadata.returncode != 0
+        assert backend.consume_network_policy_events(sandbox_id, since=started_at) == []
+
+        direct = sandbox_fetch("https://example.com/", use_proxy=False)
+        assert direct.returncode != 0
+    finally:
+        backend._cleanup_restricted_resources(sandbox_id)
+        release_port(port)
 
 
 def test_start_container_preinitialized_image_can_drop_startup_caps(monkeypatch):

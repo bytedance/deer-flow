@@ -664,6 +664,51 @@ sandbox:
 
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
 
+#### Sandbox network policy
+
+Local Docker AIO sandboxes can opt into an outbound policy:
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  network:
+    mode: allowlist
+    allow_domains:
+      - pypi.org
+      - files.pythonhosted.org
+      - registry.npmjs.org
+    approval: prompt
+    temporary_grant_ttl: 300
+```
+
+`open` (the compatibility default) keeps normal Docker egress. `isolated`
+places each sandbox on a per-sandbox internal bridge and denies all outbound
+traffic. `allowlist` uses the same bridge and a trusted sidecar that supports
+HTTP and HTTPS CONNECT only. Exact domains and leading wildcards such as
+`*.pythonhosted.org` are accepted; URLs, ports, and a catch-all `*` are
+rejected. Traffic that ignores proxy environment variables still has no route
+out of the internal bridge. DeerFlow also sets the upstream AIO image's
+`PROXY_SERVER`/`PROXY_EXCLUDE` variables so its Chromium service uses the same
+policy sidecar; standard upper/lower-case HTTP, HTTPS, and ALL proxy variables
+cover shell and package-manager clients.
+
+With `approval: prompt`, a denied public domain becomes a Human Input card with
+**Deny**, **Allow temporarily**, and **Allow for this sandbox** choices. DeerFlow
+does not replay the failed command after approval because it may already have
+performed local side effects; the agent must retry it explicitly. Non-interactive
+runs fail closed without waiting for input. Loopback, private, link-local,
+multicast, IPv6 ULA/site-local, and cloud metadata destinations are rejected
+after DNS resolution and can never be approved. Raw TCP/UDP, Git-over-SSH, and
+other non-HTTP protocols remain unavailable in restricted modes.
+
+Restricted modes currently require the local Docker backend and Docker Engine
+28 or newer. They fail closed on Apple Container, provisioner mode, and older
+engines. DeerFlow uses Engine 28's isolated bridge gateway mode so the sandbox
+cannot reach services bound to the host-side bridge address. The policy sidecar
+publishes only its fixed sandbox-API relay back to the Gateway; the sandbox API
+itself is not published. Mirror or digest-pin `network.proxy_image` in production
+environments that require supply-chain pinning.
+
 #### Sandbox container network exposure and hardening
 
 The sandbox HTTP API (`/v1/shell/*` and friends) has no authentication: anyone who can reach a published sandbox port can execute arbitrary commands in that sandbox. For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox port to `127.0.0.1` so it is not exposed on other host interfaces. For Docker-outside-of-Docker deployments that connect through `host.docker.internal`, the port is bound to the address that hostname actually resolves to — the daemon's `host-gateway-ip` mapping (customizable, possibly IPv6) — so the published port and the address the gateway connects to always match, and the port is no longer published on external network interfaces (previously it was bound to `0.0.0.0`). If resolution fails, the Docker default bridge gateway (via `docker network inspect bridge`, falling back to `172.17.0.1`) is used as a best-effort bind and a warning is logged. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address; setting it to `0.0.0.0` restores the legacy broad bind, which re-exposes the unauthenticated exec API on every interface and should be paired with an external firewall.
@@ -682,9 +727,9 @@ A custom image that is already fully initialized as a non-root user (no runtime 
 | `DEER_FLOW_SANDBOX_CPUS` | `2` | `--cpus` limit per sandbox container. `0`/`none` disables the limit. |
 | `DEER_FLOW_SANDBOX_PIDS_LIMIT` | `512` | `--pids-limit` per sandbox container (fork-bomb guard). `0`/`none` disables the limit. |
 | `DEER_FLOW_SANDBOX_CONTAINER_USER` | unset (image default) | Passed through as `--user` (e.g. `1000:1000`). The default AIO image's user is upstream-controlled, so DeerFlow does not force one; set this only if you know your image's runtime user. |
-| `DEER_FLOW_SANDBOX_NETWORK` | unset (daemon default network) | Passed through as `--network`. Point it at a dedicated, egress-controlled Docker network so sandbox egress can be filtered by that network's policy; by default sandbox code can otherwise reach internal networks and cloud metadata endpoints directly. `host`, `container:<name>`, and `none` are rejected at startup (including through Docker's extended `name=<network>` syntax, whose effective target is validated): Docker drops `-p/--publish` in host mode (and shares the namespace for `container:<name>`), which would void the hardened port bind and re-expose the unauthenticated exec API; `none` leaves the container loopback-only, so the published sandbox API port cannot receive traffic and every acquisition would time out. |
+| `DEER_FLOW_SANDBOX_NETWORK` | unset (daemon default network) | Legacy `open`-mode escape hatch passed through as `--network`. Prefer `sandbox.network` for managed isolation. `host`, `container:<name>`, and `none` are rejected at startup. Restricted modes ignore this variable and use their own per-sandbox internal network. |
 
-These hardening flags are Docker-only; Apple Container (`container` runtime) keeps its previous, unhardened invocation.
+These hardening flags are Docker-only; Apple Container (`container` runtime) keeps its previous, unhardened invocation and therefore supports only `network.mode: open`.
 
 Sandbox control-plane HTTP calls to loopback/private IPs, single-label cluster
 hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`

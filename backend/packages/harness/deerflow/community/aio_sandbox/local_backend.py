@@ -7,15 +7,18 @@ Handles container lifecycle, port allocation, and cross-process container discov
 from __future__ import annotations
 
 import csv
+import hashlib
 import ipaddress
 import json
 import logging
 import os
+import platform
 import posixpath
 import shlex
 import socket
 import subprocess
 from datetime import datetime
+from pathlib import Path
 
 from deerflow.utils.network import get_free_port, release_port
 
@@ -23,6 +26,12 @@ from .backend import SandboxBackend, wait_for_sandbox_ready
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
+
+
+class _ExistingRestrictedSandbox(RuntimeError):
+    def __init__(self, info: SandboxInfo):
+        super().__init__(f"restricted sandbox {info.sandbox_id} already exists")
+        self.info = info
 
 
 def _parse_docker_timestamp(raw: str) -> float:
@@ -187,6 +196,7 @@ _DOCKER_BRIDGE_GATEWAY_FALLBACK = "172.17.0.1"
 _DEFAULT_SANDBOX_MEMORY = "2g"
 _DEFAULT_SANDBOX_CPUS = "2"
 _DEFAULT_SANDBOX_PIDS_LIMIT = "512"
+_NETWORK_PROXY_CONTAINER_SCRIPT = "/tmp/deerflow-network-proxy.py"
 
 
 def _docker_bridge_gateway_ip() -> str | None:
@@ -466,6 +476,7 @@ class LocalContainerBackend(SandboxBackend):
         container_prefix: str,
         config_mounts: list,
         environment: dict[str, str],
+        network_config: dict[str, object] | None = None,
     ):
         """Initialize the local container backend.
 
@@ -481,12 +492,44 @@ class LocalContainerBackend(SandboxBackend):
         self._container_prefix = container_prefix
         self._config_mounts = config_mounts
         self._environment = environment
+        self._network_config = network_config or {"mode": "open"}
+        self._network_mode = str(self._network_config.get("mode", "open"))
+        self._allow_synthetic_dns = False
         self._runtime = self._detect_runtime()
+
+        if self._network_mode != "open":
+            if self._runtime != "docker":
+                raise RuntimeError("sandbox.network restricted modes require Docker; Apple Container is not supported")
+            self._require_restricted_network_support()
+            self._allow_synthetic_dns = platform.system() in {"Darwin", "Windows"}
 
     @property
     def runtime(self) -> str:
         """The detected container runtime ("docker" or "container")."""
         return self._runtime
+
+    @property
+    def network_mode(self) -> str:
+        return self._network_mode
+
+    def _resource_names(self, sandbox_id: str) -> tuple[str, str]:
+        digest = hashlib.sha256(f"{self._container_prefix}:{sandbox_id}".encode()).hexdigest()[:16]
+        return f"deer-flow-netproxy-{digest}", f"deer-flow-sandbox-net-{digest}"
+
+    def _require_restricted_network_support(self) -> None:
+        try:
+            result = subprocess.run(
+                ["docker", "version", "--format", "{{.Server.Version}}"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            major = int(result.stdout.strip().split(".", 1)[0])
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as exc:
+            raise RuntimeError("sandbox.network restricted modes require a reachable Docker Engine 28 or newer") from exc
+        if major < 28:
+            raise RuntimeError("sandbox.network restricted modes require Docker Engine 28 or newer so the internal bridge can use gateway_mode_ipv4=isolated")
 
     def _detect_runtime(self) -> str:
         """Detect which container runtime to use.
@@ -497,9 +540,7 @@ class LocalContainerBackend(SandboxBackend):
         Returns:
             "container" for Apple Container, "docker" for Docker.
         """
-        import platform
-
-        if platform.system() == "Darwin":
+        if platform.system() == "Darwin" and self._network_mode == "open":
             try:
                 result = subprocess.run(
                     ["container", "--version"],
@@ -512,6 +553,9 @@ class LocalContainerBackend(SandboxBackend):
                 return "container"
             except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 logger.info("Apple Container not available, falling back to Docker")
+
+        if platform.system() == "Darwin" and self._network_mode != "open":
+            logger.info("sandbox.network mode %s requires Docker; skipping Apple Container detection", self._network_mode)
 
         return "docker"
 
@@ -565,19 +609,33 @@ class LocalContainerBackend(SandboxBackend):
         for _attempt in range(10):
             port = get_free_port(start_port=_next_start)
             try:
-                container_id = self._start_container(
-                    container_name,
-                    port,
-                    extra_mounts,
-                    config_mount_exclusion_root=config_mount_exclusion_root,
-                )
+                if self._network_mode == "open":
+                    container_id = self._start_container(
+                        container_name,
+                        port,
+                        extra_mounts,
+                        config_mount_exclusion_root=config_mount_exclusion_root,
+                    )
+                else:
+                    container_id = self._start_restricted_sandbox(
+                        sandbox_id,
+                        container_name,
+                        port,
+                        extra_mounts,
+                        config_mount_exclusion_root=config_mount_exclusion_root,
+                    )
                 break
+            except _ExistingRestrictedSandbox as exc:
+                release_port(port)
+                return exc.info
             except RuntimeError as exc:
                 release_port(port)
                 err = str(exc)
                 err_lower = err.lower()
                 # Port already bound: skip this port and retry with the next one.
                 if "port is already allocated" in err or "address already in use" in err_lower:
+                    if self._network_mode != "open":
+                        self._cleanup_restricted_resources(sandbox_id)
                     logger.warning(f"Port {port} rejected by Docker (already allocated), retrying with next port")
                     _next_start = port + 1
                     continue
@@ -603,6 +661,168 @@ class LocalContainerBackend(SandboxBackend):
             container_id=container_id,
         )
 
+    def _start_restricted_sandbox(
+        self,
+        sandbox_id: str,
+        container_name: str,
+        port: int,
+        extra_mounts: list[tuple[str, str, bool]] | None,
+        *,
+        config_mount_exclusion_root: str | None,
+    ) -> str:
+        proxy_name, network_name = self._resource_names(sandbox_id)
+        try:
+            self._create_internal_network(network_name)
+            self._start_network_proxy(proxy_name, network_name, container_name, port, sandbox_id)
+            proxy_url = f"http://{proxy_name}:3128"
+            return self._start_container(
+                container_name,
+                port,
+                extra_mounts,
+                config_mount_exclusion_root=config_mount_exclusion_root,
+                network_override=network_name,
+                publish_port=False,
+                extra_environment={
+                    "HTTP_PROXY": proxy_url,
+                    "HTTPS_PROXY": proxy_url,
+                    "ALL_PROXY": proxy_url,
+                    "http_proxy": proxy_url,
+                    "https_proxy": proxy_url,
+                    "all_proxy": proxy_url,
+                    "NO_PROXY": "localhost,127.0.0.1,::1",
+                    "no_proxy": "localhost,127.0.0.1,::1",
+                    # The upstream AIO image uses these to configure Chromium;
+                    # Chromium does not consistently consume shell proxy vars.
+                    "PROXY_SERVER": f"{proxy_name}:3128",
+                    "PROXY_EXCLUDE": "localhost,127.0.0.1,::1",
+                },
+                labels={
+                    "deerflow.sandbox_id": sandbox_id,
+                    "deerflow.role": "sandbox",
+                    "deerflow.network_mode": self._network_mode,
+                },
+            )
+        except BaseException as exc:
+            message = str(exc).lower()
+            if "is already in use by container" in message or "conflict. the container name" in message:
+                existing = self.discover(sandbox_id)
+                if existing is not None:
+                    raise _ExistingRestrictedSandbox(existing) from exc
+            self._cleanup_restricted_resources(sandbox_id)
+            raise
+
+    def _create_internal_network(self, network_name: str) -> None:
+        inspect = subprocess.run(
+            ["docker", "network", "inspect", network_name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if inspect.returncode == 0:
+            return
+        result = subprocess.run(
+            [
+                "docker",
+                "network",
+                "create",
+                "--driver",
+                "bridge",
+                "--internal",
+                "--opt",
+                "com.docker.network.bridge.gateway_mode_ipv4=isolated",
+                network_name,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to create restricted sandbox network: {result.stderr.strip()}")
+
+    def _start_network_proxy(self, proxy_name: str, network_name: str, container_name: str, port: int, sandbox_id: str) -> None:
+        allow_domains = self._network_config.get("allow_domains", [])
+        proxy_image = str(
+            self._network_config.get(
+                "proxy_image",
+                "ghcr.io/bytedance/deer-flow-sandbox-network-proxy:latest",
+            )
+        )
+        port_mapping = f"{_resolve_docker_bind_host()}:{port}:8080"
+        cmd = [
+            "docker",
+            "create",
+            "--rm",
+            "--cap-drop=ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--memory",
+            "256m",
+            "--cpus",
+            "1",
+            "--pids-limit",
+            "128",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=16m",
+            "--user",
+            "65532:65532",
+            "-p",
+            port_mapping,
+            "--name",
+            proxy_name,
+            "--label",
+            f"deerflow.sandbox_id={sandbox_id}",
+            "--label",
+            "deerflow.role=network-proxy",
+            "-e",
+            f"DEERFLOW_NETWORK_MODE={self._network_mode}",
+            "-e",
+            f"DEERFLOW_ALLOW_DOMAINS_JSON={json.dumps(allow_domains, separators=(',', ':'))}",
+            "-e",
+            f"DEERFLOW_SANDBOX_TARGET={container_name}:8080",
+            "-e",
+            f"DEERFLOW_ALLOW_SYNTHETIC_DNS={'1' if self._allow_synthetic_dns else '0'}",
+            "-e",
+            f"DEERFLOW_RECORD_DENIALS={'1' if self._network_mode == 'allowlist' and self._network_config.get('approval', 'prompt') == 'prompt' else '0'}",
+            proxy_image,
+            "sh",
+            "-c",
+            f"while [ ! -f {_NETWORK_PROXY_CONTAINER_SCRIPT} ]; do sleep 0.05; done; exec python {_NETWORK_PROXY_CONTAINER_SCRIPT} serve",
+        ]
+        # First use may pull the sidecar image. Match the sandbox create path's
+        # tolerance for an image download instead of killing Docker mid-pull.
+        created = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if created.returncode != 0:
+            raise RuntimeError(f"Failed to create sandbox network proxy: {created.stderr.strip()}")
+        connected = subprocess.run(
+            ["docker", "network", "connect", network_name, proxy_name],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if connected.returncode != 0:
+            raise RuntimeError(f"Failed to connect sandbox network proxy: {connected.stderr.strip()}")
+        started = subprocess.run(["docker", "start", proxy_name], capture_output=True, text=True, timeout=15)
+        if started.returncode != 0:
+            raise RuntimeError(f"Failed to start sandbox network proxy: {started.stderr.strip()}")
+        source = Path(__file__).with_name("network_proxy.py")
+        copied = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "-i",
+                proxy_name,
+                "python",
+                "-c",
+                (f"import pathlib,sys; p=pathlib.Path({_NETWORK_PROXY_CONTAINER_SCRIPT!r}); tmp=p.with_suffix('.tmp'); tmp.write_bytes(sys.stdin.buffer.read()); tmp.replace(p)"),
+            ],
+            input=source.read_bytes(),
+            capture_output=True,
+            timeout=15,
+        )
+        if copied.returncode != 0:
+            raise RuntimeError(f"Failed to install sandbox network proxy: {(copied.stderr or b'').decode(errors='replace').strip()}")
+
     def destroy(self, info: SandboxInfo) -> None:
         """Stop the container and release its port."""
         # Prefer container_id, fall back to container_name (both accepted by docker stop).
@@ -611,6 +831,8 @@ class LocalContainerBackend(SandboxBackend):
         stop_target = info.container_id or info.container_name
         if stop_target:
             self._stop_container(stop_target)
+        if self._network_mode != "open":
+            self._cleanup_restricted_resources(info.sandbox_id, stop_sandbox=False)
         # Extract port from sandbox_url for release
         try:
             from urllib.parse import urlparse
@@ -624,7 +846,12 @@ class LocalContainerBackend(SandboxBackend):
     def is_alive(self, info: SandboxInfo) -> bool:
         """Check if the container is still running (lightweight, no HTTP)."""
         if info.container_name:
-            return self._is_container_running(info.container_name)
+            if not self._is_container_running(info.container_name):
+                return False
+            if self._network_mode != "open":
+                proxy_name, _ = self._resource_names(info.sandbox_id)
+                return self._is_container_running(proxy_name)
+            return True
         return False
 
     def discover(self, sandbox_id: str) -> SandboxInfo | None:
@@ -654,7 +881,18 @@ class LocalContainerBackend(SandboxBackend):
         if not running:
             return None
 
-        port = self._get_container_port(container_name)
+        port_container = container_name
+        if self._network_mode != "open":
+            proxy_name, _ = self._resource_names(sandbox_id)
+            try:
+                if not self._is_container_running(proxy_name):
+                    return None
+            except RuntimeError as e:
+                logger.warning(f"Could not verify network proxy {proxy_name} during discovery: {e}")
+                return None
+            port_container = proxy_name
+
+        port = self._get_container_port(port_container)
         if port is None:
             return None
 
@@ -721,7 +959,10 @@ class LocalContainerBackend(SandboxBackend):
             return []
 
         # Step 2: batched docker inspect — single subprocess call for all containers
-        inspections = self._batch_inspect(container_names)
+        inspect_names = list(container_names)
+        if self._network_mode != "open":
+            inspect_names.extend(self._resource_names(name[len(self._container_prefix) + 1 :])[0] for name in container_names)
+        inspections = self._batch_inspect(inspect_names)
 
         infos: list[SandboxInfo] = []
         sandbox_host = _normalize_sandbox_host_for_url(os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost"))
@@ -730,8 +971,15 @@ class LocalContainerBackend(SandboxBackend):
             if data is None:
                 # Container disappeared between ps and inspect, or inspect failed
                 continue
-            created_at, host_port = data
             sandbox_id = container_name[len(self._container_prefix) + 1 :]
+            created_at, host_port = data
+            if self._network_mode != "open":
+                proxy_name, _ = self._resource_names(sandbox_id)
+                proxy_data = inspections.get(proxy_name)
+                if proxy_data is None:
+                    host_port = None
+                else:
+                    host_port = proxy_data[1]
             sandbox_url = f"http://{sandbox_host}:{host_port}" if host_port else ""
 
             infos.append(
@@ -745,6 +993,76 @@ class LocalContainerBackend(SandboxBackend):
 
         logger.info(f"Found {len(infos)} running sandbox container(s)")
         return infos
+
+    def _cleanup_restricted_resources(self, sandbox_id: str, *, stop_sandbox: bool = True) -> None:
+        proxy_name, network_name = self._resource_names(sandbox_id)
+        if stop_sandbox:
+            self._stop_container(f"{self._container_prefix}-{sandbox_id}")
+        self._stop_container(proxy_name)
+        # ``--rm`` removes a container after it has run and then stopped, but
+        # not one left in Docker's Created state by a failure before start.
+        # An explicit remove closes that lifecycle gap and is harmless after a
+        # normal stop (Docker reports the already-removed name as not found).
+        removed = subprocess.run(
+            ["docker", "rm", "-f", proxy_name],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if removed.returncode != 0 and "no such container" not in (removed.stderr or "").lower():
+            logger.warning("Failed to remove sandbox network proxy %s: %s", proxy_name, removed.stderr.strip())
+        result = subprocess.run(
+            ["docker", "network", "rm", network_name],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0 and "not found" not in (result.stderr or "").lower():
+            logger.warning("Failed to remove sandbox network %s: %s", network_name, result.stderr.strip())
+
+    def consume_network_policy_events(self, sandbox_id: str, *, since: float) -> list[dict[str, object]]:
+        if self._network_mode != "allowlist" or self._network_config.get("approval", "prompt") != "prompt":
+            return []
+        proxy_name, _ = self._resource_names(sandbox_id)
+        result = subprocess.run(
+            ["docker", "exec", proxy_name, "python", _NETWORK_PROXY_CONTAINER_SCRIPT, "pending", "--since", str(since)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            logger.warning("Failed to read sandbox network policy events for %s: %s", sandbox_id, result.stderr.strip())
+            return []
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            logger.warning("Sandbox network proxy returned invalid policy events for %s", sandbox_id)
+            return []
+        return [event for event in payload if isinstance(event, dict)] if isinstance(payload, list) else []
+
+    def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        if self._network_mode != "allowlist" or decision not in {"deny", "allow_temporary", "allow_sandbox"}:
+            return False
+        proxy_name, _ = self._resource_names(sandbox_id)
+        ttl = int(self._network_config.get("temporary_grant_ttl", 300))
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                proxy_name,
+                "python",
+                _NETWORK_PROXY_CONTAINER_SCRIPT,
+                "decide",
+                request_id,
+                decision,
+                "--ttl",
+                str(ttl),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
 
     def _batch_inspect(self, container_names: list[str]) -> dict[str, tuple[float, int | None]]:
         """Batch-inspect containers in a single subprocess call.
@@ -801,6 +1119,10 @@ class LocalContainerBackend(SandboxBackend):
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
         config_mount_exclusion_root: str | None = None,
+        network_override: str | None = None,
+        publish_port: bool = True,
+        extra_environment: dict[str, str] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> str:
         """Start a new container.
 
@@ -914,7 +1236,10 @@ class LocalContainerBackend(SandboxBackend):
             # otherwise sandbox code can reach internal networks and cloud
             # metadata endpoints directly, bypassing the gateway's SSRF
             # protections.
-            if network := os.environ.get("DEER_FLOW_SANDBOX_NETWORK", "").strip():
+            network = network_override
+            if network is None:
+                network = os.environ.get("DEER_FLOW_SANDBOX_NETWORK", "").strip()
+            if network:
                 # Validate the *effective* target: Docker accepts the extended
                 # "name=<network>" long syntax in addition to plain names and
                 # network IDs, and "name=host" / "name=none" attach exactly
@@ -952,24 +1277,23 @@ class LocalContainerBackend(SandboxBackend):
                 # the legit name=<custom-net> long form all keep working.
                 cmd.extend(["--network", network])
 
-        if self._runtime == "docker":
-            port_mapping = f"{_resolve_docker_bind_host()}:{port}:8080"
-        else:
-            port_mapping = f"{port}:8080"
+        cmd.extend(["--rm", "-d"])
+        if publish_port:
+            if self._runtime == "docker":
+                port_mapping = f"{_resolve_docker_bind_host()}:{port}:8080"
+            else:
+                port_mapping = f"{port}:8080"
+            cmd.extend(["-p", port_mapping])
+        cmd.extend(["--name", container_name])
 
-        cmd.extend(
-            [
-                "--rm",
-                "-d",
-                "-p",
-                port_mapping,
-                "--name",
-                container_name,
-            ]
-        )
+        if labels and self._runtime == "docker":
+            for key, value in labels.items():
+                cmd.extend(["--label", f"{key}={value}"])
 
         # Environment variables
         for key, value in self._environment.items():
+            cmd.extend(["-e", f"{key}={value}"])
+        for key, value in (extra_environment or {}).items():
             cmd.extend(["-e", f"{key}={value}"])
 
         # Config-level volume mounts. A policy-scoped skills view owns its

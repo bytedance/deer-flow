@@ -96,6 +96,32 @@ class SandboxProvider(ABC):
         """
         pass
 
+    def sandbox_network_mode(self) -> str:
+        """Return the provider's effective outbound network mode."""
+        return "open"
+
+    def sandbox_network_temporary_grant_ttl(self) -> int:
+        return 300
+
+    def consume_network_policy_events(self, sandbox_id: str, *, since: float) -> list[dict[str, object]]:
+        """Return newly denied trusted-proxy events for a sandbox.
+
+        Providers without a managed network policy use the empty default.
+        """
+        del sandbox_id, since
+        return []
+
+    async def consume_network_policy_events_async(self, sandbox_id: str, *, since: float) -> list[dict[str, object]]:
+        return await asyncio.to_thread(self.consume_network_policy_events, sandbox_id, since=since)
+
+    def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        """Apply a user decision to one trusted-proxy event."""
+        del sandbox_id, request_id, decision
+        return False
+
+    async def decide_network_policy_request_async(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        return await asyncio.to_thread(self.decide_network_policy_request, sandbox_id, request_id, decision)
+
 
 _default_sandbox_provider: SandboxProvider | None = None
 # Guards every read and write of `_default_sandbox_provider`. The singleton is
@@ -113,6 +139,12 @@ _default_sandbox_provider: SandboxProvider | None = None
 # self-deadlock such a provider and would block every concurrent `get()` during a
 # slow teardown. Keeping callbacks off the lock avoids both.
 _provider_lock = threading.Lock()
+
+
+def get_initialized_sandbox_provider() -> SandboxProvider | None:
+    """Return the provider only when another lifecycle path initialized it."""
+    with _provider_lock:
+        return _default_sandbox_provider
 
 
 def get_sandbox_provider(**kwargs) -> SandboxProvider:
