@@ -40,6 +40,7 @@ import {
   patchThreadMetadata,
   type ThreadMetadataPatch,
 } from "./api";
+import { reduceThreadStateUpdates } from "./stream-state";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -659,8 +660,8 @@ export function mergeMessages(
 /**
  * Keep messages from a locally submitted turn behind that turn's user input.
  * LangGraph `messages-tuple` events can publish the first AI/tool steps before
- * the `values` event containing the user message. Those steps are not part of
- * the pre-submit baseline, so move only that visible pending segment behind the
+ * canonical history contains the user message. Those steps are not part of the
+ * pre-submit baseline, so move only that visible pending segment behind the
  * first new human message without disturbing established history or hidden
  * checkpoint controls. The caller keeps the baseline after stream completion
  * because the SDK may retain its transient event order until the next submit.
@@ -1774,7 +1775,9 @@ export function useThreadStream({
           .catch(() => ({}));
       }
     },
-    onUpdateEvent(data) {
+    onUpdateEvent(data, { mutate }) {
+      mutate((previous) => reduceThreadStateUpdates(previous, data) ?? {});
+
       const _messages = getSummarizationMiddlewareMessages(data);
       if (_messages && _messages.length >= 2) {
         for (const m of _messages) {
@@ -2062,9 +2065,9 @@ export function useThreadStream({
 
   // Clear optimistic when server messages arrive.
   // For messages with a human optimistic message, wait until the server's
-  // human message has arrived to avoid clearing before the input message
-  // appears in the stream (the input message may arrive via "values" events
-  // after individual "messages-tuple" events for AI messages).
+  // human message has arrived to avoid clearing before canonical history (or
+  // replay-gap recovery) reports the input after individual messages-tuple
+  // events for AI messages.
   const optimisticMessageCount = optimisticMessages.length;
   const hasHumanOptimistic = optimisticMessages.some((m) => m.type === "human");
   useEffect(() => {
