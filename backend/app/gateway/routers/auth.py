@@ -174,11 +174,12 @@ def _set_session_cookie(response: Response, token: str, request: Request, *, rem
 # no-config.yaml fallback is the LocalAuthConfig model defaults — a single source
 # of truth, not a second copy of the numbers.
 
-# ip → (fail_count, locked_at, locked_duration). A lock carries the duration
-# in force when it started, so _check_rate_limit can tell an active sentence
-# from a served one: a lowered lockout_seconds releases an active lock early,
-# a raised one extends it — but a lock that already served its original
-# sentence is never resurrected by a later duration increase.
+# ip → (fail_count, locked_at, locked_duration). The stored duration always
+# matches the policy the lock was last evaluated under (its creation counts
+# as an evaluation, and every check that leaves the lock active commits the
+# then-current duration, decreases included): a lowered lockout_seconds
+# releases an active lock early, a raised one extends it — and a sentence
+# that already served the last-evaluated duration is never resurrected.
 _login_attempts: dict[str, tuple[int, float, float]] = {}
 
 
@@ -296,12 +297,12 @@ def _check_rate_limit(ip: str) -> None:
         del _login_attempts[ip]
         return
     if now < locked_at + lockout_seconds:
-        # Still inside the original sentence. The *current* duration governs
-        # from here: a lowered lockout_seconds releases early, and a raised
-        # one extends this sentence — but only because the IP is being
-        # evaluated while still locked (renewal); a sentence that already
-        # elapsed is never resurrected by the branch above.
-        if lockout_seconds > locked_duration:
+        # Still locked. The sentence now follows the current duration, and
+        # that evaluation is committed — including decreases — so the stored
+        # sentence always matches the policy the lock was last evaluated
+        # under; a later raise can never resurrect time the lock already
+        # served under a shorter policy.
+        if lockout_seconds != locked_duration:
             _login_attempts[ip] = (fail_count, locked_at, lockout_seconds)
         raise HTTPException(
             status_code=429,

@@ -1145,6 +1145,54 @@ def test_rate_limiter_active_lockout_honors_live_lockout_seconds_change(monkeypa
         _login_attempts.clear()
 
 
+def test_rate_limiter_lowered_then_raised_duration_not_resurrected(monkeypatch):
+    """A shortened duration observed during the sentence is committed, so a
+    later raise cannot resurrect time already served under the short policy.
+
+    60s lock, evaluated at +6s under a lowered 10s policy (still locked — the
+    sentence becomes 10s), then raised to 30s at +20s: the lock expired at
+    +10s under the last-evaluated policy, so the +20s request must be allowed.
+    """
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    def _set_policy(lockout_seconds: float) -> None:
+        set_app_config(
+            AppConfig(
+                sandbox=SandboxConfig(use="test"),
+                auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=2, lockout_seconds=lockout_seconds)),
+            )
+        )
+
+    _login_attempts.clear()
+    try:
+        ip = "10.0.0.8"
+        _set_policy(60.0)
+        _record_login_failure(ip)
+        _record_login_failure(ip)
+        _, locked_at, _ = _login_attempts[ip]
+
+        def _freeze(t: float) -> None:
+            monkeypatch.setattr(auth_router.time, "time", lambda: t)
+
+        _freeze(locked_at + 6.0)
+        _set_policy(10.0)
+        with pytest.raises(HTTPException):
+            _check_rate_limit(ip)  # 6 < 10: still locked, and the 10s sentence is committed
+        assert _login_attempts[ip][2] == 10.0
+
+        _freeze(locked_at + 20.0)
+        _set_policy(30.0)  # raised after the 10s sentence was served at +10s
+        _check_rate_limit(ip)  # not resurrected: allowed
+        assert ip not in _login_attempts
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
+
+
 def test_rate_limiter_tightened_threshold_preserves_failures():
     """Tightening max_login_attempts mid-count keeps the accumulated failures.
 
