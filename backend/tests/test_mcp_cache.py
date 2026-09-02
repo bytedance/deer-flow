@@ -494,3 +494,43 @@ def test_reset_mcp_tools_cache_does_not_wait_for_in_flight_initialization(cache_
     reset_thread.join(timeout=1)
     assert not worker.is_alive()
     assert not reset_thread.is_alive()
+
+
+def test_cancelled_initializer_releases_generation_claim(cache_globals, monkeypatch, tmp_path):
+    """Cancelling the owner task must not strand waiters on its generation claim."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def _fake_tools():
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return []
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    async def _cancel_and_retry():
+        owner = asyncio.create_task(cache_module.initialize_mcp_tools())
+        await asyncio.wait_for(started.wait(), timeout=1)
+        owner.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert cache_module._initializing_generation is None
+        assert cache_module._cache_initialized is False
+
+        release.set()
+        result = await asyncio.wait_for(cache_module.initialize_mcp_tools(), timeout=1)
+        assert result == []
+
+    asyncio.run(_cancel_and_retry())
+    assert cache_module._cache_initialized is True
+    assert cache_module._initializing_generation is None
+    assert calls == 2

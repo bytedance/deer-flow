@@ -152,16 +152,21 @@ async def initialize_mcp_tools() -> list[BaseTool]:
 
     from deerflow.mcp.tools import get_mcp_tools
 
+    loaded_tools = None
+    post_path = None
+    post_sig = None
+    init_succeeded = False
     try:
         logger.info("Initializing MCP tools...")
         loaded_tools = await get_mcp_tools()
         post_path, post_sig = _current_config_state()
-    except Exception:
-        with _init_condition:
-            if _initializing_generation == claim_generation:
-                _initializing_generation = None
-            _init_condition.notify_all()
-        raise
+        init_succeeded = True
+    finally:
+        if not init_succeeded:
+            with _init_condition:
+                if _initializing_generation == claim_generation:
+                    _initializing_generation = None
+                _init_condition.notify_all()
 
     with _init_condition:
         try:
