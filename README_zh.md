@@ -71,6 +71,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [手动上下文压缩](#手动上下文压缩)
     - [Sub-Agents](#sub-agents)
     - [Sandbox 与文件系统](#sandbox-与文件系统)
+    - [Agentic 浏览器控制](#agentic-浏览器控制)
     - [Context Engineering](#context-engineering)
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
@@ -669,6 +670,24 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 ├── workspace/        ← agents 的工作目录
 └── outputs/          ← 最终交付物
 ```
+
+### Agentic 浏览器控制
+
+读取网页和真正操作网页并不是一回事。除了只读的 `web_fetch` 和 `web_capture` 工具，DeerFlow 还提供一个可选的 agentic 浏览器工具组。它会为每个会话维护一个实时浏览器 session，让 agent 可以实际操作网页：导航、读取交互元素、点击、输入、提交表单，以及在大量使用 JavaScript 的网站上完成多步骤流程。
+
+每次操作都会返回页面交互元素的最新快照，并为每个元素分配稳定的 `[ref]` 编号。因此，agent 会根据刚刚观察到的页面执行操作，而不是猜测 CSS selector。外部 URL 默认会经过 SSRF 检查。该能力基于 Playwright，并作为可选依赖提供，以保持核心安装精简：
+
+```bash
+cd backend
+uv sync --extra browser
+uv run playwright install chromium
+```
+
+然后在 `config.yaml` 中取消 `group: browser` 工具项的注释（`browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_get_text`、`browser_back`、`browser_screenshot`、`browser_close`）。`make dev` / Docker 启动流程会检测已启用的 `browser_navigate`，并在依赖同步时保留 `browser` extra。如果配置了浏览器控制但未安装 Playwright，Gateway 会启动失败；当后端无法提供该能力时，`/api/features` 会隐藏 Browser UI。除本地可信调试外，请保持 `headless: true` 和 `allow_private_addresses: false`。通过 `cdp_url` 连接已有 Chrome 时，DeerFlow 无法对该浏览器上下文执行子资源和重定向 SSRF 防护，因此默认会 fail closed；只有明确设置 `allow_unguarded_cdp: true` 才能启用，并且只应连接可信的本地浏览器。浏览器 session 保存在进程内，启用该工具组时请保持 `GATEWAY_WORKERS=1`，因为普通的 uvicorn Worker 调度不提供 thread affinity。
+
+现有的非 mock Custom Agent 会话也可以使用同一套 Browser Live 控件，前提是浏览器控制可用，并且该 Agent 未限制 `tool_groups`，或明确包含 `browser` 工具组。如果显式工具组白名单中没有 `browser`，这些控件会保持隐藏。
+
+Workspace 的 Browser Live 客户端会协商使用二进制 JPEG WebSocket frame，每次屏幕刷新只保留最新的待处理 frame，并撤销已替换的 object URL。Gateway 控制消息仍使用 JSON；未请求二进制能力的客户端继续使用旧版 JSON/base64 frame 协议。
 
 ### Context Engineering
 
