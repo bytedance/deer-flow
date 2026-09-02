@@ -517,8 +517,8 @@ class ScheduledTaskRepository:
         terminal state.  When there is no run row at all the parent keeps
         the original generic cancellation.
 
-        Returns ``True`` if the parent was finalised, ``False`` otherwise
-        (active occurrence or no-op).
+        Returns ``True`` if the parent was finalised, ``False`` for an active
+        occurrence that must be retried by a later recovery pass.
         """
         if run_row is not None and run_row.status in TERMINAL_RUN_STATUSES:
             if run_row.status == "success":
@@ -539,7 +539,7 @@ class ScheduledTaskRepository:
             # Active occurrence — leave the parent unchanged.  A concurrent
             # completion or a later recovery pass will finalize it.
             return False
-        # No run row at all (absent) — generic cancel.
+        # No run row, or an unrecognised legacy status — generic cancel.
         task_row.status = "cancelled"
         task_row.last_error = error
         task_row.updated_at = now
@@ -619,9 +619,10 @@ class ScheduledTaskRepository:
                 if candidate is not None and candidate.status in {"pending", "running"}:
                     if _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
                         continue
-                    # Run takeover commits in its own short transaction. If this
-                    # outer commit fails, the next poll finishes task bookkeeping
-                    # while the underlying run remains safely terminal.
+                    # Run takeover commits the durable RunRow in its own short
+                    # transaction.  Its occurrence projection may remain active
+                    # until reconcile_active_runs runs, so this pass can defer the
+                    # parent and let the next poll finish task bookkeeping.
                     claimed = await self._run_repository.claim_for_takeover(
                         candidate.run_id,
                         grace_seconds=lease_grace_seconds,
