@@ -328,7 +328,7 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     else:
         parsed_url = urlsplit(target)
         if parsed_url.scheme.lower() != "http" or not parsed_url.hostname:
-            await _reject(writer, "403 Forbidden", "Only HTTP and HTTPS proxy requests are supported")
+            await _reject(writer, "403 Forbidden", "Only HTTP absolute-form requests and HTTPS CONNECT are supported")
             return
         try:
             port = parsed_url.port or 80

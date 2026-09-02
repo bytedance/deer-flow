@@ -334,6 +334,8 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if marker in applied:
             return
         provider = get_sandbox_provider()
+        if provider.sandbox_network_mode() != "allowlist":
+            return
         if not provider.decide_network_policy_request(sandbox_id, response["request_id"], decision):
             raise SandboxRuntimeError("The sandbox network approval is stale or does not belong to this sandbox")
         applied.add(marker)
