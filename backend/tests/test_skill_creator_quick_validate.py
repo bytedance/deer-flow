@@ -3,19 +3,12 @@ from __future__ import annotations
 import ast
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL_CREATOR_ROOT = REPO_ROOT / "skills" / "public" / "skill-creator"
 SCRIPTS_DIR = SKILL_CREATOR_ROOT / "scripts"
 VALIDATOR_PATH = SCRIPTS_DIR / "quick_validate.py"
-UTF8_MIGRATED_FILES = (
-    SKILL_CREATOR_ROOT / "eval-viewer" / "generate_review.py",
-    SCRIPTS_DIR / "generate_report.py",
-    SCRIPTS_DIR / "init_skill.py",
-    SCRIPTS_DIR / "quick_validate.py",
-    SCRIPTS_DIR / "run_loop.py",
-    SCRIPTS_DIR / "utils.py",
-)
 
 
 def _load_validator():
@@ -107,10 +100,26 @@ def test_shared_skill_parser_reads_markdown_as_utf8(tmp_path: Path, monkeypatch)
     )
 
 
-def test_migrated_skill_creator_text_io_declares_utf8() -> None:
+def test_improve_description_uses_utf8_for_claude_text_io(monkeypatch) -> None:
+    monkeypatch.syspath_prepend(str(SKILL_CREATOR_ROOT))
+    improve_description = _load_script("improve_description")
+    captured: dict[str, object] = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="改进后的描述", stderr="")
+
+    monkeypatch.setattr(improve_description.subprocess, "run", fake_run)
+
+    assert improve_description._call_claude("处理中文内容🙂", None) == "改进后的描述"
+    assert captured["input"] == "处理中文内容🙂"
+    assert captured["encoding"] == "utf-8"
+
+
+def test_skill_creator_text_io_declares_utf8() -> None:
     missing_encoding: list[str] = []
 
-    for script_path in UTF8_MIGRATED_FILES:
+    for script_path in sorted(SKILL_CREATOR_ROOT.rglob("*.py")):
         tree = ast.parse(script_path.read_text(encoding="utf-8"), filename=str(script_path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -123,6 +132,12 @@ def test_migrated_skill_creator_text_io_declares_utf8() -> None:
                 if isinstance(mode, ast.Constant) and isinstance(mode.value, str) and "b" in mode.value:
                     continue
                 operation = "open"
+            elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess":
+                keywords = {keyword.arg: keyword.value for keyword in node.keywords if keyword.arg is not None}
+                text_mode = any(isinstance(keywords.get(name), ast.Constant) and keywords[name].value is True for name in ("text", "universal_newlines"))
+                if not text_mode and "encoding" not in keywords:
+                    continue
+                operation = f"subprocess.{node.func.attr}"
             else:
                 continue
 
