@@ -25,6 +25,9 @@ test:
 test-live:
 	DEER_FLOW_RUN_LIVE_TESTS=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m live tests/ -v -s
 
+model-smoke:
+	DEER_FLOW_RUN_LIVE_TESTS=1 PYTHONPATH=.:packages/harness:packages/extension-api PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python tests/model_compat/run_smoke.py $(ARGS)
+
 test-blocking-io:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/blocking_io -q --tb=short
 
