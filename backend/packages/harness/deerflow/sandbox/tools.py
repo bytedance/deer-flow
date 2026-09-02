@@ -34,6 +34,7 @@ from deerflow.sandbox.exceptions import (
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.lease import (
     get_sandbox_lease_manager,
+    run_sync_lifecycle_operation,
     sandbox_command_scope,
     sandbox_lease_owner,
 )
@@ -1670,7 +1671,7 @@ async def _run_sync_tool_after_async_sandbox_init(
             if func is None:
                 return "Error: Tool implementation not available"
 
-            return await asyncio.to_thread(func, runtime, *args)
+            return await run_sync_lifecycle_operation(func, runtime, *args)
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:

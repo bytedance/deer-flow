@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
+
 import pytest
 from langchain.tools import ToolRuntime
 from langgraph.types import Overwrite
@@ -11,7 +14,11 @@ from deerflow.sandbox.lease import SANDBOX_LEASE_OWNER_CONTEXT_KEY, get_sandbox_
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
-from deerflow.sandbox.tools import ensure_sandbox_initialized, ensure_sandbox_initialized_async
+from deerflow.sandbox.tools import (
+    _run_sync_tool_after_async_sandbox_init,
+    ensure_sandbox_initialized,
+    ensure_sandbox_initialized_async,
+)
 
 
 class _StubSandbox(Sandbox):
@@ -473,3 +480,76 @@ async def test_ensure_sandbox_initialized_async_acquires_fresh_when_parent_missi
     assert sandbox is provider.sandbox
     assert runtime.state["sandbox"] == {"sandbox_id": "fresh-sandbox"}
     assert runtime.context["sandbox_id"] == "fresh-sandbox"
+
+
+@pytest.mark.anyio
+async def test_cancelled_async_tool_drains_worker_before_execution_lease_cleanup(monkeypatch) -> None:
+    """Cancellation must not let a late sync body re-admit a released owner."""
+    provider = _FallthroughProvider()
+    set_sandbox_provider(provider)
+    worker_started = threading.Event()
+    allow_worker = threading.Event()
+    worker_finished = threading.Event()
+    try:
+        runtime = _make_runtime({"sandbox": {"sandbox_id": "fresh-sandbox"}})
+        runtime.context.update(
+            {
+                SANDBOX_LEASE_OWNER_CONTEXT_KEY: "cancelled-child",
+                "thread_id": "thread-1",
+                "user_id": "user-1",
+            }
+        )
+        manager = get_sandbox_lease_manager(provider)
+        await manager.acquire_async("cancelled-child", "thread-1", user_id="user-1")
+        await manager.acquire_async("parallel-sibling", "thread-1", user_id="user-1")
+
+        async def _allow_sandbox(*, context, app_config):
+            del context, app_config
+
+        async def _safe_config():
+            return None
+
+        monkeypatch.setattr("deerflow.sandbox.tools.authorize_sandbox_execution_async", _allow_sandbox)
+        monkeypatch.setattr("deerflow.sandbox.tools.safe_app_config_async", _safe_config)
+
+        def _blocking_tool(inner_runtime: ToolRuntime) -> str:
+            worker_started.set()
+            assert allow_worker.wait(timeout=2)
+            try:
+                sandbox = ensure_sandbox_initialized(inner_runtime)
+                return sandbox.execute_command("late command")
+            finally:
+                worker_finished.set()
+
+        async def _run_then_cleanup() -> str:
+            try:
+                return await _run_sync_tool_after_async_sandbox_init(_blocking_tool, runtime)
+            finally:
+                await manager.release_async("cancelled-child")
+
+        execution = asyncio.create_task(_run_then_cleanup())
+        assert await asyncio.to_thread(worker_started.wait, 1)
+
+        for _ in range(3):
+            execution.cancel()
+            await asyncio.sleep(0)
+
+        assert not execution.done()
+        assert manager.binding_for("cancelled-child") == "fresh-sandbox"
+        assert provider.released == []
+
+        allow_worker.set()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+
+        assert worker_finished.is_set()
+        assert manager.binding_for("cancelled-child") is None
+        assert manager.binding_for("parallel-sibling") == "fresh-sandbox"
+        assert provider.released == []
+
+        await manager.release_async("parallel-sibling")
+        assert provider.released == ["fresh-sandbox"]
+    finally:
+        allow_worker.set()
+        await asyncio.to_thread(worker_finished.wait, 2)
+        reset_sandbox_provider()

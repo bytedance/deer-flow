@@ -13,6 +13,7 @@ import asyncio
 import logging
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -47,6 +48,89 @@ async def _drain_task_after_cancellation[T](task: asyncio.Task[T]) -> T:
         except asyncio.CancelledError:
             if task.done():
                 return task.result()
+
+
+async def run_sync_lifecycle_operation[T](func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """Run blocking client work without letting cancellation outlive it.
+
+    ``asyncio.to_thread`` cannot stop its worker when the awaiting task is
+    cancelled. Sandbox cleanup must therefore wait for the worker before an
+    outer execution/request fence is allowed to release its client holder.
+    Repeated cancellation is remembered and propagated only after the worker
+    has terminated; a late worker failure is logged without replacing the
+    caller's cancellation.
+    """
+    operation_task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(operation_task)
+    except asyncio.CancelledError as cancellation:
+        try:
+            await _drain_task_after_cancellation(operation_task)
+        except Exception:
+            logger.warning(
+                "Cancelled sandbox client operation failed while draining",
+                exc_info=True,
+            )
+        raise cancellation
+
+
+@dataclass(slots=True)
+class SandboxClientLease:
+    """One bounded caller's process-local hold on a sandbox client."""
+
+    sandbox: object | None
+    sandbox_id: str
+    owner_id: str | None
+    provider: SandboxProvider
+
+    async def release(self) -> None:
+        """Drop this holder after its final sandbox operation has drained."""
+        if self.owner_id is None:
+            return
+        owner_id = self.owner_id
+        self.owner_id = None
+        await get_sandbox_lease_manager(self.provider).release_async(owner_id)
+
+    async def run_sync[T](self, func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+        """Run one blocking client operation inside this lease boundary."""
+        return await run_sync_lifecycle_operation(func, *args, **kwargs)
+
+
+async def acquire_sandbox_client_lease(
+    provider: SandboxProvider,
+    thread_id: str,
+    *,
+    user_id: str,
+    owner_prefix: str,
+    release_on_last: bool = True,
+) -> SandboxClientLease:
+    """Acquire a unique holder and resolve its process-local client.
+
+    This is the non-HTTP counterpart of Gateway request leases. Callers must
+    keep the returned object through their last sandbox operation and release
+    it in ``finally``. ``release_on_last=False`` is appropriate for upload
+    synchronization: the upload fences a concurrent run but does not itself
+    request that the warm sandbox be parked.
+    """
+    owner_id = f"{owner_prefix}:{uuid.uuid4()}"
+    manager = get_sandbox_lease_manager(provider)
+    sandbox_id = await manager.acquire_async(
+        owner_id,
+        thread_id,
+        user_id=user_id,
+        release_on_last=release_on_last,
+    )
+    try:
+        sandbox = provider.get(sandbox_id)
+    except BaseException:
+        await manager.release_async(owner_id)
+        raise
+    return SandboxClientLease(
+        sandbox=sandbox,
+        sandbox_id=sandbox_id,
+        owner_id=owner_id,
+        provider=provider,
+    )
 
 
 @dataclass(frozen=True)
