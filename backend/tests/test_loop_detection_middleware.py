@@ -652,6 +652,217 @@ class TestLoopDetection:
         assert "default" in mw._history
 
 
+class TestLoopDetectionRunEvents:
+    @staticmethod
+    def _runtime_with_journal(journal):
+        runtime = _make_runtime()
+        runtime.context["__run_journal"] = journal
+        return runtime
+
+    def test_identical_call_warning_records_once_without_arguments(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=10,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        call = [_bash_call("SUPER_SECRET_COMMAND")]
+
+        # The second identical call reaches the warning threshold.
+        for _ in range(2):
+            assert mw._apply(_make_state(tool_calls=call), runtime) is None
+
+        # A subsequent occurrence must not duplicate the warning event.
+        assert mw._apply(_make_state(tool_calls=call), runtime) is None
+
+        journal.record_middleware.assert_called_once()
+        recorded = journal.record_middleware.call_args
+
+        assert recorded.kwargs["tag"] == "loop_detection"
+        assert recorded.kwargs["name"] == "LoopDetectionMiddleware"
+        assert recorded.kwargs["hook"] == "after_model"
+        assert recorded.kwargs["action"] == "warn"
+        assert recorded.kwargs["changes"] == {
+            "is_subagent": False,
+            "agent_id": None,
+            "detection_layer": "identical_call_set",
+            "tool_names": ["bash"],
+            "count": 2,
+            "threshold": 2,
+        }
+
+        # Tool arguments and argument-derived values must not be persisted.
+        assert "SUPER_SECRET_COMMAND" not in repr(recorded)
+        assert "args" not in recorded.kwargs["changes"]
+
+    def test_narrow_subagent_recorder_key_records_without_shared_journal(self):
+        recorder = MagicMock()
+        runtime = _make_runtime()
+        runtime.context["__run_loop_detection_recorder"] = recorder
+        runtime.context["is_subagent"] = True
+        runtime.context["agent_id"] = "general-purpose"
+        assert "__run_journal" not in runtime.context
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=10,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        call = [_bash_call("ls")]
+
+        assert mw._apply(_make_state(tool_calls=call), runtime) is None
+        assert mw._apply(_make_state(tool_calls=call), runtime) is None
+
+        recorder.record_middleware.assert_called_once()
+        assert recorder.record_middleware.call_args.kwargs["action"] == "warn"
+        assert recorder.record_middleware.call_args.kwargs["changes"]["is_subagent"] is True
+        assert recorder.record_middleware.call_args.kwargs["changes"]["agent_id"] == "general-purpose"
+
+    def test_identical_call_hard_stop_records_event(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=3,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        call = [_bash_call("ls")]
+
+        for _ in range(2):
+            assert mw._apply(_make_state(tool_calls=call), runtime) is None
+
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+
+        assert result is not None
+        assert result["messages"][0].tool_calls == []
+
+        # One warning transition followed by one hard-stop transition.
+        assert journal.record_middleware.call_count == 2
+        recorded = journal.record_middleware.call_args_list[-1]
+
+        assert recorded.kwargs["tag"] == "loop_detection"
+        assert recorded.kwargs["action"] == "hard_stop"
+        assert recorded.kwargs["changes"] == {
+            "is_subagent": False,
+            "agent_id": None,
+            "detection_layer": "identical_call_set",
+            "tool_names": ["bash"],
+            "count": 3,
+            "threshold": 3,
+        }
+
+    def test_tool_frequency_warning_records_once(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        mw = LoopDetectionMiddleware(
+            warn_threshold=100,
+            hard_limit=200,
+            tool_freq_warn=2,
+            tool_freq_hard_limit=10,
+        )
+
+        # Vary the arguments so the identical-call detector cannot fire.
+        for index in range(3):
+            result = mw._apply(
+                _make_state(tool_calls=[_bash_call(f"command-{index}")]),
+                runtime,
+            )
+            assert result is None
+
+        journal.record_middleware.assert_called_once()
+        recorded = journal.record_middleware.call_args
+
+        assert recorded.kwargs["action"] == "warn"
+        assert recorded.kwargs["changes"] == {
+            "is_subagent": False,
+            "agent_id": None,
+            "detection_layer": "tool_frequency",
+            "tool_names": ["bash"],
+            "count": 2,
+            "threshold": 2,
+        }
+
+    def test_tool_frequency_hard_stop_records_event(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        mw = LoopDetectionMiddleware(
+            warn_threshold=100,
+            hard_limit=200,
+            tool_freq_warn=2,
+            tool_freq_hard_limit=3,
+        )
+
+        for index in range(2):
+            assert (
+                mw._apply(
+                    _make_state(tool_calls=[_bash_call(f"command-{index}")]),
+                    runtime,
+                )
+                is None
+            )
+
+        result = mw._apply(
+            _make_state(tool_calls=[_bash_call("command-2")]),
+            runtime,
+        )
+
+        assert result is not None
+        assert journal.record_middleware.call_count == 2
+
+        recorded = journal.record_middleware.call_args_list[-1]
+        assert recorded.kwargs["action"] == "hard_stop"
+        assert recorded.kwargs["changes"] == {
+            "is_subagent": False,
+            "agent_id": None,
+            "detection_layer": "tool_frequency",
+            "tool_names": ["bash"],
+            "count": 3,
+            "threshold": 3,
+        }
+
+    def test_journal_failure_warns_without_breaking_detection(self, caplog):
+        journal = MagicMock()
+        journal.record_middleware.side_effect = RuntimeError("db down")
+        runtime = self._runtime_with_journal(journal)
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=10,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        call = [_bash_call("ls")]
+
+        assert mw._apply(_make_state(tool_calls=call), runtime) is None
+
+        with caplog.at_level("WARNING"):
+            result = mw._apply(_make_state(tool_calls=call), runtime)
+
+        assert result is None
+        assert mw._pending_warnings[_pending_key()]
+        assert "Failed to record middleware:loop_detection event" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_async_after_model_records_warning_event(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=10,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        call = [_bash_call("ls")]
+
+        assert await mw.aafter_model(_make_state(tool_calls=call), runtime) is None
+        assert await mw.aafter_model(_make_state(tool_calls=call), runtime) is None
+
+        journal.record_middleware.assert_called_once()
+        assert journal.record_middleware.call_args.kwargs["action"] == "warn"
+
+
 class TestLoopDetectionAgentGraphIntegration:
     def test_loop_warning_is_transient_in_real_agent_graph(self):
         """after_model queues the warning; wrap_model_call injects it request-only."""

@@ -27,6 +27,8 @@ from deerflow.config.authorization_config import AuthorizationConfig, Authorizat
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.sandbox.lease import ensure_sandbox_lease_owner, get_sandbox_lease_manager
+from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
 from deerflow.skills.types import SkillCategory
 from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.uploads.manager import PathTraversalError
@@ -3651,6 +3653,85 @@ class TestStreamHardening:
         ):
             with pytest.raises(RuntimeError, match="model quota exceeded"):
                 list(client.stream("hi", thread_id="t-err"))
+
+    def test_agent_exception_releases_embedded_execution_lease(self, client):
+        provider = MagicMock()
+        provider.get.return_value = MagicMock()
+        manager = get_sandbox_lease_manager(provider)
+        owner_ids: list[str] = []
+
+        def failing_stream(state, *, config, context, stream_mode):
+            del state, config, stream_mode
+            owner_id = ensure_sandbox_lease_owner(context)
+            assert owner_id is not None
+            owner_ids.append(owner_id)
+            context["sandbox_id"] = "shared"
+            manager.retain(
+                owner_id,
+                "shared",
+                thread_id="t-err-lease",
+                user_id="anonymous",
+            )
+            raise RuntimeError("model quota exceeded")
+            yield  # pragma: no cover
+
+        agent = MagicMock()
+        agent.stream.side_effect = failing_stream
+        set_sandbox_provider(provider)
+        try:
+            with (
+                patch.object(client, "_ensure_agent"),
+                patch.object(client, "_agent", agent),
+                pytest.raises(RuntimeError, match="model quota exceeded"),
+            ):
+                list(client.stream("hi", thread_id="t-err-lease"))
+
+            assert len(owner_ids) == 1
+            assert manager.binding_for(owner_ids[0]) is None
+            provider.get.return_value.release_command_scope.assert_called_once_with(owner_ids[0])
+            provider.release.assert_called_once_with("shared")
+        finally:
+            reset_sandbox_provider()
+
+    def test_abandoned_embedded_stream_releases_execution_lease(self, client):
+        provider = MagicMock()
+        provider.get.return_value = MagicMock()
+        manager = get_sandbox_lease_manager(provider)
+        owner_ids: list[str] = []
+
+        def blocking_stream(state, *, config, context, stream_mode):
+            del state, config, stream_mode
+            owner_id = ensure_sandbox_lease_owner(context)
+            assert owner_id is not None
+            owner_ids.append(owner_id)
+            context["sandbox_id"] = "shared"
+            manager.retain(
+                owner_id,
+                "shared",
+                thread_id="t-abandoned-lease",
+                user_id="anonymous",
+            )
+            yield "values", {"messages": []}
+            raise AssertionError("abandoned stream continued")
+
+        agent = MagicMock()
+        agent.stream.side_effect = blocking_stream
+        set_sandbox_provider(provider)
+        try:
+            with (
+                patch.object(client, "_ensure_agent"),
+                patch.object(client, "_agent", agent),
+            ):
+                stream = client.stream("hi", thread_id="t-abandoned-lease")
+                assert next(stream).type == "values"
+                stream.close()
+
+            assert len(owner_ids) == 1
+            assert manager.binding_for(owner_ids[0]) is None
+            provider.get.return_value.release_command_scope.assert_called_once_with(owner_ids[0])
+            provider.release.assert_called_once_with("shared")
+        finally:
+            reset_sandbox_provider()
 
     def test_messages_without_id(self, client):
         """Messages without id attribute are emitted without crashing."""

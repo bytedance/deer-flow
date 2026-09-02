@@ -19,7 +19,7 @@ from deerflow.config.agents_config import (
 )
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
-from deerflow.persistence.agents import AgentExistsError, get_agent_store
+from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -251,10 +251,14 @@ async def check_agent_name(name: str) -> dict:
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
     user_id = get_effective_user_id()
+
     # Availability is defined by the active backend and stays consistent with
     # create()'s conflict rule (file: per-user or legacy dir; db: a row). The
     # exists() probe is filesystem IO / a DB round trip, so keep it off the loop.
-    exists = await asyncio.to_thread(get_agent_store().exists, normalized, user_id=user_id)
+    def _exists() -> bool:
+        return get_agent_store().exists(normalized, user_id=user_id)
+
+    exists = await asyncio.to_thread(_exists)
     return {"available": not exists, "name": normalized}
 
 
@@ -334,11 +338,10 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     # model / model_settings / thinking_enabled / reasoning_effort (issue #4336).
     _apply_model_behavior(config_data, request)
 
-    store = get_agent_store()
-
     def _create_agent() -> AgentResponse:
         # Worker thread: existence checks + persistence (file IO or a DB round
         # trip) must stay off the event loop.
+        store = get_agent_store()
         store.create(normalized_name, config_data, request.soul, user_id=user_id)
         logger.info("Created agent '%s'", normalized_name)
         agent_cfg = load_agent_config(normalized_name, user_id=user_id)
@@ -453,11 +456,14 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
             for key, value in preserve_non_managed_fields(agent_cfg).items():
                 updated.setdefault(key, value)
 
-        store = get_agent_store()
         # Persist config (when changed) and/or soul (when provided) off the
         # event loop. A no-change PATCH commits nothing and re-reads current state.
         if updated is not None or request.soul is not None:
-            await asyncio.to_thread(store.update, name, updated, request.soul, user_id=user_id)
+
+            def _update_agent() -> None:
+                get_agent_store().update(name, updated, request.soul, user_id=user_id)
+
+            await asyncio.to_thread(_update_agent)
 
         logger.info(f"Updated agent '{name}'")
 
@@ -560,11 +566,12 @@ async def delete_agent(name: str) -> None:
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
-    store = get_agent_store()
-
     try:
         # Off the event loop: file rmtree or a DB delete plus memory cleanup.
-        outcome = await asyncio.to_thread(store.delete, name, user_id=user_id)
+        def _delete_agent() -> AgentDeleteOutcome:
+            return get_agent_store().delete(name, user_id=user_id)
+
+        outcome = await asyncio.to_thread(_delete_agent)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
