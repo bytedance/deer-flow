@@ -54,14 +54,23 @@ _PRIVATE_REFERENCE_MARKER = "[private artifact omitted]"
 # ``&#38;``/``&amp;`` decode to ``&`` so a following collapse pass unwraps
 # ``&amp;#47;``; ``\u005c`` yields ``\`` so an adjacent ``u002f`` collapses
 # on the next pass. That is why the collapse runs to a bounded fixpoint.
+# Any character reference decodes in the shadow, not only separators: the
+# frontend's CommonMark renderer (micromark via streamdown) decodes ``&#45;``
+# back into a path exactly as readily as ``&#47;``, so one entity-encoded
+# letter would otherwise shield a whole private phrase. The separator
+# codepoints keep their special mappings (a decoded backslash is a
+# separator, ``%``/``&`` feed the percent/entity paths); everything else
+# lands literally for classification. Public text keeps its original bytes
+# either way — decoding only feeds classification.
 _HTML_ENTITY_RE = re.compile(
-    r"&(?:#0*(?:47|92|37|38)|#x0*(?:2f|5c|25|26)|sol|bsol|percnt|amp);",
+    r"&(?:#0*\d+|#x0*[0-9a-f]+|sol|bsol|percnt|amp);",
     re.IGNORECASE,
 )
 _ENTITY_CODEPOINTS = {0x2F: "/", 0x5C: "/", 0x25: "%", 0x26: "&"}
 _ENTITY_NAMES = {"sol": "/", "bsol": "/", "percnt": "%", "amp": "&"}
-_UNICODE_SEPARATOR_ESCAPE_RE = re.compile(r"u(?:002f|2f|\{0*2f\})", re.IGNORECASE)
-_UNICODE_BACKSLASH_ESCAPE_RE = re.compile(r"u(?:005c|5c|\{0*5c\})", re.IGNORECASE)
+# ``uXXXX`` / ``u{X...}`` escapes decode the same way (JSON consumers decode
+# letters as readily as separators); the 2-digit form keeps round-8 parity.
+_UNICODE_ESCAPE_RE = re.compile(r"u(?:\{0*[0-9a-f]{1,6}\}|[0-9a-f]{4}|[0-9a-f]{2})", re.IGNORECASE)
 # Depth bound for nested encodings, matching ``_decoded_reference``'s
 # three-layer percent-decoding loop: ``&amp;amp;#47;`` needs all three.
 _COLLAPSE_MAX_PASSES = 3
@@ -79,12 +88,30 @@ def _decode_entity(text: str, index: int) -> tuple[str, int] | None:
         if digits.startswith("x"):
             digits = digits[1:]
             base = 16
-        char = _ENTITY_CODEPOINTS.get(int(digits.lstrip("0") or "0", base))
+        codepoint = int(digits.lstrip("0") or "0", base)
+        char = _ENTITY_CODEPOINTS.get(codepoint)
+        if char is None:
+            if codepoint <= 0 or codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+                return None
+            char = chr(codepoint)
     else:
         char = _ENTITY_NAMES.get(body)
     if char is None:
         return None
     return char, match.end()
+
+
+def _decode_unicode_escape(token: str) -> str | None:
+    """Decode one matched ``uXXXX`` / ``u{X...}`` escape to its character."""
+    body = token[1:]
+    if body.startswith("{"):
+        body = body[1:-1]
+    codepoint = int(body.lstrip("0") or "0", 16)
+    if codepoint == 0x5C:
+        return "\\"
+    if codepoint <= 0 or codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+        return None
+    return chr(codepoint)
 
 
 class ShareSnapshotTooLarge(Exception):
@@ -270,17 +297,13 @@ def _collapse_separators_once(text: str) -> tuple[str, list[tuple[int, int]]]:
             run_end = i
             while run_end < n and text[run_end] == "\\":
                 run_end += 1
-            backslash_escape = _UNICODE_BACKSLASH_ESCAPE_RE.match(text, run_end)
-            if backslash_escape is not None:
-                # Yield the backslash itself: a u002f escape it introduces
-                # collapses on the next pass.
-                normalized.append("\\")
-                spans.append((i, backslash_escape.end() - 1))
-                i = backslash_escape.end()
-                continue
-            unicode_escape = _UNICODE_SEPARATOR_ESCAPE_RE.match(text, run_end)
-            if unicode_escape is not None:
-                normalized.append("/")
+            unicode_escape = _UNICODE_ESCAPE_RE.match(text, run_end)
+            decoded_escape = _decode_unicode_escape(unicode_escape.group(0)) if unicode_escape is not None else None
+            if decoded_escape is not None:
+                # A decoded ``\u005c`` yields the backslash itself: a
+                # ``u002f`` escape it introduces collapses on the next pass.
+                # Every other codepoint lands literally in the shadow.
+                normalized.append(decoded_escape)
                 spans.append((i, unicode_escape.end() - 1))
                 i = unicode_escape.end()
                 continue
@@ -298,13 +321,16 @@ def _collapse_separators_once(text: str) -> tuple[str, list[tuple[int, int]]]:
             run_end = i
             while run_end < n and text[run_end] == "/":
                 run_end += 1
-            if run_end - i > 1:
+            if run_end - i > 1 and (i == 0 or text[i - 1] != ":"):
                 # A run of separators is one separator: raw ``//`` (and,
                 # composed across passes, entity- or percent-decoded doubles)
                 # must classify like the single ``/`` whose escaped forms
                 # already collapse — the shipped nginx leaves ``merge_slashes``
                 # on, so ``/api//threads//…`` reaches the real owner-scoped
-                # route when followed.
+                # route when followed. The run directly after ``:`` is a URL
+                # scheme separator, not a path one: keeping it lets the
+                # ``https?://`` match cover the full URL (and a public host
+                # keep its bytes while only a private-shaped subpath is cut).
                 normalized.append("/")
                 spans.append((i, run_end - 1))
                 i = run_end
@@ -384,8 +410,15 @@ _REFERENCE_CUT_TERMINATORS = ",;:!?)\\]}\"'`*_~(|[<"
 # separator is optional so a relative Markdown destination or a bare path
 # in running text classifies identically instead of publishing a
 # live-looking private link.
-_API_THREAD_REFERENCE_RE = re.compile(r"(?:^|/)api/threads/[^/?#\s]+/", re.IGNORECASE)
-_MNT_USER_DATA_RE = re.compile(r"(?:^|/)mnt/user-data", re.IGNORECASE)
+#
+# The boundary before ``api``/``mnt`` is the token start, a real separator,
+# or a joining terminator (tool-style comma lists: a public head may not
+# shield the private tail behind it) — never mid-word, where the bytes name
+# a longer public identifier or host (``foo_api/threads``, ``foo.api``).
+# ``_`` is a cut terminator but stays a non-boundary for the same reason.
+_PHRASE_BOUNDARY = f"(?:^|[{re.escape('/' + _REFERENCE_CUT_TERMINATORS.replace('_', ''))}])"
+_API_THREAD_REFERENCE_RE = re.compile(_PHRASE_BOUNDARY + r"api/threads/[^/?#\s]+/", re.IGNORECASE)
+_MNT_USER_DATA_RE = re.compile(_PHRASE_BOUNDARY + r"mnt/user-data", re.IGNORECASE)
 
 
 def _trim_reference_punctuation(value: str) -> str:
@@ -397,16 +430,10 @@ def _is_private_reference(value: str) -> bool:
     return _MNT_USER_DATA_RE.search(decoded) is not None or _API_THREAD_REFERENCE_RE.search(decoded) is not None
 
 
-def _private_reference_cut_end(value: str) -> int | None:
-    """Index just past the private path inside *value* (a normalized-shadow
-    slice): the path continues through URL structure and in-segment bytes,
-    and stops at the first prose/markdown terminator or whitespace — unless
-    the terminator only joins this private path to another one, in which
-    case the cut continues through the joined items."""
-    prefix = _API_THREAD_REFERENCE_RE.search(value) or _MNT_USER_DATA_RE.search(value)
-    if prefix is None:
-        return None
-    end = prefix.end()
+def _phrase_end(value: str, end: int) -> int:
+    """Extend a private phrase's cut through in-segment bytes: URL structure
+    (``/``, ``?``, ``#``) continues the path, prose/markdown terminators and
+    whitespace end it."""
     n = len(value)
     while end < n:
         char = value[end]
@@ -414,15 +441,61 @@ def _private_reference_cut_end(value: str) -> int | None:
             end += 1
             continue
         if char in _REFERENCE_CUT_TERMINATORS or char.isspace():
-            probe = end
-            while probe < n and value[probe] in _REFERENCE_CUT_TERMINATORS:
-                probe += 1
-            if probe < n and not value[probe].isspace() and _is_private_reference(value[probe:]):
-                end = probe
-                continue
             break
         end += 1
     return end
+
+
+def _starts_with_private_reference(window: str) -> bool:
+    """Anchored classification: does *window* begin with a private phrase?
+
+    Used by the segment walker's percent probe. Percent-encoded phrases
+    never decode in the shadow (their decoded positions cannot map back to
+    original bytes), so after each terminator run the upcoming window is
+    decoded for classification alone."""
+    decoded = _trim_reference_punctuation(_decoded_reference(window)).lower()
+    return _MNT_USER_DATA_RE.match(decoded) is not None or _API_THREAD_REFERENCE_RE.match(decoded) is not None
+
+
+# One bounded probe per terminator join keeps the walk linear — re-decoding
+# the whole tail at every terminator was quadratic on joined lists.
+_SEGMENT_PROBE_WINDOW = 256
+
+
+def _private_reference_segments(value: str) -> list[tuple[int, int]]:
+    """Shadow-coordinate ``[start, end)`` spans of every private phrase in
+    one matched token. Public head/middle/tail bytes between the segments
+    are part of no span and survive the cut; the joining terminators stay
+    public too."""
+    segments: list[tuple[int, int]] = []
+    pos = 0
+    n = len(value)
+    while pos < n:
+        candidates: list[tuple[int, int]] = []
+        for match in (_API_THREAD_REFERENCE_RE.search(value, pos), _MNT_USER_DATA_RE.search(value, pos)):
+            if match is not None:
+                candidates.append((match.start(), match.end()))
+        probe = pos
+        while probe < n and value[probe] in _REFERENCE_CUT_TERMINATORS:
+            probe += 1
+        if probe > pos and probe < n and not value[probe].isspace() and _starts_with_private_reference(value[probe : probe + _SEGMENT_PROBE_WINDOW]):
+            candidates.append((probe, probe))
+        if not candidates:
+            break
+        start, walk_from = min(candidates)
+        if start > 0 and walk_from > start:
+            # The boundary character before the phrase (a separator or a
+            # joining terminator) is public structure: cut from the phrase
+            # itself, so ``/docs,api/...`` keeps its comma and a public host
+            # keeps the separator that introduced the private subpath.
+            start += 1
+        end = _phrase_end(value, walk_from)
+        if end <= start:
+            pos = start + 1
+            continue
+        segments.append((start, end))
+        pos = end
+    return segments
 
 
 def _neutralize_private_references(text: str) -> str:
@@ -430,13 +503,27 @@ def _neutralize_private_references(text: str) -> str:
 
     Classification runs on the separator-normalized shadow of the text (JSON
     ``\\/`` escapes, percent-encoding, HTML character references, and
-    ``\\uXXXX`` unicode escapes — raw or in any combination), while
-    replacements are applied to the original text: normalized matching is
-    what catches escaped private references, but public content must keep
-    its exact original bytes. The cut spans exactly the private path and
-    stops at the first structural terminator, so public prose after the
-    reference survives.
+    ``\\uXXXX`` unicode escapes — raw or in any combination, decoding every
+    character they encode, not just separators), while replacements are
+    applied to the original text: normalized matching is what catches
+    escaped private references, but public content must keep its exact
+    original bytes. Each private phrase is cut on its own segment, so public
+    head/middle/tail bytes inside one whitespace-free token survive.
+
+    One application may still leave work — a markdown edit that shadows an
+    overlapping raw match drops it for that pass — so the pass re-applies on
+    its own output until it stabilizes, bounded by ``_COLLAPSE_MAX_PASSES``.
     """
+    for _ in range(_COLLAPSE_MAX_PASSES):
+        result = _neutralize_private_references_once(text)
+        if result == text:
+            return result
+        text = result
+    return text
+
+
+def _neutralize_private_references_once(text: str) -> str:
+    """One classification-and-cut pass over ``text`` (see the wrapper)."""
     normalized, spans = _collapse_separators_with_offsets(text)
 
     def original_span(start: int, end: int) -> tuple[int, int]:
@@ -471,20 +558,25 @@ def _neutralize_private_references(text: str) -> str:
 
     def replace_raw(match: re.Match[str]) -> None:
         value = match.group(0)
-        if not _is_private_reference(value):
-            return
-        # The cut spans exactly the private path: it ends at the first
-        # structural terminator (URL structure continues the path, prose
-        # delimiters stay in the public output), and trailing sentence
-        # punctuation is kept out of the cut so the public text keeps its
-        # own ``.``/``,``/``)`` after the marker.
-        cut_end = _private_reference_cut_end(value)
-        if cut_end is None:
-            cut_end = len(value)
-        kept = _trim_reference_punctuation(value[:cut_end])
-        stop_index = match.start() + len(kept)
-        begin, stop = original_span(match.start(), stop_index)
-        edits.append((begin, stop, _PRIVATE_REFERENCE_MARKER))
+        # Every private phrase in the token is cut on its own segment, so a
+        # public head/middle/tail (and the joining terminators) survive. The
+        # whole-token fallback still covers phrases the shadow cannot
+        # position at all — percent-encoding decodes for classification, not
+        # in the shadow, and a probe window may have missed the shape.
+        segments = _private_reference_segments(value)
+        if not segments:
+            if not _is_private_reference(value):
+                return
+            segments = [(0, _phrase_end(value, 0))]
+        for start, end in segments:
+            # Trailing sentence punctuation is kept out of the cut so the
+            # public text keeps its own ``.``/``,``/``)`` after the marker.
+            kept = _trim_reference_punctuation(value[start:end])
+            if not kept:
+                continue
+            stop_index = match.start() + start + len(kept)
+            begin, stop = original_span(match.start() + start, stop_index)
+            edits.append((begin, stop, _PRIVATE_REFERENCE_MARKER))
 
     for match in _MARKDOWN_LINK_RE.finditer(normalized):
         replace_markdown(match)

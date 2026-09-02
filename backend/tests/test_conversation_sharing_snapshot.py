@@ -248,16 +248,81 @@ async def test_neutralize_separator_runs():
 
 async def test_neutralize_terminator_joined_private_paths():
     """Whitespace-free tokens may carry several private paths joined by
-    prose/markdown terminators (tool-style comma lists). The first cut must
-    not publish the tail items; a public tail after the terminator still
-    survives."""
+    prose/markdown terminators (tool-style comma lists). Every private item
+    is cut; the joining terminator bytes are public and stay; a public tail
+    after the terminator survives too."""
     neutralize = _neutralize_private_references
-    assert neutralize("/mnt/user-data/a.txt,/mnt/user-data/b.txt") == "[private artifact omitted]"
-    assert neutralize("/api/threads/thread-secret/artifacts/a.png;/mnt/user-data/b.png") == "[private artifact omitted]"
-    assert neutralize("(/mnt/user-data/a.txt),(/mnt/user-data/b.txt)") == "([private artifact omitted])"
+    assert neutralize("/mnt/user-data/a.txt,/mnt/user-data/b.txt") == "[private artifact omitted],[private artifact omitted]"
+    assert neutralize("/api/threads/thread-secret/artifacts/a.png;/mnt/user-data/b.png") == "[private artifact omitted];[private artifact omitted]"
+    assert neutralize("(/mnt/user-data/a.txt),(/mnt/user-data/b.txt)") == "([private artifact omitted]),([private artifact omitted])"
     # terminator followed by public content keeps both sides
     assert neutralize("/mnt/user-data/a.txt, see the docs") == "[private artifact omitted], see the docs"
     assert neutralize("/mnt/user-data/a.txt,/etc/hosts") == "[private artifact omitted],/etc/hosts"
+
+
+async def test_neutralize_encoded_letters_in_private_phrases():
+    """Character references and unicode escapes decode anywhere in the
+    phrase, not only in separator position — the frontend's CommonMark
+    renderer (micromark via streamdown) renders ``&#45;`` back into the
+    path exactly as readily as ``&#47;``, including as clickable links."""
+    neutralize = _neutralize_private_references
+    # decimal/hex entities: letters and the mnt hyphen
+    assert neutralize("see /mnt/user&#45;data/x.csv now") == "see [private artifact omitted] now"
+    assert neutralize("see /&#109;nt/user-data/x.csv now") == "see [private artifact omitted] now"
+    assert neutralize("see /api/thre&#97;ds/t1/uploads/f.pdf now") == "see [private artifact omitted] now"
+    assert neutralize("x /api/threads/t&#49;/uploads/f.pdf y") == "x [private artifact omitted] y"
+    # markdown destination and label leak
+    assert neutralize("grab [the export](/mnt/user&#x2D;data/x.csv)") == "grab the export [private artifact omitted]"
+    assert neutralize("grab [the export](/api/thre&#x61;ds/t1/uploads/f.pdf)") == "grab the export [private artifact omitted]"
+    assert neutralize("[file at /mnt/user&#45;data](https://example.com)") == "[private artifact omitted]"
+    # bare relative form with one encoded letter (no leading separator)
+    assert neutralize("report at api/thre&#97;ds/t1/uploads/f.pdf") == "report at [private artifact omitted]"
+    # unicode-escaped letters (JSON consumers decode \\uXXXX everywhere)
+    assert neutralize("x /\\u0061pi/threads/t1/uploads/f.pdf y") == "x [private artifact omitted] y"
+    assert neutralize("x /mnt/user\\u002Ddata/f.pdf y") == "x [private artifact omitted] y"
+    # joined tail whose private item carries one encoded byte
+    assert neutralize("x /api/threads/t1/uploads,/mnt/user&#45;data y") == "x [private artifact omitted],[private artifact omitted] y"
+    assert neutralize("x /mnt/user-data/a.txt,%6Dnt%2Fuser%2Ddata%2Fb y") == "x [private artifact omitted],[private artifact omitted] y"
+    # public entity/escape text keeps its original bytes
+    assert neutralize("fish &amp; chips &#65; ok") == "fish &amp; chips &#65; ok"
+    assert neutralize("unicode \\u0041 stays") == "unicode \\u0041 stays"
+
+
+async def test_neutralize_public_head_and_middle_in_joined_tokens():
+    """A public first item may not shield a private relative tail joined
+    behind it in one whitespace-free token; a public middle item between
+    two private ones survives the segment-precise cut."""
+    neutralize = _neutralize_private_references
+    assert neutralize("report at /docs,api/threads/8f3a/uploads/q4.pdf") == "report at /docs,[private artifact omitted]"
+    assert neutralize("see /docs,mnt/user-data/report.pdf") == "see /docs,[private artifact omitted]"
+    assert neutralize("x /api/threads/t1/uploads,https://example.com/pub,/mnt/user-data y") == "x [private artifact omitted],https://example.com/pub,/[private artifact omitted] y"
+
+
+async def test_neutralize_scheme_separator_stays_uncollapsed():
+    """The ``//`` of a URL scheme is not a path separator: a public host
+    keeps its bytes while only a private-shaped subpath is cut
+    (origin-blind classification of /mnt/user-data is the pre-existing
+    design, single- and doubled-slash alike)."""
+    neutralize = _neutralize_private_references
+    assert neutralize("go https://example.com/?u=/mnt/user-data now") == "go https://example.com/?u=/[private artifact omitted] now"
+    assert neutralize("see https://example.com/mnt//user-data/x") == "see https://example.com/[private artifact omitted]"
+    # public doubled paths keep their bytes
+    assert neutralize("see //example.com//docs next") == "see //example.com//docs next"
+    assert neutralize("file:///mnt/public/readme.txt") == "file:///mnt/public/readme.txt"
+
+
+async def test_neutralize_stable_under_rerun_and_heals_overlap_drops():
+    """One application leaves no private bytes (re-running is a no-op), and
+    a markdown edit that shadows a raw match in the same pass is healed by
+    the bounded re-application instead of persisting into the snapshot."""
+    neutralize = _neutralize_private_references
+    once = neutralize("[x](/api/threads/t1/uploads),/mnt/user-data")
+    assert once == "x [private artifact omitted],[private artifact omitted]"
+    assert neutralize(once) == once
+    pathological = "/mnt/user-data/a," + ",xx/mnt/user-data/b" * 200
+    result = neutralize(pathological)
+    assert "user-data" not in result
+    assert "xx" in result  # public middle bytes between the cuts survive
 
 
 async def test_neutralize_preserves_public_content_with_separators():
