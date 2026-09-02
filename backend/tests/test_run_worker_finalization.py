@@ -64,16 +64,24 @@ class _SpyRunManager:
     async def update_run_completion(self, *_args, **_kwargs) -> None:
         return None
 
+    async def cleanup(self, *_args, **_kwargs) -> None:
+        return None
+
     def schedule_cleanup(self, run_id: str, **kwargs):
         self.cleanup_calls.append((run_id, kwargs))
         return None
 
 
 class _FakeBridge:
+    def __init__(self, *, fail_publish_end: bool = False) -> None:
+        self.fail_publish_end = fail_publish_end
+
     async def publish(self, _run_id, event, payload) -> None:
         return None
 
     async def publish_end(self, _run_id) -> None:
+        if self.fail_publish_end:
+            raise RuntimeError("publish_end failed")
         return None
 
     async def cleanup(self, _run_id, *, delay: int = 0) -> None:
@@ -106,3 +114,32 @@ async def test_run_agent_finalization_schedules_eviction():
 
     scheduled_ids = [run_id for run_id, _kwargs in run_manager.cleanup_calls]
     assert scheduled_ids == ["run-finalize"], f"run_agent finalization must schedule eviction for the run exactly once; got {run_manager.cleanup_calls!r}"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_finalization_schedules_eviction_when_publish_end_fails():
+    """Outer cleanup must schedule eviction even when terminal publication fails."""
+    run_manager = _SpyRunManager()
+    record = RunRecord(
+        run_id="run-publish-end-fails",
+        thread_id="thread-finalize",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+    )
+    record.abort_event = asyncio.Event()
+    ctx = RunContext(checkpointer=None)
+
+    with pytest.raises(RuntimeError, match="publish_end failed"):
+        await run_agent(
+            _FakeBridge(fail_publish_end=True),
+            run_manager,
+            record,
+            ctx=ctx,
+            agent_factory=lambda config: _FakeAgent(),
+            graph_input={"messages": []},
+            config={"configurable": {"thread_id": "thread-finalize"}},
+        )
+
+    scheduled_ids = [run_id for run_id, _kwargs in run_manager.cleanup_calls]
+    assert scheduled_ids == ["run-publish-end-fails"]
