@@ -882,37 +882,581 @@ def test_login_response_includes_needs_setup():
 # ── Rate Limiting ──────────────────────────────────────────────────────────
 
 
-def test_rate_limiter_allows_under_limit():
+@pytest.mark.asyncio
+async def test_rate_limiter_allows_under_limit():
     """Requests under the limit are allowed."""
     from app.gateway.routers.auth import _check_rate_limit, _login_attempts
 
     _login_attempts.clear()
-    _check_rate_limit("192.168.1.1")  # Should not raise
+    await _check_rate_limit("192.168.1.1")  # Should not raise
 
 
-def test_rate_limiter_blocks_after_max_failures():
+@pytest.mark.asyncio
+async def test_rate_limiter_blocks_after_max_failures():
     """IP is blocked after 5 consecutive failures."""
     from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
 
     _login_attempts.clear()
     ip = "10.0.0.1"
     for _ in range(5):
-        _record_login_failure(ip)
+        await _record_login_failure(ip)
     with pytest.raises(HTTPException) as exc_info:
-        _check_rate_limit(ip)
+        await _check_rate_limit(ip)
     assert exc_info.value.status_code == 429
 
 
-def test_rate_limiter_resets_on_success():
+@pytest.mark.asyncio
+async def test_rate_limiter_resets_on_success():
     """Successful login clears the failure counter."""
     from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure, _record_login_success
 
     _login_attempts.clear()
     ip = "10.0.0.2"
     for _ in range(4):
-        _record_login_failure(ip)
+        await _record_login_failure(ip)
     _record_login_success(ip)
-    _check_rate_limit(ip)  # Should not raise
+    await _check_rate_limit(ip)  # Should not raise
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_honors_configured_attempts_and_lockout(monkeypatch):
+    """auth.local.max_login_attempts / lockout_seconds drive the throttle policy."""
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    _login_attempts.clear()
+    set_app_config(
+        AppConfig(
+            sandbox=SandboxConfig(use="test"),
+            auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=2, lockout_seconds=60.0)),
+        )
+    )
+    try:
+        ip = "10.0.0.3"
+        await _record_login_failure(ip)
+        await _check_rate_limit(ip)  # 1 failure < 2: allowed
+        await _record_login_failure(ip)
+        with pytest.raises(HTTPException) as exc_info:
+            await _check_rate_limit(ip)
+        assert exc_info.value.status_code == 429
+        # The lockout window comes from lockout_seconds (60s), not the 300s
+        # default: at locked_at + 61 the lock must already be released.
+        _, locked_at, _ = _login_attempts[ip]
+        monkeypatch.setattr(auth_router.time, "time", lambda: locked_at + 61.0)
+        await _check_rate_limit(ip)
+        assert ip not in _login_attempts
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
+
+
+def test_rate_limiter_uses_defaults_when_config_unavailable(monkeypatch):
+    """An absent config.yaml falls back to the built-in (5 attempts / 300s) policy.
+
+    Mirrors ``_local_registration_enabled``: only FileNotFoundError is caught.
+    A malformed config must NOT silently change the throttle policy — pinned
+    to propagate by the test below.
+    """
+    from app.gateway.routers import auth as auth_router
+    from deerflow.config import app_config as app_config_module
+
+    def _missing():
+        raise FileNotFoundError("no config.yaml")
+
+    monkeypatch.setattr(app_config_module, "get_app_config", _missing)
+    assert auth_router._login_throttle_policy() == (5, 300)
+
+
+def test_rate_limiter_malformed_config_propagates(monkeypatch):
+    """A malformed config.yaml fails loudly instead of fail-opening the throttle.
+
+    Every other config consumer 500s on a validation failure; silently
+    substituting the (possibly more permissive) defaults here would diverge —
+    an operator who set max_login_attempts=2 must never silently get 5.
+    """
+    from app.gateway.routers import auth as auth_router
+    from deerflow.config import app_config as app_config_module
+
+    def _malformed():
+        raise ValueError("config validation error")
+
+    monkeypatch.setattr(app_config_module, "get_app_config", _malformed)
+    with pytest.raises(ValueError, match="config validation error"):
+        auth_router._login_throttle_policy()
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_clean_ip_skips_config_read(monkeypatch):
+    """A clean IP pays zero config reads: the record-None early return must
+    come before policy resolution (get_app_config re-hashes config.yaml on
+    every call, and login_local is an unauthenticated async endpoint)."""
+    from app.gateway.routers import auth as auth_router
+    from deerflow.config import app_config as app_config_module
+
+    def _must_not_load():
+        raise AssertionError("config must not be read for a clean IP")
+
+    monkeypatch.setattr(app_config_module, "get_app_config", _must_not_load)
+    auth_router._login_attempts.clear()
+    await auth_router._check_rate_limit("192.0.2.7")  # returns quietly → no config read
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_policy_change_semantics():
+    """Pin the emergent semantics of a live-read policy under config reload.
+
+    Raising max_login_attempts mid-lockout immediately unblocks IPs whose
+    fail_count falls below the new threshold — that is the issue #5108 use
+    case (shared-egress-IP office unblocked by raising the limit, no restart).
+    Tightening the threshold keeps the accumulated count (see the dedicated
+    test below); subsequent failures lock under the new, stricter policy.
+    """
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    def _set_policy(max_attempts: int) -> None:
+        set_app_config(
+            AppConfig(
+                sandbox=SandboxConfig(use="test"),
+                auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=max_attempts, lockout_seconds=60.0)),
+            )
+        )
+
+    _login_attempts.clear()
+    try:
+        ip = "10.0.0.4"
+        _set_policy(2)
+        for _ in range(2):
+            await _record_login_failure(ip)
+        with pytest.raises(HTTPException):
+            await _check_rate_limit(ip)  # locked under the old policy
+
+        _set_policy(5)  # operator raises the ceiling mid-lockout
+        await _check_rate_limit(ip)  # immediately allowed: 2 < 5, no restart needed
+
+        # max_login_attempts=1 never reaches the endpoint: config load rejects
+        # it (ge=2). A legal value of 1 previously disabled lockout entirely —
+        # the (1, 0.0) first-failure record expired immediately, and every
+        # subsequent failure re-created it, so the IP was never locked.
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            _set_policy(1)
+
+        # The strictest legal value still locks, at the second failure.
+        _login_attempts.pop(ip, None)
+        _set_policy(2)
+        await _record_login_failure(ip)
+        await _check_rate_limit(ip)  # 1 failure < 2: allowed
+        await _record_login_failure(ip)
+        with pytest.raises(HTTPException):
+            await _check_rate_limit(ip)
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
+
+
+def test_local_auth_throttle_config_validation():
+    """Throttle knobs reject degenerate operator values at config load."""
+    import pydantic
+
+    from deerflow.config.auth_config import LocalAuthConfig
+
+    with pytest.raises(pydantic.ValidationError):
+        LocalAuthConfig(max_login_attempts=0)
+    with pytest.raises(pydantic.ValidationError):
+        # 1 would mean a single typo locks the whole shared egress, and before
+        # ge=2 it actually disabled lockout entirely (the (1, 0.0) record
+        # expired immediately and every failure re-created it).
+        LocalAuthConfig(max_login_attempts=1)
+    LocalAuthConfig(max_login_attempts=2)  # strictest legal value
+    with pytest.raises(pydantic.ValidationError):
+        LocalAuthConfig(lockout_seconds=0)
+    with pytest.raises(pydantic.ValidationError):
+        LocalAuthConfig(lockout_seconds=float("inf"))
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_active_lockout_honors_live_lockout_seconds_change(monkeypatch):
+    """A live lockout_seconds change applies to in-flight lockouts, in the
+    direction that serves the operator, without resurrecting served sentences.
+
+    A lock records the duration in force when it started. At check time an
+    active sentence follows the *currently* configured duration — lowering
+    60 → 1 releases early — while a lock that already served its original
+    sentence stays expired even if the duration is later raised (no
+    resurrection), and a raise while the lock is still active extends it.
+    """
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    def _set_policy(lockout_seconds: float) -> None:
+        set_app_config(
+            AppConfig(
+                sandbox=SandboxConfig(use="test"),
+                auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=2, lockout_seconds=lockout_seconds)),
+            )
+        )
+
+    def _freeze_clock_at(t: float) -> None:
+        monkeypatch.setattr(auth_router.time, "time", lambda: t)
+
+    _login_attempts.clear()
+    try:
+        ip = "10.0.0.5"
+
+        # Lowering mid-lockout releases early.
+        _set_policy(60.0)
+        await _record_login_failure(ip)
+        await _record_login_failure(ip)
+        _, locked_at, _ = _login_attempts[ip]
+        _freeze_clock_at(locked_at + 2.0)
+        with pytest.raises(HTTPException):
+            await _check_rate_limit(ip)  # 2s into the 60s window: still locked
+        _set_policy(1.0)  # operator shortens the window
+        await _check_rate_limit(ip)  # 2s > 1s: unlocked on the very next login
+        assert ip not in _login_attempts
+
+        # Raising while the lock is still active extends it.
+        _set_policy(1.0)
+        await _record_login_failure(ip)
+        await _record_login_failure(ip)
+        _, locked_at, _ = _login_attempts[ip]
+        _freeze_clock_at(locked_at + 0.5)  # still inside the 1s sentence
+        _set_policy(60.0)  # operator lengthens the window mid-sentence
+        with pytest.raises(HTTPException):
+            await _check_rate_limit(ip)  # active, and 0.5 < 60: extended
+        _freeze_clock_at(locked_at + 2.0)  # past the original 1s sentence
+        with pytest.raises(HTTPException):
+            await _check_rate_limit(ip)  # extended: 2 < 60, still locked
+
+        # A sentence that already elapsed before the raise is not resurrected.
+        _set_policy(1.0)
+        await _record_login_failure(ip)
+        await _record_login_failure(ip)
+        _, locked_at, _ = _login_attempts[ip]
+        _freeze_clock_at(locked_at + 2.0)  # past the 1s sentence, no check yet
+        _set_policy(60.0)  # operator lengthens the window for *future* locks
+        await _check_rate_limit(ip)  # the served 1s sentence is not resurrected
+        assert ip not in _login_attempts
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_lowered_then_raised_duration_not_resurrected(monkeypatch):
+    """A shortened duration observed during the sentence is committed, so a
+    later raise cannot resurrect time already served under the short policy.
+
+    60s lock, evaluated at +6s under a lowered 10s policy (still locked — the
+    sentence becomes 10s), then raised to 30s at +20s: the lock expired at
+    +10s under the last-evaluated policy, so the +20s request must be allowed.
+    """
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    def _set_policy(lockout_seconds: float) -> None:
+        set_app_config(
+            AppConfig(
+                sandbox=SandboxConfig(use="test"),
+                auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=2, lockout_seconds=lockout_seconds)),
+            )
+        )
+
+    _login_attempts.clear()
+    try:
+        ip = "10.0.0.8"
+        _set_policy(60.0)
+        await _record_login_failure(ip)
+        await _record_login_failure(ip)
+        _, locked_at, _ = _login_attempts[ip]
+
+        def _freeze(t: float) -> None:
+            monkeypatch.setattr(auth_router.time, "time", lambda: t)
+
+        _freeze(locked_at + 6.0)
+        _set_policy(10.0)
+        with pytest.raises(HTTPException):
+            await _check_rate_limit(ip)  # 6 < 10: still locked, and the 10s sentence is committed
+        assert _login_attempts[ip][2] == 10.0
+
+        _freeze(locked_at + 20.0)
+        _set_policy(30.0)  # raised after the 10s sentence was served at +10s
+        await _check_rate_limit(ip)  # not resurrected: allowed
+        assert ip not in _login_attempts
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_checks_on_expired_lock_are_race_free(monkeypatch):
+    """Synchronized checks of the same expired lock must all resolve cleanly.
+
+    Policy resolution yields the event loop (asyncio.to_thread), so the sync
+    version's atomicity is gone: with a pre-await snapshot only, concurrent
+    checks of an expired record raced into double ``del`` — one request
+    returned normally and the others raised KeyError (review reproduction).
+    """
+    import asyncio
+
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts
+    from deerflow.config.auth_config import LocalAuthConfig
+
+    def _defaults():
+        return LocalAuthConfig().max_login_attempts, LocalAuthConfig().lockout_seconds
+
+    monkeypatch.setattr(auth_router, "_login_throttle_policy", _defaults)
+    _login_attempts.clear()
+    try:
+        _login_attempts["10.0.0.9"] = (5, 1.0, 1.0)  # sentence long expired
+
+        results = await asyncio.gather(*[_check_rate_limit("10.0.0.9") for _ in range(8)], return_exceptions=True)
+
+        assert all(result is None for result in results), results
+        assert "10.0.0.9" not in _login_attempts
+    finally:
+        _login_attempts.clear()
+
+
+@pytest.mark.asyncio
+async def test_check_survives_record_deleted_during_policy_resolution(monkeypatch):
+    """A record removed while the checker is suspended must not KeyError.
+
+    Deterministic stand-in for the suspension-window interleaving: the policy
+    resolution itself removes the record, exactly like a concurrent success
+    login would while this coroutine sits in ``asyncio.to_thread``.
+    """
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_success
+
+    def _policy_that_deletes_the_record():
+        _record_login_success("10.0.0.10")
+        return 5, 300.0
+
+    monkeypatch.setattr(auth_router, "_login_throttle_policy", _policy_that_deletes_the_record)
+    _login_attempts.clear()
+    try:
+        _login_attempts["10.0.0.10"] = (5, 1.0, 1.0)  # expired
+
+        await _check_rate_limit("10.0.0.10")  # pre-fix: KeyError
+
+        assert "10.0.0.10" not in _login_attempts
+    finally:
+        _login_attempts.clear()
+
+
+@pytest.mark.asyncio
+async def test_check_never_clobbers_record_replaced_during_policy_resolution(monkeypatch):
+    """A record replaced while the checker is suspended must survive intact.
+
+    The pre-await snapshot said "locked"; while suspended, a successful login
+    plus one new failure replaced the record with a fresh counter. The checker
+    must re-read and leave the fresh record alone instead of writing its
+    stale-snapshot decision over it.
+    """
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts
+
+    def _policy_that_replaces_the_record():
+        _login_attempts["10.0.0.11"] = (1, 0.0, 0.0)
+        return 2, 60.0
+
+    monkeypatch.setattr(auth_router, "_login_throttle_policy", _policy_that_replaces_the_record)
+    _login_attempts.clear()
+    try:
+        _login_attempts["10.0.0.11"] = (2, 1.0, 1.0)  # locked, sentence running
+
+        await _check_rate_limit("10.0.0.11")  # fresh read: (1, 0, 0) < max 2 → allowed
+
+        assert _login_attempts["10.0.0.11"] == (1, 0.0, 0.0)
+    finally:
+        _login_attempts.clear()
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_eviction_expires_by_stored_sentence_not_current_threshold(monkeypatch):
+    """The capacity sweep must expire records by their own committed sentence,
+    with no gate on the current threshold.
+
+    A record locked under an old, lower threshold has a count below the live
+    max after the operator raises it; gating expiry on ``count >= max`` keeps
+    that served record resident while the capacity fallback evicts live
+    counters first (they sort earliest), handing an active offender a fresh
+    budget. Reproduction from review: cap 2, live ``(1, 0, 0)`` plus expired
+    ``(2, 10, 1)`` under max=3, clock at 100.
+    """
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _login_attempts, _record_login_failure
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    monkeypatch.setattr(auth_router, "_MAX_TRACKED_IPS", 2)
+    monkeypatch.setattr(auth_router.time, "time", lambda: 100.0)
+    set_app_config(
+        AppConfig(
+            sandbox=SandboxConfig(use="test"),
+            auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=3, lockout_seconds=60.0)),
+        )
+    )
+    _login_attempts.clear()
+    try:
+        _login_attempts["live-counter"] = (1, 0.0, 0.0)  # active offender, counting
+        _login_attempts["expired-lock"] = (2, 10.0, 1.0)  # locked under old max=2; served at 11.0
+
+        await _record_login_failure("fresh-ip")  # hits the capacity sweep
+
+        assert "expired-lock" not in _login_attempts  # served sentence is swept
+        assert _login_attempts["live-counter"] == (1, 0.0, 0.0)  # live counter survives
+        assert _login_attempts["fresh-ip"][0] == 1
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_tightened_threshold_preserves_failures():
+    """Tightening max_login_attempts mid-count keeps the accumulated failures.
+
+    An IP with four failures under max_login_attempts=5 must not get a fresh
+    budget when the operator lowers the threshold to 2: the count stays, the
+    next failure starts the lock, and a successful login still clears it.
+    """
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure, _record_login_success
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    def _set_policy(max_attempts: int) -> None:
+        set_app_config(
+            AppConfig(
+                sandbox=SandboxConfig(use="test"),
+                auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=max_attempts, lockout_seconds=60.0)),
+            )
+        )
+
+    _login_attempts.clear()
+    try:
+        ip = "10.0.0.6"
+        _set_policy(5)
+        for _ in range(4):
+            await _record_login_failure(ip)  # 4 failures: counting, never locked
+
+        _set_policy(2)  # operator tightens the policy mid-count
+        await _check_rate_limit(ip)  # allowed this once — but the count survives
+        assert _login_attempts[ip][0] == 4
+
+        await _record_login_failure(ip)  # 4 + 1 >= 2: locks on the very next failure
+        with pytest.raises(HTTPException):
+            await _check_rate_limit(ip)
+
+        # A correct password still clears everything (no retroactive lockout
+        # of a legitimate user who fat-fingered the password four times).
+        _record_login_success(ip)
+        await _check_rate_limit(ip)
+        assert ip not in _login_attempts
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_counts_failure_when_config_breaks(monkeypatch):
+    """A malformed config hot-edit must not hand out unlimited verification.
+
+    Endpoint order per failed login: _check_rate_limit (clean IPs skip the
+    config read) → authenticate() → _record_login_failure. If the record call
+    raises on the broken config *before* mutating state, the IP stays clean
+    and every subsequent wrong password reaches authenticate() again. The
+    failure must land (counted under the model defaults) before the error
+    re-raises; from then on the dirty IP's own check reads the broken config
+    and fails closed — before authenticate.
+    """
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
+    from deerflow.config import app_config as app_config_module
+
+    def _malformed():
+        raise ValueError("config validation error")
+
+    _login_attempts.clear()
+    monkeypatch.setattr(app_config_module, "get_app_config", _malformed)
+    try:
+        ip = "10.0.0.7"
+
+        # First failed login: still allowed through to authenticate(), then
+        # the record call fails loudly — but the failure is counted first.
+        await _check_rate_limit(ip)  # clean IP: no config read, allowed
+        with pytest.raises(ValueError, match="config validation error"):
+            await _record_login_failure(ip)
+        assert _login_attempts[ip] == (1, 0.0, 0.0)
+
+        # Second login: the now-dirty IP's check reads the broken config and
+        # fails closed *before* authenticate() — no more password verification.
+        with pytest.raises(ValueError, match="config validation error"):
+            await _check_rate_limit(ip)
+    finally:
+        _login_attempts.clear()
+
+
+def test_login_local_broken_config_fails_closed_after_first_failure(monkeypatch):
+    """Route-level pin of the same sequence, through POST /login/local.
+
+    The first wrong password is verified once and counted (the 500 comes from
+    the re-raised config error, not from a skipped record); the second request
+    from the same client IP must 500 in _check_rate_limit *before*
+    authenticate() is reached — no unlimited password verification while
+    config.yaml stays malformed.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.gateway.routers import auth as auth_router
+    from deerflow.config import app_config as app_config_module
+
+    def _malformed():
+        raise ValueError("config validation error")
+
+    monkeypatch.setattr(app_config_module, "get_app_config", _malformed)
+
+    calls = {"authenticate": 0}
+
+    class _Provider:
+        async def authenticate(self, credentials):
+            calls["authenticate"] += 1
+            return None  # wrong password
+
+    monkeypatch.setattr(auth_router, "get_local_provider", lambda: _Provider())
+    monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
+    auth_router._login_attempts.clear()
+
+    app = FastAPI()
+    app.include_router(auth_router.router)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            first = client.post("/api/v1/auth/login/local", data={"username": "user@example.com", "password": "wrong"})
+            assert first.status_code == 500
+            assert calls["authenticate"] == 1  # verified once — and counted despite the raise
+            assert auth_router._login_attempts["testclient"][0] == 1
+
+            second = client.post("/api/v1/auth/login/local", data={"username": "user@example.com", "password": "wrong-again"})
+            assert second.status_code == 500
+            assert calls["authenticate"] == 1  # fail-closed: no second verification
+    finally:
+        auth_router._login_attempts.clear()
 
 
 # ── Client IP extraction ─────────────────────────────────────────────────

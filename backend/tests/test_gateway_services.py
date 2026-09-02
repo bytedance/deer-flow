@@ -3029,6 +3029,24 @@ class TestInjectAuthenticatedUserContextAuthz:
         assert "authz_attributes" not in config["context"]
         assert config["context"]["is_internal"] is True
 
+    @pytest.mark.parametrize("auth_source", ["session", AUTH_SOURCE_INTERNAL])
+    @pytest.mark.parametrize("section", ["context", "configurable"])
+    def test_gateway_callers_cannot_inject_sandbox_execution_identities(self, auth_source, section):
+        """Only the in-process lead/subagent lifecycle may assign lease identities."""
+        request = _make_request_with_auth_source(auth_source)
+        config = _assemble_authz_run_config(
+            {
+                section: {
+                    "sandbox_lease_owner_id": "forged-owner",
+                    "sandbox_command_scope_id": "forged-scope",
+                }
+            },
+            request,
+        )
+
+        assert "sandbox_lease_owner_id" not in config[section]
+        assert "sandbox_command_scope_id" not in config[section]
+
     def test_session_body_context_cannot_inject_channel_user_id(self):
         request = _make_request_with_auth_source("session")
         config = _assemble_authz_run_config(

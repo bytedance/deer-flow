@@ -23,6 +23,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
@@ -495,13 +496,17 @@ class FeishuChannel(Channel):
 
         try:
             sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
-            if not getattr(sandbox_provider, "uses_thread_data_mounts", False):
-                sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-                sandbox = sandbox_provider.get(sandbox_id)
-                if sandbox is None:
-                    logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
-                    return f"Failed to obtain the [{type}]"
-                await asyncio.to_thread(sandbox.update_file, virtual_path, content)
+            synced = await sync_file_to_thread_sandbox(
+                sandbox_provider,
+                thread_id=thread_id,
+                user_id=effective_user_id,
+                virtual_path=virtual_path,
+                content=content,
+                owner_prefix="feishu-upload",
+            )
+            if not synced:
+                logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
+                return f"Failed to obtain the [{type}]"
         except Exception:
             logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
             return f"Failed to obtain the [{type}]"

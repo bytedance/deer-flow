@@ -23,7 +23,7 @@ import mimetypes
 import os
 import shutil
 import uuid
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -91,6 +91,19 @@ _EMBEDDED_AUTHORIZATION_CONTEXT_KEYS = frozenset(
         "authz_attributes",
     }
 )
+
+
+def _stream_with_sandbox_lease_cleanup(items: Iterator[Any], context: dict[str, Any]) -> Iterator[Any]:
+    """Fence an embedded graph iterator with execution-lease cleanup."""
+    try:
+        yield from items
+    finally:
+        try:
+            from deerflow.sandbox.lease import release_sandbox_execution_lease
+
+            release_sandbox_execution_lease(context)
+        except Exception:
+            logger.warning("Failed to release embedded sandbox execution lease", exc_info=True)
 
 
 def _run_async_from_sync(coro):
@@ -961,12 +974,13 @@ class DeerFlowClient:
             sent.update(delta)
             return delta
 
-        for item in self._agent.stream(
+        agent_items = self._agent.stream(
             state,
             config=config,
             context=context,
             stream_mode=["values", "messages", "custom"],
-        ):
+        )
+        for item in _stream_with_sandbox_lease_cleanup(agent_items, context):
             if isinstance(item, tuple) and len(item) == 2:
                 mode, chunk = item
                 mode = str(mode)
