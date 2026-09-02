@@ -18,9 +18,10 @@ from deerflow.config.agents_config import (
     preserve_non_managed_fields,
 )
 from deerflow.config.app_config import get_app_config
+from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
@@ -348,12 +349,25 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
 
     try:
-        return await asyncio.to_thread(_create_agent)
+        response = await asyncio.to_thread(_create_agent)
     except AgentExistsError:
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
     except Exception as e:
         logger.error(f"Failed to create agent '{request.name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
+
+    # A deleted-and-recreated agent may still carry a tombstone marker from the
+    # prior deletion; clear it so the freshly created agent's memory works again
+    # (an unbounded marker would skip every memory write forever, issue #3364).
+    if get_memory_config().enabled:
+        try:
+            from deerflow.agents.memory import clear_deleted_agent_marker
+
+            await asyncio.to_thread(clear_deleted_agent_marker, normalized_name, user_id)
+        except Exception as e:
+            logger.warning(f"Failed to clear deleted marker for agent '{normalized_name}': {e}")
+
+    return response
 
 
 @router.put(
@@ -566,10 +580,52 @@ async def delete_agent(name: str) -> None:
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
+
+    store = get_agent_store()
+
+    # Enqueue-side user ids go through resolve_runtime_user_id() (runtime
+    # server_info / langgraph auth / runtime context), which can differ from the
+    # raw get_effective_user_id() value in authenticated deployments. Build the
+    # candidate set once and reuse it for BOTH the pending-update discard and the
+    # tombstone marker (issue #3364 review) so neither can silently match the
+    # wrong user bucket.
+    candidate_ids: set[str] = {user_id}
+    try:
+        candidate_ids.add(resolve_runtime_user_id(None))
+    except Exception:
+        pass
+
+    if get_memory_config().enabled:
+        # Cancel any pending debounced memory writes for this agent before
+        # removing the directory. Otherwise a lagging write can recreate the
+        # agent dir (with a stray memory.json) and block recreating a
+        # same-named agent (issue #3364).
+        #
+        # Should we discard? The file backend only discards for genuine custom
+        # agents (the dir contains a config.yaml, mirroring FileAgentStore.delete)
+        # so a no-op delete doesn't drop queued updates for an agent that is
+        # preserved. SqlAgentStore never writes config.yaml on disk (config/SOUL
+        # live in the row), so that guard is always False there and the discard
+        # would silently no-op — db-backed stores discard unconditionally
+        # (issue #3364 round-4 review).
+        from deerflow.persistence.agents import should_discard_on_delete
+
+        if should_discard_on_delete(store, user_id, name):
+            try:
+                from deerflow.agents.memory import get_memory_manager
+
+                manager = await asyncio.to_thread(get_memory_manager)
+                discard = getattr(manager, "discard_pending_updates", None)
+                if discard is not None:
+                    for candidate_id in candidate_ids:
+                        discard(user_id=candidate_id, agent_name=name)
+            except Exception as e:
+                logger.warning(f"Failed to discard pending memory updates for agent '{name}': {e}")
+
     try:
         # Off the event loop: file rmtree or a DB delete plus memory cleanup.
         def _delete_agent() -> AgentDeleteOutcome:
-            return get_agent_store().delete(name, user_id=user_id)
+            return store.delete(name, user_id=user_id)
 
         outcome = await asyncio.to_thread(_delete_agent)
     except Exception as e:
@@ -588,5 +644,22 @@ async def delete_agent(name: str) -> None:
             status_code=409,
             detail=(f"Directory for '{name}' contains memory data but is not a custom agent because config.yaml is missing; it was preserved."),
         )
+
+    # The agent is genuinely deleted. Mark it in the memory storage so any
+    # write that lands later (debounced queue update, fact-CRUD API, other
+    # worker) skips committing instead of resurrecting the directory.
+    if get_memory_config().enabled:
+        try:
+            from deerflow.agents.memory import get_memory_manager
+
+            manager = await asyncio.to_thread(get_memory_manager)
+            mark = getattr(manager, "mark_agent_deleted", None)
+            if mark is not None:
+                # Reuse the candidate set built above (before store.delete) so the
+                # marker lands in every user bucket a late write may resolve to.
+                for candidate_id in candidate_ids:
+                    mark(user_id=candidate_id, agent_name=name)
+        except Exception as e:
+            logger.warning(f"Failed to mark agent '{name}' deleted in memory storage: {e}")
 
     logger.info(f"Deleted agent '{name}'")

@@ -13,7 +13,7 @@ from app.gateway.deps import _validate_agent_storage
 from deerflow.config.agent_storage_config import AgentStorageConfig
 from deerflow.config.app_config import reset_app_config
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.persistence.agents import get_agent_store, make_agent_store
+from deerflow.persistence.agents import get_agent_store, make_agent_store, should_discard_on_delete
 from deerflow.persistence.agents.file import FileAgentStore
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.persistence.agents.sql import SqlAgentStore
@@ -58,6 +58,37 @@ def test_validation_rejects_db_on_memory_database():
 def test_validation_allows_file_and_db_on_sql(tmp_path):
     _validate_agent_storage(_cfg("file", "memory"))  # no raise
     _validate_agent_storage(_cfg("db", "sqlite", str(tmp_path)))  # no raise
+
+
+# -- delete: discard-pending-updates decision (issue #3364 round-4) ---------
+
+
+def test_should_discard_on_delete_backend_split(tmp_path, monkeypatch):
+    """A delete discards pending memory updates for db-backed stores even when
+    the agent dir on disk has no config.yaml (SqlAgentStore keeps config/SOUL in
+    the DB row), whereas the file backend only discards for genuine custom
+    agents. Regression for the round-4 review: under ``agent_storage.backend:
+    db`` the old ``config.yaml`` guard was always False, so the discard silently
+    no-oped.
+    """
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+
+    # db-backed: discard regardless of what is on disk.
+    assert should_discard_on_delete(SqlAgentStore("sqlite:///:memory:"), "u1", "x") is True
+
+    # file-backed, agent never created → preserved, no discard.
+    assert should_discard_on_delete(FileAgentStore(), "u1", "never-created") is False
+
+    # file-backed, dir exists but only memory data (no config.yaml) → preserved.
+    paths_module.get_paths().user_agent_dir("u1", "memory-only").mkdir(parents=True)
+    assert should_discard_on_delete(FileAgentStore(), "u1", "memory-only") is False
+
+    # file-backed, genuine custom agent → discard.
+    FileAgentStore().create("reviewer", {"name": "reviewer", "description": "reviews"}, "soul", user_id="u1")
+    assert should_discard_on_delete(FileAgentStore(), "u1", "reviewer") is True
 
 
 def test_validation_warns_on_file_under_multiworker_postgres(monkeypatch, caplog):

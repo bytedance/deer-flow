@@ -727,6 +727,49 @@ class FileMemoryStorage(MemoryStorage):
     def _get_memory_file_path(self, agent_name: str | None = None, *, user_id: str | None = None) -> Path:
         return memory_file_path(self._config, agent_name, user_id=user_id)
 
+    def _deleted_agent_marker(self, path: Path, agent_name: str) -> Path:
+        """Return the tombstone marker path for one deleted agent.
+
+        The marker lives under the user bucket (``users/{uid}/.deleted-agents/``),
+        which survives the agent-directory rmtree, so it is visible to every
+        write path and to other worker processes sharing the storage root.
+        """
+        validate_agent_name(agent_name)
+        return path.parent / ".deleted-agents" / f"{agent_name.lower()}.marker"
+
+    def mark_agent_deleted(self, *, user_id: str | None = None, agent_name: str | None = None) -> None:
+        """Record that an agent was deleted so late memory writes are skipped.
+
+        Written by the agent-deletion path (issue #3364): the marker outlives
+        the agent-dir rmtree and makes ``_commit_changes_locked`` skip any
+        write that lands after deletion — debounced queue updates, fact-CRUD
+        API calls, and writes from other workers. Agents that never existed
+        have no marker, so first-conversation bootstrap writes are unaffected.
+        """
+        if agent_name is None:
+            return
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        marker = self._deleted_agent_marker(path, agent_name)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("", encoding="utf-8")
+
+    def clear_agent_deleted(self, *, user_id: str | None = None, agent_name: str | None = None) -> None:
+        """Remove the tombstone marker for an agent that was (re)created.
+
+        The agent-creation path calls this after a deleted agent's directory
+        is recreated (issue #3364): an unbounded marker would permanently
+        skip every memory write for a same-named agent. No-op when no marker
+        exists, so fresh agents are unaffected.
+        """
+        if agent_name is None:
+            return
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        marker = self._deleted_agent_marker(path, agent_name)
+        try:
+            marker.unlink()
+        except FileNotFoundError:
+            pass
+
     def _scope_signature(self, path: Path, agent_name: str | None) -> tuple[Any, ...]:
         """Track supported writes without scanning the agent's fact files.
 
@@ -1008,6 +1051,23 @@ class FileMemoryStorage(MemoryStorage):
         deliberately not implemented as load-all/replace-all: unchanged fact
         files are neither opened for backup nor rewritten nor re-indexed.
         """
+        # issue #3364: never resurrect a deleted agent's directory. The agent
+        # deletion path marks the agent by writing a tombstone marker under the
+        # user bucket (which survives the agent-dir rmtree); any write that
+        # lands after that — a debounced/in-flight queue update, a fact-CRUD
+        # API call, or a write from another worker process — is skipped here,
+        # where every commit path (save / apply_changes / import) funnels
+        # through. Bootstrap writes for agents that never had a store dir are
+        # unaffected: no marker exists for them.
+        if agent_name is not None:
+            deleted_marker = self._deleted_agent_marker(path, agent_name)
+            if deleted_marker.exists():
+                logger.info(
+                    "Skipping memory commit for deleted agent %s (marker %s)",
+                    agent_name,
+                    deleted_marker,
+                )
+                return {}, []
         current_memory = self._load_memory_file(path)
         current_revision = int((current_memory or {}).get("revision") or 0)
         if expected_revision is not None and expected_revision != current_revision:
@@ -1361,6 +1421,14 @@ class FileMemoryStorage(MemoryStorage):
         notifications: list[RetrievalNotification] = []
         deleted_metadata_ids: list[str] = []
         try:
+            # issue #3364: a deleted agent's late write must not resurrect its
+            # directory. The deletion path writes a tombstone marker under the
+            # user bucket; skip the full save when it is present. The commit
+            # path itself is also guarded in _commit_changes_locked, which
+            # covers every write path (save / apply_changes / fact CRUD).
+            if agent_name is not None and self._deleted_agent_marker(path, agent_name).exists():
+                logger.info("Skipping memory save for deleted agent %s", agent_name)
+                return False
             if not isinstance(memory_data, dict):
                 raise ValueError("memory_data must be an object")
             if agent_name is not None and "facts" not in memory_data:
@@ -1456,6 +1524,16 @@ class FileMemoryStorage(MemoryStorage):
                         delete_revisions={str(fact["id"]): int(fact.get("revision") or 1) for fact in facts},
                     )
                     notifications_by_agent.append((agent_name, notifications))
+
+            # Delete-tombstone markers only accumulate under
+            # users/{uid}/.deleted-agents/ (they are never reaped because a
+            # marker is cleared only by recreating the exact same agent name).
+            # Clearing this user's memory makes every marker moot, so prune the
+            # directory to avoid unbounded per-user on-disk state (issue #3364
+            # review).
+            markers_dir = path.parent / ".deleted-agents"
+            if markers_dir.exists():
+                shutil.rmtree(markers_dir, ignore_errors=True)
 
             empty = create_empty_memory()
             current_memory = self._load_memory_file(path)

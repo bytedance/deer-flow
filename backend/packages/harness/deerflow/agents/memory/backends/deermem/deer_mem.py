@@ -270,6 +270,62 @@ class DeerMem(MemoryManager):
         except QueueFull as e:
             logger.warning("Memory emergency flush rejected under backpressure (thread=%s): %s", thread_id, e)
 
+    def discard_pending_updates(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> int:
+        """Drop pending debounced memory updates for one agent (issue #3364).
+
+        Called from the agent-deletion path before the agent directory is
+        removed, so a lagging memory write cannot recreate the directory and
+        block recreating a same-named agent. Returns the number of pending
+        updates removed.
+        """
+        queue = self._queue
+        if queue is None:
+            return 0
+        return queue.discard(user_id=user_id, agent_name=agent_name)
+
+    def mark_agent_deleted(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> None:
+        """Record an agent deletion so late memory writes are skipped (issue #3364).
+
+        Forwards to the storage backend's tombstone marker, which survives the
+        agent-directory rmtree and guards every commit path (save / apply_changes
+        / fact CRUD) against resurrecting a deleted agent's directory.
+        """
+        storage = self._storage
+        if storage is None:
+            return
+        mark = getattr(storage, "mark_agent_deleted", None)
+        if mark is not None:
+            mark(user_id=user_id, agent_name=agent_name)
+
+    def clear_agent_deleted(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> None:
+        """Remove a deleted-agent tombstone when a same-named agent is (re)created.
+
+        Mirrors ``mark_agent_deleted`` (issue #3364): the marker would otherwise
+        skip every memory write for the recreated agent forever. Forwards to the
+        storage backend; no-op when no marker exists.
+        """
+        storage = self._storage
+        if storage is None:
+            return
+        clear = getattr(storage, "clear_agent_deleted", None)
+        if clear is not None:
+            clear(user_id=user_id, agent_name=agent_name)
+
     def _prepare_update(
         self,
         messages: list[Any],

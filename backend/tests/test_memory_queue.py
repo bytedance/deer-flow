@@ -403,3 +403,104 @@ def test_flush_sync_skips_inter_item_delay_on_drain_path() -> None:
     # No inter-item rate-limit sleep on the drain path.
     mock_sleep.assert_not_called()
     assert mock_updater.update_memory.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# discard() — drop pending updates for a deleted agent and tombstone in-flight
+# ones (issue #3364). A debounced memory write that fires after the agent is
+# deleted would otherwise recreate the agent's directory via mkdir and block
+# recreating a same-named agent.
+# ---------------------------------------------------------------------------
+
+
+def test_discard_removes_pending_updates_for_agent() -> None:
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["m"], agent_name="agent-a", user_id="alice")
+        queue.add(thread_id="t2", messages=["m"], agent_name="agent-b", user_id="alice")
+        queue.add(thread_id="t3", messages=["m"], agent_name="agent-a", user_id="bob")
+
+    removed = queue.discard(user_id="alice", agent_name="agent-a")
+
+    assert removed == 1
+    assert queue.pending_count == 2
+    remaining = [c.agent_name for c in queue._items]
+    assert remaining == ["agent-b", "agent-a"]
+
+
+def test_discard_skips_in_flight_update_for_deleted_agent() -> None:
+    """After discard, a context the in-flight worker already pulled out of the
+    queue (and is about to persist) must be skipped before reaching save()."""
+    queue = _queue()
+    started = threading.Event()
+    release = threading.Event()
+    processed: list[str | None] = []
+
+    def fake_update(**kwargs: object) -> bool:
+        processed.append(str(kwargs.get("agent_name")))
+        # Hold the worker mid-batch on the first context so the main thread can
+        # delete the agent (record a tombstone) while the run is in flight.
+        started.set()
+        release.wait(timeout=5.0)
+        return True
+
+    queue._updater.update_memory = fake_update  # type: ignore[method-assign]
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["m"], agent_name="agent-a", user_id="alice")
+        queue.add(thread_id="t2", messages=["m"], agent_name="agent-a", user_id="alice")
+
+    # Start a real in-flight _process_queue worker; both contexts are snapshot.
+    worker = threading.Thread(target=queue._process_queue, daemon=True)
+    worker.start()
+    assert started.wait(timeout=5.0) is True  # worker mid-update on the first context
+
+    # Agent deleted while the worker is in flight: nothing is pending (the
+    # worker already pulled the contexts out), but a tombstone is recorded.
+    removed = queue.discard(user_id="alice", agent_name="agent-a")
+    assert removed == 0
+    assert ("alice", "agent-a") in queue._deleted_agents
+
+    release.set()
+    worker.join(timeout=5.0)
+
+    # Tombstone honored: only the pre-discard context was persisted; the second
+    # in-flight context for the deleted agent was skipped.
+    assert processed == ["agent-a"]
+    assert queue._deleted_agents == set()
+
+
+def test_discard_does_not_leave_stale_tombstone_when_idle() -> None:
+    """An idle queue has no pre-discard snapshot, so discard() must not record
+    a tombstone: a stale one would silently skip a recreated same-named
+    agent's first legitimate update (review feedback on #3364)."""
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["m"], agent_name="agent-a", user_id="alice")
+
+    removed = queue.discard(user_id="alice", agent_name="agent-a")
+
+    assert removed == 1
+    assert queue._deleted_agents == set()  # idle queue: no tombstone recorded
+
+
+def test_discard_tombstone_cleared_after_processing() -> None:
+    """A tombstone recorded while a worker holds a pre-discard snapshot is
+    cleared once that processing run finishes, so it never leaks into a later
+    run and blocks a recreated same-named agent."""
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["m"], agent_name="agent-a", user_id="alice")
+    # Simulate in-flight: the worker already pulled the queue out.
+    queue._processing = True
+    contexts = queue._items
+    queue._items = []
+    queue.discard(user_id="alice", agent_name="agent-a")
+    assert queue._deleted_agents == {("alice", "agent-a")}
+
+    # Re-arm the snapshot and run it: the in-flight context is skipped via the
+    # tombstone, and the finally block clears the set.
+    queue._items = contexts
+    queue._processing = False
+    queue.flush()
+
+    assert queue._deleted_agents == set()

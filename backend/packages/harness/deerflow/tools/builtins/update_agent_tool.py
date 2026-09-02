@@ -34,6 +34,7 @@ from langchain_core.tools import tool
 from langgraph.types import Command
 from pydantic import BaseModel, BeforeValidator
 
+from deerflow.agents.memory import clear_deleted_agent_marker
 from deerflow.config.agents_config import load_agent_config, preserve_non_managed_fields, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
@@ -249,6 +250,11 @@ def update_agent(
     if config_changed or soul is not None:
         try:
             get_agent_store().update(agent_name, config_data if config_changed else None, soul, user_id=user_id)
+            # FileAgentStore.update is an upsert (mkdir exist_ok), so updating a
+            # possibly-deleted agent name always writes through. Clear the
+            # tombstone the deletion left, or the re-created agent's memory stays
+            # muted forever (issue #3364) — same drift guard as setup_agent / REST.
+            clear_deleted_agent_marker(agent_name, user_id)
         except Exception as e:
             logger.error("[update_agent] Failed to update agent '%s' (user=%s): %s", agent_name, user_id, e, exc_info=True)
             return _err(f"Failed to update agent '{agent_name}': {e}")

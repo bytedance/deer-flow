@@ -4,6 +4,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
+from deerflow.agents.memory import clear_deleted_agent_marker
 from deerflow.config.agents_config import SOUL_FILENAME, validate_agent_name
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents import get_agent_store
@@ -63,6 +64,11 @@ def setup_agent(
             if skills is not None:
                 config_data["skills"] = skills
             get_agent_store().update(agent_name, config_data, soul, user_id=user_id)
+            # setup is an upsert, so re-creating a same-named agent after a
+            # delete hits this path. Clear the tombstone the deletion wrote, or
+            # every later memory write bails in the commit guard and the
+            # re-created agent is permanently muted (issue #3364).
+            clear_deleted_agent_marker(agent_name, user_id)
         else:
             # Default agent (no agent_name): SOUL.md lives at the global base
             # dir. It is not a custom-agent record, so it stays file-based
