@@ -428,6 +428,47 @@ class IgnoringClearGenerationStorage(MemoryStorage):
         return copy.deepcopy(self._memory)
 
 
+class NamedFenceWithoutCapabilitiesStorage(MemoryStorage):
+    """Declares fence parameters but does not implement ``capabilities()``."""
+
+    def __init__(self, config: DeerMemConfig | None = None) -> None:
+        self._memory = create_empty_memory()
+
+    def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        return copy.deepcopy(self._memory)
+
+    def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        return self.load(agent_name, user_id=user_id)
+
+    def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None, expected_revision: int | None = None) -> bool:
+        self._memory = copy.deepcopy(memory_data)
+        return True
+
+    def apply_changes(
+        self,
+        change_set: dict[str, Any],
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+        expected_manifest_revision: int | None = None,
+        allow_manifest_rebase: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
+        bump_clear_generation: str | None = None,
+    ) -> dict[str, Any]:
+        return {"complete": False}
+
+    def clear_all(self, *, user_id: str | None = None) -> dict[str, Any]:
+        self._memory = create_empty_memory()
+        return copy.deepcopy(self._memory)
+
+
+class NamedFenceOmittingCapabilityStorage(NamedFenceWithoutCapabilitiesStorage):
+    """Names the fence parameters but advertises a different capability set."""
+
+    def capabilities(self) -> set[str]:
+        return {"custom"}
+
+
 class TransactionalClearGenerationStorage(MemoryStorage):
     """In-memory provider that checks and bumps clear generation under one lock."""
 
@@ -534,6 +575,26 @@ def test_create_storage_rejects_provider_that_ignores_clear_generation() -> None
     try:
         with pytest.raises(ValueError, match="clear-generation"):
             create_storage(DeerMemConfig(storage_class="clear_generation_fakes.IgnoringClearGenerationStorage"))
+    finally:
+        sys.modules.pop("clear_generation_fakes", None)
+
+
+def test_create_storage_rejects_provider_without_capabilities_method() -> None:
+    assert declares_clear_generation_fence(NamedFenceWithoutCapabilitiesStorage) is False
+    _install_storage_module("clear_generation_fakes", Storage=NamedFenceWithoutCapabilitiesStorage)
+    try:
+        with pytest.raises(ValueError, match="clear-generation"):
+            create_storage(DeerMemConfig(storage_class="clear_generation_fakes.Storage"))
+    finally:
+        sys.modules.pop("clear_generation_fakes", None)
+
+
+def test_create_storage_rejects_provider_that_omits_clear_generation_capability() -> None:
+    assert declares_clear_generation_fence(NamedFenceOmittingCapabilityStorage) is True
+    _install_storage_module("clear_generation_fakes", Storage=NamedFenceOmittingCapabilityStorage)
+    try:
+        with pytest.raises(ValueError, match="clear-generation"):
+            create_storage(DeerMemConfig(storage_class="clear_generation_fakes.Storage"))
     finally:
         sys.modules.pop("clear_generation_fakes", None)
 

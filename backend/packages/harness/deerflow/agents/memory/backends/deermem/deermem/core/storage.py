@@ -465,16 +465,20 @@ CLEAR_GENERATION_CAPABILITY = "clear-generation"
 def declares_clear_generation_fence(storage_cls: type) -> bool:
     """Return True when ``storage_cls`` declares the atomic clear-generation contract.
 
-    Custom ``storage_class`` providers must override ``apply_changes`` and
-    ``clear_all`` and name ``expected_clear_generation`` / ``bump_clear_generation``
-    as explicit parameters. A ``**scope`` sink is not enough: those values can
-    be accepted and ignored, leaving the restore-after-clear race.
+    Custom ``storage_class`` providers must override ``apply_changes``,
+    ``clear_all``, and ``capabilities``, and name ``expected_clear_generation`` /
+    ``bump_clear_generation`` as explicit parameters. A ``**scope`` sink is not
+    enough: those values can be accepted and ignored, leaving the
+    restore-after-clear race.
     """
     apply_changes = getattr(storage_cls, "apply_changes", None)
     clear_all = getattr(storage_cls, "clear_all", None)
+    capabilities = getattr(storage_cls, "capabilities", None)
     if apply_changes is None or apply_changes is MemoryStorage.apply_changes:
         return False
     if clear_all is None or clear_all is MemoryStorage.clear_all:
+        return False
+    if capabilities is None or capabilities is MemoryStorage.capabilities:
         return False
     try:
         params = inspect.signature(apply_changes).parameters
@@ -485,9 +489,12 @@ def declares_clear_generation_fence(storage_cls: type) -> bool:
 
 def _validate_clear_generation_contract(storage: MemoryStorage, *, label: str) -> None:
     if not declares_clear_generation_fence(type(storage)):
-        raise TypeError(f"Configured memory storage {label} does not implement the atomic clear-generation fence (apply_changes must declare expected_clear_generation/bump_clear_generation; clear_all must be overridden)")
-    capabilities = getattr(storage, "capabilities", None)
-    if callable(capabilities) and CLEAR_GENERATION_CAPABILITY not in capabilities():
+        raise TypeError(f"Configured memory storage {label} does not implement the atomic clear-generation fence (apply_changes must declare expected_clear_generation/bump_clear_generation; clear_all and capabilities must be overridden)")
+    try:
+        advertised = storage.capabilities()
+    except NotImplementedError:
+        advertised = None
+    if not isinstance(advertised, (set, frozenset)) or CLEAR_GENERATION_CAPABILITY not in advertised:
         raise TypeError(f"Configured memory storage {label} capabilities() omit {CLEAR_GENERATION_CAPABILITY!r}")
 
 
@@ -576,6 +583,15 @@ class MemoryStorage(abc.ABC):
         fact_ids: list[str] | None = None,
     ) -> None:
         """Remove sidecar data for selected facts, or the whole scope."""
+
+    def capabilities(self) -> set[str]:
+        """Return advertised storage features.
+
+        Providers that implement the atomic clear-generation fence must include
+        ``clear-generation``. ``create_storage`` fail-fasts when that entry is
+        missing or this base implementation is left in place.
+        """
+        raise NotImplementedError
 
     def peek_clear_generation(self, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
         """Return the scope clear-generation fence.

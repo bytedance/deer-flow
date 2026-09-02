@@ -126,6 +126,12 @@ class MemoryUpdateQueue:
                 reinforcement / preference / ...), used as extraction hints. Any
                 signal is admitted under backpressure.
         """
+        # Peek before the queue lock: every conversation turn enqueues here, and
+        # the file-backed peek is uncached manifest I/O. Holding ``_lock`` across
+        # that read would serialize all memory admits behind disk. A token that
+        # misses a clear landing afterwards is still dropped by the pre-LLM and
+        # commit-time checks.
+        captured_clear_generation = self._capture_clear_generation(agent_name, user_id)
         with self._lock:
             self._enqueue_locked(
                 thread_id=thread_id,
@@ -135,6 +141,7 @@ class MemoryUpdateQueue:
                 trace_id=trace_id,
                 signals=frozenset(signals) if signals else frozenset(),
                 bypass_watermark=False,
+                captured_clear_generation=captured_clear_generation,
             )
             self._reset_timer()
 
@@ -150,6 +157,7 @@ class MemoryUpdateQueue:
         signals: frozenset[str] | None = None,
     ) -> None:
         """Add a conversation and start processing immediately in the background."""
+        captured_clear_generation = self._capture_clear_generation(agent_name, user_id)
         with self._lock:
             self._enqueue_locked(
                 thread_id=thread_id,
@@ -159,6 +167,7 @@ class MemoryUpdateQueue:
                 trace_id=trace_id,
                 signals=frozenset(signals) if signals else frozenset(),
                 bypass_watermark=True,
+                captured_clear_generation=captured_clear_generation,
             )
             self._schedule_timer(0)
 
@@ -174,6 +183,7 @@ class MemoryUpdateQueue:
         trace_id: str | None,
         signals: frozenset[str],
         bypass_watermark: bool = False,
+        captured_clear_generation: tuple[int, int],
     ) -> ConversationContext:
         key = queue_key(thread_id, user_id, agent_name)
         # Emergency (bypass) and normal updates coexist: the match key includes
@@ -198,22 +208,20 @@ class MemoryUpdateQueue:
 
         # Merge by signal union: a signal seen on any update for this key stays.
         merged_signals = signals | (existing.signals if existing is not None else frozenset())
-        # First enqueue captures the fence. A later same-key merge keeps that
-        # token when the generation is unchanged, missing, or this is an
+        # First enqueue binds the pre-lock peek. A later same-key merge keeps
+        # that token when the generation is unchanged, missing, or this is an
         # emergency snapshot. Re-reading after a clear and blindly refreshing
         # would restore pre-clear facts; a visible newer clear instead consumes
         # the pre-clear snapshot and starts a fresh fence so post-clear turns
         # are extracted on this flush.
         if existing is None:
-            enqueued_clear_generation = self._capture_clear_generation(agent_name, user_id)
+            enqueued_clear_generation = captured_clear_generation
         elif existing.bypass_watermark or existing.clear_generation is None:
             enqueued_clear_generation = existing.clear_generation
+        elif is_stale_clear_generation(existing.clear_generation, captured_clear_generation) and self._consume_pre_clear_feed(existing):
+            enqueued_clear_generation = captured_clear_generation
         else:
-            current = self._capture_clear_generation(agent_name, user_id)
-            if is_stale_clear_generation(existing.clear_generation, current) and self._consume_pre_clear_feed(existing):
-                enqueued_clear_generation = current
-            else:
-                enqueued_clear_generation = existing.clear_generation
+            enqueued_clear_generation = existing.clear_generation
         context = ConversationContext(
             thread_id=thread_id,
             messages=messages,
@@ -232,8 +240,9 @@ class MemoryUpdateQueue:
     def _capture_clear_generation(self, agent_name: str | None, user_id: str | None) -> tuple[int, int]:
         """Read the current scope fence without loading fact files.
 
-        Missing or invalid updater peeks default to ``(0, 0)`` so a later
-        clear still looks newer and the write is dropped.
+        Callers must invoke this before acquiring ``self._lock``. Missing or
+        invalid updater peeks default to ``(0, 0)`` so a later clear still
+        looks newer and the write is dropped.
         """
         peek = getattr(self._updater, "peek_clear_generation", None)
         if not callable(peek):

@@ -424,8 +424,14 @@ def test_queue_add_captures_clear_generation_from_updater_peek() -> None:
 
 def test_queue_coalesce_keeps_earlier_clear_generation_when_unchanged() -> None:
     mock_updater = MagicMock()
-    mock_updater.peek_clear_generation.return_value = (0, 0)
+    held_during_peek: list[bool] = []
     queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+
+    def peek(agent_name: str | None, *, user_id: str | None = None) -> tuple[int, int]:
+        held_during_peek.append(queue._lock.locked())
+        return (0, 0)
+
+    mock_updater.peek_clear_generation.side_effect = peek
     with patch.object(queue, "_schedule_timer"):
         queue.add(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
         queue.add(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
@@ -433,7 +439,7 @@ def test_queue_coalesce_keeps_earlier_clear_generation_when_unchanged() -> None:
     assert queue.pending_count == 1
     assert queue._items[0].messages == ["second"]
     assert queue._items[0].clear_generation == (0, 0)
-    assert mock_updater.peek_clear_generation.call_count == 2
+    assert held_during_peek == [False, False]
     mock_updater.mark_feed_consumed.assert_not_called()
 
 
@@ -479,7 +485,7 @@ def test_queue_coalesce_does_not_refresh_emergency_snapshot_after_clear() -> Non
 
     assert queue._items[0].clear_generation == (0, 0)
     assert queue._items[0].messages == ["second"]
-    assert mock_updater.peek_clear_generation.call_count == 1
+    assert mock_updater.peek_clear_generation.call_count == 2
     mock_updater.mark_feed_consumed.assert_not_called()
 
 
@@ -492,4 +498,4 @@ def test_queue_coalesce_does_not_refresh_missing_generation_from_storage() -> No
         queue.add(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
 
     assert queue._items[0].clear_generation is None
-    mock_updater.peek_clear_generation.assert_not_called()
+    mock_updater.peek_clear_generation.assert_called_once_with("researcher", user_id="alice")
