@@ -20,7 +20,6 @@ _GIT_BASH_DRIVE_PATH = re.compile(r"^/(?P<drive>[A-Za-z])(?:/|$)")
 _PROGRAM_ARGUMENT_DRIVE = re.compile(r"^[A-Za-z]:")
 _PROGRAM_ARGUMENT_TRAVERSAL = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
 _URL_SCHEME_ANYWHERE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
-_URL_SCHEME_AT_START = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _FILE_URL_SCHEME = re.compile(r"^file://", re.IGNORECASE)
 
 # Match only absolute Windows drive spellings in command text.  POSIX paths
@@ -68,13 +67,13 @@ def _contains_file_url(value: str) -> bool:
     # argument separator, response-file marker, or option-colon prefix.
     if _FILE_URL_SCHEME.match(value):
         return True
-    if _URL_SCHEME_AT_START.match(value):
+    if _URL_SCHEME_ANYWHERE.match(value):
         return False
     if value.startswith("@"):
         return _contains_file_url(value[1:])
     if "=" in value:
         candidate = value.split("=", 1)[1]
-        if _URL_SCHEME_AT_START.match(candidate) and not _FILE_URL_SCHEME.match(candidate):
+        if _URL_SCHEME_ANYWHERE.match(candidate) and not _FILE_URL_SCHEME.match(candidate):
             return False
         return _contains_file_url(candidate)
 
