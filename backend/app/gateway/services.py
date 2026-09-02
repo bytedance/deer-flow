@@ -77,6 +77,7 @@ from deerflow.runtime.secret_context import (
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
@@ -408,22 +409,27 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
 # arbitrary HTTP/IM clients must not be able to force autonomous execution.
 _CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
 
-# Server-owned authorization identity fields. These must never be accepted from
-# client-supplied ``body.config.context`` or ``body.config.configurable``. They
+# Server-owned authorization and sandbox lifecycle identity fields. These must
+# never be accepted from client-supplied ``body.config.context`` or
+# ``body.config.configurable``. They
 # are either produced by Gateway auth state, admitted from a separately
 # authenticated internal request channel, or reserved for LangGraph Server.
 #   ``is_internal``             — derived from ``request.state.auth_source``
 #   ``authz_attributes``        — Phase 1A has no Gateway-side producer; cleared.
 #   ``channel_user_id``         — accepted only from trusted internal context.
 #   ``langgraph_auth_user*``    — populated only by LangGraph Server auth.
-_SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
-    {
-        "is_internal",
-        "authz_attributes",
-        "channel_user_id",
-        "langgraph_auth_user",
-        "langgraph_auth_user_id",
-    }
+#   ``sandbox_*_id``           — created only inside the run/subagent lifecycle.
+_SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
+    frozenset(
+        {
+            "is_internal",
+            "authz_attributes",
+            "channel_user_id",
+            "langgraph_auth_user",
+            "langgraph_auth_user_id",
+        }
+    )
+    | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 )
 
 # Keys forwarded from ``body.context`` into ``config['context']`` ONLY (the
@@ -534,18 +540,18 @@ def inject_authenticated_user_context(
     Values copied through the free-form RunnableConfig are always cleared.
     """
 
-    # --- Server-owned authorization identity fields ---
+    # --- Server-owned authorization and sandbox lifecycle identity fields ---
     # Clear any client-forged values from both config sections, then write the
     # authoritative is_internal. This runs before ALL early returns so that
     # even user_id-is-None paths get a defined is_internal value.
     runtime_context = config.setdefault("context", {})
     if not isinstance(runtime_context, dict):
         raise TypeError("run context must be a mapping")
-    for key in _SERVER_OWNED_AUTHZ_CONTEXT_KEYS:
+    for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
         runtime_context.pop(key, None)
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
-        for key in _SERVER_OWNED_AUTHZ_CONTEXT_KEYS:
+        for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
             configurable.pop(key, None)
     auth_source = getattr(getattr(request, "state", None), "auth_source", None)
     # ``user_id`` is server-owned for EXTERNAL callers: it now selects which

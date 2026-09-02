@@ -44,6 +44,13 @@ from deerflow.runtime.runs.worker import (
     _try_extract_from_message,
     run_agent,
 )
+from deerflow.sandbox.lease import (
+    SANDBOX_COMMAND_SCOPE_CONTEXT_KEY,
+    SANDBOX_LEASE_OWNER_CONTEXT_KEY,
+    ensure_sandbox_lease_owner,
+    get_sandbox_lease_manager,
+)
+from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
 
 
 class FakeCheckpointer:
@@ -51,6 +58,115 @@ class FakeCheckpointer:
         self.adelete_thread = AsyncMock()
         self.aget_tuple = AsyncMock(return_value=None)
         self.aput_writes = AsyncMock()
+
+
+def _lease_test_bridge():
+    return SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+
+@pytest.mark.anyio
+async def test_run_agent_releases_execution_lease_when_graph_raises():
+    provider = MagicMock()
+    provider.get.return_value = MagicMock()
+    manager = get_sandbox_lease_manager(provider)
+    run_manager = RunManager()
+    record = await run_manager.create("thread-lead-error")
+    owner_ids: list[str] = []
+
+    class FailingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, stream_mode, subgraphs
+            context = config["configurable"]["__pregel_runtime"].context
+            owner_id = ensure_sandbox_lease_owner(context)
+            assert owner_id is not None
+            owner_ids.append(owner_id)
+            context["sandbox_id"] = "shared"
+            manager.retain(
+                owner_id,
+                "shared",
+                thread_id=record.thread_id,
+                user_id="anonymous",
+            )
+            raise RuntimeError("lead model failed")
+            yield  # pragma: no cover
+
+    set_sandbox_provider(provider)
+    try:
+        await run_agent(
+            _lease_test_bridge(),
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=lambda **_kwargs: FailingAgent(),
+            graph_input={},
+            config={},
+        )
+        await asyncio.sleep(0)
+
+        assert len(owner_ids) == 1
+        assert manager.binding_for(owner_ids[0]) is None
+        provider.get.return_value.release_command_scope.assert_called_once_with(owner_ids[0])
+        provider.release.assert_called_once_with("shared")
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+async def test_run_agent_releases_execution_lease_when_cancelled():
+    provider = MagicMock()
+    provider.get.return_value = MagicMock()
+    manager = get_sandbox_lease_manager(provider)
+    run_manager = RunManager()
+    record = await run_manager.create("thread-lead-cancel")
+    lease_bound = asyncio.Event()
+    owner_ids: list[str] = []
+
+    class BlockingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, stream_mode, subgraphs
+            context = config["configurable"]["__pregel_runtime"].context
+            owner_id = ensure_sandbox_lease_owner(context)
+            assert owner_id is not None
+            owner_ids.append(owner_id)
+            context["sandbox_id"] = "shared"
+            manager.retain(
+                owner_id,
+                "shared",
+                thread_id=record.thread_id,
+                user_id="anonymous",
+            )
+            lease_bound.set()
+            await asyncio.Event().wait()
+            yield  # pragma: no cover
+
+    set_sandbox_provider(provider)
+    try:
+        task = asyncio.create_task(
+            run_agent(
+                _lease_test_bridge(),
+                run_manager,
+                record,
+                ctx=RunContext(checkpointer=None),
+                agent_factory=lambda **_kwargs: BlockingAgent(),
+                graph_input={},
+                config={},
+            )
+        )
+        await asyncio.wait_for(lease_bound.wait(), timeout=1)
+        task.cancel()
+        await task
+        await asyncio.sleep(0)
+
+        assert len(owner_ids) == 1
+        assert manager.binding_for(owner_ids[0]) is None
+        provider.get.return_value.release_command_scope.assert_called_once_with(owner_ids[0])
+        provider.release.assert_called_once_with("shared")
+    finally:
+        reset_sandbox_provider()
 
 
 @pytest.mark.anyio
@@ -501,6 +617,26 @@ def test_install_runtime_context_overrides_internal_pre_existing_message_ids():
     )
 
     assert config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"old-ai"})
+
+
+def test_install_runtime_context_removes_caller_sandbox_execution_identities():
+    config = {
+        "context": {
+            SANDBOX_LEASE_OWNER_CONTEXT_KEY: "forged-owner",
+            SANDBOX_COMMAND_SCOPE_CONTEXT_KEY: "forged-scope",
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "record-thread",
+            "run_id": "run-1",
+        },
+    )
+
+    assert SANDBOX_LEASE_OWNER_CONTEXT_KEY not in config["context"]
+    assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in config["context"]
 
 
 @pytest.mark.anyio
@@ -2193,6 +2329,18 @@ def test_build_runtime_context_ignores_caller_pre_existing_message_ids():
     ctx = _build_runtime_context("thread-1", "run-1", caller_context)
 
     assert CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY not in ctx
+
+
+def test_build_runtime_context_ignores_caller_sandbox_execution_identities():
+    caller_context = {
+        SANDBOX_LEASE_OWNER_CONTEXT_KEY: "forged-owner",
+        SANDBOX_COMMAND_SCOPE_CONTEXT_KEY: "forged-scope",
+    }
+
+    ctx = _build_runtime_context("thread-1", "run-1", caller_context)
+
+    assert SANDBOX_LEASE_OWNER_CONTEXT_KEY not in ctx
+    assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in ctx
 
 
 def test_build_runtime_context_ignores_non_dict_caller_context():

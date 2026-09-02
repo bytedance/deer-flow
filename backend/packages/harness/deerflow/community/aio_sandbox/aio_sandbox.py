@@ -4,6 +4,7 @@ import logging
 import shlex
 import threading
 import uuid
+from dataclasses import dataclass, field
 
 import httpx
 from agent_sandbox import Sandbox as AioSandboxClient
@@ -35,12 +36,22 @@ _BASH_EXEC_UNSUPPORTED_ERROR = (
 )
 
 
+@dataclass
+class _ScopedShellSession:
+    """One server-side shell session serialized within an agent execution."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    session_id: str | None = None
+
+
 class AioSandbox(Sandbox):
     """Sandbox implementation using the agent-infra/sandbox Docker container.
 
     This sandbox connects to a running AIO sandbox container via HTTP API.
-    A threading lock serializes shell commands to prevent concurrent requests
-    from corrupting the container's single persistent session (see #1433).
+    Lead/direct calls retain the legacy serialized shell. Delegated executions
+    receive separate server-side sessions, with commands serialized only inside
+    the same execution scope, so parallel subagents cannot corrupt one another's
+    shell state (see #1433 and #5128).
     """
 
     #: The legacy exec path reuses one persistent shell session across calls,
@@ -69,6 +80,10 @@ class AioSandbox(Sandbox):
             )
         self._home_dir = home_dir
         self._lock = threading.Lock()
+        self._scope_registry_lock = threading.Lock()
+        self._scoped_shell_sessions: dict[str, _ScopedShellSession] = {}
+        self._recovery_session_id: str | None = None
+        self._default_shell_corrupted = False
         self._closed = False
         # Set to True after bash.exec answers 404 (image predates /v1/bash/*),
         # so later env-bearing calls fail fast instead of re-hitting HTTP (#3921).
@@ -98,10 +113,34 @@ class AioSandbox(Sandbox):
         failures during teardown are logged and swallowed so provider/backend
         cleanup is never blocked.
         """
-        with self._lock:
+        # Close admission for scoped commands before draining their sessions.
+        # A scoped call that already registered itself remains in this snapshot
+        # and is joined through its per-scope lock below; later calls fail
+        # without creating an orphaned registry entry.
+        with self._scope_registry_lock:
             if self._closed:
                 return
             self._closed = True
+            scoped_sessions = list(self._scoped_shell_sessions.items())
+            self._scoped_shell_sessions.clear()
+        for scope_id, scoped in scoped_sessions:
+            with scoped.lock:
+                if scoped.session_id is not None and self._client is not None:
+                    self._cleanup_session_best_effort(
+                        self._client,
+                        scoped.session_id,
+                        context=f"execution scope {scope_id}",
+                    )
+                    scoped.session_id = None
+
+        with self._lock:
+            if self._recovery_session_id is not None and self._client is not None:
+                self._cleanup_session_best_effort(
+                    self._client,
+                    self._recovery_session_id,
+                    context="default recovery session",
+                )
+                self._recovery_session_id = None
             client = self._client
             # Drop the reference under the lock for use-after-close safety: any
             # later command on this instance fails loudly instead of reusing a
@@ -128,6 +167,157 @@ class AioSandbox(Sandbox):
             target.close()
         except Exception as e:
             logger.warning(f"Error closing AioSandbox client for {self.id}: {e}")
+
+    @staticmethod
+    def _cleanup_session_best_effort(client, session_id: str, *, context: str) -> None:
+        try:
+            client.shell.cleanup_session(session_id)
+        except Exception as cleanup_error:
+            logger.warning(
+                "Failed to release shell session %s (%s): %s",
+                session_id,
+                context,
+                cleanup_error,
+            )
+
+    @staticmethod
+    def _format_shell_result(result) -> tuple[str, int | None]:
+        data = result.data if result else None
+        output = data.output if data else ""
+        exit_code = getattr(data, "exit_code", None) if data else None
+        return output, exit_code
+
+    def _create_shell_session(self, client) -> str:
+        session_id = str(uuid.uuid4())
+        client.shell.create_session(id=session_id)
+        return session_id
+
+    def _exec_shell(self, client, command: str, *, session_id: str | None) -> tuple[str, int | None]:
+        kwargs = {
+            "command": command,
+            "no_change_timeout": self._DEFAULT_NO_CHANGE_TIMEOUT,
+        }
+        if session_id is not None:
+            kwargs["id"] = session_id
+        return self._format_shell_result(client.shell.exec_command(**kwargs))
+
+    def _rotate_and_retry_shell(
+        self,
+        client,
+        command: str,
+        *,
+        corrupted_session_id: str | None,
+        context: str,
+    ) -> tuple[str, int | None, str | None]:
+        if corrupted_session_id is not None:
+            self._cleanup_session_best_effort(
+                client,
+                corrupted_session_id,
+                context=f"corrupted {context}",
+            )
+        replacement_id = self._create_shell_session(client)
+        try:
+            output, exit_code = self._exec_shell(
+                client,
+                command,
+                session_id=replacement_id,
+            )
+        except BaseException:
+            self._cleanup_session_best_effort(
+                client,
+                replacement_id,
+                context=f"abandoned replacement for {context}",
+            )
+            raise
+        if output and _ERROR_OBSERVATION_SIGNATURE in output:
+            self._cleanup_session_best_effort(
+                client,
+                replacement_id,
+                context=f"failed replacement for {context}",
+            )
+            return output, exit_code, None
+        return output, exit_code, replacement_id
+
+    def execute_command_in_scope(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+        *,
+        scope_id: str | None = None,
+    ) -> str:
+        """Run no-env commands in one persistent session per subagent run.
+
+        Commands within a scope remain serialized, while independent subagents
+        use distinct server-side sessions and can execute concurrently. Secret-
+        bearing commands keep the existing fresh ``bash.exec`` behavior.
+        """
+        if env or scope_id is None:
+            return self.execute_command(command, env=env, timeout=timeout)
+        del timeout
+        _validate_extra_env(env)
+
+        try:
+            with self._scope_registry_lock:
+                if self._closed:
+                    raise RuntimeError("sandbox client is closed")
+                scoped = self._scoped_shell_sessions.setdefault(
+                    scope_id,
+                    _ScopedShellSession(),
+                )
+            with scoped.lock:
+                # Registration and command execution are separated by the
+                # per-scope wait.  Revalidate identity after that wait so a
+                # release/close which removed this exact scope is a hard
+                # lifecycle fence: queued callers cannot resurrect a session
+                # on an orphaned registry entry.
+                with self._scope_registry_lock:
+                    if self._closed or self._scoped_shell_sessions.get(scope_id) is not scoped:
+                        raise RuntimeError("sandbox command scope is no longer active")
+                client = self._client
+                if client is None:
+                    raise RuntimeError("sandbox client is closed")
+                if scoped.session_id is None:
+                    scoped.session_id = self._create_shell_session(client)
+                output, exit_code = self._exec_shell(
+                    client,
+                    command,
+                    session_id=scoped.session_id,
+                )
+                if output and _ERROR_OBSERVATION_SIGNATURE in output:
+                    logger.warning("ErrorObservation detected in sandbox output for execution scope; rotating session")
+                    output, exit_code, scoped.session_id = self._rotate_and_retry_shell(
+                        client,
+                        command,
+                        corrupted_session_id=scoped.session_id,
+                        context="execution scope",
+                    )
+                return self._render_shell_output(output, exit_code)
+        except Exception as e:
+            logger.error(f"Failed to execute command in sandbox: {e}")
+            return f"Error: {e}"
+
+    def release_command_scope(self, scope_id: str) -> None:
+        """Clean up one subagent's explicit server-side shell session."""
+        with self._scope_registry_lock:
+            scoped = self._scoped_shell_sessions.pop(scope_id, None)
+        if scoped is None:
+            return
+        with scoped.lock:
+            if scoped.session_id is None or self._client is None:
+                return
+            self._cleanup_session_best_effort(
+                self._client,
+                scoped.session_id,
+                context=f"execution scope {scope_id}",
+            )
+            scoped.session_id = None
+
+    @staticmethod
+    def _render_shell_output(output: str, exit_code: int | None) -> str:
+        if exit_code not in (0, None):
+            output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
+        return output if output else "(no output)"
 
     @property
     def home_dir(self) -> str:
@@ -161,12 +351,12 @@ class AioSandbox(Sandbox):
     ) -> str:
         """Execute a shell command in the sandbox.
 
-        Uses a lock to serialize concurrent requests. The AIO sandbox
-        container maintains a single persistent shell session that
-        corrupts when hit with concurrent exec_command calls (returns
-        ``ErrorObservation`` instead of real output). If corruption is
-        detected despite the lock (e.g. multiple processes sharing a
-        sandbox), the command is retried on a fresh session.
+        Uses a lock to serialize unscoped requests. The AIO sandbox container's
+        implicit persistent shell corrupts when hit with concurrent
+        ``exec_command`` calls (returning ``ErrorObservation`` instead of real
+        output). If corruption is detected despite the lock (e.g. multiple
+        processes sharing a sandbox), the replacement session is promoted for
+        subsequent calls rather than returning to the corrupted implicit one.
 
         Args:
             command: The command to execute.
@@ -195,34 +385,31 @@ class AioSandbox(Sandbox):
             return self._execute_with_env(command, env)
         with self._lock:
             try:
-                result = self._client.shell.exec_command(command=command, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
-                output = result.data.output if result.data else ""
-                exit_code = getattr(result.data, "exit_code", None) if result.data else None
+                client = self._client
+                if getattr(self, "_closed", False) or client is None:
+                    raise RuntimeError("sandbox client is closed")
+                if self._default_shell_corrupted and self._recovery_session_id is None:
+                    # Once the implicit session emits ErrorObservation, never
+                    # target it again. A failed replacement is cleaned up and
+                    # the next call starts another explicit session.
+                    self._recovery_session_id = self._create_shell_session(client)
+                output, exit_code = self._exec_shell(
+                    client,
+                    command,
+                    session_id=self._recovery_session_id,
+                )
 
                 if output and _ERROR_OBSERVATION_SIGNATURE in output:
+                    self._default_shell_corrupted = True
                     logger.warning("ErrorObservation detected in sandbox output, retrying on a fresh session")
-                    # exec_command only auto-creates a session when called with
-                    # no id, so the recovery session must be created explicitly
-                    # before we target it on retry.
-                    fresh_id = str(uuid.uuid4())
-                    self._client.shell.create_session(id=fresh_id)
-                    try:
-                        result = self._client.shell.exec_command(command=command, id=fresh_id, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
-                        output = result.data.output if result.data else ""
-                        exit_code = getattr(result.data, "exit_code", None) if result.data else None
-                    finally:
-                        # Release the one-shot recovery session, best-effort, so
-                        # repeated corruption can't accumulate sessions.
-                        try:
-                            self._client.shell.cleanup_session(fresh_id)
-                        except Exception as cleanup_error:
-                            logger.warning(f"Failed to release recovery session {fresh_id}: {cleanup_error}")
+                    output, exit_code, self._recovery_session_id = self._rotate_and_retry_shell(
+                        client,
+                        command,
+                        corrupted_session_id=self._recovery_session_id,
+                        context="default shell",
+                    )
 
-                if exit_code not in (0, None):
-                    # Mirror LocalSandbox: keep the actual shell status in the
-                    # output text (acceptance-checklist evidence).
-                    output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
-                return output if output else "(no output)"
+                return self._render_shell_output(output, exit_code)
             except Exception as e:
                 logger.error(f"Failed to execute command in sandbox: {e}")
                 return f"Error: {e}"
