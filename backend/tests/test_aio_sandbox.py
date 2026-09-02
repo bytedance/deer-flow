@@ -58,6 +58,21 @@ def sandbox():
         return sb
 
 
+def test_exec_command_appends_exit_marker_when_failure_has_output(sandbox):
+    """The legacy exec path must propagate the structured exit_code into the
+    output text (LocalSandbox parity) instead of discarding it."""
+    sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="5 passed, 1 error\n", exit_code=1)))
+
+    assert sandbox.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
+def test_bash_exec_appends_exit_marker_when_failure_has_output(sandbox):
+    """The bash.exec (env-bearing) path must propagate exit_code the same way."""
+    sandbox._client.bash.exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(stdout="5 passed, 1 error\n", stderr="", exit_code=1)))
+
+    assert sandbox.execute_command("make test", env={"A": "1"}) == "5 passed, 1 error\n\nExit Code: 1"
+
+
 class TestExecuteCommandSerialization:
     """Verify that concurrent exec_command calls are serialized."""
 
@@ -578,3 +593,11 @@ class TestClose:
         sandbox._client = SimpleNamespace()  # no close, no _client_wrapper
         sandbox.close()  # must not raise
         assert sandbox._client is None
+
+
+def test_list_dir_preserves_trailing_space_in_filename(sandbox):
+    """ "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    verbatim, one entry per line, so a per-line strip() corrupts the name."""
+    sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/test/notes.txt \n/test/sub\n")))
+
+    assert sandbox.list_dir("/test") == ["/test/notes.txt ", "/test/sub"]

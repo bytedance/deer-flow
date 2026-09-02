@@ -27,6 +27,7 @@ Fixes #
 - [ ] **Frontend UI** — page / component / setting / interaction under `frontend/`
 - [ ] **Backend API** — endpoint / SSE event / request-response shape under `backend/app`
 - [ ] **Agents / LangGraph** — agent node, graph wiring, `langgraph.json`, or prompt change
+  - Prompt-layer self-check: for every data source in the new text, what is its trust level, and which channel should it ride? Model-supplied or user-influenceable values belong on the untrusted, sanitized data channel (e.g. the task `HumanMessage`) — never interpolated into framework-owned system text, even neutralized.
 - [ ] **Sandbox** — `docker/` or sandboxed execution
 - [ ] **Skills** — change under `skills/`
 - [ ] **Dependencies** — new/upgraded entry in `backend/pyproject.toml` or `frontend/package.json` (say what it buys us)

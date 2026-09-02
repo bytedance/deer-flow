@@ -124,6 +124,16 @@ export const enUS: Translations = {
     loadingFullFile: "Loading full file...",
     previewFailed:
       "This file could not be previewed. You can still download it.",
+    viewSource: "View source",
+    missingTarget: "This link does not say which artifact to display.",
+  },
+
+  artifactArchive: {
+    downloadCurrent: (count) =>
+      `Download current versions (${count} ${count === 1 ? "file" : "files"})`,
+    currentVersionNotice:
+      "The file list comes from this response. Contents are the current versions and may have changed.",
+    downloadFailed: "Failed to download artifact archive.",
   },
 
   // Citations
@@ -345,6 +355,37 @@ export const enUS: Translations = {
     },
   },
 
+  subagentBatches: {
+    label: "Batches",
+    title: "Subagent batches",
+    description: "Durable, restart-safe work for many independent items.",
+    workerUnavailable:
+      "The batch worker is not running. Historical batches remain available in read-only mode.",
+    empty: "No subagent batches yet",
+    emptyHint: "Explicit batch_task submissions in this chat will appear here.",
+    loadFailed: "Couldn't load subagent batches",
+    active: "Active",
+    recent: "Recent",
+    pause: "Pause",
+    resume: "Resume",
+    cancel: "Cancel",
+    retryItem: "Retry",
+    exportResults: "Export JSONL",
+    viewItems: "View items",
+    hideItems: "Hide items",
+    itemsFailed: "Couldn't load batch items",
+    progress: (completed, total) => `${completed} of ${total} terminal`,
+    limits: (live, running) => `Live ${live} · running ${running}`,
+    status: {
+      queued: "Queued",
+      running: "Running",
+      paused: "Paused",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+  },
+
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: {
@@ -427,6 +468,8 @@ export const enUS: Translations = {
       pause: "Pause",
       resume: "Resume",
       trigger: "Trigger now",
+      duplicate: "Duplicate",
+      duplicateTitleSuffix: " (Copy)",
       delete: "Delete",
     },
     deleteConfirm:
@@ -587,11 +630,14 @@ export const enUS: Translations = {
     branchFailed: "Failed to branch conversation.",
     streamReplayGap:
       "Some live updates expired. The conversation was restored from saved state.",
+    outlineLabel: "Conversation outline",
+    outlineAttachmentFallback: "Image or file message",
   },
 
   // Chats
   chats: {
     searchChats: "Search chats",
+    branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
@@ -906,6 +952,37 @@ export const enUS: Translations = {
       description: "Manage the configuration and enabled status of MCP tools.",
       adminRequired: "Admin privileges are required to manage MCP tools.",
       empty: "No MCP tools configured.",
+      addServer: "Add server",
+      addServerDescription:
+        "Paste the JSON definition published by the MCP server. Both a bare server map and one wrapped in `mcpServers` are accepted. Existing names must be changed through Edit.",
+      addServerPlaceholder: `{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"]
+    }
+  }
+}`,
+      serverDefinitionLabel: "MCP server JSON definition",
+      definitionEmpty: "Paste an MCP server definition.",
+      definitionInvalidJson: "Enter valid JSON.",
+      definitionRootNotObject:
+        "Enter a JSON object describing one or more MCP servers.",
+      definitionNoServers: "No MCP server was found in the definition.",
+      definitionServerNotObject:
+        'The configuration for server "{name}" must be a JSON object.',
+      editServer: "Edit MCP server",
+      editServerDescription:
+        'Edit the complete JSON definition for "{name}". The server name is fixed; add a new server and remove this one to rename it.',
+      editSingleServer: "Edit exactly one MCP server at a time.",
+      editServerNameMismatch:
+        'Keep the existing server name "{name}" while editing.',
+      serverAlreadyExists:
+        'MCP server "{name}" already exists. Use Edit instead.',
+      removeServer: "Remove MCP server",
+      removeServerDescription:
+        'Remove "{name}" from the MCP configuration? Its tools stop being available to agents.',
+      unnamedServer: "(empty name)",
     },
     subagents: {
       title: "Subagents",
@@ -1183,6 +1260,11 @@ export const enUS: Translations = {
       adminRequired: "Admin privileges are required to manage agent skills.",
       installAdminRequired:
         "Admin privileges are required to install agent skills.",
+      installFromFile: "Install .skill",
+      installingArchive: "Installing...",
+      invalidArchive: "Choose a file with the .skill extension.",
+      archiveTooLarge: "The skill archive must be 100 MiB or smaller.",
+      installFailed: "Failed to install the skill archive.",
     },
     notification: {
       title: "Notification",

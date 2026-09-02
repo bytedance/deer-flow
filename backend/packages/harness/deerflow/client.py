@@ -38,7 +38,7 @@ from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
-from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
+from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
     SkillStateConfig,
@@ -49,6 +49,7 @@ from deerflow.config.extensions_config import (
     reload_extensions_config,
 )
 from deerflow.config.paths import get_paths
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.models import create_chat_model
 from deerflow.runtime import CheckpointStateAccessor
 from deerflow.runtime.checkpoint_mode import (
@@ -61,8 +62,9 @@ from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_sta
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
 from deerflow.skills.storage import get_or_new_user_skill_storage
+from deerflow.subagents.capacity import configure_subagent_execution_capacity
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, bind_trace_id, ensure_trace_id, generate_trace_id, get_current_trace_id, reset_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     claim_unique_filename,
@@ -199,6 +201,13 @@ class DeerFlowClient:
         if config_path is not None:
             reload_app_config(config_path)
         self._app_config = get_app_config()
+        runtime_config = getattr(self._app_config, "subagent_runtime", None)
+        if not isinstance(runtime_config, SubagentRuntimeConfig):
+            # Preserve compatibility with lightweight embedded/test configs
+            # created before the startup-only section existed.
+            runtime_config = SubagentRuntimeConfig()
+        configure_subagent_execution_capacity(runtime_config)
+        self._subagent_execution_capacity = runtime_config.max_running
         self._checkpoint_channel_mode = freeze_checkpoint_channel_mode(self._app_config.database.checkpoint_channel_mode)
         self._checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(self._app_config.database.checkpoint_delta.snapshot_frequency)
 
@@ -303,7 +312,22 @@ class DeerFlowClient:
             model_name = self._app_config.models[0].name
         model_name = _authorize_model_name(model_name, context=cfg, app_config=self._app_config)
         subagent_enabled = cfg.get("subagent_enabled", False)
-        max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        from deerflow.config.subagents_config import effective_subagent_concurrency
+
+        # Lightweight integrations and older tests may construct a client via
+        # ``__new__`` and inject only ``_app_config``. Production clients keep
+        # the startup snapshot set by ``__init__``; the fallback preserves the
+        # pre-snapshot construction contract without consulting global state.
+        subagent_execution_capacity = getattr(
+            self,
+            "_subagent_execution_capacity",
+            int(getattr(getattr(self._app_config, "subagent_runtime", None), "max_running", 3)),
+        )
+        max_concurrent_subagents = effective_subagent_concurrency(
+            cfg.get("max_concurrent_subagents"),
+            self._app_config,
+            execution_capacity=subagent_execution_capacity,
+        )
         max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
@@ -363,6 +387,7 @@ class DeerFlowClient:
                     mcp_routing_middleware=mcp_routing_middleware,
                     user_id=effective_user_id,
                     authorization_provider=_authz_provider,
+                    subagent_execution_capacity=subagent_execution_capacity,
                 ),
                 self._checkpoint_channel_mode,
                 self._checkpoint_snapshot_frequency,
@@ -378,6 +403,7 @@ class DeerFlowClient:
                 mcp_routing_hints_section=mcp_routing_hints_section,
                 user_id=effective_user_id,
                 skill_names=skill_setup.skill_names or None,
+                subagent_execution_capacity=subagent_execution_capacity,
             ),
             "state_schema": get_thread_state_schema(self._checkpoint_channel_mode, self._checkpoint_snapshot_frequency),
         }
@@ -689,23 +715,12 @@ class DeerFlowClient:
     ) -> Generator[StreamEvent, None, None]:
         """Stream a conversation turn with a DeerFlow request trace context.
 
-        Mirrors the Gateway ``TraceMiddleware`` gate: when
-        ``logging.enhance.enabled`` is off the embedded client does **not**
-        create a fresh request-level trace id, so Langfuse traces from
-        embedded / TUI / CLI callers keep their pre-enhancement schema and
-        do not gain a ``metadata.deerflow_trace_id`` key by default. A
-        caller that explicitly binds its own trace via
-        :func:`deerflow.trace_context.request_trace_context` still opts in:
-        the inner ``get_current_trace_id()`` read propagates that value
-        into Langfuse metadata regardless of the flag.
+        The embedded entry point, and like every other one it binds a trace id
+        for the turn so logs, Langfuse metadata, and delegated work correlate.
+        A caller that opened its own scope with ``request_trace_context`` keeps
+        that id; otherwise the turn gets a fresh one.
         """
-        if not is_trace_correlation_enabled(self._app_config):
-            yield from self._stream_without_trace_context(message, thread_id=thread_id, **kwargs)
-            return
-
-        # Resolve the trace id once, without mutating the caller's context.
-        # Inherits an ambient id if the caller opted in via
-        # ``request_trace_context``; otherwise mints a fresh one.
+        # Resolve the id once, without mutating the caller's context.
         trace_id = get_current_trace_id() or generate_trace_id()
 
         # Bind the trace id only around each ``next()`` step, never across a
@@ -717,25 +732,35 @@ class DeerFlowClient:
         # Per-step set/reset keeps LangGraph node execution and its log
         # records inside the binding while returning control to the caller
         # with the ContextVar restored.
-        inner = self._stream_without_trace_context(message, thread_id=thread_id, **kwargs)
+        inner = self._stream_turn(message, thread_id=thread_id, **kwargs)
         _EXHAUSTED = object()
         try:
             while True:
-                token = set_current_trace_id(trace_id)
+                token = bind_trace_id(trace_id)
                 try:
                     try:
                         event = next(inner)
                     except StopIteration:
                         event = _EXHAUSTED
                 finally:
-                    reset_current_trace_id(token)
+                    reset_trace_id(token)
                 if event is _EXHAUSTED:
                     break
                 yield event
         finally:
-            inner.close()
+            # close() drives the inner generator's finally path (GeneratorExit
+            # on an abandoned stream), which still logs and fires callbacks --
+            # bind the turn's id around it so that cleanup correlates with the
+            # turn it belongs to. Set and reset in this same frame, never
+            # across a yield, so the per-step cross-context safety holds even
+            # when GC closes the generator from another Context.
+            token = bind_trace_id(trace_id)
+            try:
+                inner.close()
+            finally:
+                reset_trace_id(token)
 
-    def _stream_without_trace_context(
+    def _stream_turn(
         self,
         message: str,
         *,
@@ -859,7 +884,7 @@ class DeerFlowClient:
                 context[key] = kwargs[key]
 
         configurable = config.get("configurable") or {}
-        deerflow_trace_id = get_current_trace_id()
+        deerflow_trace_id = ensure_trace_id()
         effective_user_id = context.get("user_id") or get_effective_user_id()
         if self._app_config.authorization.enabled:
             # Match the existing user-scoped storage/tracing identity when an
@@ -880,8 +905,7 @@ class DeerFlowClient:
         self._ensure_agent(config, context=context)
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
-        if deerflow_trace_id:
-            context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
+        context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
         if self._agent_name:
             context["agent_name"] = self._agent_name
 

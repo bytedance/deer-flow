@@ -60,17 +60,12 @@ def _stub_agent_creation(monkeypatch, fake_agent: _FakeAgent) -> dict[str, Any]:
     return captured
 
 
-def _make_client(_monkeypatch, *, enhance_enabled: bool = True) -> DeerFlowClient:
+def _make_client(_monkeypatch) -> DeerFlowClient:
     """Build a client without going through ``__init__`` so we never load
     config.yaml or perform any other side-effectful startup work.
-
-    ``enhance_enabled`` seeds the ``logging.enhance.enabled`` flag that
-    :func:`DeerFlowClient.stream` consults to gate request-trace binding
-    (mirrors the Gateway ``TraceMiddleware`` startup snapshot).
     """
     fake_app_config = SimpleNamespace(
         models=[SimpleNamespace(name="stub-model")],
-        logging=SimpleNamespace(enhance=SimpleNamespace(enabled=enhance_enabled)),
         authorization=AuthorizationConfig(enabled=False),
     )
     client = DeerFlowClient.__new__(DeerFlowClient)
@@ -176,12 +171,10 @@ def test_stream_preserves_caller_metadata_overrides(monkeypatch):
     assert metadata["langfuse_trace_name"] == "lead-agent"
 
 
-def test_stream_omits_deerflow_trace_id_when_enhance_disabled(monkeypatch):
-    """With ``logging.enhance.enabled=false`` the embedded client must not
-    forge a fresh request trace id. Otherwise embedded / TUI callers on the
-    default config would silently gain a new indexed ``deerflow_trace_id``
-    key on every Langfuse trace they emit — the exact schema change the
-    enhancement flag exists to opt into.
+def test_stream_always_binds_a_trace_id(monkeypatch):
+    """Embedded turns are correlated like every other entry point. The id is
+    unconditional so downstream consumers -- delegated subagents, the memory
+    threads -- read one ContextVar instead of branching on its absence.
     """
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
@@ -193,24 +186,22 @@ def test_stream_omits_deerflow_trace_id_when_enhance_disabled(monkeypatch):
 
     fake_agent = _FakeAgent()
     captured = _stub_agent_creation(monkeypatch, fake_agent)
-    client = _make_client(monkeypatch, enhance_enabled=False)
+    client = _make_client(monkeypatch)
 
-    list(client.stream("hi", thread_id="thread-client-disabled"))
+    list(client.stream("hi", thread_id="thread-client-bound"))
 
     metadata = captured["config"].get("metadata") or {}
-    # Session / user still bind — those are Langfuse-native trace attributes
-    # unrelated to the request-trace-correlation enhancement.
-    assert metadata.get("langfuse_session_id") == "thread-client-disabled"
-    assert metadata.get("langfuse_trace_name") == "lead-agent"
-    # The gated key stays out of metadata.
-    assert DEERFLOW_TRACE_METADATA_KEY not in metadata
+    assert metadata.get("langfuse_session_id") == "thread-client-bound"
+    assert metadata[DEERFLOW_TRACE_METADATA_KEY]
+    # The same id reaches the runtime context, which is what carries it across
+    # the boundaries the ContextVar does not survive.
+    assert captured["context"][DEERFLOW_TRACE_METADATA_KEY] == metadata[DEERFLOW_TRACE_METADATA_KEY]
 
 
-def test_stream_respects_caller_bound_trace_when_enhance_disabled(monkeypatch):
-    """Even with the enhancement disabled, a caller that explicitly binds
-    :func:`request_trace_context` has opted into propagation. The embedded
-    client must not swallow that id — the flag only gates *implicit*
-    per-turn id creation, not caller-supplied context."""
+def test_stream_keeps_a_caller_bound_trace(monkeypatch):
+    """A caller that opened its own scope with :func:`request_trace_context`
+    is pinning a correlation id across several turns; the client must join
+    that trace rather than mint a competing one per turn."""
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
@@ -221,13 +212,13 @@ def test_stream_respects_caller_bound_trace_when_enhance_disabled(monkeypatch):
 
     fake_agent = _FakeAgent()
     captured = _stub_agent_creation(monkeypatch, fake_agent)
-    client = _make_client(monkeypatch, enhance_enabled=False)
+    client = _make_client(monkeypatch)
 
-    with request_trace_context("caller-opt-in"):
-        list(client.stream("hi", thread_id="thread-client-opt-in"))
+    with request_trace_context("caller-pinned"):
+        list(client.stream("hi", thread_id="thread-client-pinned"))
 
     metadata = captured["config"].get("metadata") or {}
-    assert metadata.get(DEERFLOW_TRACE_METADATA_KEY) == "caller-opt-in"
+    assert metadata.get(DEERFLOW_TRACE_METADATA_KEY) == "caller-pinned"
 
 
 def test_stream_does_not_leak_trace_id_to_caller_context_between_yields(monkeypatch):
@@ -253,7 +244,7 @@ def test_stream_does_not_leak_trace_id_to_caller_context_between_yields(monkeypa
             yield ("values", {"messages": [], "artifacts": []})
 
     _stub_agent_creation(monkeypatch, _TwoEventAgent())
-    client = _make_client(monkeypatch, enhance_enabled=True)
+    client = _make_client(monkeypatch)
 
     from deerflow.trace_context import get_current_trace_id
 
@@ -295,7 +286,7 @@ def test_stream_abandoned_generator_close_does_not_raise_cross_context(monkeypat
                 yield ("values", {"messages": [], "artifacts": []})
 
     _stub_agent_creation(monkeypatch, _InfiniteAgent())
-    client = _make_client(monkeypatch, enhance_enabled=True)
+    client = _make_client(monkeypatch)
 
     gen = client.stream("hi", thread_id="thread-cross-ctx")
     # Pull one event in the current Context — a buggy implementation would
@@ -309,3 +300,43 @@ def test_stream_abandoned_generator_close_does_not_raise_cross_context(monkeypat
     # Tokens (if any) cannot be reset from here. Reaching this line without
     # a ``ValueError`` is the assertion.
     isolated_ctx.run(gen.close)
+
+
+def test_stream_abandoned_generator_cleanup_stays_inside_trace_binding(monkeypatch):
+    """Abandoning a stream runs the inner generator's ``finally`` path via
+    ``GeneratorExit``, and that cleanup still logs and fires callbacks. The
+    per-step binding has already been reset by then, so without a binding
+    around ``inner.close()`` the cleanup would observe no trace id (or an
+    unrelated ambient one) and its records would not correlate with the turn
+    they belong to.
+    """
+    monkeypatch.setattr("deerflow.client.build_tracing_callbacks", lambda: [])
+
+    from deerflow.trace_context import get_current_trace_id
+
+    observed: dict[str, str | None] = {}
+
+    class _RecordingAgent:
+        def __init__(self) -> None:
+            self.checkpointer = None
+            self.store = None
+
+        def stream(self, state, *, config, context, stream_mode):
+            observed["body"] = get_current_trace_id()
+            try:
+                while True:
+                    yield ("values", {"messages": [], "artifacts": []})
+            finally:
+                observed["cleanup"] = get_current_trace_id()
+
+    _stub_agent_creation(monkeypatch, _RecordingAgent())
+    client = _make_client(monkeypatch)
+
+    gen = client.stream("hi", thread_id="thread-abandoned-cleanup")
+    next(gen)
+    gen.close()
+
+    assert observed["body"] is not None
+    assert observed["cleanup"] == observed["body"]
+    # The close-time binding is local set/reset: nothing leaks to the caller.
+    assert get_current_trace_id() is None

@@ -13,6 +13,17 @@ import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
+
+from skill_review_waivers import (
+    EMPTY_MANIFEST,
+    WaiverManifest,
+    WaiverManifestError,
+    finding_key,
+    load_manifest_at_ref,
+    matching_waiver,
+    validate_manifest_against_facts,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HARNESS_PATH = REPO_ROOT / "backend" / "packages" / "harness"
@@ -33,6 +44,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     repo_root = args.repo_root.resolve()
     diff_args = build_diff_args(args)
+
+    try:
+        effective_manifest, proposed_manifest = load_waiver_manifests(args, repo_root)
+    except WaiverManifestError as exc:
+        sys.stderr.write(f"[skill-review] Invalid waiver manifest: {exc}\n")
+        return 1
+
+    print(f"[skill-review] Trusted waivers: {len(effective_manifest.waivers)}")
+    print(f"[skill-review] Proposed waivers validated but not trusted in this run: {len(proposed_manifest.waivers)}")
+    if validate_proposed_manifest(proposed_manifest, repo_root, args.python) != 0:
+        return 1
 
     print(f"[skill-review] Repository: {repo_root}")
     print(f"[skill-review] Diff: git diff {' '.join(diff_args)}")
@@ -88,9 +110,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if use_baseline:
             base_pkg = extract_package_at_ref(package_rel, base_ref, repo_root)
             if base_pkg is not None:
-                base_facts = run_review_json(base_pkg, repo_root, args.python)
+                base_facts = collect_review_facts(base_pkg, repo_root, args.python)
                 if base_facts is not None:
-                    base_keys = {finding_key(f) for f in base_facts.get("findings", [])}
+                    base_keys = {finding_key(f) for f in base_facts.get("findings", []) if finding_key(f) is not None}
                 else:
                     # Baseline review itself failed.  Do not silently pass:
                     # treat every head finding as new (fail-closed).
@@ -100,12 +122,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"treating all head findings as new"
                     )
                 shutil.rmtree(base_pkg, ignore_errors=True)
-                # Clean up the temp root left behind by extract_package_at_ref.
+                # Clean up the temp root left behind by extract_package_at_ref,
+                # bounded at the mkdtemp root: never climb above the directory
+                # we created and never rmdir a directory we do not own.
                 tmp_root = base_pkg.parent
-                while tmp_root != tmp_root.parent and not any(tmp_root.iterdir()):
-                    parent = tmp_root.parent
-                    tmp_root.rmdir()
-                    tmp_root = parent
+                if tmp_root != repo_root and tmp_root.name.startswith("skill-review-"):
+                    shutil.rmtree(tmp_root, ignore_errors=True)
                 print(
                     f"[skill-review] Baseline: {len(base_keys)} existing finding(s) at {base_ref}"
                 )
@@ -115,7 +137,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"[skill-review] Could not extract baseline at {base_ref}; treating all findings as new"
                 )
 
-            head_facts = run_review_json(package, repo_root, args.python)
+            head_facts = collect_review_facts(package, repo_root, args.python)
             if head_facts is None:
                 # Head review crashed or produced invalid output.  This is NOT
                 # "no findings" — fail closed so the gate never silently passes.
@@ -126,17 +148,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 failed = True
                 continue
 
+            head_findings = [
+                f for f in head_facts.get("findings", []) if isinstance(f, dict)
+            ]
             new_findings = [
                 f
-                for f in head_facts.get("findings", [])
-                if finding_key(f) not in base_keys
+                for f in head_findings
+                if (key := finding_key(f)) is None or key not in base_keys
             ]
-            gate_findings = [f for f in new_findings if finding_gates(f)]
-            incomplete = review_incomplete(head_facts)
+            gate_findings = [
+                f for f in new_findings
+                if f.get("severity") in {"blocker", "error"}
+                and matching_waiver(f, package=package_rel, manifest=effective_manifest, repo_root=repo_root) is None
+            ]
+            incomplete = bool(head_facts.get("completeness", {}).get("not_assessed"))
 
             if gate_findings:
                 for f in gate_findings:
-                    loc = f.get("path", "<package>")
+                    loc = f.get("path") or "<package>"
                     if f.get("line") is not None:
                         loc = f"{loc}:{f['line']}"
                     print(
@@ -159,7 +188,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(f"[skill-review] Passed: {package_rel} (no new gating findings)")
         else:
-            if run_review(package, repo_root, args.python) != 0:
+            if run_review(package, repo_root, args.python, effective_manifest) != 0:
                 failed = True
 
     if failed:
@@ -168,6 +197,39 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print("[skill-review] All changed public skill packages passed review.")
     return 0
+
+
+def load_waiver_manifests(args: argparse.Namespace, repo_root: Path) -> tuple[WaiverManifest, WaiverManifest]:
+    """Load effective waivers only from the trusted side of the comparison."""
+    if args.base_ref and args.head_ref:
+        effective = load_manifest_at_ref(repo_root, str(args.base_ref), label="trusted base")
+        proposed = load_manifest_at_ref(repo_root, str(args.head_ref), label="proposed head")
+        return effective, proposed
+
+    before = str(args.before)
+    effective = EMPTY_MANIFEST if is_zero_sha(before) else load_manifest_at_ref(repo_root, before, label="trusted before")
+    proposed = load_manifest_at_ref(repo_root, str(args.after), label="proposed after")
+    return effective, proposed
+
+
+def validate_proposed_manifest(manifest: WaiverManifest, repo_root: Path, python_executable: str) -> int:
+    """Verify every proposed entry still identifies one current error finding."""
+    if not manifest.waivers:
+        return 0
+
+    facts_by_package: dict[str, dict[str, Any]] = {}
+    for package_rel in sorted({waiver.package for waiver in manifest.waivers}):
+        package = repo_root / package_rel
+        print(f"[skill-review] Validating proposed waivers for: {package_rel}")
+        facts = collect_review_facts(package, repo_root, python_executable)
+        if facts is None:
+            return 1
+        facts_by_package[package_rel] = facts
+
+    errors = validate_manifest_against_facts(manifest, facts_by_package=facts_by_package, repo_root=repo_root)
+    for error in errors:
+        sys.stderr.write(f"[skill-review] Invalid proposed waiver: {error}\n")
+    return 1 if errors else 0
 
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -363,77 +425,14 @@ def _is_eval_fixture_skill_md(path: PurePosixPath) -> bool:
     return is_eval_fixture_skill_md(path)
 
 
-def finding_key(finding: dict) -> tuple:
-    """Stable key for diffing findings across refs.
-
-    Line numbers are excluded because unrelated insertions/deletions in the same
-    file shift line numbers for pre-existing findings.  Path + rule_id + message
-    is a stable identity that survives typical code churn.
-    """
-    return (
-        finding.get("path", ""),
-        finding.get("rule_id", ""),
-        finding.get("message", ""),
-    )
-
-
-def run_review_json(
-    package: Path, repo_root: Path, python_executable: str,
-) -> dict | None:
-    """Run review with JSON output, return the full facts dict.
-
-    Returns ``None`` when the review itself failed (CLI crash, invalid JSON,
-    or empty output).  Callers MUST treat ``None`` as REVIEW FAILED
-    (fail-closed) and never as "no findings".
-    """
-    # The review CLI accepts an absolute skill directory path, so pass
-    # str(package) directly.  base_pkg lives in a temp extraction dir (not
-    # under repo_root), so relative_to(repo_root) would raise ValueError for
-    # baseline reviews; cwd and env still come from the real repo root.
-    command = [
-        python_executable,
-        "-m",
-        "deerflow.skills.review.cli",
-        str(package),
-        "--format",
-        "json",
-    ]
-    result = subprocess.run(
-        command,
-        cwd=repo_root,
-        env=review_env(repo_root),
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0 or not result.stdout:
-        return None
-    try:
-        facts = json.loads(result.stdout.decode("utf-8", errors="replace"))
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(facts, dict):
-        return None
-    return facts
-
-
-def finding_gates(finding: dict) -> bool:
-    """Whether a finding blocks the gate under the original ``--fail-on error``.
-
-    Only blocker/error findings gate; warning/info do not, matching the
-    pre-baseline CLI semantics so the baseline mode does not silently change
-    the severity policy.
-    """
-    return str(finding.get("severity", "")).lower() in {"blocker", "error"}
-
-
-def review_incomplete(facts: dict | None) -> bool:
-    """Whether the review left content not assessed (``--fail-on-incomplete``)."""
-    return bool((facts or {}).get("completeness", {}).get("not_assessed"))
-
-
 def extract_package_at_ref(package_rel: str, ref: str, repo_root: Path) -> Path | None:
-    """Extract skill package at a git ref to a temp directory."""
-    tmp_dir = Path(tempfile.mkdtemp(prefix="skill-review-"))
+    """Extract skill package at a git ref to a dedicated temp root.
+
+    The extraction lands under a fresh ``skill-review-*`` mkdtemp root so the
+    caller can clean exactly what it created — no unbounded parent climb and
+    no ``rmdir`` on directories it does not own.
+    """
+    tmp_root = Path(tempfile.mkdtemp(prefix="skill-review-"))
     try:
         result = subprocess.run(
             ["git", "archive", ref, "--", package_rel],
@@ -442,20 +441,24 @@ def extract_package_at_ref(package_rel: str, ref: str, repo_root: Path) -> Path 
             check=False,
         )
         if result.returncode != 0:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            shutil.rmtree(tmp_root, ignore_errors=True)
             return None
-        subprocess.run(["tar", "-x"], cwd=tmp_dir, input=result.stdout, check=False)
-        extracted = tmp_dir / package_rel
+        try:
+            subprocess.run(["tar", "-x"], cwd=tmp_root, input=result.stdout, check=False)
+        except OSError:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+            return None
+        extracted = tmp_root / package_rel
         if not extracted.is_dir():
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            shutil.rmtree(tmp_root, ignore_errors=True)
             return None
         return extracted
     except OSError:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(tmp_root, ignore_errors=True)
         return None
 
 
-def run_review(package: Path, repo_root: Path, python_executable: str) -> int:
+def collect_review_facts(package: Path, repo_root: Path, python_executable: str) -> dict[str, Any] | None:
     package_rel = package.relative_to(repo_root).as_posix()
     command = [
         python_executable,
@@ -463,36 +466,72 @@ def run_review(package: Path, repo_root: Path, python_executable: str) -> int:
         "deerflow.skills.review.cli",
         package_rel,
         "--format",
-        "text",
+        "json",
         "--fail-on",
-        "error",
-        "--fail-on-incomplete",
+        "never",
     ]
-    log_command = [
-        "python",
-        "-m",
-        "deerflow.skills.review.cli",
-        package_rel,
-        "--format",
-        "text",
-        "--fail-on",
-        "error",
-        "--fail-on-incomplete",
-    ]
-
-    print(f"[skill-review] Reviewing package: {package_rel}")
-    print(f"[skill-review] $ {' '.join(log_command)}")
     result = subprocess.run(
         command,
         cwd=repo_root,
         env=review_env(repo_root),
+        capture_output=True,
+        text=True,
         check=False,
     )
-    if result.returncode == 0:
-        print(f"[skill-review] Passed: {package_rel}")
-    else:
-        print(f"[skill-review] Failed: {package_rel} (exit {result.returncode})")
-    return result.returncode
+    if result.returncode != 0:
+        sys.stderr.write(f"[skill-review] Analyzer failed for {package_rel} (exit {result.returncode}).\n")
+        sys.stderr.write(result.stderr)
+        return None
+    try:
+        facts = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        sys.stderr.write(f"[skill-review] Analyzer returned invalid JSON for {package_rel}: {exc}\n")
+        return None
+    if not isinstance(facts, dict):
+        sys.stderr.write(f"[skill-review] Analyzer returned a non-object payload for {package_rel}.\n")
+        return None
+    return facts
+
+
+def run_review(package: Path, repo_root: Path, python_executable: str, manifest: WaiverManifest = EMPTY_MANIFEST) -> int:
+    package_rel = package.relative_to(repo_root).as_posix()
+    print(f"[skill-review] Reviewing package: {package_rel}")
+    print(f"[skill-review] $ python -m deerflow.skills.review.cli {package_rel} --format json --fail-on never")
+    facts = collect_review_facts(package, repo_root, python_executable)
+    if facts is None:
+        print(f"[skill-review] Failed: {package_rel}")
+        return 1
+
+    summary = facts.get("summary", {})
+    completeness = facts.get("completeness", {})
+    print(f"[skill-review] Summary: {summary.get('blockers')} blocker(s), {summary.get('errors')} error(s), {summary.get('warnings')} warning(s), {summary.get('infos')} info(s)")
+    not_assessed = completeness.get("not_assessed") or []
+    failed = bool(not_assessed)
+    if not_assessed:
+        print(f"[skill-review] Incomplete review: {', '.join(str(item) for item in not_assessed)}")
+
+    waived_count = 0
+    for finding in facts.get("findings", []):
+        if not isinstance(finding, dict):
+            failed = True
+            continue
+        location = finding.get("path") or "<package>"
+        if finding.get("line") is not None:
+            location = f"{location}:{finding['line']}"
+        waiver = matching_waiver(finding, package=package_rel, manifest=manifest, repo_root=repo_root)
+        waiver_suffix = ""
+        if waiver is not None:
+            waived_count += 1
+            waiver_suffix = f" [WAIVED until {waiver.expires_on.isoformat()}: {waiver.reason}]"
+        elif finding.get("severity") in {"blocker", "error"}:
+            failed = True
+        print(f"- {finding.get('severity')} {finding.get('rule_id')} at {location}: {finding.get('message')}{waiver_suffix}")
+
+    if failed:
+        print(f"[skill-review] Failed: {package_rel}")
+        return 1
+    print(f"[skill-review] Passed: {package_rel} ({waived_count} waived finding(s))")
+    return 0
 
 
 def review_env(repo_root: Path) -> dict[str, str]:
