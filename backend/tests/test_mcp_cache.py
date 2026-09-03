@@ -496,6 +496,47 @@ def test_reset_mcp_tools_cache_does_not_wait_for_in_flight_initialization(cache_
     assert not reset_thread.is_alive()
 
 
+def test_automatic_stale_invalidation_retires_session_pool_before_reinitializing(cache_globals, monkeypatch, tmp_path):
+    """Automatic config-signature invalidation must retire the old session pool.
+
+    ``get_cached_mcp_tools()`` detects runtime edits through ``_is_cache_stale``
+    without going through the explicit admin reset endpoint. That automatic path
+    must still swap the session-pool singleton before rebuilding tool wrappers;
+    otherwise the fresh wrappers can keep reusing sessions created from the old
+    connection config.
+    """
+    from deerflow.mcp import session_pool as session_pool_module
+
+    real_reset_session_pool = session_pool_module.reset_session_pool
+    real_reset_session_pool()
+    old_pool = session_pool_module.get_session_pool()
+
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"old": _server()})
+    _initialize_against(monkeypatch, cfg)
+    assert cache_module._cache_initialized is True
+    assert session_pool_module.get_session_pool() is old_pool
+
+    _write_extensions_config(cfg, {"new": _server("uvx")})
+    loaded_pools = []
+
+    async def _fake_tools():
+        loaded_pools.append(session_pool_module.get_session_pool())
+        return ["new-tools"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    try:
+        result = cache_module.get_cached_mcp_tools()
+
+        assert result == ["new-tools"]
+        assert loaded_pools == [session_pool_module.get_session_pool()]
+        assert loaded_pools[0] is not old_pool
+        assert cache_module._cache_initialized is True
+    finally:
+        real_reset_session_pool()
+
+
 def test_reset_mcp_tools_cache_retires_session_pool_before_releasing_initializers(cache_globals, monkeypatch):
     """A reset must not let fresh tool wrappers publish with the retiring pool."""
     from deerflow.mcp import session_pool as session_pool_module

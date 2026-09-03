@@ -208,10 +208,11 @@ def get_cached_mcp_tools() -> list[BaseTool]:
         List of cached MCP tools.
     """
     while True:
+        retired_pool = None
         with _init_lock:
             if _is_cache_stale():
                 logger.info("MCP cache is stale, resetting for re-initialization...")
-                _reset_mcp_tools_cache_state()
+                retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
 
             if _cache_initialized:
                 return _mcp_tools_cache or []
@@ -219,6 +220,9 @@ def get_cached_mcp_tools() -> list[BaseTool]:
             if _initializing_generation is not None:
                 _init_condition.wait_for(lambda: _initializing_generation is None or _cache_initialized)
                 continue
+
+        if retired_pool is not None:
+            retired_pool.close_all_sync()
 
         logger.info("MCP tools not initialized, performing lazy initialization...")
         try:
@@ -257,6 +261,21 @@ def _reset_mcp_tools_cache_state() -> None:
     _config_signature = None
     _cache_generation += 1
     _init_condition.notify_all()
+
+
+def _reset_mcp_tools_cache_state_and_retire_pool_locked():
+    """Retire the MCP session pool and reset cache state under one lock.
+
+    Tool wrappers close over the module-level session-pool singleton when they
+    are built. Any path that invalidates the tool cache must therefore swap the
+    singleton before waiters/fresh initializers can rebuild wrappers, including
+    automatic config-signature invalidation in ``get_cached_mcp_tools()``.
+    """
+    from deerflow.mcp.session_pool import reset_session_pool
+
+    retired_pool = reset_session_pool()
+    _reset_mcp_tools_cache_state()
+    return retired_pool
 
 
 def reset_mcp_tools_cache() -> None:
