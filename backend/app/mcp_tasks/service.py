@@ -788,13 +788,6 @@ class McpTaskService:
                         exc_info=(type(result), result, result.__traceback__),
                     )
 
-    async def _cancel_one(self, record: dict[str, Any]) -> None:
-        try:
-            await self._cancel_one_claimed(record)
-        except asyncio.CancelledError:
-            await self._release_cancel_after_cancellation(record)
-            raise
-
     async def _cancel_one_claimed(self, record: dict[str, Any]) -> None:
         driver_name = str(record.get("driver_name") or "")
         driver = self._drivers.get(driver_name)
@@ -867,13 +860,6 @@ class McpTaskService:
                     exc_info=(type(result), result, result.__traceback__),
                 )
                 await self._release_notification_failure(record, now=now, error=error)
-
-    async def _notify_one(self, record: dict[str, Any], *, now: datetime) -> None:
-        try:
-            await self._notify_one_claimed(record, now=now)
-        except asyncio.CancelledError:
-            await self._release_notification_after_cancellation(record)
-            raise
 
     async def _notify_one_claimed(self, record: dict[str, Any], *, now: datetime) -> None:
         task_id = record["id"]
@@ -1008,13 +994,6 @@ class McpTaskService:
             self._poll_interval_seconds * (2 ** min(failures, 16)),
             self._max_poll_backoff_seconds,
         )
-
-    async def _poll_one(self, record: dict, *, now: datetime) -> None:
-        try:
-            await self._poll_one_claimed(record, now=now)
-        except asyncio.CancelledError:
-            await self._release_poll_after_cancellation(record)
-            raise
 
     async def _claim_with_cancellation_release(
         self,
