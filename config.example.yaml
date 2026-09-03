@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 38
+config_version: 39
 
 # ============================================================================
 # Logging
@@ -2722,6 +2722,19 @@ authorization:
 # auth:
 #   local:
 #     allow_registration: false
+#     # Login throttling per client IP (in-process, per worker). Raise
+#     # max_login_attempts when many users share one egress IP (corporate
+#     # proxy / NAT) so shared-IP lockouts don't block the whole office;
+#     # lower it for a stricter posture (minimum 2 — one failed attempt must
+#     # never lock an IP, or a single typo would block the shared egress).
+#     # Defaults preserve the historical hardcoded policy (5 failures /
+#     # 5 minutes). Live-read per login, so a config reload applies without
+#     # a Gateway restart: lowering lockout_seconds releases an active lock
+#     # early and tightening max_login_attempts keeps already-counted
+#     # failures; a raised lockout_seconds extends a still-active lock but
+#     # never resurrects one that already expired.
+#     # max_login_attempts: 5
+#     # lockout_seconds: 300
 #
 #   oidc:
 #     enabled: true

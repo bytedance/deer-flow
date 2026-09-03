@@ -76,10 +76,24 @@ through run-event or specialized APIs:
 | `context:memory` | `context` | `record_memory_context()` |
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
 
-Current middleware tags are `guardrail`, `safety_termination`,
-`skill_activation`, and `skill_secrets`. The pattern is intentionally open so
-new middleware tags are additive. Because the full event type is limited to 32
-characters and `middleware:` uses 11, a tag must contain 1-21 characters.
+Current middleware tags are `guardrail`, `loop_detection`,
+`safety_termination`, `skill_activation`, and `skill_secrets`. The pattern is
+intentionally open so new middleware tags are additive. Because the full event
+type is limited to 32 characters and `middleware:` uses 11, a tag must contain
+1-21 characters.
+
+`middleware:loop_detection` records transitions into the warned state (first
+per call hash or per tool-frequency burst) and each hard stop produced by
+`LoopDetectionMiddleware` in lead-agent and ordinary task-tool subagent runs.
+Task-tool subagents forward the append to the parent loop because `RunJournal`
+and its event store must not cross the isolated-loop boundary. Durable batch
+subagents have no parent run journal and do not emit these events. The event's
+`action` is `warn` or
+`hard_stop`. The `changes` object identifies the detection layer, affected tool
+names, observed count, effective threshold, whether the producer was a
+subagent, and its agent id when applicable. Tool arguments, prompts, message
+content, tool results, and argument-derived hashes are not persisted in this
+event.
 
 ### Opaque Run Outputs
 
@@ -176,7 +190,7 @@ be used by new producers.
 - Nested non-JSON values in `run.end.content` have backend-dependent
   representations: memory retains Python values, while JSONL and database
   stores read them back as strings.
-- Loop detection and deferred-tool promotion do not currently emit middleware
-  events.
+- Durable batch subagent loop detection and deferred-tool promotion do not
+  currently emit middleware events.
 - Journal attribution, token accounting, and external tracing metadata still
   depend on manual instrumentation at several LLM call sites.

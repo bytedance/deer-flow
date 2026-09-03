@@ -200,6 +200,37 @@ class TestValidateSkillFrontmatter:
         assert valid is False
         assert "too long" in msg.lower()
 
+    def test_description_at_max_length_accepted(self, tmp_path):
+        max_desc = "a" * 1024
+        skill_dir = _write_skill(
+            tmp_path,
+            f"---\nname: my-skill\ndescription: {max_desc}\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is True
+        assert msg == "Skill is valid!"
+        assert name == "my-skill"
+
+    def test_empty_description_rejected(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            "---\nname: my-skill\ndescription: ''\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is False
+        assert "empty" in msg.lower()
+        assert name is None
+
+    def test_whitespace_only_description_rejected(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            "---\nname: my-skill\ndescription: '   '\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is False
+        assert "empty" in msg.lower()
+        assert name is None
+
     def test_empty_name_rejected(self, tmp_path):
         skill_dir = _write_skill(
             tmp_path,

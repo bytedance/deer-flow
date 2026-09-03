@@ -3029,6 +3029,24 @@ class TestInjectAuthenticatedUserContextAuthz:
         assert "authz_attributes" not in config["context"]
         assert config["context"]["is_internal"] is True
 
+    @pytest.mark.parametrize("auth_source", ["session", AUTH_SOURCE_INTERNAL])
+    @pytest.mark.parametrize("section", ["context", "configurable"])
+    def test_gateway_callers_cannot_inject_sandbox_execution_identities(self, auth_source, section):
+        """Only the in-process lead/subagent lifecycle may assign lease identities."""
+        request = _make_request_with_auth_source(auth_source)
+        config = _assemble_authz_run_config(
+            {
+                section: {
+                    "sandbox_lease_owner_id": "forged-owner",
+                    "sandbox_command_scope_id": "forged-scope",
+                }
+            },
+            request,
+        )
+
+        assert "sandbox_lease_owner_id" not in config[section]
+        assert "sandbox_command_scope_id" not in config[section]
+
     def test_session_body_context_cannot_inject_channel_user_id(self):
         request = _make_request_with_auth_source("session")
         config = _assemble_authz_run_config(
@@ -3317,6 +3335,33 @@ async def test_start_run_rejects_invalid_thread_id_before_resolving_dependencies
 
     assert exc_info.value.status_code == 422
     assert "Invalid thread_id" in exc_info.value.detail
+
+
+def test_normalize_input_strips_the_server_owned_message_seq():
+    """`deerflow_seq` is display metadata the Gateway attaches on the way out.
+
+    A client replaying messages (regenerate / edit-and-rerun) would otherwise
+    write it into the checkpoint, where it becomes wrong the moment the thread
+    is forked — a branch re-seeds its feed and reassigns seq (#4380).
+    """
+    from app.gateway.services import normalize_input
+    from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "human",
+                    "content": "replayed turn",
+                    "additional_kwargs": {MESSAGE_SEQ_KEY: 2, "keep_me": True},
+                }
+            ]
+        }
+    )
+
+    kwargs = result["messages"][0].additional_kwargs
+    assert MESSAGE_SEQ_KEY not in kwargs
+    assert kwargs["keep_me"] is True
 
 
 def test_client_forged_user_id_is_scrubbed_for_external_callers():

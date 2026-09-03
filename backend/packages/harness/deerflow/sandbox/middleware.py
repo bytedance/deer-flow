@@ -21,6 +21,11 @@ from deerflow.authz.sandbox_authz import (
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
+from deerflow.sandbox.lease import (
+    ensure_sandbox_lease_owner,
+    get_sandbox_lease_manager,
+    sandbox_lease_owner,
+)
 from deerflow.sandbox.overwrite import unwrap_sandbox
 
 logger = logging.getLogger(__name__)
@@ -39,9 +44,9 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     Lifecycle Management:
     - With lazy_init=True (default): Sandbox is acquired on first tool call
     - With lazy_init=False: Sandbox is acquired on first agent invocation (before_agent)
-    - Sandbox is reused across multiple turns within the same thread
-    - Sandbox is NOT released after each agent call to avoid wasteful recreation
-    - Cleanup happens at application shutdown via SandboxProvider.shutdown()
+    - Concurrent lead/subagent executions hold independent process-local leases
+    - Only the final execution release parks a remote sandbox in its warm pool
+    - Provider shutdown remains the terminal cleanup boundary
     """
 
     state_schema = SandboxMiddlewareState
@@ -108,20 +113,105 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if projection is not None and not provider.supports_agent_skill_isolation:
             raise SandboxRuntimeError(f"Sandbox provider {provider.__class__.__name__} cannot enforce per-Agent skill filesystem isolation")
 
-    def _acquire_sandbox(self, thread_id: str, *, user_id: str) -> str:
+    def _acquire_sandbox(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        owner_id: str | None,
+    ) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = provider.acquire(thread_id, user_id=user_id)
+        if owner_id is None:
+            sandbox_id = provider.acquire(thread_id, user_id=user_id)
+        else:
+            sandbox_id = get_sandbox_lease_manager(provider).acquire(
+                owner_id,
+                thread_id,
+                user_id=user_id,
+            )
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
-    async def _acquire_sandbox_async(self, thread_id: str, *, user_id: str) -> str:
+    async def _acquire_sandbox_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        owner_id: str | None,
+    ) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+        if owner_id is None:
+            sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+        else:
+            sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
+                owner_id,
+                thread_id,
+                user_id=user_id,
+            )
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
-    async def _release_sandbox_async(self, sandbox_id: str) -> None:
-        await asyncio.to_thread(get_sandbox_provider().release, sandbox_id)
+    @staticmethod
+    def _retain_existing_sandbox(
+        state: SandboxMiddlewareState,
+        *,
+        thread_id: str,
+        user_id: str,
+        owner_id: str | None,
+    ) -> str | None:
+        if owner_id is None:
+            return None
+        sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
+        if not isinstance(sandbox, dict) or fork_restored:
+            return None
+        sandbox_id = sandbox.get("sandbox_id")
+        if isinstance(sandbox_id, str):
+            provider = get_sandbox_provider()
+            get_sandbox_lease_manager(provider).retain(
+                owner_id,
+                sandbox_id,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
+            return sandbox_id
+        return None
+
+    @staticmethod
+    async def _retain_existing_sandbox_async(
+        state: SandboxMiddlewareState,
+        *,
+        thread_id: str,
+        user_id: str,
+        owner_id: str | None,
+    ) -> str | None:
+        if owner_id is None:
+            return None
+        sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
+        if not isinstance(sandbox, dict) or fork_restored:
+            return None
+        sandbox_id = sandbox.get("sandbox_id")
+        if isinstance(sandbox_id, str):
+            provider = get_sandbox_provider()
+            await get_sandbox_lease_manager(provider).retain_async(
+                owner_id,
+                sandbox_id,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
+            return sandbox_id
+        return None
+
+    async def _release_sandbox_async(
+        self,
+        sandbox_id: str,
+        *,
+        owner_id: str | None,
+    ) -> None:
+        provider = get_sandbox_provider()
+        if owner_id is not None:
+            await get_sandbox_lease_manager(provider).release_async(owner_id)
+            return
+        await asyncio.to_thread(provider.release, sandbox_id)
 
     @override
     def before_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
@@ -130,11 +220,16 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return super().before_agent(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
         projection = self._prepare_agent_skill_projection(thread_id, user_id=user_id)
+        owner_id = ensure_sandbox_lease_owner(runtime.context)
 
         # Preserve lazy initialization for threads that use the shared view.
         # A policy-scoped view is acquired eagerly so an old shared-view
         # sandbox cannot survive into this run through checkpoint state.
         if self._lazy_init and projection is None:
+            # Bind the execution lease only when a sandbox-backed tool actually
+            # touches the persisted sandbox. Runs that only answer or return a
+            # terminal Command must not leave an unused owner behind when the
+            # graph bypasses after_agent.
             return super().before_agent(state, runtime)
 
         existing_sandbox_id = self._read_sandbox_id_from_state(state)
@@ -162,14 +257,29 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 return None
             provider = get_sandbox_provider()
             self._require_projection_support(provider, projection)
-            sandbox_id = self._acquire_sandbox(thread_id, user_id=user_id)
-            if projection is not None:
-                provider.sync_agent_skills(
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    projection=projection,
-                )
+            sandbox_id = self._acquire_sandbox(
+                thread_id,
+                user_id=user_id,
+                owner_id=owner_id,
+            )
+            if runtime.context is not None:
+                runtime.context["sandbox_id"] = sandbox_id
+            try:
+                if projection is not None:
+                    provider.sync_agent_skills(
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        projection=projection,
+                    )
+            except BaseException:
+                if owner_id is not None:
+                    get_sandbox_lease_manager(provider).release(owner_id)
+                else:
+                    provider.release(sandbox_id)
+                if runtime.context is not None:
+                    runtime.context.pop("sandbox_id", None)
+                raise
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             if existing_sandbox_id == sandbox_id:
                 return super().before_agent(state, runtime)
@@ -178,6 +288,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                     "sandbox": Overwrite({"sandbox_id": sandbox_id}),
                 }
             return {"sandbox": {"sandbox_id": sandbox_id}}
+        retained_id = self._retain_existing_sandbox(
+            state,
+            thread_id=thread_id,
+            user_id=user_id,
+            owner_id=owner_id,
+        )
+        if retained_id is not None and runtime.context is not None:
+            runtime.context["sandbox_id"] = retained_id
         return super().before_agent(state, runtime)
 
     @override
@@ -191,6 +309,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             thread_id,
             user_id=user_id,
         )
+        owner_id = ensure_sandbox_lease_owner(runtime.context)
 
         if self._lazy_init and projection is None:
             return await super().abefore_agent(state, runtime)
@@ -213,14 +332,29 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 return None
             provider = get_sandbox_provider()
             self._require_projection_support(provider, projection)
-            sandbox_id = await self._acquire_sandbox_async(thread_id, user_id=user_id)
-            if projection is not None:
-                await provider.sync_agent_skills_async(
+            sandbox_id = await self._acquire_sandbox_async(
+                thread_id,
+                user_id=user_id,
+                owner_id=owner_id,
+            )
+            if runtime.context is not None:
+                runtime.context["sandbox_id"] = sandbox_id
+            try:
+                if projection is not None:
+                    await provider.sync_agent_skills_async(
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        projection=projection,
+                    )
+            except BaseException:
+                await self._release_sandbox_async(
                     sandbox_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    projection=projection,
+                    owner_id=owner_id,
                 )
+                if runtime.context is not None:
+                    runtime.context.pop("sandbox_id", None)
+                raise
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             if existing_sandbox_id == sandbox_id:
                 return await super().abefore_agent(state, runtime)
@@ -229,6 +363,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                     "sandbox": Overwrite({"sandbox_id": sandbox_id}),
                 }
             return {"sandbox": {"sandbox_id": sandbox_id}}
+        retained_id = await self._retain_existing_sandbox_async(
+            state,
+            thread_id=thread_id,
+            user_id=user_id,
+            owner_id=owner_id,
+        )
+        if retained_id is not None and runtime.context is not None:
+            runtime.context["sandbox_id"] = retained_id
         return await super().abefore_agent(state, runtime)
 
     @override
@@ -242,13 +384,23 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 logger.info(f"Not releasing fork-restored sandbox {sandbox_id}")
                 return None
             logger.info(f"Releasing sandbox {sandbox_id}")
-            get_sandbox_provider().release(sandbox_id)
+            provider = get_sandbox_provider()
+            owner_id = sandbox_lease_owner(runtime.context)
+            if owner_id is not None:
+                get_sandbox_lease_manager(provider).release(owner_id)
+            else:
+                provider.release(sandbox_id)
             return None
 
         if (runtime.context or {}).get("sandbox_id") is not None:
             sandbox_id = runtime.context.get("sandbox_id")
             logger.info(f"Releasing sandbox {sandbox_id} from context")
-            get_sandbox_provider().release(sandbox_id)
+            provider = get_sandbox_provider()
+            owner_id = sandbox_lease_owner(runtime.context)
+            if owner_id is not None:
+                get_sandbox_lease_manager(provider).release(owner_id)
+            else:
+                provider.release(sandbox_id)
             return None
 
         # No sandbox to release
@@ -265,13 +417,19 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 logger.info(f"Not releasing fork-restored sandbox {sandbox_id}")
                 return None
             logger.info(f"Releasing sandbox {sandbox_id}")
-            await self._release_sandbox_async(sandbox_id)
+            await self._release_sandbox_async(
+                sandbox_id,
+                owner_id=sandbox_lease_owner(runtime.context),
+            )
             return None
 
         if (runtime.context or {}).get("sandbox_id") is not None:
             sandbox_id = runtime.context.get("sandbox_id")
             logger.info(f"Releasing sandbox {sandbox_id} from context")
-            await self._release_sandbox_async(sandbox_id)
+            await self._release_sandbox_async(
+                sandbox_id,
+                owner_id=sandbox_lease_owner(runtime.context),
+            )
             return None
 
         # No sandbox to release
