@@ -23,6 +23,7 @@ from app.gateway.shares.snapshot import (
     ShareSnapshotTooLarge,
     _neutralize_private_references,
     build_share_snapshot,
+    resanitize_share_snapshot,
     resolve_share_title,
     sanitize_share_title,
 )
@@ -48,7 +49,7 @@ async def test_snapshot_keeps_only_visible_human_and_ai_text():
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     assert snapshot["version"] == 1
     assert snapshot["messages"] == [
@@ -73,7 +74,7 @@ async def test_snapshot_preserves_order_across_many_pages():
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     assert [m["content"] for m in snapshot["messages"]] == [f"m{seq}" for seq in range(1, 9)]
 
@@ -84,7 +85,7 @@ async def test_snapshot_skips_empty_text_messages():
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     assert snapshot["messages"] == []
 
@@ -115,7 +116,7 @@ async def test_snapshot_excludes_reasoning_and_tool_content_blocks():
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     assert snapshot["messages"] == [
         {"id": "m1", "role": "assistant", "content": "public answer\npublic follow-up"},
@@ -141,7 +142,7 @@ async def test_snapshot_preserves_literal_think_tags_inside_markdown_code():
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     content = snapshot["messages"][0]["content"]
     assert "`<think>text</think>`" in content
@@ -166,7 +167,7 @@ async def test_snapshot_neutralizes_private_artifact_paths_and_urls():
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     content = snapshot["messages"][0]["content"]
     assert "/mnt/user-data" not in content
@@ -190,7 +191,7 @@ async def test_snapshot_neutralizes_json_escaped_private_references():
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     content = snapshot["messages"][0]["content"]
     assert "thread-secret" not in content
@@ -538,6 +539,63 @@ def test_neutralize_langgraph_route_alias():
     assert neutralize("langgraph/threads/t1/u without the api anchor") == "langgraph/threads/t1/u without the api anchor"
 
 
+def test_resanitize_rebuilds_the_strict_public_dto():
+    """The public read boundary reconstructs the allowlisted DTO rather
+    than spreading stored fields: an older, malformed, or sanitizer-defect
+    snapshot must not serialize tool_calls, reasoning, run ids, debug
+    metadata, or any other non-contract field to anonymous callers."""
+    stored = {
+        "version": 1,
+        "debug": {"owner_user_id": "u-1"},
+        "messages": [
+            {
+                "id": "m1",
+                "role": "user",
+                "content": "see /api/threads/t-secret/u now",
+                "tool_calls": [{"id": "call_1"}],
+                "run_id": "run-9",
+            },
+            {"id": "m2", "role": "tool", "content": "raw tool output"},
+            {"id": "m3", "role": "assistant", "content": [{"type": "text", "text": "block"}]},
+            "not-even-a-dict",
+        ],
+    }
+    rebuilt = resanitize_share_snapshot(stored)
+    assert rebuilt == {
+        "version": 1,
+        "messages": [
+            {"id": "m1", "role": "user", "content": "see [private artifact omitted] now"},
+        ],
+    }
+    # the stored record is never mutated, and a non-int version falls back
+    # to the only contract version
+    assert stored["messages"][0]["content"] == "see /api/threads/t-secret/u now"
+    assert resanitize_share_snapshot({"version": "x", "messages": [], "extra": 1}) == {"version": 1, "messages": []}
+
+
+async def test_snapshot_reports_the_source_history_boundary():
+    """The build reports the highest source seq observed during the bounded
+    scan — including tool/hidden rows the public DTO drops — so the audit
+    column records the true source-history boundary a snapshot represents."""
+    pages = [
+        [_row(6, {"type": "tool", "content": '{"args": 1}'}), _row(7, {"type": "human", "content": "newest"})],
+        [_row(1, {"type": "human", "content": "hello"}), _row(2, {"type": "human", "content": "mid"})],
+    ]
+    calls = {"n": 0}
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        page = pages[calls["n"]]
+        calls["n"] += 1
+        return page, calls["n"] < len(pages)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot, source_last_seq = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert source_last_seq == 7
+    assert [message["content"] for message in snapshot["messages"]] == ["hello", "mid", "newest"]
+
+
 async def test_neutralize_preserves_public_content_with_separators():
     neutralize = _neutralize_private_references
     # normalization exists only for classification; public text is emitted
@@ -645,7 +703,7 @@ async def test_snapshot_at_cap_scans_older_non_public_page_before_deciding():
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(snapshot_module, "_SNAPSHOT_MAX_MESSAGES", 3)
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     assert calls["n"] == 2
     assert [message["content"] for message in snapshot["messages"]] == ["m2", "m3", "m4"]
@@ -671,7 +729,7 @@ async def test_tool_heavy_thread_does_not_hit_the_cap_early():
         # messages must not.
         mp.setattr("app.gateway.shares.snapshot._SNAPSHOT_MAX_MESSAGES", 100)
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     assert [m["content"] for m in snapshot["messages"]] == ["hello", "hi"]
 
@@ -757,7 +815,7 @@ async def test_snapshot_exactly_at_cap_with_no_more_rows_shares_completely():
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(snapshot_module, "_SNAPSHOT_MAX_MESSAGES", 6)  # == total rows
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     assert [m["content"] for m in snapshot["messages"]] == [f"m{seq}" for seq in range(1, 7)]
 
@@ -951,7 +1009,7 @@ async def test_snapshot_neutralizes_entity_and_unicode_escaped_private_reference
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     content = snapshot["messages"][0]["content"]
     assert "thread-secret" not in content

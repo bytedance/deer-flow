@@ -188,8 +188,13 @@ async def build_share_snapshot(
     *,
     request: Any,
     user_id: str | None,
-) -> dict[str, Any]:
-    """Freeze the visible transcript of *thread_id* into a public DTO."""
+) -> tuple[dict[str, Any], int | None]:
+    """Freeze the visible transcript of *thread_id* into a public DTO.
+
+    Returns the snapshot and the highest source ``seq`` the bounded scan
+    observed (including tool/hidden rows the DTO drops) — the
+    source-history boundary the snapshot represents, persisted as the
+    share's audit-only ``source_last_seq``."""
     from app.gateway.routers.thread_runs import (
         _RawMessageScanBudget,
         _RawMessageScanLimitExceeded,
@@ -209,6 +214,7 @@ async def build_share_snapshot(
     pages: list[list[dict[str, Any]]] = []
     public_messages = 0
     rendered_bytes = 0
+    source_last_seq: int | None = None
     raw_scan_budget = _RawMessageScanBudget(_SNAPSHOT_MAX_SCANNED_ROWS)
     before_seq: int | None = None
     while True:
@@ -235,6 +241,14 @@ async def build_share_snapshot(
             ) from exc
         if not rows:
             break
+        # The audit boundary follows the scan, not the public DTO: tool and
+        # hidden rows advance it exactly like public ones.
+        page_max_seq = max(
+            (row["seq"] for row in rows if isinstance(row.get("seq"), int)),
+            default=None,
+        )
+        if page_max_seq is not None and (source_last_seq is None or page_max_seq > source_last_seq):
+            source_last_seq = page_max_seq
         page_messages = [_public_message(row) for row in rows]
         page_messages = [message for message in page_messages if message is not None]
         if page_messages:
@@ -273,10 +287,13 @@ async def build_share_snapshot(
             messages.append(message)
 
     logger.debug("Share snapshot for thread %s: %d visible messages", thread_id, len(messages))
-    return {
-        "version": 1,
-        "messages": messages,
-    }
+    return (
+        {
+            "version": 1,
+            "messages": messages,
+        },
+        source_last_seq,
+    )
 
 
 def _public_message(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -927,27 +944,46 @@ def sanitize_share_title(
 
 
 def resanitize_share_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Re-apply the private-reference neutralizer to a stored snapshot.
+    """Re-apply the public contract to a stored snapshot at read time.
 
     Snapshots are immutable once minted, so a message that still carries an
     owner-only path — written through a sanitizer defect or before the rules
     were tightened — would otherwise stay exposed on every public read until
-    the share is revoked. The public read boundary runs this pass next to
-    ``sanitize_share_title`` for the same reason.
+    the share is revoked. The private-reference neutralizer runs here next
+    to ``sanitize_share_title`` for the same reason.
+
+    The DTO is also *rebuilt*, never spread: the public response is
+    reconstructed as the strict ``{version, messages}`` /
+    ``{id, role, content}`` allowlist the create path emits, so extra
+    fields in an older, malformed, or sanitizer-defect record (tool_calls,
+    reasoning, run ids, debug metadata) can never serialize to anonymous
+    callers, and messages that do not conform to the contract are dropped.
     """
-    messages = snapshot.get("messages")
-    if not isinstance(messages, list):
-        return snapshot
-    sanitized_messages: list[Any] = []
-    changed = False
-    for message in messages:
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
-            sanitized = _neutralize_private_references(message["content"])
-            if sanitized != message["content"]:
-                changed = True
-                message = {**message, "content": sanitized}
-        sanitized_messages.append(message)
-    return {**snapshot, "messages": sanitized_messages} if changed else snapshot
+    messages_value = snapshot.get("messages")
+    messages: list[dict[str, str]] = []
+    if isinstance(messages_value, list):
+        for message in messages_value:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            message_id = message.get("id")
+            content = message.get("content")
+            if role not in ("user", "assistant"):
+                continue
+            if not isinstance(content, str) or not isinstance(message_id, str):
+                continue
+            messages.append(
+                {
+                    "id": message_id,
+                    "role": role,
+                    "content": _neutralize_private_references(content),
+                }
+            )
+    version = snapshot.get("version")
+    return {
+        "version": version if isinstance(version, int) else 1,
+        "messages": messages,
+    }
 
 
 async def resolve_share_title(thread_id: str, *, request: Any, fallback: str = "Shared conversation") -> str:

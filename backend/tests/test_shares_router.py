@@ -121,7 +121,7 @@ def test_memory_backend_fails_explicitly(tmp_path):
 
 def test_cross_user_create_returns_404(tmp_path):
     with _client(tmp_path, user=USER_B) as (client, repo):
-        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
             response = _create(client)
     assert response.status_code == 404
     assert repo is not None and asyncio.run(repo.list_by_thread(THREAD_A, str(USER_B.id))) == []
@@ -129,7 +129,7 @@ def test_cross_user_create_returns_404(tmp_path):
 
 def test_cross_user_revoke_returns_404(tmp_path):
     with _client(tmp_path) as (client, repo):
-        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
             created = _create(client).json()
         switch = _client(tmp_path, user=USER_B)
         with switch as (client_b, _repo_b):
@@ -145,7 +145,7 @@ def test_cross_user_revoke_returns_404(tmp_path):
 
 def test_create_returns_show_once_url_and_persists_only_hash(tmp_path):
     with _client(tmp_path) as (client, repo):
-        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
             response = _create(client, payload={"title": "My title"})
     assert response.status_code == 201
     body = response.json()
@@ -158,10 +158,22 @@ def test_create_returns_show_once_url_and_persists_only_hash(tmp_path):
     assert body["created_at"] == str(row["created_at"])
 
 
+def test_create_persists_the_scanned_source_history_boundary(tmp_path):
+    """The audit column records the highest source seq the bounded scan
+    observed — the history boundary the frozen snapshot represents."""
+    with _client(tmp_path) as (client, repo):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, 1234))):
+            response = _create(client)
+    assert response.status_code == 201
+    row = asyncio.run(repo.get(response.json()["share_id"]))
+    assert row["source_last_seq"] == 1234
+    assert row["snapshot_json"] == _SNAPSHOT
+
+
 def test_custom_title_private_artifact_reference_is_neutralized_before_persistence(tmp_path):
     private_title = "/api/threads/thread-secret/artifacts/mnt/user-data/outputs/report.pdf"
     with _client(tmp_path) as (client, repo):
-        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
             response = _create(client, payload={"title": private_title})
 
         body = response.json()
@@ -229,7 +241,7 @@ def test_public_resolution_defensively_neutralizes_private_message_from_storage(
 def test_operator_default_expiry_is_honored_without_coercion(tmp_path):
     """A configured default outside {1,7,30} must be used as-is, not coerced."""
     with _client(tmp_path, default_expiry_days=14) as (client, repo):
-        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
             response = _create(client)
     assert response.status_code == 201
     row = asyncio.run(repo.get(response.json()["share_id"]))
@@ -242,14 +254,14 @@ def test_operator_default_expiry_is_honored_without_coercion(tmp_path):
 
 def test_create_rejects_invalid_expiry_choices_and_no_expiry(tmp_path):
     with _client(tmp_path) as (client, _repo):
-        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
             assert _create(client, payload={"expires_in_days": 5}).status_code == 400
             assert _create(client, payload={"never_expires": True}).status_code == 400
 
 
 def test_create_allows_no_expiry_when_deployed_for_it(tmp_path):
     with _client(tmp_path, allow_no_expiry=True) as (client, _repo):
-        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
             response = _create(client, payload={"never_expires": True})
     assert response.status_code == 201
     assert response.json()["expires_at"] is None
@@ -257,7 +269,7 @@ def test_create_allows_no_expiry_when_deployed_for_it(tmp_path):
 
 def test_create_empty_conversation_conflict(tmp_path):
     with _client(tmp_path) as (client, _repo):
-        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value={"version": 1, "messages": []})):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=({"version": 1, "messages": []}, None))):
             response = _create(client)
     assert response.status_code == 409
 
@@ -277,7 +289,7 @@ def test_create_rejects_oversized_conversation_without_persisting(tmp_path):
 
 def test_list_strips_token_hashes(tmp_path):
     with _client(tmp_path) as (client, _repo):
-        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
             _create(client)
         listed = client.get(f"/api/threads/{THREAD_A}/shares").json()
     assert len(listed) == 1
@@ -289,7 +301,7 @@ def test_list_strips_token_hashes(tmp_path):
 
 
 def _mint(client: TestClient, repo: ConversationShareRepository, **overrides) -> str:
-    with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+    with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
         created = _create(client).json()
     return created["share_url"].split("/share/")[-1]
 
@@ -369,7 +381,7 @@ def test_auth_disabled_mode_does_not_auto_publish(monkeypatch, tmp_path):
 
     set_share_pepper("test-pepper")
     try:
-        with TestClient(app) as client, patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+        with TestClient(app) as client, patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
             # No record yet: 404 even though every requester is a synthetic admin.
             assert client.get("/api/shares/dfs_any-token").status_code == 404
 
@@ -407,7 +419,7 @@ def test_null_owner_and_untracked_threads_cannot_be_published(tmp_path):
     app.state.share_repo = asyncio.run(_make_repo(tmp_path))
     set_share_pepper("test-pepper")
     try:
-        with TestClient(app) as client, patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+        with TestClient(app) as client, patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
             assert client.post("/api/threads/thread-null-owner/shares", json={}).status_code == 404
             assert client.post("/api/threads/thread-never-existed/shares", json={}).status_code == 404
     finally:

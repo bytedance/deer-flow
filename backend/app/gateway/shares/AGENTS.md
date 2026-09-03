@@ -143,4 +143,5 @@ Token-in-URL leakage also has repository-level log and diagnostic controls
   addition to collection-time masking.
 
 Snapshot immutability: later messages/edits never modify an existing share;
-`source_last_seq` is audit-only and public rendering never re-reads the source.
+`source_last_seq` records the highest source seq the bounded create scan observed
+(audit-only; public rendering never re-reads the source).

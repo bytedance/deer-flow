@@ -217,7 +217,7 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
     # raw-scan budget first.
     expires_at = _resolve_expiry(body)
     try:
-        snapshot = await build_share_snapshot(thread_id, request=request, user_id=user_id)
+        snapshot, source_last_seq = await build_share_snapshot(thread_id, request=request, user_id=user_id)
     except ShareSnapshotTooLarge as exc:
         # A share promises the complete visible transcript; a conversation
         # too long to snapshot is rejected instead of silently truncated.
@@ -241,7 +241,7 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
         title=title or "Shared conversation",
         snapshot_json=snapshot,
         snapshot_version=snapshot["version"],
-        source_last_seq=None,
+        source_last_seq=source_last_seq,
         expires_at=expires_at,
     )
     logger.info("Share created: share_id=%s thread_id=%s expires=%s", record["id"], thread_id, expires_at or "never")
