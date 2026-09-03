@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
+from deerflow.mcp.headers import illegal_header_value_reason
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,17 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
         params["url"] = config.url
         # Add headers if present
         if config.headers:
+            # A statically configured value the transport would refuse gets the
+            # same treatment as a request-scoped one: h11 renders the full
+            # value into its exception on a line break or surrounding
+            # whitespace, which reaches the model through
+            # ToolErrorHandlingMiddleware. These values are API keys often
+            # enough to be worth refusing here, where build_servers_config
+            # already drops just this server and logs the reason.
+            for header_name, header_value in config.headers.items():
+                reason = illegal_header_value_reason(header_value)
+                if reason is not None:
+                    raise ValueError(f"MCP server '{server_name}' has a header '{header_name}' that cannot be sent as an HTTP header value: it {reason}")
             params["headers"] = config.headers
     else:
         raise ValueError(f"MCP server '{server_name}' has unsupported transport type: {transport_type}")

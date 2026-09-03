@@ -4,6 +4,7 @@ import { useStream } from "@langchain/langgraph-sdk/react";
 import {
   type QueryClient,
   type InfiniteData,
+  type QueryFilters,
   useInfiniteQuery,
   useMutation,
   useQuery,
@@ -171,6 +172,10 @@ const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_RUN_MESSAGES: RunMessage[] = [];
 const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
 const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
+// Thread-global feed position, attached by the backend to history rows and to
+// `values` frame messages it has already persisted. Mirrors MESSAGE_SEQ_KEY in
+// `deerflow/runtime/events/message_identity.py`.
+const MESSAGE_SEQ_KEY = "deerflow_seq";
 
 const EMPTY_THREAD_VALUES: AgentThreadState = {
   title: "",
@@ -187,6 +192,12 @@ const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
   "SummarizationMiddleware.before_model",
   "DeerFlowSummarizationMiddleware.before_model",
 ]);
+
+/** Thread-global feed position, when the backend has attached one. */
+function messageSeq(message: Message): number | undefined {
+  const seq = message.additional_kwargs?.[MESSAGE_SEQ_KEY];
+  return typeof seq === "number" ? seq : undefined;
+}
 
 function messageIdentity(message: Message): string | undefined {
   if (
@@ -309,9 +320,16 @@ export function buildVisibleHistoryMessages(
     // Carry the owning run_id onto the content message so historical subtask
     // cards can fetch their persisted step history on expand (#3779). run_id
     // lives on the RunMessage wrapper and would otherwise be dropped here.
+    // seq rides along for the same reason: it is the thread-global position
+    // this feed is ordered by, and merging needs it on the message itself to
+    // place a checkpoint copy that falls outside the loaded window (#4666).
     ...visibleRows.map((message) => ({
       ...message.content,
       run_id: message.run_id,
+      additional_kwargs: {
+        ...message.content.additional_kwargs,
+        [MESSAGE_SEQ_KEY]: message.seq,
+      },
     })),
   ]);
 }
@@ -499,7 +517,41 @@ export function mergeMessages(
   const beforeAnchor = new Map<string, Message[]>();
   let pending: Message[] = [];
   let lastAnchorIdentity: string | undefined;
-  let hasSharedAnchor = false;
+
+  // Lower bound of the history page window that is currently loaded. A live
+  // message whose seq is below it belongs before everything on screen, which
+  // is knowledge the anchor weaving below cannot reach: the anchor only says
+  // "earlier than this row", and after compaction the nearest anchor can sit
+  // deep inside the window (#4666 — measured at row 25 of 50).
+  const canonicalMinSeq = canonical.reduce<number | undefined>(
+    (min, message) => {
+      const seq = messageSeq(message);
+      return seq !== undefined && (min === undefined || seq < min) ? seq : min;
+    },
+    undefined,
+  );
+  const beforeWindow: Message[] = [];
+
+  // Split off what the feed places before the loaded window BEFORE the anchor
+  // walk rather than inside it. A summarized checkpoint can share no identity
+  // at all with the loaded page — compaction keeps only this run's recent tail,
+  // while the page on screen was fetched turns earlier — and the anchor loop
+  // then never runs. That is exactly when a rescued early turn most needs its
+  // seq: user submits, waits without reloading, compaction fires, and the
+  // message is appended to the tail instead (#4666).
+  const liveInWindow: Message[] = [];
+  for (const message of live) {
+    const seq = messageSeq(message);
+    if (
+      seq !== undefined &&
+      canonicalMinSeq !== undefined &&
+      seq < canonicalMinSeq
+    ) {
+      beforeWindow.push(message);
+    } else {
+      liveInWindow.push(message);
+    }
+  }
 
   // A summarized checkpoint is not necessarily a contiguous history suffix:
   // middleware may retain protected prompt/input messages at the front and a
@@ -507,7 +559,7 @@ export function mergeMessages(
   // replacing the canonical copy in place. New live messages are woven before
   // the next shared anchor (or after the last one), so a protected early input
   // can never be moved to the tail by global last-copy deduplication.
-  for (const message of live) {
+  for (const message of liveInWindow) {
     const identity = messageIdentity(message);
     const canonicalMessage = identity
       ? canonicalByIdentity.get(identity)
@@ -517,17 +569,22 @@ export function mergeMessages(
       continue;
     }
 
-    if (pending.length > 0 && hasSharedAnchor) {
+    // A summarized checkpoint may start with a protected message whose true
+    // canonical position is separated from this anchor by unloaded pages —
+    // rescued dynamic-context messages are the common case. Its position
+    // relative to this anchor is still known (both the checkpoint and
+    // seq-sorted history place it earlier), so it is woven in before the
+    // anchor like any other live-only segment. Dropping it instead was how a
+    // user's own question disappeared from a long thread once the first
+    // history page no longer reached back to it (#4666): a collapsed unloaded
+    // gap is recoverable by paging, a discarded message is not.
+    if (pending.length > 0) {
       beforeAnchor.set(identity, [
         ...(beforeAnchor.get(identity) ?? []),
         ...pending,
       ]);
     }
-    // A summarized checkpoint may start with a protected message whose true
-    // canonical position is separated from this anchor by unloaded pages.
-    // Suppress that ambiguous prefix instead of visually collapsing the gap.
     pending = [];
-    hasSharedAnchor = true;
     lastAnchorIdentity = identity;
 
     // A hidden checkpoint control message must not replace a visible canonical
@@ -543,7 +600,7 @@ export function mergeMessages(
 
   let canonicalAndLive: Message[];
   if (!lastAnchorIdentity) {
-    canonicalAndLive = [...canonical, ...live];
+    canonicalAndLive = [...canonical, ...liveInWindow];
   } else {
     canonicalAndLive = [];
     for (const message of canonical) {
@@ -564,6 +621,9 @@ export function mergeMessages(
   }
 
   const merged = dedupeMessagesByIdentity([
+    ...[...beforeWindow].sort(
+      (left, right) => (messageSeq(left) ?? 0) - (messageSeq(right) ?? 0),
+    ),
     ...canonicalAndLive,
     ...optimisticMessages,
   ]);
@@ -675,7 +735,9 @@ export function restoreLocalTurnMessageOrder(
  * accepted transient, far safer than pulling a completed turn's answer
  * below the next user message. A resent turn after an interrupted run and
  * pagination orphans from older turns (#4399) fail the checks as well and
- * are left untouched.
+ * are left untouched. When an interrupted turn and the next turn share one
+ * synthetic run_id, the previous human anchor plus the missing terminal
+ * answer makes step ownership ambiguous, so that layout is also preserved.
  */
 export function restoreReconnectedTurnMessageOrder(
   messages: Message[],
@@ -719,6 +781,21 @@ export function restoreReconnectedTurnMessageOrder(
     ) {
       candidateStart = index + 1;
     }
+  }
+
+  const previousHumanRunId =
+    segmentStart > 0 ? getMessageRunId(messages[segmentStart - 1]!) : undefined;
+  const hasUniformRunIdSincePreviousHuman =
+    previousHumanRunId !== undefined &&
+    messages
+      .slice(segmentStart - 1)
+      .every(
+        (message) =>
+          isHiddenFromUIMessage(message) ||
+          getMessageRunId(message) === previousHumanRunId,
+      );
+  if (candidateStart === segmentStart && hasUniformRunIdSincePreviousHuman) {
+    return messages;
   }
 
   const runIdsAfter = new Set<string>();
@@ -1733,47 +1810,10 @@ export function useThreadStream({
       );
       for (const update of updates) {
         if (update && "title" in update && update.title) {
-          void queryClient.setQueriesData(
-            {
-              queryKey: ["threads", "search"],
-              exact: false,
-            },
-            (oldData: Array<AgentThread> | undefined) => {
-              return oldData?.map((t) => {
-                if (t.thread_id === threadIdRef.current) {
-                  return {
-                    ...t,
-                    values: {
-                      ...t.values,
-                      title: update.title,
-                    },
-                  };
-                }
-                return t;
-              });
-            },
-          );
-          const nextTitle: string = update.title;
-          void queryClient.setQueriesData(
-            {
-              queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-              exact: false,
-            },
-            (oldData: InfiniteData<AgentThread[]> | undefined) =>
-              mapInfiniteThreadsCache(
-                oldData,
-                (t): AgentThread =>
-                  t.thread_id === threadIdRef.current
-                    ? {
-                        ...t,
-                        values: {
-                          ...t.values,
-                          title: nextTitle,
-                        },
-                      }
-                    : t,
-              ),
-          );
+          const currentThreadId = threadIdRef.current;
+          if (currentThreadId) {
+            setThreadTitleInCaches(queryClient, currentThreadId, update.title);
+          }
         }
       }
     },
@@ -2846,46 +2886,82 @@ function mergeThreadMetadata(
   };
 }
 
-function setThreadMetadataInCaches(
-  queryClient: QueryClient,
-  threadId: string,
-  metadata: ThreadMetadataPatch,
-) {
-  queryClient.setQueriesData(
-    {
+function mergeThreadTitle(thread: AgentThread, title: string): AgentThread {
+  return {
+    ...thread,
+    values: {
+      ...thread.values,
+      title,
+    },
+  };
+}
+
+function getThreadSnapshotCacheFilters(threadId: string) {
+  return {
+    search: {
       queryKey: ["threads", "search"],
       exact: false,
     },
+    infiniteSearch: {
+      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      exact: false,
+    },
+    metadata: {
+      queryKey: ["thread", "metadata", threadId],
+      exact: false,
+    },
+  } as const;
+}
+
+function setThreadInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  mapper: (thread: AgentThread) => AgentThread,
+): void {
+  const filters = getThreadSnapshotCacheFilters(threadId);
+
+  queryClient.setQueriesData(
+    filters.search,
     (oldData: Array<AgentThread> | undefined) => {
       if (!oldData) {
         return oldData;
       }
       return oldData.map((thread) =>
-        thread.thread_id === threadId
-          ? mergeThreadMetadata(thread, metadata)
-          : thread,
+        thread.thread_id === threadId ? mapper(thread) : thread,
       );
     },
   );
   queryClient.setQueriesData(
-    {
-      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-      exact: false,
-    },
+    filters.infiniteSearch,
     (oldData: InfiniteData<AgentThread[]> | undefined) =>
       mapInfiniteThreadsCache(oldData, (thread) =>
-        thread.thread_id === threadId
-          ? mergeThreadMetadata(thread, metadata)
-          : thread,
+        thread.thread_id === threadId ? mapper(thread) : thread,
       ),
   );
   queryClient.setQueriesData(
-    {
-      queryKey: ["thread", "metadata", threadId],
-      exact: false,
-    },
+    filters.metadata,
     (oldData: AgentThread | null | undefined) =>
-      oldData ? mergeThreadMetadata(oldData, metadata) : oldData,
+      oldData ? mapper(oldData) : oldData,
+  );
+}
+
+function setThreadMetadataInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  metadata: ThreadMetadataPatch,
+) {
+  setThreadInCaches(queryClient, threadId, (thread) =>
+    mergeThreadMetadata(thread, metadata),
+  );
+}
+
+export function setThreadTitleInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  title: string,
+): void {
+  setThreadInCaches(queryClient, threadId, (thread) =>
+    mergeThreadTitle(thread, title),
   );
 }
 
@@ -3244,45 +3320,19 @@ export function useRenameThread() {
         values: { title },
       });
     },
-    onSuccess(_, { threadId, title }) {
-      queryClient.setQueriesData(
-        {
-          queryKey: ["threads", "search"],
-          exact: false,
-        },
-        (oldData: Array<AgentThread>) => {
-          return oldData.map((t) => {
-            if (t.thread_id === threadId) {
-              return {
-                ...t,
-                values: {
-                  ...t.values,
-                  title,
-                },
-              };
-            }
-            return t;
-          });
-        },
+    async onSuccess(_, { threadId, title }) {
+      const filters: QueryFilters[] = Object.values(
+        getThreadSnapshotCacheFilters(threadId),
       );
-      queryClient.setQueriesData(
-        {
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-          exact: false,
-        },
-        (oldData: InfiniteData<AgentThread[]> | undefined) =>
-          mapInfiniteThreadsCache(oldData, (t) =>
-            t.thread_id === threadId
-              ? {
-                  ...t,
-                  values: {
-                    ...t.values,
-                    title,
-                  },
-                }
-              : t,
-          ),
+
+      // Prevent pre-rename snapshot requests from restoring the stale title.
+      await Promise.all(
+        filters.map((filter) => queryClient.cancelQueries(filter)),
       );
+      setThreadTitleInCaches(queryClient, threadId, title);
+      for (const filter of filters) {
+        void queryClient.invalidateQueries(filter);
+      }
     },
   });
 }

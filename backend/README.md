@@ -61,7 +61,7 @@ Middlewares execute in strict order, each handling a specific concern:
 | 3 | **SandboxMiddleware** | Acquires sandbox environment for code execution |
 | 4 | **SummarizationMiddleware** | Reduces context when approaching token limits (optional) |
 | 5 | **TodoListMiddleware** | Tracks multi-step tasks in plan mode (optional) |
-| 6 | **TitleMiddleware** | Auto-generates conversation titles after first exchange |
+| 6 | **TitleMiddleware** | Auto-generates conversation titles from the original user request after first exchange; attachment-only messages fall back to `New Conversation` |
 | 7 | **MemoryMiddleware** | Queues conversations for async memory extraction |
 | 8 | **ViewImageMiddleware** | Injects image data for vision-capable models (conditional) |
 | 9 | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
@@ -490,8 +490,11 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-# Offline backend suite (live external-API tests are excluded)
+# Default offline backend suite (live external-API and blocking-I/O tests are excluded)
 make test
+
+# Strict blocking-I/O suite
+make test-blocking-io
 
 # Explicit real-API DeerFlowClient integration suite
 make test-live

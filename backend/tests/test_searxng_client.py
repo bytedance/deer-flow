@@ -110,6 +110,40 @@ class TestSearxngClient:
             call_kwargs = mock_ctx.get.call_args.kwargs
             assert call_kwargs["params"]["categories"] == "news,science"
 
+    async def test_search_with_time_range(self):
+        """Search passes a native relative time range."""
+        with patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"results": []}
+            mock_resp.raise_for_status.return_value = None
+            mock_ctx.get = AsyncMock(return_value=mock_resp)
+
+            client = SearxngClient(base_url="http://searxng:8080")
+            await client.search("latest release", time_range="month")
+
+            params = mock_ctx.get.call_args.kwargs["params"]
+            assert params["time_range"] == "month"
+
+    async def test_search_without_time_range_omits_parameter(self):
+        """The default request shape remains unchanged."""
+        with patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"results": []}
+            mock_resp.raise_for_status.return_value = None
+            mock_ctx.get = AsyncMock(return_value=mock_resp)
+
+            client = SearxngClient(base_url="http://searxng:8080")
+            await client.search("stable documentation")
+
+            params = mock_ctx.get.call_args.kwargs["params"]
+            assert "time_range" not in params
+
 
 @pytest.mark.asyncio
 class TestSearxngTools:
@@ -161,3 +195,15 @@ class TestSearxngTools:
         mock_client.search.assert_called_once()
         call_kwargs = mock_client.search.call_args.kwargs
         assert call_kwargs["max_results"] == 3
+
+    @patch("deerflow.community.searxng.tools._get_searxng_client")
+    async def test_web_search_tool_forwards_time_range(self, mock_get_client):
+        """web_search_tool forwards the requested relative time range."""
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(return_value=[])
+        mock_get_client.return_value = mock_client
+
+        with patch("deerflow.community.searxng.tools._get_tool_config", return_value=None):
+            await tools.web_search_tool.ainvoke({"query": "latest release", "time_range": "week"})
+
+        mock_client.search.assert_called_once_with("latest release", max_results=5, time_range="week")

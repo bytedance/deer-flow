@@ -461,6 +461,7 @@ def build_middlewares(
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
     available_skills: set[str] | None = None,
+    owns_agent_skill_projection: bool = True,
     app_config: AppConfig | None = None,
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
@@ -481,6 +482,9 @@ def build_middlewares(
         model_name: Resolved runtime model name; gates vision-only middleware.
         agent_name: If provided, MemoryMiddleware will use per-agent memory storage.
         custom_middlewares: Optional list of custom middlewares to inject into the chain.
+        owns_agent_skill_projection: Whether this lead middleware chain owns the
+            thread's physical skill projection. Prompt-only bootstrap agents do
+            not; their narrow skill set must not replace the thread view.
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
@@ -506,6 +510,10 @@ def build_middlewares(
         "app_config": resolved_app_config,
         "lazy_init": True,
     }
+    if available_skills is not None:
+        runtime_middleware_kwargs["available_skills"] = available_skills
+    if not owns_agent_skill_projection:
+        runtime_middleware_kwargs["owns_agent_skill_projection"] = False
     if authorization_provider is not None:
         runtime_middleware_kwargs["authorization_provider"] = authorization_provider
     if authorization_provider is not None and deferred_setup is not None:
@@ -1025,6 +1033,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             model_name=model_name,
             agent_name=agent_name,
             available_skills=set(_BOOTSTRAP_SKILL_NAMES),
+            owns_agent_skill_projection=False,
             app_config=resolved_app_config,
             deferred_setup=setup,
             mcp_routing_middleware=mcp_routing_middleware,

@@ -102,6 +102,14 @@ export interface Translations {
     loadFullFile: string;
     loadingFullFile: string;
     previewFailed: string;
+    viewSource: string;
+    missingTarget: string;
+  };
+
+  artifactArchive: {
+    downloadCurrent: (count: number) => string;
+    currentVersionNotice: string;
+    downloadFailed: string;
   };
 
   // Citations
@@ -375,6 +383,8 @@ export interface Translations {
       pause: string;
       resume: string;
       trigger: string;
+      duplicate: string;
+      duplicateTitleSuffix: string;
       delete: string;
     };
     deleteConfirm: string;
@@ -504,6 +514,8 @@ export interface Translations {
     branchCreated: string;
     branchFailed: string;
     streamReplayGap: string;
+    outlineLabel: string;
+    outlineAttachmentFallback: string;
   };
 
   // Chats
@@ -800,6 +812,23 @@ export interface Translations {
       description: string;
       adminRequired: string;
       empty: string;
+      addServer: string;
+      addServerDescription: string;
+      addServerPlaceholder: string;
+      serverDefinitionLabel: string;
+      definitionEmpty: string;
+      definitionInvalidJson: string;
+      definitionRootNotObject: string;
+      definitionNoServers: string;
+      definitionServerNotObject: string;
+      editServer: string;
+      editServerDescription: string;
+      editSingleServer: string;
+      editServerNameMismatch: string;
+      serverAlreadyExists: string;
+      removeServer: string;
+      removeServerDescription: string;
+      unnamedServer: string;
     };
     subagents: {
       title: string;
@@ -966,6 +995,11 @@ export interface Translations {
       emptyButton: string;
       adminRequired: string;
       installAdminRequired: string;
+      installFromFile: string;
+      installingArchive: string;
+      invalidArchive: string;
+      archiveTooLarge: string;
+      installFailed: string;
     };
     notification: {
       title: string;
