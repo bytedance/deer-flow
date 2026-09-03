@@ -526,7 +526,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "default_headers": {
                 "HTTP-Referer": "https://github.com/bytedance/deer-flow",
                 "X-Title": "DeerFlow",
-                "X-AIMLAPI-Partner-ID": "part_deerflow",
+                "X-AIMLAPI-Partner-ID": "part_91MTARtiTI8JdCgPOt0ioAKF",
                 "X-AIMLAPI-Source": "agent/deer-flow",
             },
         },

@@ -666,7 +666,7 @@ models:
   #   default_headers:
   #     HTTP-Referer: https://github.com/bytedance/deer-flow
   #     X-Title: DeerFlow
-  #     X-AIMLAPI-Partner-ID: part_deerflow
+  #     X-AIMLAPI-Partner-ID: part_91MTARtiTI8JdCgPOt0ioAKF
   #     X-AIMLAPI-Source: agent/deer-flow
   #
   # For a reasoning model on aimlapi.com use the patched OpenAI-compatible
@@ -686,7 +686,7 @@ models:
   #   default_headers:
   #     HTTP-Referer: https://github.com/bytedance/deer-flow
   #     X-Title: DeerFlow
-  #     X-AIMLAPI-Partner-ID: part_deerflow
+  #     X-AIMLAPI-Partner-ID: part_91MTARtiTI8JdCgPOt0ioAKF
   #     X-AIMLAPI-Source: agent/deer-flow
 
   # Example: Atlas Cloud (OpenAI-compatible)
