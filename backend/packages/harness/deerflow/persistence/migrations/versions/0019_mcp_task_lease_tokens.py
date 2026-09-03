@@ -1,7 +1,7 @@
 """fence MCP task claims by per-claim lease tokens.
 
-Revision ID: 0018_mcp_task_lease_tokens
-Revises: 0017_personal_access_tokens
+Revision ID: 0019_mcp_task_lease_tokens
+Revises: 0018_oauth_identity_pg_partial
 Create Date: 2026-08-27
 """
 

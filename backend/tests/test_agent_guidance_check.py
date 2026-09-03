@@ -172,7 +172,7 @@ def test_mcp_task_lease_token_migration_is_documented() -> None:
     guidance = (REPO_ROOT / "backend" / "packages" / "harness" / "deerflow" / "persistence" / "migrations" / "AGENTS.md").read_text(encoding="utf-8")
 
     for required in (
-        "0018_mcp_task_lease_tokens.py",
+        "0019_mcp_task_lease_tokens.py",
         "0016_subagent_batches",
         "lease_token",
         "notification_lease_token",
