@@ -67,6 +67,8 @@ def _default_route_authorization_config(monkeypatch):
 
 
 def _make_pat_app(with_pat_repo: bool = True):
+    from app.gateway.authz import require_permission
+
     app = FastAPI()
     # Production order: AuthMiddleware added first (inner), CSRF last (outer).
     app.add_middleware(AuthMiddleware)
@@ -85,6 +87,17 @@ def _make_pat_app(with_pat_repo: bool = True):
 
     @app.post("/api/threads/{thread_id}/runs/stream")
     async def run_stream(request: Request):
+        return {"ok": True, "permissions": list(request.state.auth.permissions)}
+
+    @app.post("/api/threads/{thread_id}/shares")
+    @app.get("/api/threads/{thread_id}/shares")
+    @require_permission("threads", "read")
+    async def share_collection(request: Request):
+        return {"ok": True, "permissions": list(request.state.auth.permissions)}
+
+    @app.delete("/api/threads/{thread_id}/shares/{share_id}")
+    @require_permission("threads", "read")
+    async def share_revoke(request: Request):
         return {"ok": True, "permissions": list(request.state.auth.permissions)}
 
     @app.delete("/api/memory")
@@ -733,3 +746,59 @@ def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):
         response = disabled_client.get("/api/threads/whoami", headers={"Authorization": "Bearer dfp_garbage"})
     assert response.status_code == 200
     assert response.json()["auth_source"] == "auth_disabled"
+
+
+def test_pat_share_management_reaches_decorated_routes(client):
+    """Behavioral complement to the derived policy test (round-13 P2): the
+    share management paths pass AuthMiddleware for a threads:read PAT with
+    exactly that scope — a wiring regression (wrong method casing, a lost
+    rule) fails here even though the policy table alone passes — and a
+    token without threads:read is 403."""
+    read_only = _create_pat(client, scopes=["threads:read"])
+    client.cookies.clear()
+    headers = {"Authorization": f"Bearer {read_only['token']}"}
+
+    created = client.post("/api/threads/t1/shares", headers=headers, json={})
+    assert created.status_code == 200
+    assert created.json()["permissions"] == ["threads:read"]
+
+    listed = client.get("/api/threads/t1/shares", headers=headers)
+    assert listed.status_code == 200
+
+    revoked = client.delete("/api/threads/t1/shares/s1", headers=headers)
+    assert revoked.status_code == 200
+
+    unscoped = _create_pat(client, scopes=["runs:read"])
+    client.cookies.clear()
+    denied = client.post(
+        "/api/threads/t1/shares",
+        headers={"Authorization": f"Bearer {unscoped['token']}"},
+        json={},
+    )
+    assert denied.status_code == 403
+
+
+def test_pat_policy_admits_share_management_routes():
+    """Round-13 P2 (fafcfb2b review): the share-management routes run under
+    the `threads:read` permission, so a PAT holding that scope must reach
+    them; the public-resolution route stays PAT-denied (it is anonymous by
+    design and must not become a PAT-credentialed surface)."""
+    from fastapi.routing import APIRoute
+
+    from app.gateway.auth.pat import is_pat_allowed_route
+    from app.gateway.routers.shares import router
+
+    seen_management = 0
+    seen_public = 0
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        path = route.path.replace("{thread_id}", "t1").replace("{share_id}", "s1").replace("{share_token}", "dfs_x")
+        for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
+            if path.startswith("/api/shares/"):
+                seen_public += 1
+                assert not is_pat_allowed_route(method, path), f"{method} {path} is the anonymous public route and must stay PAT-denied"
+            else:
+                seen_management += 1
+                assert is_pat_allowed_route(method, path), f"{method} {path} is implemented but PAT-denied"
+    assert (seen_management, seen_public) == (3, 1)
