@@ -64,9 +64,6 @@ class ScheduledTaskService:
                 error=_LEASE_RECOVERY_ERROR,
                 now=now,
             )
-            stuck = await self._task_repo.cancel_stuck_once_tasks(error=_LEASE_RECOVERY_ERROR)
-            if stuck:
-                logger.warning("Reconciled %d stuck once task(s) in poll loop", stuck)
         await self._expire_waiting_runs(now=now)
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
@@ -574,24 +571,28 @@ class ScheduledTaskService:
             await self._reconcile_active_state(now=datetime.now(UTC))
             self._skip_next_lease_reconciliation = True
         else:
+            # This destructive sweep is safe only while Gateway lifespan awaits
+            # start(): no request or poll admission can create a run owned by
+            # this process yet. Complete occurrence -> parent recovery before
+            # returning; moving either pass into run_once() can interrupt live
+            # work or race manual admission.
             try:
-                # ORDER MATTERS: run-row sweep must happen before parent
-                # reconciliation so cancel_stuck_once_tasks can see the
-                # terminal status written by mark_stale_active_runs.
                 stale = await self._task_run_repo.mark_stale_active_runs(error=restart_error)
                 if stale:
                     logger.warning("Marked %d stale scheduled task run(s) as interrupted after restart", stale)
             except Exception:
                 logger.exception("Failed to sweep stale scheduled task runs at startup")
+                raise
             try:
                 # The run rows above are only half the story: a launched `once`
                 # task is parked in "running" until the (now dead) completion hook
-                # would have finalized it, so reconcile the parent rows too.
+                # would have finalized it.
                 stuck = await self._task_repo.cancel_stuck_once_tasks(error=restart_error)
                 if stuck:
                     logger.warning("Reconciled %d stuck once task(s) after restart", stuck)
             except Exception:
                 logger.exception("Failed to reconcile stuck once tasks at startup")
+                raise
         self._stop.clear()
         self._task = asyncio.create_task(self._run_loop())
 
