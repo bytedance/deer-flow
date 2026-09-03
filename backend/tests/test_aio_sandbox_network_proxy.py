@@ -152,9 +152,11 @@ async def test_tls_client_hello_sni_is_extracted_for_connect_enforcement() -> No
 
 def test_http_request_framing_rejects_ambiguous_or_duplicate_lengths() -> None:
     with pytest.raises(ValueError, match="cannot be combined"):
-        network_proxy._http_request_body_framing(["Content-Length: 4", "Transfer-Encoding: chunked"])
+        fields = network_proxy._parse_http_header_fields(["Content-Length: 4", "Transfer-Encoding: chunked"])
+        network_proxy._http_request_body_framing(fields)
     with pytest.raises(ValueError, match="one non-negative"):
-        network_proxy._http_request_body_framing(["Content-Length: 4", "Content-Length: 4"])
+        fields = network_proxy._parse_http_header_fields(["Content-Length: 4", "Content-Length: 4"])
+        network_proxy._http_request_body_framing(fields)
 
 
 @pytest.mark.anyio
@@ -216,3 +218,38 @@ async def test_http_proxy_relays_exactly_one_request_per_connection(monkeypatch)
         upstream.close()
         await proxy.wait_closed()
         await upstream.wait_closed()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "malformed_header",
+    [
+        b"Host : denied.example",
+        b"Transfer-Encoding : chunked",
+        b"Bad(Header): value",
+    ],
+)
+async def test_http_proxy_rejects_ambiguous_field_names_before_policy_check(monkeypatch, malformed_header: bytes) -> None:
+    policy_checks: list[tuple[str, int]] = []
+
+    def fake_policy_allows(host: str, port: int) -> bool:
+        policy_checks.append((host, port))
+        return False
+
+    monkeypatch.setattr(network_proxy, "policy_allows", fake_policy_allows)
+
+    proxy = await asyncio.start_server(network_proxy.handle_proxy, "127.0.0.1", 0)
+    proxy_port = proxy.sockets[0].getsockname()[1]
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer.write(b"GET http://allowed.example/ HTTP/1.1\r\nHost: allowed.example\r\n" + malformed_header + b"\r\n\r\n")
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=2)
+        writer.close()
+        await writer.wait_closed()
+
+        assert b"400 Bad Request" in response
+        assert policy_checks == []
+    finally:
+        proxy.close()
+        await proxy.wait_closed()

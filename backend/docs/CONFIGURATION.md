@@ -692,9 +692,19 @@ out of the internal bridge. DeerFlow also sets the upstream AIO image's
 policy sidecar; standard upper/lower-case HTTP, HTTPS, and ALL proxy variables
 cover shell and package-manager clients.
 
+The sidecar is dual-homed between the sandbox's internal bridge and a separate
+per-sandbox egress bridge with inter-container communication disabled. It is
+never attached to Docker's shared default `bridge`, so unrelated containers
+cannot reach its unauthenticated sandbox-API relay directly. Only the sidecar
+is attached to the egress bridge; outbound traffic still goes through Docker
+NAT.
+
 Plain HTTP connections carry exactly one fully framed, policy-checked request;
 the sidecar closes the upstream connection afterward so a pipelined request
-cannot reuse the first request's decision. HTTPS CONNECT validates both the
+cannot reuse the first request's decision. HTTP field names are parsed once,
+must use the RFC token grammar with the colon immediately following the name,
+and malformed or ambiguous fields are rejected before any policy lookup or
+forwarding. HTTPS CONNECT validates both the
 CONNECT authority and the TLS ClientHello SNI without intercepting TLS. Because
 the encrypted HTTP `Host`/`:authority` remains invisible, a deliberately
 malicious client may still reach another virtual host co-located on an allowed
@@ -717,13 +727,14 @@ Restricted modes currently require the local Docker backend and Docker Engine
 28 or newer. They fail closed on Apple Container, provisioner mode, and older
 engines. DeerFlow applies Engine 28's isolated bridge gateway mode to both IPv4
 and IPv6 so the sandbox cannot reach services bound to either host-side bridge
-address. The sandbox, sidecar, and network carry a digest of the effective
-policy, proxy source, and image reference; startup and reconciliation destroy
-and recreate a persisted resource set when that identity or its required
-network properties no longer match. Docker Desktop is detected from the daemon,
-not the Gateway process, so Docker-outside-of-Docker deployments handle its
-synthetic DNS range correctly. The policy sidecar publishes only its fixed
-sandbox-API relay back to the Gateway; the sandbox API itself is not published.
+address. The sandbox, sidecar, internal network, and egress network carry a
+digest of the effective policy, proxy source, and image reference; startup and
+reconciliation destroy and recreate a persisted resource set when that identity
+or its required network properties no longer match. Docker Desktop is detected
+from the daemon, not the Gateway process, so Docker-outside-of-Docker deployments
+handle its synthetic DNS range correctly. The policy sidecar publishes only its
+fixed sandbox-API relay back to the Gateway; the sandbox API itself is not
+published.
 Mirror or digest-pin `network.proxy_image` in production environments that
 require supply-chain pinning.
 

@@ -1296,7 +1296,10 @@ compatibility. Operators can set `sandbox.network.mode` to `isolated` or
 Human Input card for temporary or sandbox-lifetime HTTP(S) approval. Private,
 loopback, link-local, multicast, and cloud metadata addresses remain
 unapprovable. Denied hostnames are rejected before DNS resolution, and
-scheduled or otherwise non-interactive runs auto-deny without opening a card. See
+scheduled or otherwise non-interactive runs auto-deny without opening a card.
+The trusted sidecar uses a dedicated per-sandbox egress bridge rather than
+Docker's shared default bridge, and rejects ambiguous HTTP field names before
+forwarding. See
 [Sandbox configuration](backend/docs/CONFIGURATION.md#sandbox-network-policy)
 for runtime requirements and the complete policy model.
 

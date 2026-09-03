@@ -24,8 +24,19 @@ MAX_HEADER_BYTES = 65_536
 POLICY_DB = Path(os.environ.get("DEERFLOW_POLICY_DB", "/tmp/deerflow-network-policy.sqlite3"))
 
 
-class _InvalidHttpBody(ValueError):
+class _InvalidHttpRequest(ValueError):
     pass
+
+
+class _InvalidHttpBody(_InvalidHttpRequest):
+    pass
+
+
+class _InvalidHttpHeader(_InvalidHttpRequest):
+    pass
+
+
+_HTTP_TOKEN_CHARS = frozenset("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 
 
 def _connect_db() -> sqlite3.Connection:
@@ -221,10 +232,27 @@ async def _reject(writer: asyncio.StreamWriter, status: str, body: str) -> None:
     await writer.wait_closed()
 
 
-def _http_request_body_framing(header_lines: list[str]) -> tuple[str, int]:
+def _parse_http_header_fields(header_lines: list[str]) -> list[tuple[str, str, str]]:
+    """Parse one header block using a single strict field-name grammar."""
+    fields: list[tuple[str, str, str]] = []
+    for line in header_lines:
+        if not line:
+            continue
+        if line.startswith((" ", "\t")) or ":" not in line:
+            raise _InvalidHttpHeader("Obsolete or malformed HTTP headers are not supported")
+        raw_name, raw_value = line.split(":", 1)
+        if not raw_name or any(char not in _HTTP_TOKEN_CHARS for char in raw_name):
+            raise _InvalidHttpHeader("HTTP field names must use token characters followed immediately by a colon")
+        if any((ord(char) < 0x20 and char != "\t") or ord(char) == 0x7F for char in raw_value):
+            raise _InvalidHttpHeader("HTTP field values cannot contain control characters")
+        fields.append((raw_name, raw_name.lower(), raw_value.strip(" \t")))
+    return fields
+
+
+def _http_request_body_framing(header_fields: list[tuple[str, str, str]]) -> tuple[str, int]:
     """Return the strictly validated framing for one HTTP proxy request."""
-    content_lengths = [line.split(":", 1)[1].strip() for line in header_lines if line.lower().startswith("content-length:")]
-    transfer_encodings = [line.split(":", 1)[1].strip().lower() for line in header_lines if line.lower().startswith("transfer-encoding:")]
+    content_lengths = [value for _raw_name, name, value in header_fields if name == "content-length"]
+    transfer_encodings = [value.lower() for _raw_name, name, value in header_fields if name == "transfer-encoding"]
     if content_lengths and transfer_encodings:
         raise _InvalidHttpBody("Content-Length and Transfer-Encoding cannot be combined")
     if transfer_encodings:
@@ -238,9 +266,11 @@ def _http_request_body_framing(header_lines: list[str]) -> tuple[str, int]:
     return ("fixed", int(content_lengths[0]))
 
 
-def _build_http_outbound_header(method: str, path: str, version: str, header_lines: list[str]) -> bytes:
+def _build_http_outbound_header(method: str, path: str, version: str, header_fields: list[tuple[str, str, str]]) -> bytes:
     """Strip proxy/hop headers and force the one-request upstream connection closed."""
-    connection_tokens = {token.strip().lower() for line in header_lines if line.lower().startswith("connection:") for token in line.split(":", 1)[1].split(",") if token.strip()}
+    connection_tokens = {token.strip().lower() for _raw_name, name, value in header_fields if name == "connection" for token in value.split(",") if token.strip()}
+    if any(any(char not in _HTTP_TOKEN_CHARS for char in token) for token in connection_tokens):
+        raise _InvalidHttpHeader("Connection header options must use HTTP token characters")
     if connection_tokens & {"host", "content-length", "transfer-encoding"}:
         raise _InvalidHttpBody("Connection cannot remove request framing headers")
     hop_headers = {
@@ -254,7 +284,7 @@ def _build_http_outbound_header(method: str, path: str, version: str, header_lin
         "upgrade",
         *connection_tokens,
     }
-    kept_headers = [line for line in header_lines if line and line.split(":", 1)[0].strip().lower() not in hop_headers]
+    kept_headers = [f"{raw_name}: {value}" for raw_name, name, value in header_fields if name not in hop_headers]
     kept_headers.append("Connection: close")
     return f"{method} {path} {version}\r\n".encode("latin-1") + "\r\n".join(kept_headers).encode("latin-1") + b"\r\n\r\n"
 
@@ -405,6 +435,11 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     if version not in {"HTTP/1.0", "HTTP/1.1"}:
         await _reject(writer, "400 Bad Request", "Unsupported HTTP version")
         return
+    try:
+        header_fields = _parse_http_header_fields(header_lines)
+    except _InvalidHttpHeader as exc:
+        await _reject(writer, "400 Bad Request", str(exc))
+        return
 
     method = method.upper()
     if method == "CONNECT":
@@ -431,21 +466,18 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
         path = parsed_url.path or "/"
         if parsed_url.query:
             path += "?" + parsed_url.query
-        if any(line.startswith((" ", "\t")) or ":" not in line for line in header_lines if line):
-            await _reject(writer, "400 Bad Request", "Obsolete or malformed HTTP headers are not supported")
-            return
-        host_headers = [line.split(":", 1)[1].strip() for line in header_lines if line.lower().startswith("host:")]
+        host_headers = [value for _raw_name, name, value in header_fields if name == "host"]
         host_authority = _parse_authority(host_headers[0], 80) if len(host_headers) == 1 else None
         if host_authority != (host, port):
             await _reject(writer, "400 Bad Request", "HTTP Host header must match the approved proxy destination")
             return
-        if any(line.lower().startswith("expect:") for line in header_lines):
+        if any(name == "expect" for _raw_name, name, _value in header_fields):
             await _reject(writer, "417 Expectation Failed", "Expect is not supported by the sandbox network proxy")
             return
         try:
-            body_mode, body_length = _http_request_body_framing(header_lines)
-            outbound_header = _build_http_outbound_header(method, path, version, header_lines)
-        except _InvalidHttpBody as exc:
+            body_mode, body_length = _http_request_body_framing(header_fields)
+            outbound_header = _build_http_outbound_header(method, path, version, header_fields)
+        except _InvalidHttpRequest as exc:
             await _reject(writer, "400 Bad Request", str(exc))
             return
 

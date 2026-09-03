@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import socket
@@ -225,11 +226,31 @@ def test_create_internal_network_isolates_both_gateway_families_and_labels_polic
     assert f"deerflow.network_policy_digest={backend._network_policy_digest()}" in create
 
 
+def test_create_egress_network_is_per_sandbox_and_disables_inter_container_traffic(monkeypatch):
+    backend = _restricted_backend()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(backend, "_inspect_network", lambda _name: None)
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(stdout="network-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._create_egress_network("sandbox-egress", "sandbox-id")
+
+    create = commands[0]
+    assert "--internal" not in create
+    assert "com.docker.network.bridge.enable_icc=false" in create
+    assert "deerflow.role=egress-network" in create
+    assert f"deerflow.network_policy_digest={backend._network_policy_digest()}" in create
+
+
 def test_restricted_resource_status_requires_matching_policy_image_and_network():
     backend = _restricted_backend()
     sandbox_id = "existing"
     container_name = "sandbox-existing"
     proxy_name, network_name = backend._resource_names(sandbox_id)
+    egress_network_name = backend._egress_network_name(sandbox_id)
     inspections = {
         container_name: _ContainerInspection(
             created_at=1.0,
@@ -243,7 +264,7 @@ def test_restricted_resource_status_requires_matching_policy_image_and_network()
             host_port=18080,
             labels=backend._restricted_labels(sandbox_id, "network-proxy"),
             image="proxy:latest",
-            networks=frozenset({"bridge", network_name}),
+            networks=frozenset({egress_network_name, network_name}),
         ),
     }
     network = _NetworkInspection(
@@ -255,16 +276,36 @@ def test_restricted_resource_status_requires_matching_policy_image_and_network()
             "com.docker.network.bridge.gateway_mode_ipv6": "isolated",
         },
     )
-    backend._inspect_network = lambda _name: network
+    egress_network = _NetworkInspection(
+        driver="bridge",
+        internal=False,
+        labels=backend._restricted_labels(sandbox_id, "egress-network"),
+        options={"com.docker.network.bridge.enable_icc": "false"},
+    )
+    backend._inspect_network = lambda name: network if name == network_name else egress_network
 
     assert backend._restricted_resources_status(sandbox_id, inspections=inspections) == "compatible"
 
+    egress_network = _NetworkInspection(
+        driver="bridge",
+        internal=False,
+        labels=backend._restricted_labels(sandbox_id, "egress-network"),
+        options={"com.docker.network.bridge.enable_icc": "true"},
+    )
+    assert backend._restricted_resources_status(sandbox_id, inspections=inspections) == "mismatch"
+
+    egress_network = _NetworkInspection(
+        driver="bridge",
+        internal=False,
+        labels=backend._restricted_labels(sandbox_id, "egress-network"),
+        options={"com.docker.network.bridge.enable_icc": "false"},
+    )
     inspections[proxy_name] = _ContainerInspection(
         created_at=1.0,
         host_port=18080,
         labels={**backend._restricted_labels(sandbox_id, "network-proxy"), "deerflow.network_policy_digest": "stale"},
         image="proxy:latest",
-        networks=frozenset({"bridge", network_name}),
+        networks=frozenset({egress_network_name, network_name}),
     )
     assert backend._restricted_resources_status(sandbox_id, inspections=inspections) == "mismatch"
 
@@ -310,6 +351,7 @@ def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
     backend._network_mode = "allowlist"
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "missing")
     monkeypatch.setattr(backend, "_create_internal_network", lambda _name, _sandbox_id: None)
+    monkeypatch.setattr(backend, "_create_egress_network", lambda _name, _sandbox_id: None)
     monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
     captured: dict[str, object] = {}
 
@@ -337,13 +379,17 @@ def test_restricted_start_recreates_resources_with_stale_policy(monkeypatch):
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "mismatch")
     monkeypatch.setattr(backend, "_cleanup_restricted_resources", cleaned.append)
     monkeypatch.setattr(backend, "_create_internal_network", lambda name, sandbox_id: created.append((name, sandbox_id)))
+    monkeypatch.setattr(backend, "_create_egress_network", lambda name, sandbox_id: created.append((name, sandbox_id)))
     monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
     monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
 
     assert backend._start_restricted_sandbox("stale", "sandbox-stale", 18080, None, config_mount_exclusion_root=None) == "container-id"
 
     assert cleaned == ["stale"]
-    assert created == [(backend._resource_names("stale")[1], "stale")]
+    assert created == [
+        (backend._resource_names("stale")[1], "stale"),
+        (backend._egress_network_name("stale"), "stale"),
+    ]
 
 
 def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatch):
@@ -369,9 +415,18 @@ def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatc
 
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    backend._start_network_proxy("proxy-name", "network-name", "sandbox-name", 18080, "sandbox-id")
+    backend._start_network_proxy(
+        "proxy-name",
+        "network-name",
+        "egress-network-name",
+        "sandbox-name",
+        18080,
+        "sandbox-id",
+    )
 
     create = commands[0]
+    assert create[create.index("--network") + 1] == "egress-network-name"
+    assert "bridge" not in create
     assert "--read-only" in create
     assert create[create.index("--tmpfs") + 1] == "/tmp:rw,noexec,nosuid,size=16m"
     assert "--cap-drop=ALL" in create
@@ -1048,10 +1103,11 @@ def test_restricted_list_reconciliation_removes_resources_with_stale_policy(monk
     assert cleaned == ["stale"]
 
 
-def test_restricted_destroy_stops_pair_and_removes_internal_network(monkeypatch):
+def test_restricted_destroy_stops_pair_and_removes_both_networks(monkeypatch):
     backend = _backend_for_inspect_tests()
     backend._network_mode = "isolated"
     proxy_name, network_name = backend._resource_names("existing")
+    egress_network_name = backend._egress_network_name("existing")
     stopped: list[str] = []
     commands: list[list[str]] = []
     monkeypatch.setattr(backend, "_stop_container", stopped.append)
@@ -1073,6 +1129,7 @@ def test_restricted_destroy_stops_pair_and_removes_internal_network(monkeypatch)
     assert stopped == ["sandbox-container-id", proxy_name]
     assert ["docker", "rm", "-f", proxy_name] in commands
     assert ["docker", "network", "rm", network_name] in commands
+    assert ["docker", "network", "rm", egress_network_name] in commands
 
 
 def test_is_container_running_false_on_apple_container_not_found(monkeypatch):
@@ -1412,6 +1469,7 @@ def test_restricted_network_proxy_enforces_and_approves_real_traffic(monkeypatch
     sandbox_id = "network-live"
     container_name = f"sandbox-policy-smoke-{sandbox_id}"
     proxy_name, network_name = backend._resource_names(sandbox_id)
+    egress_network_name = backend._egress_network_name(sandbox_id)
     port = get_free_port(start_port=18310)
     started_at = time.time()
     proxy_url = f"http://{proxy_name}:3128"
@@ -1419,7 +1477,37 @@ def test_restricted_network_proxy_enforces_and_approves_real_traffic(monkeypatch
     try:
         assert backend._restricted_resources_status(sandbox_id) == "missing"
         backend._create_internal_network(network_name, sandbox_id)
-        backend._start_network_proxy(proxy_name, network_name, container_name, port, sandbox_id)
+        backend._create_egress_network(egress_network_name, sandbox_id)
+        backend._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id)
+
+        proxy_inspect = subprocess.run(
+            ["docker", "inspect", proxy_name],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert proxy_inspect.returncode == 0, proxy_inspect.stderr
+        proxy_networks = json.loads(proxy_inspect.stdout)[0]["NetworkSettings"]["Networks"]
+        assert set(proxy_networks) == {network_name, egress_network_name}
+        assert "bridge" not in proxy_networks
+        proxy_egress_ip = proxy_networks[egress_network_name]["IPAddress"]
+        outside = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "bridge",
+                image,
+                "python",
+                "-c",
+                (f"import socket,sys\ntry:\n    socket.create_connection(({proxy_egress_ip!r}, 8080), timeout=2)\nexcept OSError:\n    sys.exit(0)\nsys.exit(42)"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert outside.returncode == 0, outside.stderr or "a container on Docker's shared bridge reached the sandbox API relay"
         sandbox_labels = backend._restricted_labels(sandbox_id, "sandbox")
         sandbox = subprocess.run(
             [

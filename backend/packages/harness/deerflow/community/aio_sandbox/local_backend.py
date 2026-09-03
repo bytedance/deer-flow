@@ -218,6 +218,7 @@ _NETWORK_PROXY_CONTAINER_SCRIPT = "/tmp/deerflow-network-proxy.py"
 _NETWORK_POLICY_DIGEST_LABEL = "deerflow.network_policy_digest"
 _NETWORK_GATEWAY_MODE_IPV4 = "com.docker.network.bridge.gateway_mode_ipv4"
 _NETWORK_GATEWAY_MODE_IPV6 = "com.docker.network.bridge.gateway_mode_ipv6"
+_NETWORK_ENABLE_ICC = "com.docker.network.bridge.enable_icc"
 
 
 def _docker_bridge_gateway_ip() -> str | None:
@@ -537,6 +538,10 @@ class LocalContainerBackend(SandboxBackend):
         digest = hashlib.sha256(f"{self._container_prefix}:{sandbox_id}".encode()).hexdigest()[:16]
         return f"deer-flow-netproxy-{digest}", f"deer-flow-sandbox-net-{digest}"
 
+    def _egress_network_name(self, sandbox_id: str) -> str:
+        digest = hashlib.sha256(f"{self._container_prefix}:{sandbox_id}".encode()).hexdigest()[:16]
+        return f"deer-flow-sandbox-egress-{digest}"
+
     def _proxy_image(self) -> str:
         return str(
             self._network_config.get(
@@ -563,6 +568,11 @@ class LocalContainerBackend(SandboxBackend):
                 "internal": True,
                 "gateway_mode_ipv4": "isolated",
                 "gateway_mode_ipv6": "isolated",
+            },
+            "egress_network": {
+                "driver": "bridge",
+                "internal": False,
+                "enable_icc": False,
             },
         }
         encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
@@ -616,6 +626,9 @@ class LocalContainerBackend(SandboxBackend):
             and self._labels_match(network.labels, self._restricted_labels(sandbox_id, "network"))
         )
 
+    def _egress_network_matches_policy(self, network: _NetworkInspection, sandbox_id: str) -> bool:
+        return network.driver == "bridge" and not network.internal and network.options.get(_NETWORK_ENABLE_ICC) == "false" and self._labels_match(network.labels, self._restricted_labels(sandbox_id, "egress-network"))
+
     def _restricted_resources_status(
         self,
         sandbox_id: str,
@@ -625,18 +638,22 @@ class LocalContainerBackend(SandboxBackend):
         """Return missing, compatible, or mismatch for one restricted sandbox set."""
         container_name = f"{self._container_prefix}-{sandbox_id}"
         proxy_name, network_name = self._resource_names(sandbox_id)
+        egress_network_name = self._egress_network_name(sandbox_id)
         if inspections is None:
             inspections = self._batch_inspect([container_name, proxy_name], strict=True)
         sandbox = inspections.get(container_name)
         proxy = inspections.get(proxy_name)
         network = self._inspect_network(network_name)
-        if sandbox is None and proxy is None and network is None:
+        egress_network = self._inspect_network(egress_network_name)
+        if sandbox is None and proxy is None and network is None and egress_network is None:
             return "missing"
-        if sandbox is None or proxy is None or network is None:
+        if sandbox is None or proxy is None or network is None or egress_network is None:
             return "mismatch"
         sandbox_matches = sandbox.host_port is None and sandbox.networks == frozenset({network_name}) and self._labels_match(sandbox.labels, self._restricted_labels(sandbox_id, "sandbox"))
-        proxy_matches = proxy.host_port is not None and proxy.image == self._proxy_image() and proxy.networks == frozenset({"bridge", network_name}) and self._labels_match(proxy.labels, self._restricted_labels(sandbox_id, "network-proxy"))
-        return "compatible" if sandbox_matches and proxy_matches and self._network_matches_policy(network, sandbox_id) else "mismatch"
+        proxy_matches = (
+            proxy.host_port is not None and proxy.image == self._proxy_image() and proxy.networks == frozenset({egress_network_name, network_name}) and self._labels_match(proxy.labels, self._restricted_labels(sandbox_id, "network-proxy"))
+        )
+        return "compatible" if sandbox_matches and proxy_matches and self._network_matches_policy(network, sandbox_id) and self._egress_network_matches_policy(egress_network, sandbox_id) else "mismatch"
 
     def _require_restricted_network_support(self) -> None:
         try:
@@ -815,13 +832,15 @@ class LocalContainerBackend(SandboxBackend):
         config_mount_exclusion_root: str | None,
     ) -> str:
         proxy_name, network_name = self._resource_names(sandbox_id)
+        egress_network_name = self._egress_network_name(sandbox_id)
         try:
             resource_status = self._restricted_resources_status(sandbox_id)
             if resource_status == "mismatch":
                 logger.warning("Removing restricted sandbox %s because its persisted network policy no longer matches", sandbox_id)
                 self._cleanup_restricted_resources(sandbox_id)
             self._create_internal_network(network_name, sandbox_id)
-            self._start_network_proxy(proxy_name, network_name, container_name, port, sandbox_id)
+            self._create_egress_network(egress_network_name, sandbox_id)
+            self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id)
             proxy_url = f"http://{proxy_name}:3128"
             return self._start_container(
                 container_name,
@@ -884,7 +903,41 @@ class LocalContainerBackend(SandboxBackend):
         if result.returncode != 0:
             raise RuntimeError(f"Failed to create restricted sandbox network: {result.stderr.strip()}")
 
-    def _start_network_proxy(self, proxy_name: str, network_name: str, container_name: str, port: int, sandbox_id: str) -> None:
+    def _create_egress_network(self, network_name: str, sandbox_id: str) -> None:
+        existing = self._inspect_network(network_name)
+        if existing is not None:
+            if self._egress_network_matches_policy(existing, sandbox_id):
+                return
+            raise RuntimeError(f"Restricted sandbox egress network {network_name} exists with incompatible policy or isolation settings")
+        labels = self._restricted_labels(sandbox_id, "egress-network")
+        result = subprocess.run(
+            [
+                "docker",
+                "network",
+                "create",
+                "--driver",
+                "bridge",
+                "--opt",
+                f"{_NETWORK_ENABLE_ICC}=false",
+                *(item for key, value in labels.items() for item in ("--label", f"{key}={value}")),
+                network_name,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to create restricted sandbox egress network: {result.stderr.strip()}")
+
+    def _start_network_proxy(
+        self,
+        proxy_name: str,
+        network_name: str,
+        egress_network_name: str,
+        container_name: str,
+        port: int,
+        sandbox_id: str,
+    ) -> None:
         allow_domains = self._network_config.get("allow_domains", [])
         proxy_image = self._proxy_image()
         labels = self._restricted_labels(sandbox_id, "network-proxy")
@@ -909,6 +962,8 @@ class LocalContainerBackend(SandboxBackend):
             "65532:65532",
             "-p",
             port_mapping,
+            "--network",
+            egress_network_name,
             "--name",
             proxy_name,
             *(item for key, value in labels.items() for item in ("--label", f"{key}={value}")),
@@ -1153,6 +1208,7 @@ class LocalContainerBackend(SandboxBackend):
 
     def _cleanup_restricted_resources(self, sandbox_id: str, *, stop_sandbox: bool = True) -> None:
         proxy_name, network_name = self._resource_names(sandbox_id)
+        egress_network_name = self._egress_network_name(sandbox_id)
         if stop_sandbox:
             self._stop_container(f"{self._container_prefix}-{sandbox_id}")
         self._stop_container(proxy_name)
@@ -1168,14 +1224,15 @@ class LocalContainerBackend(SandboxBackend):
         )
         if removed.returncode != 0 and "no such container" not in (removed.stderr or "").lower():
             logger.warning("Failed to remove sandbox network proxy %s: %s", proxy_name, removed.stderr.strip())
-        result = subprocess.run(
-            ["docker", "network", "rm", network_name],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if result.returncode != 0 and "not found" not in (result.stderr or "").lower():
-            logger.warning("Failed to remove sandbox network %s: %s", network_name, result.stderr.strip())
+        for current_network_name in (network_name, egress_network_name):
+            result = subprocess.run(
+                ["docker", "network", "rm", current_network_name],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode != 0 and "not found" not in (result.stderr or "").lower():
+                logger.warning("Failed to remove sandbox network %s: %s", current_network_name, result.stderr.strip())
 
     def consume_network_policy_events(self, sandbox_id: str, *, since: float) -> list[dict[str, object]]:
         if self._network_mode != "allowlist" or self._network_config.get("approval", "prompt") != "prompt":
