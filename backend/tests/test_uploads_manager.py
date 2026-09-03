@@ -73,6 +73,40 @@ class TestDeduplicateFilename:
         claim_unique_filename("a.txt", seen)
         assert seen == {"a.txt", "a_1.txt"}
 
+    def test_max_length_name_stays_within_filename_limit(self):
+        # A 255-byte name passes normalize_filename; the deduplicated name
+        # must not exceed that limit, or the write path rejects it.
+        name = "a" * 251 + ".txt"
+        seen = {name}
+        deduped = claim_unique_filename(name, seen)
+        assert deduped != name
+        assert deduped.endswith("_1.txt")
+        assert len(deduped.encode("utf-8")) <= 255
+        # The truncated result must round-trip through normalize_filename.
+        assert normalize_filename(deduped) == deduped
+
+    def test_max_length_collisions_stay_unique_across_truncation(self):
+        name = "a" * 251 + ".txt"
+        seen = {name}
+        first = claim_unique_filename(name, seen)
+        second = claim_unique_filename(name, seen)
+        assert first != second
+        assert len(second.encode("utf-8")) <= 255
+
+    def test_multibyte_stem_is_truncated_on_a_codepoint_boundary(self):
+        # 85 CJK chars × 3 bytes = 255 bytes.
+        name = "深" * 85
+        seen = {name}
+        deduped = claim_unique_filename(name, seen)
+        assert len(deduped.encode("utf-8")) <= 255
+        assert deduped.endswith("_1")
+        # No replacement characters / decode artifacts.
+        deduped.encode("utf-8").decode("utf-8")
+
+    def test_short_names_keep_existing_dedupe_shape(self):
+        seen = {"data.txt"}
+        assert claim_unique_filename("data.txt", seen) == "data_1.txt"
+
 
 # ---------------------------------------------------------------------------
 # validate_path_traversal

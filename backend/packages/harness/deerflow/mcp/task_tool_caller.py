@@ -12,9 +12,11 @@ from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import get_paths
 from deerflow.constants import MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_server_params
+from deerflow.mcp.context_headers import build_context_headers_interceptor
+from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
-from deerflow.mcp.session_pool import get_session_pool
+from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +60,29 @@ class McpTaskToolCaller:
     ) -> None:
         self._extensions_config = extensions_config
         self._oauth_token_manager = oauth_token_manager or OAuthTokenManager.from_extensions_config(extensions_config)
-        self._interceptors = build_mcp_tool_interceptors(
+        context_headers_interceptor = build_context_headers_interceptor(extensions_config)
+        # Built once so the two chains keep an identical interceptor order and a
+        # custom ``mcpInterceptors`` builder is invoked exactly once.
+        self._submit_interceptors = build_mcp_tool_interceptors(
             extensions_config,
             oauth_builder=lambda config: build_oauth_tool_interceptor(
                 config,
                 token_manager=self._oauth_token_manager,
             ),
+            context_headers_builder=lambda _config: context_headers_interceptor,
         )
+        # Submitting a durable task is awaited inline inside the Agent's tool
+        # call, so ``config.context.secrets`` is still reachable through the
+        # ambient LangGraph runtime and the submit goes out under the caller's
+        # own credential. The later status/cancel polls are driven by the task
+        # runtime long after that run ended: there is no run context to read, so
+        # the fail-closed interceptor would deny every poll. Those keep using
+        # server-level credentials (see docs/MCP_SERVER.md), which is what
+        # ``build_context_headers_interceptor`` warns about at startup.
+        if context_headers_interceptor is None:
+            self._interceptors = self._submit_interceptors
+        else:
+            self._interceptors = [interceptor for interceptor in self._submit_interceptors if interceptor is not context_headers_interceptor]
 
     async def call_tool(
         self,
@@ -74,7 +92,16 @@ class McpTaskToolCaller:
         arguments: dict[str, Any],
         user_id: str,
         thread_id: str,
+        request_scoped_headers: bool = False,
     ) -> Any:
+        """Call a raw MCP tool.
+
+        ``request_scoped_headers`` opts this call into the ``headers_from_context``
+        interceptor. Only the durable *submit* may set it: submit is awaited
+        inside the Agent run that carries the secrets, while status and cancel
+        run after that run ended.
+        """
+        interceptors = self._submit_interceptors if request_scoped_headers else self._interceptors
         server_config = self._extensions_config.get_enabled_mcp_servers().get(server_name)
         if server_config is None:
             raise LookupError(f"MCP task server {server_name!r} is missing or disabled in the startup configuration")
@@ -106,30 +133,30 @@ class McpTaskToolCaller:
                     raise
             else:
                 session = await pool.get_session(server_name, scope_key, connection)
-            try:
-                return await self._invoke(
-                    session=session,
-                    connection=connection,
-                    server_name=server_name,
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    timeout_seconds=server_config.tool_call_timeout,
-                    session_init_timeout_seconds=None,
-                    persistent_session=True,
-                )
-            except Exception:
-                # A dead pooled subprocess must not poison every later status
-                # poll. The next retry recreates this exact scoped session.
-                await pool.close_session(server_name, scope_key)
-                raise
+            return await self._invoke(
+                session=session,
+                pool=pool,
+                scope_key=scope_key,
+                connection=connection,
+                server_name=server_name,
+                tool_name=tool_name,
+                arguments=arguments,
+                timeout_seconds=server_config.tool_call_timeout,
+                session_init_timeout_seconds=None,
+                persistent_session=True,
+                interceptors=interceptors,
+            )
 
         authorization = await self._oauth_token_manager.get_authorization_header(server_name)
         if authorization:
-            headers = dict(connection.get("headers") or {})
-            headers["Authorization"] = authorization
-            connection["headers"] = headers
+            connection["headers"] = apply_header_overrides(
+                connection.get("headers") or {},
+                {"Authorization": authorization},
+            )
         return await self._invoke(
             session=None,
+            pool=None,
+            scope_key=scope_key,
             connection=connection,
             server_name=server_name,
             tool_name=tool_name,
@@ -137,12 +164,15 @@ class McpTaskToolCaller:
             timeout_seconds=server_config.tool_call_timeout,
             session_init_timeout_seconds=server_config.session_init_timeout,
             persistent_session=False,
+            interceptors=interceptors,
         )
 
     async def _invoke(
         self,
         *,
         session: Any | None,
+        pool: MCPSessionPool | None,
+        scope_key: str,
         connection: dict[str, Any],
         server_name: str,
         tool_name: str,
@@ -150,6 +180,7 @@ class McpTaskToolCaller:
         timeout_seconds: float | None,
         session_init_timeout_seconds: float | None,
         persistent_session: bool,
+        interceptors: list[Any],
     ) -> Any:
         from langchain_mcp_adapters.interceptors import MCPToolCallRequest
         from langchain_mcp_adapters.sessions import create_session
@@ -160,7 +191,7 @@ class McpTaskToolCaller:
                 call_kwargs["read_timeout_seconds"] = timedelta(seconds=timeout_seconds)
 
             if persistent_session:
-                assert session is not None
+                assert session is not None and pool is not None
                 if request.headers:
                     if isinstance(request.headers, Mapping):
                         call_kwargs["meta"] = {"headers": dict(request.headers)}
@@ -169,13 +200,22 @@ class McpTaskToolCaller:
                             "Ignoring MCP interceptor headers with unsupported type: %s",
                             type(request.headers).__name__,
                         )
-                return await session.call_tool(request.name, request.args, **call_kwargs)
+                return await call_pooled_session_tool(
+                    session,
+                    pool,
+                    server_name=server_name,
+                    scope_key=scope_key,
+                    tool_name=request.name,
+                    arguments=request.args,
+                    call_kwargs=call_kwargs,
+                )
 
             effective_connection = dict(connection)
             if request.headers:
-                headers = dict(effective_connection.get("headers") or {})
-                headers.update(dict(request.headers))
-                effective_connection["headers"] = headers
+                effective_connection["headers"] = apply_header_overrides(
+                    effective_connection.get("headers") or {},
+                    dict(request.headers),
+                )
             captured: BaseException | None = None
             call_result: Any | None = None
             async with create_session(effective_connection) as remote_session:
@@ -209,7 +249,7 @@ class McpTaskToolCaller:
             return call_result
 
         handler = execute
-        for interceptor in reversed(self._interceptors):
+        for interceptor in reversed(interceptors):
             inner = handler
 
             async def wrapped(request: Any, _interceptor: Any = interceptor, _inner: Any = inner) -> Any:

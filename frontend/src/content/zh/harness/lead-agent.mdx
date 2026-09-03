@@ -115,13 +115,13 @@ models:
 
 相同的 Lead Agent 运行时同时为默认 Agent 和你创建的任何自定义 Agent 提供服务。自定义 Agent 的区别仅在于：
 
-- 其**名称**（ASCII slug，从 `display_name` 自动派生）
+- 其唯一的 ASCII **名称**（用于 API、路由和存储）
 - 其**系统提示**或 Agent 特定指令
 - 它有权访问的**技能**
 - 它可以使用的**工具组**
 - 它默认使用的**模型**
 
-自定义 Agent 通过 DeerFlow 应用界面或 `/api/agents` 端点创建。其配置存储在后端目录的 `agents/{name}/config.yaml` 中。
+自定义 Agent 通过 DeerFlow 应用界面或 `/api/agents` 端点创建。这两种方式都要求在 `config.yaml` 中设置 `agents_api.enabled: true`；管理 API 默认关闭。使用默认的 `agent_storage.backend: file` 时，配置按用户存储在 `{base_dir}/users/{user_id}/agents/{name}/config.yaml` 中，其中 `{base_dir}` 是 `DEER_FLOW_HOME`（默认值为 `backend/.deer-flow`）。使用 `agent_storage.backend: db` 时，定义会改为存储在共享 SQL 数据库中；它要求 `database.backend: sqlite` 或 `database.backend: postgres`。使用 `backend/scripts/migrate_agents_to_db.py` 迁移已有的文件后端定义。
 
 <Callout type="tip">
   当在线程中选择自定义 Agent 时，Lead Agent 在运行时加载该 Agent 的配置。为特定

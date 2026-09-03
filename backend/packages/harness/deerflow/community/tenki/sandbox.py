@@ -1,6 +1,7 @@
 """``TenkiSandbox`` — DeerFlow :class:`Sandbox` backed by a Tenki cloud sandbox.
 
-Tenki's Python SDK (``tenki-sandbox``) is synchronous, so — unlike
+Tenki's Python SDK (the ``tenki`` distribution, which ships the
+``tenki_sandbox`` module) is synchronous, so — unlike
 ``community/boxlite`` — this adapter calls the SDK directly with no event-loop
 bridge. File transport uses Tenki's native ``sandbox.fs`` API (``read_text`` /
 ``read_stream`` / ``write_stream`` / ``mkdir`` / ``stat``), which is binary-safe
@@ -13,7 +14,7 @@ Tenki base image works.
 
 The Tenki SDK is not imported at module load (only its exception *class names*
 are matched, as strings), so importing this package never requires
-``tenki-sandbox`` to be installed — it is needed only once the provider is
+``tenki`` to be installed — it is needed only once the provider is
 selected and a sandbox is actually created.
 """
 
@@ -52,7 +53,7 @@ DEFAULT_TENKI_HOME_DIR = "/home/tenki"
 _STREAM_CHUNK = 1024 * 1024
 
 # Tenki SDK exception *class names* that mean the remote session is gone for
-# good — matched as strings so this module imports without ``tenki-sandbox``.
+# good — matched as strings so this module imports without ``tenki``.
 # A terminated/not-found/closed session is unrecoverable; the provider drops it
 # and rebuilds on the next call. This is only the named-error half of the rule:
 # _is_terminal_failure ALSO treats the builtin ConnectionError / BrokenPipeError
@@ -87,6 +88,10 @@ class TenkiSandbox(Sandbox):
             when an operation fails with a terminal Tenki error, so the provider
             can evict the dead sandbox.
     """
+
+    #: Every call is a fresh ``sh -lc`` exec in the sandbox — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
 
     def __init__(
         self,
@@ -267,8 +272,10 @@ class TenkiSandbox(Sandbox):
             output = f"{stdout}\n{stderr}"
         else:
             output = stdout or stderr
-        if result.exit_code not in (0, None) and not output:
-            output = f"Command exited with code {result.exit_code}"
+        if result.exit_code not in (0, None):
+            # Mirror LocalSandbox: preserve a nonzero exit in the output text
+            # even when the command produced output (see e2b_sandbox).
+            output = f"{output}\nExit Code: {result.exit_code}" if output else f"Command exited with code {result.exit_code}"
         return output if output else "(no output)"
 
     # ── file operations ─────────────────────────────────────────────────
@@ -362,7 +369,9 @@ class TenkiSandbox(Sandbox):
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
         r = self._sh(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        return [self._virtual_path(line.strip()) for line in (r.stdout_text or "").splitlines() if line.strip()]
+        # splitlines() already removed the terminators; do NOT strip entries —
+        # a filename that legitimately ends in whitespace would be corrupted.
+        return [self._virtual_path(line) for line in (r.stdout_text or "").splitlines() if line]
 
     def glob(
         self,
@@ -382,7 +391,7 @@ class TenkiSandbox(Sandbox):
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
         for entry in (r.stdout_text or "").splitlines():
-            entry = entry.strip()
+            # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
             if should_ignore_path(entry):

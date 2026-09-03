@@ -16,6 +16,118 @@ For agent conversations, clients can either pre-create a thread
 endpoint (`POST /api/langgraph/runs/stream`). The latter auto-creates a thread
 and returns `thread_id` and `run_id` in the response `Content-Location` header.
 
+## Authentication
+
+Browser sessions authenticate with the `access_token` session cookie issued at
+login. Programmatic clients can instead use a **personal access token (PAT)**
+sent as a Bearer credential:
+
+```http
+POST /api/threads/search
+Authorization: Bearer dfp_...
+Content-Type: application/json
+
+{}
+```
+
+PATs require a configured database backend (SQLite/PostgreSQL) — on the
+memory-only backend, Bearer credentials are rejected and PAT management routes
+return `503`.
+
+### Personal Access Tokens
+
+Base URL: `/api/v1/auth`
+
+PAT management requires an **interactive session** (a PAT cannot manage PATs
+or change passwords, so a leaked automation token cannot mint fresh
+credentials). The raw token is returned **exactly once** at creation; only its
+SHA-256 digest is stored server-side.
+
+#### Create Token
+
+```http
+POST /api/v1/auth/pats
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "name": "ci-runner",
+  "scopes": ["threads:read", "runs:create", "runs:read"],
+  "expires_in_days": 90
+}
+```
+
+- `scopes` — subset of the route permissions: `threads:read`, `threads:write`,
+  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`. A PAT can only
+  *narrow* its owning user's permissions, never widen them.
+- `expires_in_days` — optional (`1`–`365`); omitted means the token never expires.
+
+**Response (`201`):**
+```json
+{
+  "id": "0f0c6e6a-...",
+  "name": "ci-runner",
+  "scopes": ["runs:create", "runs:read", "threads:read"],
+  "expires_at": "2026-11-25T10:30:00Z",
+  "created_at": "2026-08-27T10:30:00Z",
+  "token": "dfp_..."
+}
+```
+
+Save `token` immediately — it cannot be retrieved again.
+
+#### List Tokens
+
+```http
+GET /api/v1/auth/pats
+```
+
+Returns the caller's tokens with `last_used_at` / `revoked_at` audit fields;
+never returns digests or raw tokens.
+
+#### Revoke Token
+
+```http
+DELETE /api/v1/auth/pats/{pat_id}
+```
+
+Revocation is immediate.
+
+### PAT Constraints
+
+- A request carrying an `Authorization` header that fails validation gets a
+  hard `401` — it never falls back to the session cookie.
+- **Cancel capability requires `runs:cancel` on every request dimension that
+  carries it**, not just the dedicated cancel route: `?action=interrupt|rollback`
+  on `POST /api/threads/{thread_id}/runs/{run_id}/stream` (action-less joins
+  stay at `runs:read`), and `multitask_strategy=interrupt|rollback` on run
+  creation (the default `reject` stays at `runs:create`). Joining a run's
+  stream is pure observation — an observer disconnecting never cancels the run.
+- **Route-level default-deny:** PAT requests are admitted only to the
+  thread/run lifecycle routes the v1 scopes govern — `POST /api/threads`
+  (create), `POST /api/threads/search` (list), `GET/PATCH/DELETE
+  /api/threads/{thread_id}`, the thread `goal`/`state`/`compact`/`history`/
+  `branches` subroutes, and exactly the implemented `/runs` subroutes
+  (`GET|POST /api/threads/{thread_id}/runs`, the POST-only `stream`, `wait`,
+  `regenerate/prepare`, and `edit-regenerate/prepare` collection endpoints,
+  `GET /api/threads/{thread_id}/runs/{run_id}` plus its `cancel` (POST),
+  `join`/`messages`/`events`/`workspace-changes` (GET), and
+  `GET|POST .../runs/{run_id}/stream`), plus `POST /api/runs/stream|wait` and
+  `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
+  denied until explicitly added to the policy.
+  Every other authenticated route — memory, agents, models, MCP/skills
+  config, integrations, channels, uploads — answers `403` to PAT callers
+  regardless of scopes. Scope enforcement alone only constrains
+  permission-decorated routes, so the allowlist is the outer boundary;
+  session-cookie callers are unaffected.
+- PAT credentials never carry admin capability, even when the owning user is
+  an admin. This includes extension-contributed admin routes: the extension
+  principal projection suppresses every admin signal for PAT callers.
+- Revoking or deleting the owning user invalidates their PATs on the next
+  request.
+
 ## LangGraph-compatible API
 
 Base URL: `/api/langgraph`
@@ -127,8 +239,10 @@ in a single run. The unified Gateway path defaults to `100` in
 `build_run_config` (see `backend/app/gateway/services.py`), which is a safer
 starting point for plan-mode or subagent-heavy runs. Clients can still set
 `recursion_limit` explicitly in the request body; increase it if you run deeply
-nested subagent graphs. For safety, the Gateway clamps any client-supplied value
-to a configurable server ceiling (`max_recursion_limit` in `config.yaml`,
+nested subagent graphs. Scheduled-task launches do not take a client body: they
+use `scheduler.recursion_limit` from `config.yaml` (default `1000`, matching
+the web UI). For safety, the Gateway clamps any supplied
+value to a configurable server ceiling (`max_recursion_limit` in `config.yaml`,
 default `1000`) so a single run cannot execute unbounded graph steps (runaway
 LLM cost / DoS); invalid or non-positive values fall back to the `100` default.
 
@@ -323,7 +437,10 @@ GET /api/mcp/config
 ```
 
 Requires an authenticated admin session. Sensitive env/header/OAuth secret
-values are masked in the response.
+values are masked in the response. Environment placeholders outside secret
+containers are returned in their raw form so editing cannot expose or persist
+their expanded values. Invalid operator-authored JSON/config shapes return
+`400` instead of being reported as a Gateway fault.
 
 **Response:**
 ```json
@@ -422,6 +539,63 @@ DeerFlow's `type` field or the MCP-spec `transport` field.
 The response is the full masked MCP configuration, matching `GET` and `PUT`.
 An unknown `server_name` returns `404`; attempting to enable a server with a
 disallowed `stdio` command returns `400`.
+
+#### Add MCP Servers
+
+Add one or more servers without replacing existing entries. The Gateway
+re-reads the file under the shared configuration lock, so concurrent sibling
+changes are preserved. Existing names return `409`.
+
+```http
+POST /api/mcp/config/servers
+Content-Type: application/json
+```
+
+The request body uses the same `mcp_servers` map as the full `PUT` endpoint.
+
+#### Replace One MCP Server
+
+Completely replace one existing server while preserving sibling entries.
+Omitted ordinary fields are deleted or reset; explicit `***` placeholders
+restore the corresponding stored secret.
+
+A disabled `stdio` replacement may keep a syntactically valid command outside
+the allowlist for offline editing. Command-shape and code-injecting environment
+variable checks still run when saving; the allowlist and executable-argument
+policy run when the server is enabled.
+
+```http
+PUT /api/mcp/config/server
+Content-Type: application/json
+```
+
+```json
+{
+  "server_name": "github",
+  "server": {
+    "enabled": true,
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env": {"GITHUB_TOKEN": "***"}
+  }
+}
+```
+
+#### Delete One MCP Server
+
+Delete one server without replacing sibling entries. The server name is a
+path parameter and the DELETE request has no body. Percent-encode names before
+placing them in the URL; the path converter also keeps legacy empty and
+slash-containing names addressable.
+
+```http
+DELETE /api/mcp/config/servers/{server_name}
+```
+
+All targeted mutations return the full masked MCP configuration. Before any
+write, the Gateway resolves environment variables in a copy and validates the
+same expanded document the runtime will load while persisting the original raw
+placeholders.
 
 #### Reset MCP Tools Cache
 
@@ -844,13 +1018,16 @@ data: {"code":"stream_replay_gap","run_id":"run-123","requested_event_id":"17180
 
 ```
 
-The frame deliberately has no SSE `id:`. Consumers must reload durable thread
-state and persisted run events/messages, then may reconnect from
-`latest_available_event_id` to follow newer live events. A gap does not cancel
-the active run. The same signal applies when a no-cursor subscriber has already
-established an empty-stream wait but the first Redis wake-up falls behind before
-delivery; in that case `requested_event_id` is `null`. Malformed cursor handling
-is backend-specific and is not the same as a valid cursor that was evicted.
+The frame deliberately has no SSE `id:`. Both `earliest_available_event_id` and
+`latest_available_event_id` are `string | null` (they are `null` when no events
+are retained in the buffer). Consumers must reload durable thread state and
+persisted run events/messages, then may reconnect from `latest_available_event_id`
+to follow newer live events, or rejoin without a cursor when the buffer is empty
+(`latest_available_event_id` is `null`). A gap does not cancel the active run.
+The same signal applies when a no-cursor subscriber has already established an
+empty-stream wait but the first Redis wake-up falls behind before delivery; in
+that case `requested_event_id` is `null`. Malformed cursor handling is
+backend-specific and is not the same as a valid cursor that was evicted.
 
 ---
 
@@ -1037,4 +1214,5 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs/stream \
 > The unified Gateway path defaults `config.recursion_limit` to 100 for
 > plan-mode and subagent-heavy runs. Clients may still set
 > `config.recursion_limit` explicitly — see the [Create Run](#create-run)
-> section for details.
+> section for details. Scheduled-task launches use
+> `scheduler.recursion_limit` from `config.yaml` instead of a client body.

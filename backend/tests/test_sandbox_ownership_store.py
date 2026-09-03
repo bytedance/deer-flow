@@ -356,6 +356,13 @@ def test_ttl_multiplier_below_two_is_rejected():
         SandboxOwnershipConfig(ttl_multiplier=1.0)
 
 
+@pytest.mark.parametrize("field", ["renewal_interval_seconds", "ttl_multiplier"])
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+def test_lease_timing_rejects_non_finite_values(field, value):
+    with pytest.raises(ValueError):
+        SandboxOwnershipConfig(**{field: value})
+
+
 def test_owner_ids_are_unique_per_instance():
     """Two workers on one host must not share an owner id."""
     assert generate_owner_id() != generate_owner_id()
