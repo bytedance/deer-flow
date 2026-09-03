@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hmac
 import ipaddress
 import json
 import os
@@ -22,6 +23,8 @@ from urllib.parse import urlsplit
 
 MAX_HEADER_BYTES = 65_536
 POLICY_DB = Path(os.environ.get("DEERFLOW_POLICY_DB", "/tmp/deerflow-network-policy.sqlite3"))
+RELAY_AUTH_HEADER = "X-DeerFlow-Relay-Token"
+RELAY_TOKEN_ENV = "DEERFLOW_RELAY_TOKEN"
 
 
 class _InvalidHttpRequest(ValueError):
@@ -136,6 +139,9 @@ def policy_allows(host: str, port: int, now: float | None = None) -> bool:
 def record_denial(host: str, port: int, method: str) -> str:
     now = time.time()
     with _connect_db() as db:
+        # Serialize the read-before-insert deduplication so simultaneous proxy
+        # requests cannot create multiple approval cards for one destination.
+        db.execute("BEGIN IMMEDIATE")
         recent = db.execute(
             "SELECT request_id FROM events WHERE host = ? AND port = ? AND decision IS NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
             (host, port, now - 30),
@@ -150,11 +156,15 @@ def record_denial(host: str, port: int, method: str) -> str:
         return request_id
 
 
-def pending_events(since: float) -> list[dict[str, object]]:
+def pending_events() -> list[dict[str, object]]:
     with _connect_db() as db:
+        # Tool execution timestamps cannot reliably delimit proxy events: a
+        # background process may emit a denial after its launching tool returns,
+        # and subagent/non-interactive paths must drain events without prompting.
+        # Claim the oldest unsurfaced event atomically, independent of age.
+        db.execute("BEGIN IMMEDIATE")
         rows = db.execute(
-            "SELECT request_id, host, port, method, created_at FROM events WHERE surfaced = 0 AND decision IS NULL AND created_at >= ? ORDER BY created_at LIMIT 16",
-            (since,),
+            "SELECT request_id, host, port, method, created_at FROM events WHERE surfaced = 0 AND decision IS NULL ORDER BY created_at LIMIT 16",
         ).fetchall()
         if rows:
             db.execute("UPDATE events SET surfaced = 1 WHERE request_id = ?", (rows[0][0],))
@@ -190,7 +200,7 @@ def decide(request_id: str, decision: str, ttl: int) -> bool:
         return True
 
 
-async def resolve_public(host: str, port: int) -> tuple[int, tuple] | None:
+async def resolve_public(host: str, port: int) -> tuple[tuple[int, tuple], ...] | None:
     loop = asyncio.get_running_loop()
     try:
         infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -200,7 +210,7 @@ async def resolve_public(host: str, port: int) -> tuple[int, tuple] | None:
     public = [(family, sockaddr) for family, _socktype, _proto, _canonname, sockaddr in infos if address_is_public(str(sockaddr[0]), allow_synthetic_dns=allow_synthetic_dns)]
     if len(public) != len(infos) or not public:
         return None
-    return public[0]
+    return tuple(public)
 
 
 async def _relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -216,12 +226,26 @@ async def _relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
             await writer.wait_closed()
 
 
-async def _open_public(resolved: tuple[int, tuple], port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
-    family, sockaddr = resolved
-    try:
-        return await asyncio.wait_for(asyncio.open_connection(sockaddr[0], port, family=family), timeout=15)
-    except (OSError, TimeoutError):
-        return None
+async def _open_public(resolved: tuple[tuple[int, tuple], ...], port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
+    """Try every pre-validated DNS answer within one shared deadline."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 15
+    for index, (family, sockaddr) in enumerate(resolved):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        # Reserve an equal share of the remaining budget for every later
+        # address so a black-holed first answer cannot consume the full
+        # deadline and strand otherwise reachable candidates.
+        attempt_timeout = remaining / (len(resolved) - index)
+        try:
+            return await asyncio.wait_for(
+                asyncio.open_connection(sockaddr[0], port, family=family),
+                timeout=attempt_timeout,
+            )
+        except (OSError, TimeoutError):
+            continue
+    return None
 
 
 async def _reject(writer: asyncio.StreamWriter, status: str, body: str) -> None:
@@ -547,6 +571,26 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
 
 
 async def handle_relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    try:
+        header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=15)
+    except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
+        await _reject(writer, "400 Bad Request", "Invalid sandbox relay request")
+        return
+    if len(header) > MAX_HEADER_BYTES:
+        await _reject(writer, "431 Request Header Fields Too Large", "Sandbox relay request headers are too large")
+        return
+    try:
+        _request_line, *header_lines = header.decode("latin-1").split("\r\n")
+        header_fields = _parse_http_header_fields(header_lines)
+    except (UnicodeDecodeError, _InvalidHttpHeader):
+        await _reject(writer, "400 Bad Request", "Invalid sandbox relay request headers")
+        return
+    expected_token = os.environ.get(RELAY_TOKEN_ENV, "")
+    presented_tokens = [value for _raw_name, name, value in header_fields if name == RELAY_AUTH_HEADER.lower()]
+    if not expected_token or len(presented_tokens) != 1 or not hmac.compare_digest(presented_tokens[0], expected_token):
+        await _reject(writer, "403 Forbidden", "Sandbox relay authentication failed")
+        return
+
     target = os.environ.get("DEERFLOW_SANDBOX_TARGET", "")
     parsed = _parse_authority(target, 8080)
     if parsed is None:
@@ -557,6 +601,8 @@ async def handle_relay(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     except (OSError, TimeoutError):
         await _reject(writer, "502 Bad Gateway", "Sandbox is not ready")
         return
+    upstream_writer.write(header)
+    await upstream_writer.drain()
     await asyncio.gather(_relay(reader, upstream_writer), _relay(upstream_reader, writer))
 
 
@@ -572,8 +618,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("serve")
-    pending_parser = subparsers.add_parser("pending")
-    pending_parser.add_argument("--since", type=float, required=True)
+    subparsers.add_parser("pending")
     decide_parser = subparsers.add_parser("decide")
     decide_parser.add_argument("request_id")
     decide_parser.add_argument("decision", choices=("deny", "allow_temporary", "allow_sandbox"))
@@ -583,7 +628,7 @@ def main() -> int:
         asyncio.run(serve())
         return 0
     if args.command == "pending":
-        print(json.dumps(pending_events(args.since), separators=(",", ":")))
+        print(json.dumps(pending_events(), separators=(",", ":")))
         return 0
     if args.command == "decide":
         return 0 if decide(args.request_id, args.decision, args.ttl) else 2

@@ -310,10 +310,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def sandbox_network_temporary_grant_ttl(self) -> int:
         return int(self._config.get("network", {}).get("temporary_grant_ttl", 300))
 
-    def consume_network_policy_events(self, sandbox_id: str, *, since: float) -> list[dict[str, object]]:
+    def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
         if not isinstance(self._backend, LocalContainerBackend):
             return []
-        return self._backend.consume_network_policy_events(sandbox_id, since=since)
+        return self._backend.consume_network_policy_events(sandbox_id)
 
     def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
         if not isinstance(self._backend, LocalContainerBackend):
@@ -1595,7 +1595,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return None
             self._warm_pool_identity.pop(sandbox_id, None)
             info, _ = warm_item
-            sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+            sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url, request_headers=info.request_headers)
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
             self._active_sandbox_identity[sandbox_id] = key
@@ -1638,7 +1638,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._assert_active_identity_available_locked(info.sandbox_id, key)
             self._assert_warm_identity_available_locked(info.sandbox_id, key)
 
-        sandbox = AioSandbox(id=info.sandbox_id, base_url=info.sandbox_url)
+        sandbox = AioSandbox(id=info.sandbox_id, base_url=info.sandbox_url, request_headers=info.request_headers)
         # Ownership first, so a failure cannot leave a tracked-but-unowned sandbox.
         # There is no container to roll back (we did not create it), but the
         # host-side HTTP client constructed above is ours and must not leak —
@@ -1684,7 +1684,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _register_created_sandbox(self, thread_id: str | None, sandbox_id: str, info: SandboxInfo, *, user_id: str | None = None) -> str:
         """Track a newly-created sandbox in the active maps."""
-        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
+        sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url, request_headers=info.request_headers)
         key = (
             self._thread_key(
                 thread_id,
@@ -2180,7 +2180,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         )
 
         # Wait for sandbox to be ready
-        if not wait_for_sandbox_ready(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT):
+        readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
+        if not wait_for_sandbox_ready(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, **readiness_kwargs):
             # The container is running but unowned: ownership is published by
             # ``_register_created_sandbox`` after this gate. Claim the teardown
             # lease before stopping it so a peer cannot adopt the not-yet-ready
@@ -2226,7 +2227,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         )
 
         # Wait for sandbox to be ready without blocking the event loop.
-        if not await wait_for_sandbox_ready_async(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT):
+        readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
+        if not await wait_for_sandbox_ready_async(
+            info.sandbox_url,
+            timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT,
+            **readiness_kwargs,
+        ):
             # The container is running but unowned: ownership is published by
             # ``_register_created_sandbox`` after this gate. Claim the teardown
             # lease before stopping it so a peer cannot adopt the not-yet-ready

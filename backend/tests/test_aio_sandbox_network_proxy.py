@@ -59,7 +59,7 @@ def test_pending_events_are_consumed_once(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
     request_id = network_proxy.record_denial("example.com", 443, "CONNECT")
 
-    events = network_proxy.pending_events(0)
+    events = network_proxy.pending_events()
 
     assert events == [
         {
@@ -70,7 +70,7 @@ def test_pending_events_are_consumed_once(tmp_path, monkeypatch) -> None:
             "created_at": events[0]["created_at"],
         }
     ]
-    assert network_proxy.pending_events(0) == []
+    assert network_proxy.pending_events() == []
 
 
 def test_pending_events_surface_only_one_destination_per_approval(tmp_path, monkeypatch) -> None:
@@ -78,11 +78,22 @@ def test_pending_events_surface_only_one_destination_per_approval(tmp_path, monk
     first = network_proxy.record_denial("one.example", 443, "CONNECT")
     network_proxy.record_denial("two.example", 443, "CONNECT")
 
-    assert [event["request_id"] for event in network_proxy.pending_events(0)] == [first]
+    assert [event["request_id"] for event in network_proxy.pending_events()] == [first]
     # The sibling is superseded so a retry can create a fresh approvable event.
-    assert network_proxy.pending_events(0) == []
+    assert network_proxy.pending_events() == []
     fresh = network_proxy.record_denial("two.example", 443, "CONNECT")
-    assert [event["request_id"] for event in network_proxy.pending_events(0)] == [fresh]
+    assert [event["request_id"] for event in network_proxy.pending_events()] == [fresh]
+
+
+def test_pending_events_claims_old_unsurfaced_denial_on_retry(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    now = [100.0]
+    monkeypatch.setattr(network_proxy.time, "time", lambda: now[0])
+    request_id = network_proxy.record_denial("late.example", 443, "CONNECT")
+
+    now[0] = 105.0
+    assert network_proxy.record_denial("late.example", 443, "CONNECT") == request_id
+    assert [event["request_id"] for event in network_proxy.pending_events()] == [request_id]
 
 
 @pytest.mark.anyio
@@ -97,6 +108,40 @@ async def test_resolve_public_fails_closed_when_dns_contains_private_answer(monk
 
     monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
     assert await network_proxy.resolve_public("example.com", 443) is None
+
+
+@pytest.mark.anyio
+async def test_resolve_public_returns_every_validated_answer_and_open_retries(monkeypatch) -> None:
+    loop = asyncio.get_running_loop()
+    answers = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 443)),
+    ]
+
+    async def fake_getaddrinfo(*_args, **_kwargs):
+        return answers
+
+    attempts: list[str] = []
+    connected = (MagicMock(), MagicMock())
+
+    async def fake_open_connection(host: str, _port: int, *, family: int):
+        attempts.append(host)
+        assert family == socket.AF_INET
+        if host == "8.8.8.8":
+            raise OSError("first address unavailable")
+        return connected
+
+    monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(network_proxy.asyncio, "open_connection", fake_open_connection)
+
+    resolved = await network_proxy.resolve_public("example.com", 443)
+
+    assert resolved == (
+        (socket.AF_INET, ("8.8.8.8", 443)),
+        (socket.AF_INET, ("1.1.1.1", 443)),
+    )
+    assert await network_proxy._open_public(resolved, 443) is connected
+    assert attempts == ["8.8.8.8", "1.1.1.1"]
 
 
 @pytest.mark.anyio
@@ -217,6 +262,51 @@ async def test_http_proxy_relays_exactly_one_request_per_connection(monkeypatch)
         proxy.close()
         upstream.close()
         await proxy.wait_closed()
+        await upstream.wait_closed()
+
+
+@pytest.mark.anyio
+async def test_sandbox_api_relay_requires_per_sandbox_token(monkeypatch) -> None:
+    received: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+
+    async def upstream_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        header = await reader.readuntil(b"\r\n\r\n")
+        received.set_result(header)
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    upstream = await asyncio.start_server(upstream_handler, "127.0.0.1", 0)
+    upstream_port = upstream.sockets[0].getsockname()[1]
+    monkeypatch.setenv(network_proxy.RELAY_TOKEN_ENV, "test-relay-token")
+    monkeypatch.setenv("DEERFLOW_SANDBOX_TARGET", f"127.0.0.1:{upstream_port}")
+    relay = await asyncio.start_server(network_proxy.handle_relay, "127.0.0.1", 0)
+    relay_port = relay.sockets[0].getsockname()[1]
+    try:
+        denied_reader, denied_writer = await asyncio.open_connection("127.0.0.1", relay_port)
+        denied_writer.write(b"GET /v1/sandbox HTTP/1.1\r\nHost: sandbox\r\n\r\n")
+        await denied_writer.drain()
+        denied_response = await asyncio.wait_for(denied_reader.read(), timeout=2)
+        denied_writer.close()
+        await denied_writer.wait_closed()
+
+        assert b"403 Forbidden" in denied_response
+        assert not received.done()
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", relay_port)
+        writer.write(b"GET /v1/sandbox HTTP/1.1\r\nHost: sandbox\r\n" + f"{network_proxy.RELAY_AUTH_HEADER}: test-relay-token\r\n\r\n".encode())
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=2)
+        writer.close()
+        await writer.wait_closed()
+
+        assert b"200 OK" in response
+        assert network_proxy.RELAY_AUTH_HEADER.encode() in await asyncio.wait_for(received, timeout=2)
+    finally:
+        relay.close()
+        upstream.close()
+        await relay.wait_closed()
         await upstream.wait_closed()
 
 

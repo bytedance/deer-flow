@@ -7,6 +7,7 @@ import ipaddress
 import logging
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from urllib.parse import urlparse
 
 import httpx
@@ -48,7 +49,12 @@ def sandbox_http_trust_env(sandbox_url: str) -> bool:
 SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT = 60
 
 
-def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
+def wait_for_sandbox_ready(
+    sandbox_url: str,
+    timeout: int = 30,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> bool:
     """Poll sandbox health endpoint until ready or timeout.
 
     Args:
@@ -61,6 +67,8 @@ def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
     start_time = time.time()
     with requests.Session() as session:
         session.trust_env = sandbox_http_trust_env(sandbox_url)
+        if headers:
+            session.headers.update(headers)
         while time.time() - start_time < timeout:
             try:
                 response = session.get(f"{sandbox_url}/v1/sandbox", timeout=5)
@@ -72,7 +80,13 @@ def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
     return False
 
 
-async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll_interval: float = 1.0) -> bool:
+async def wait_for_sandbox_ready_async(
+    sandbox_url: str,
+    timeout: int = 30,
+    poll_interval: float = 1.0,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> bool:
     """Async variant of sandbox readiness polling.
 
     Use this from async runtime paths so sandbox startup waits do not block the
@@ -82,7 +96,13 @@ async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
 
-    async with httpx.AsyncClient(timeout=5, trust_env=sandbox_http_trust_env(sandbox_url)) as client:
+    client_kwargs: dict[str, object] = {
+        "timeout": 5,
+        "trust_env": sandbox_http_trust_env(sandbox_url),
+    }
+    if headers:
+        client_kwargs["headers"] = dict(headers)
+    async with httpx.AsyncClient(**client_kwargs) as client:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:

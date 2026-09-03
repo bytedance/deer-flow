@@ -21,6 +21,17 @@ from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
 from deerflow.utils.network import get_free_port, release_port
 
 
+def test_sandbox_info_does_not_serialize_or_repr_relay_credentials():
+    info = SandboxInfo(
+        sandbox_id="sandbox-id",
+        sandbox_url="http://localhost:8080",
+        request_headers={"X-DeerFlow-Relay-Token": "secret-token"},
+    )
+
+    assert "request_headers" not in info.to_dict()
+    assert "secret-token" not in repr(info)
+
+
 def test_format_container_mount_uses_mount_syntax_for_docker_windows_paths():
     args = _format_container_mount("docker", "D:/deer-flow/backend/.deer-flow/threads", "/mnt/threads", False)
 
@@ -265,6 +276,7 @@ def test_restricted_resource_status_requires_matching_policy_image_and_network()
             labels=backend._restricted_labels(sandbox_id, "network-proxy"),
             image="proxy:latest",
             networks=frozenset({egress_network_name, network_name}),
+            relay_token="test-relay-token-that-is-at-least-32-bytes",
         ),
     }
     network = _NetworkInspection(
@@ -286,6 +298,17 @@ def test_restricted_resource_status_requires_matching_policy_image_and_network()
 
     assert backend._restricted_resources_status(sandbox_id, inspections=inspections) == "compatible"
 
+    compatible_proxy = inspections[proxy_name]
+    inspections[proxy_name] = _ContainerInspection(
+        created_at=compatible_proxy.created_at,
+        host_port=compatible_proxy.host_port,
+        labels=compatible_proxy.labels,
+        image=compatible_proxy.image,
+        networks=compatible_proxy.networks,
+    )
+    assert backend._restricted_resources_status(sandbox_id, inspections=inspections) == "mismatch"
+    inspections[proxy_name] = compatible_proxy
+
     egress_network = _NetworkInspection(
         driver="bridge",
         internal=False,
@@ -306,6 +329,7 @@ def test_restricted_resource_status_requires_matching_policy_image_and_network()
         labels={**backend._restricted_labels(sandbox_id, "network-proxy"), "deerflow.network_policy_digest": "stale"},
         image="proxy:latest",
         networks=frozenset({egress_network_name, network_name}),
+        relay_token="test-relay-token-that-is-at-least-32-bytes",
     )
     assert backend._restricted_resources_status(sandbox_id, inspections=inspections) == "mismatch"
 
@@ -361,7 +385,17 @@ def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
 
     monkeypatch.setattr(backend, "_start_container", fake_start)
 
-    assert backend._start_restricted_sandbox("id", "sandbox-id", 18080, None, config_mount_exclusion_root=None) == "container-id"
+    assert (
+        backend._start_restricted_sandbox(
+            "id",
+            "sandbox-id",
+            18080,
+            None,
+            config_mount_exclusion_root=None,
+            relay_token="test-relay-token",
+        )
+        == "container-id"
+    )
 
     proxy_name, network_name = backend._resource_names("id")
     assert captured["network_override"] == network_name
@@ -383,7 +417,17 @@ def test_restricted_start_recreates_resources_with_stale_policy(monkeypatch):
     monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
     monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
 
-    assert backend._start_restricted_sandbox("stale", "sandbox-stale", 18080, None, config_mount_exclusion_root=None) == "container-id"
+    assert (
+        backend._start_restricted_sandbox(
+            "stale",
+            "sandbox-stale",
+            18080,
+            None,
+            config_mount_exclusion_root=None,
+            relay_token="test-relay-token",
+        )
+        == "container-id"
+    )
 
     assert cleaned == ["stale"]
     assert created == [
@@ -422,6 +466,7 @@ def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatc
         "sandbox-name",
         18080,
         "sandbox-id",
+        "test-relay-token",
     )
 
     create = commands[0]
@@ -431,6 +476,7 @@ def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatc
     assert create[create.index("--tmpfs") + 1] == "/tmp:rw,noexec,nosuid,size=16m"
     assert "--cap-drop=ALL" in create
     assert "no-new-privileges" in create
+    assert "DEERFLOW_RELAY_TOKEN=test-relay-token" in create
 
 
 def test_start_container_filters_nested_config_mounts_for_policy_scoped_skills(
@@ -1041,15 +1087,33 @@ def test_restricted_discovery_uses_proxy_relay_port(monkeypatch):
     backend._network_mode = "allowlist"
     proxy_name, _ = backend._resource_names("existing")
     monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
-    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "compatible")
-    monkeypatch.setattr(backend, "_get_container_port", lambda name: 18080 if name == proxy_name else None)
-    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
+    inspections = {
+        proxy_name: _ContainerInspection(
+            1.0,
+            18080,
+            {},
+            "proxy:latest",
+            frozenset(),
+            "test-relay-token-that-is-at-least-32-bytes",
+        )
+    }
+    monkeypatch.setattr(backend, "_batch_inspect", lambda *_args, **_kwargs: inspections)
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id, **_kwargs: "compatible")
+    readiness: list[dict[str, object]] = []
+
+    def fake_ready(_url, **kwargs):
+        readiness.append(kwargs)
+        return True
+
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.wait_for_sandbox_ready", fake_ready)
 
     info = backend.discover("existing")
 
     assert info is not None
     assert info.container_name == "sandbox-existing"
     assert info.sandbox_url == "http://localhost:18080"
+    assert info.request_headers == {"X-DeerFlow-Relay-Token": "test-relay-token-that-is-at-least-32-bytes"}
+    assert readiness == [{"timeout": 5, "headers": info.request_headers}]
 
 
 def test_restricted_discovery_removes_resources_with_stale_policy(monkeypatch):
@@ -1057,7 +1121,8 @@ def test_restricted_discovery_removes_resources_with_stale_policy(monkeypatch):
     backend._network_mode = "allowlist"
     cleaned: list[str] = []
     monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
-    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "mismatch")
+    monkeypatch.setattr(backend, "_batch_inspect", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id, **_kwargs: "mismatch")
     monkeypatch.setattr(backend, "_cleanup_restricted_resources", cleaned.append)
 
     assert backend.discover("stale") is None
@@ -1471,14 +1536,14 @@ def test_restricted_network_proxy_enforces_and_approves_real_traffic(monkeypatch
     proxy_name, network_name = backend._resource_names(sandbox_id)
     egress_network_name = backend._egress_network_name(sandbox_id)
     port = get_free_port(start_port=18310)
-    started_at = time.time()
+    relay_token = "live-relay-token-that-is-at-least-32-bytes"
     proxy_url = f"http://{proxy_name}:3128"
 
     try:
         assert backend._restricted_resources_status(sandbox_id) == "missing"
         backend._create_internal_network(network_name, sandbox_id)
         backend._create_egress_network(egress_network_name, sandbox_id)
-        backend._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id)
+        backend._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token)
 
         proxy_inspect = subprocess.run(
             ["docker", "inspect", proxy_name],
@@ -1545,10 +1610,25 @@ def test_restricted_network_proxy_enforces_and_approves_real_traffic(monkeypatch
         backend._network_config["allow_domains"] = ["pypi.org"]
 
         sandbox_url = f"http://127.0.0.1:{port}"
+        unauthenticated = subprocess.run(
+            ["curl", "--fail", "--silent", "--max-time", "2", sandbox_url],
+            capture_output=True,
+            text=True,
+        )
+        assert unauthenticated.returncode != 0
         deadline = time.time() + 20
         while time.time() < deadline:
             relay = subprocess.run(
-                ["curl", "--fail", "--silent", "--max-time", "2", sandbox_url],
+                [
+                    "curl",
+                    "--fail",
+                    "--silent",
+                    "--max-time",
+                    "2",
+                    "-H",
+                    f"X-DeerFlow-Relay-Token: {relay_token}",
+                    sandbox_url,
+                ],
                 capture_output=True,
                 text=True,
             )
@@ -1573,7 +1653,7 @@ def test_restricted_network_proxy_enforces_and_approves_real_traffic(monkeypatch
 
         denied = sandbox_fetch("https://example.com/")
         assert denied.returncode != 0
-        events = backend.consume_network_policy_events(sandbox_id, since=started_at)
+        events = backend.consume_network_policy_events(sandbox_id)
         assert [(event["host"], event["port"]) for event in events] == [("example.com", 443)]
 
         request_id = str(events[0]["request_id"])
@@ -1584,7 +1664,7 @@ def test_restricted_network_proxy_enforces_and_approves_real_traffic(monkeypatch
 
         metadata = sandbox_fetch("http://169.254.169.254/latest/meta-data/")
         assert metadata.returncode != 0
-        assert backend.consume_network_policy_events(sandbox_id, since=started_at) == []
+        assert backend.consume_network_policy_events(sandbox_id) == []
 
         direct = sandbox_fetch("https://example.com/", use_proxy=False)
         assert direct.returncode != 0

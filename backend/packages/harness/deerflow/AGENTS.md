@@ -91,14 +91,12 @@ CI.
 
 ### AIO Sandbox Network Policy
 
-Restricted AIO keeps sandboxes on internal bridges; only the policy/API sidecar
-has egress through a per-sandbox bridge with ICC disabled, never the shared
-default bridge. Parse HTTP field names once with strict token/colon grammar and
-reject malformed fields before policy checks. Reject hostnames before DNS
-resolution; scheduled/non-interactive runs auto-deny without Human Input. DB
-approvals never replay tools; policy labels fence reuse. CONNECT/SNI cannot
-inspect encrypted authority. Destroy the sandbox, sidecar, and both networks
-together.
+Restricted AIO keeps sandboxes internal; a per-sandbox, ICC-disabled sidecar
+handles egress and its token-authenticated API relay. Parse headers strictly;
+reject policy-denied names before DNS and try all validated answers. Claim the
+oldest unsurfaced denial; subagent/non-interactive runs drain and deny. Approvals
+never replay tools; policy labels fence reuse. CONNECT/SNI cannot inspect
+encrypted authority. Destroy the sandbox, sidecar, and both networks together.
 
 ### E2B Mount Uploads
 

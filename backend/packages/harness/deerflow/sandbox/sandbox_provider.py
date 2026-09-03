@@ -103,16 +103,16 @@ class SandboxProvider(ABC):
     def sandbox_network_temporary_grant_ttl(self) -> int:
         return 300
 
-    def consume_network_policy_events(self, sandbox_id: str, *, since: float) -> list[dict[str, object]]:
-        """Return newly denied trusted-proxy events for a sandbox.
+    def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
+        """Claim the oldest unsurfaced trusted-proxy event for a sandbox.
 
         Providers without a managed network policy use the empty default.
         """
-        del sandbox_id, since
+        del sandbox_id
         return []
 
-    async def consume_network_policy_events_async(self, sandbox_id: str, *, since: float) -> list[dict[str, object]]:
-        return await asyncio.to_thread(self.consume_network_policy_events, sandbox_id, since=since)
+    async def consume_network_policy_events_async(self, sandbox_id: str) -> list[dict[str, object]]:
+        return await asyncio.to_thread(self.consume_network_policy_events, sandbox_id)
 
     def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
         """Apply a user decision to one trusted-proxy event."""

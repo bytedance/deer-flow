@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import NotRequired, override
@@ -542,13 +541,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
-        started_at = time.time()
         prev_sandbox_id = self._read_sandbox_id_from_request(request)
         result = handler(request)
         curr_sandbox_id = self._read_sandbox_id_from_request(request)
         if prev_sandbox_id is None and curr_sandbox_id is not None:
             result = self._attach_sandbox_update(result, curr_sandbox_id)
-        return self._maybe_request_network_approval(request, result, curr_sandbox_id or prev_sandbox_id, started_at)
+        return self._maybe_request_network_approval(request, result, curr_sandbox_id or prev_sandbox_id)
 
     @override
     async def awrap_tool_call(
@@ -556,7 +554,6 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
-        started_at = time.time()
         prev_sandbox_id = self._read_sandbox_id_from_request(request)
         result = await handler(request)
         curr_sandbox_id = self._read_sandbox_id_from_request(request)
@@ -566,15 +563,13 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if sandbox_id is None:
             return result
         context = getattr(request.runtime, "context", None) or {}
-        if context.get("is_subagent"):
-            return result
         provider = get_initialized_sandbox_provider()
         if provider is None:
             return result
         if provider.sandbox_network_mode() != "allowlist":
             return result
-        events = await provider.consume_network_policy_events_async(sandbox_id, since=started_at - 0.25)
-        if _network_approval_is_non_interactive(context):
+        events = await provider.consume_network_policy_events_async(sandbox_id)
+        if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
             for event in events:
                 request_id = event.get("request_id")
                 if isinstance(request_id, str):
@@ -587,20 +582,17 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         request: ToolCallRequest,
         result: ToolMessage | Command,
         sandbox_id: str | None,
-        started_at: float,
     ) -> ToolMessage | Command:
         if sandbox_id is None:
             return result
         context = getattr(request.runtime, "context", None) or {}
-        if context.get("is_subagent"):
-            return result
         provider = get_initialized_sandbox_provider()
         if provider is None:
             return result
         if provider.sandbox_network_mode() != "allowlist":
             return result
-        events = provider.consume_network_policy_events(sandbox_id, since=started_at - 0.25)
-        if _network_approval_is_non_interactive(context):
+        events = provider.consume_network_policy_events(sandbox_id)
+        if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
             for event in events:
                 request_id = event.get("request_id")
                 if isinstance(request_id, str):

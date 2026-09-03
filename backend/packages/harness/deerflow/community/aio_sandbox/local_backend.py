@@ -14,6 +14,7 @@ import logging
 import os
 import platform
 import posixpath
+import secrets
 import shlex
 import socket
 import subprocess
@@ -24,6 +25,7 @@ from pathlib import Path
 from deerflow.utils.network import get_free_port, release_port
 
 from .backend import SandboxBackend, wait_for_sandbox_ready
+from .network_proxy import RELAY_AUTH_HEADER, RELAY_TOKEN_ENV
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ class _ContainerInspection:
     labels: dict[str, str]
     image: str
     networks: frozenset[str]
+    relay_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,16 @@ def _extract_host_port(inspect_entry: dict, container_port: int) -> int | None:
                 return int(host_port)
     except (ValueError, TypeError, AttributeError):
         pass
+    return None
+
+
+def _extract_container_environment(config: dict, name: str) -> str | None:
+    """Read one exact environment value from Docker inspect data."""
+    prefix = f"{name}="
+    for item in config.get("Env") or []:
+        if isinstance(item, str) and item.startswith(prefix):
+            value = item[len(prefix) :]
+            return value or None
     return None
 
 
@@ -651,7 +664,12 @@ class LocalContainerBackend(SandboxBackend):
             return "mismatch"
         sandbox_matches = sandbox.host_port is None and sandbox.networks == frozenset({network_name}) and self._labels_match(sandbox.labels, self._restricted_labels(sandbox_id, "sandbox"))
         proxy_matches = (
-            proxy.host_port is not None and proxy.image == self._proxy_image() and proxy.networks == frozenset({egress_network_name, network_name}) and self._labels_match(proxy.labels, self._restricted_labels(sandbox_id, "network-proxy"))
+            proxy.host_port is not None
+            and proxy.image == self._proxy_image()
+            and proxy.networks == frozenset({egress_network_name, network_name})
+            and isinstance(proxy.relay_token, str)
+            and len(proxy.relay_token) >= 32
+            and self._labels_match(proxy.labels, self._restricted_labels(sandbox_id, "network-proxy"))
         )
         return "compatible" if sandbox_matches and proxy_matches and self._network_matches_policy(network, sandbox_id) and self._egress_network_matches_policy(egress_network, sandbox_id) else "mismatch"
 
@@ -766,6 +784,7 @@ class LocalContainerBackend(SandboxBackend):
         # so a reactive fallback here ensures we always make progress.
         _next_start = self._base_port
         container_id: str | None = None
+        relay_token: str | None = None
         port: int = 0
         for _attempt in range(10):
             port = get_free_port(start_port=_next_start)
@@ -778,12 +797,14 @@ class LocalContainerBackend(SandboxBackend):
                         config_mount_exclusion_root=config_mount_exclusion_root,
                     )
                 else:
+                    relay_token = secrets.token_urlsafe(32)
                     container_id = self._start_restricted_sandbox(
                         sandbox_id,
                         container_name,
                         port,
                         extra_mounts,
                         config_mount_exclusion_root=config_mount_exclusion_root,
+                        relay_token=relay_token,
                     )
                 break
             except _ExistingRestrictedSandbox as exc:
@@ -820,6 +841,7 @@ class LocalContainerBackend(SandboxBackend):
             sandbox_url=f"http://{sandbox_host}:{port}",
             container_name=container_name,
             container_id=container_id,
+            request_headers={RELAY_AUTH_HEADER: relay_token} if relay_token is not None else {},
         )
 
     def _start_restricted_sandbox(
@@ -830,6 +852,7 @@ class LocalContainerBackend(SandboxBackend):
         extra_mounts: list[tuple[str, str, bool]] | None,
         *,
         config_mount_exclusion_root: str | None,
+        relay_token: str,
     ) -> str:
         proxy_name, network_name = self._resource_names(sandbox_id)
         egress_network_name = self._egress_network_name(sandbox_id)
@@ -840,7 +863,7 @@ class LocalContainerBackend(SandboxBackend):
                 self._cleanup_restricted_resources(sandbox_id)
             self._create_internal_network(network_name, sandbox_id)
             self._create_egress_network(egress_network_name, sandbox_id)
-            self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id)
+            self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token)
             proxy_url = f"http://{proxy_name}:3128"
             return self._start_container(
                 container_name,
@@ -937,6 +960,7 @@ class LocalContainerBackend(SandboxBackend):
         container_name: str,
         port: int,
         sandbox_id: str,
+        relay_token: str,
     ) -> None:
         allow_domains = self._network_config.get("allow_domains", [])
         proxy_image = self._proxy_image()
@@ -977,6 +1001,8 @@ class LocalContainerBackend(SandboxBackend):
             f"DEERFLOW_ALLOW_SYNTHETIC_DNS={'1' if self._allow_synthetic_dns else '0'}",
             "-e",
             f"DEERFLOW_RECORD_DENIALS={'1' if self._network_mode == 'allowlist' and self._network_config.get('approval', 'prompt') == 'prompt' else '0'}",
+            "-e",
+            f"{RELAY_TOKEN_ENV}={relay_token}",
             proxy_image,
             "sh",
             "-c",
@@ -1075,6 +1101,8 @@ class LocalContainerBackend(SandboxBackend):
             return None
 
         port_container = container_name
+        request_headers: dict[str, str] = {}
+        restricted_port: int | None = None
         if self._network_mode != "open":
             proxy_name, _ = self._resource_names(sandbox_id)
             try:
@@ -1084,7 +1112,8 @@ class LocalContainerBackend(SandboxBackend):
                 logger.warning(f"Could not verify network proxy {proxy_name} during discovery: {e}")
                 return None
             try:
-                resource_status = self._restricted_resources_status(sandbox_id)
+                inspections = self._batch_inspect([container_name, proxy_name], strict=True)
+                resource_status = self._restricted_resources_status(sandbox_id, inspections=inspections)
             except RuntimeError as e:
                 logger.warning("Could not verify persisted network policy for sandbox %s: %s", sandbox_id, e)
                 return None
@@ -1092,21 +1121,27 @@ class LocalContainerBackend(SandboxBackend):
                 logger.warning("Removing restricted sandbox %s because its persisted network policy no longer matches", sandbox_id)
                 self._cleanup_restricted_resources(sandbox_id)
                 return None
-            port_container = proxy_name
+            proxy_inspection = inspections.get(proxy_name)
+            if proxy_inspection is None or proxy_inspection.host_port is None or proxy_inspection.relay_token is None:
+                return None
+            restricted_port = proxy_inspection.host_port
+            request_headers = {RELAY_AUTH_HEADER: proxy_inspection.relay_token}
 
-        port = self._get_container_port(port_container)
+        port = restricted_port if restricted_port is not None else self._get_container_port(port_container)
         if port is None:
             return None
 
         sandbox_host = _normalize_sandbox_host_for_url(os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost"))
         sandbox_url = f"http://{sandbox_host}:{port}"
-        if not wait_for_sandbox_ready(sandbox_url, timeout=5):
+        readiness_kwargs = {"headers": request_headers} if request_headers else {}
+        if not wait_for_sandbox_ready(sandbox_url, timeout=5, **readiness_kwargs):
             return None
 
         return SandboxInfo(
             sandbox_id=sandbox_id,
             sandbox_url=sandbox_url,
             container_name=container_name,
+            request_headers=request_headers,
         )
 
     def list_running(self) -> list[SandboxInfo]:
@@ -1179,6 +1214,7 @@ class LocalContainerBackend(SandboxBackend):
                 continue
             sandbox_id = container_name[len(self._container_prefix) + 1 :]
             created_at, host_port = data.created_at, data.host_port
+            request_headers: dict[str, str] = {}
             if self._network_mode != "open":
                 proxy_name, _ = self._resource_names(sandbox_id)
                 proxy_data = inspections.get(proxy_name)
@@ -1192,6 +1228,8 @@ class LocalContainerBackend(SandboxBackend):
                     self._cleanup_restricted_resources(sandbox_id)
                     continue
                 host_port = proxy_data.host_port if proxy_data is not None else None
+                if proxy_data is not None and proxy_data.relay_token is not None:
+                    request_headers = {RELAY_AUTH_HEADER: proxy_data.relay_token}
             sandbox_url = f"http://{sandbox_host}:{host_port}" if host_port else ""
 
             infos.append(
@@ -1200,6 +1238,7 @@ class LocalContainerBackend(SandboxBackend):
                     sandbox_url=sandbox_url,
                     container_name=container_name,
                     created_at=created_at,
+                    request_headers=request_headers,
                 )
             )
 
@@ -1234,12 +1273,12 @@ class LocalContainerBackend(SandboxBackend):
             if result.returncode != 0 and "not found" not in (result.stderr or "").lower():
                 logger.warning("Failed to remove sandbox network %s: %s", current_network_name, result.stderr.strip())
 
-    def consume_network_policy_events(self, sandbox_id: str, *, since: float) -> list[dict[str, object]]:
+    def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
         if self._network_mode != "allowlist" or self._network_config.get("approval", "prompt") != "prompt":
             return []
         proxy_name, _ = self._resource_names(sandbox_id)
         result = subprocess.run(
-            ["docker", "exec", proxy_name, "python", _NETWORK_PROXY_CONTAINER_SCRIPT, "pending", "--since", str(since)],
+            ["docker", "exec", proxy_name, "python", _NETWORK_PROXY_CONTAINER_SCRIPT, "pending"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -1337,6 +1376,7 @@ class LocalContainerBackend(SandboxBackend):
                 labels={str(key): str(value) for key, value in (config.get("Labels") or {}).items()},
                 image=str(config.get("Image") or ""),
                 networks=frozenset(str(value) for value in (network_settings.get("Networks") or {})),
+                relay_token=_extract_container_environment(config, RELAY_TOKEN_ENV),
             )
         return out
 

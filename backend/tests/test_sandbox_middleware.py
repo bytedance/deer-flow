@@ -70,8 +70,8 @@ class _NetworkPolicyProvider(_SyncProvider):
     def sandbox_network_mode(self) -> str:
         return "allowlist"
 
-    def consume_network_policy_events(self, sandbox_id: str, *, since: float) -> list[dict[str, object]]:
-        del sandbox_id, since
+    def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
+        del sandbox_id
         events, self.events = self.events, []
         return events
 
@@ -743,7 +743,31 @@ def test_subagent_network_denial_fails_closed_without_prompt() -> None:
         reset_sandbox_provider()
 
     assert result is original
-    assert provider.events == [{"request_id": "req-1", "host": "example.com", "port": 443, "method": "CONNECT"}]
+    assert provider.events == []
+    assert provider.decisions == [("existing", "req-1", "deny")]
+
+
+@pytest.mark.anyio
+async def test_async_subagent_network_denial_fails_closed_without_prompt() -> None:
+    provider = _NetworkPolicyProvider()
+    provider.events = [{"request_id": "req-1", "host": "example.com", "port": 443, "method": "CONNECT"}]
+    state: dict = {"sandbox": {"sandbox_id": "existing"}}
+    request = _make_tool_call_request(state)
+    request.runtime.context["is_subagent"] = True
+    original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
+    set_sandbox_provider(provider)
+    try:
+        result = await SandboxMiddleware().awrap_tool_call(request, handler)
+    finally:
+        reset_sandbox_provider()
+
+    assert result is original
+    assert provider.events == []
+    assert provider.decisions == [("existing", "req-1", "deny")]
 
 
 def test_wrap_tool_call_passthrough_when_handler_did_not_initialize_sandbox() -> None:

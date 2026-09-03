@@ -695,9 +695,11 @@ cover shell and package-manager clients.
 The sidecar is dual-homed between the sandbox's internal bridge and a separate
 per-sandbox egress bridge with inter-container communication disabled. It is
 never attached to Docker's shared default `bridge`, so unrelated containers
-cannot reach its unauthenticated sandbox-API relay directly. Only the sidecar
-is attached to the egress bridge; outbound traffic still goes through Docker
-NAT.
+cannot reach its container address directly. Its published sandbox-API relay
+also requires a cryptographically random per-sandbox token, so containers on
+other bridge networks cannot use Docker's host-port mapping to bypass that
+separation. Only the sidecar is attached to the egress bridge; outbound traffic
+still goes through Docker NAT.
 
 Plain HTTP connections carry exactly one fully framed, policy-checked request;
 the sidecar closes the upstream connection afterward so a pipelined request
@@ -734,7 +736,10 @@ or its required network properties no longer match. Docker Desktop is detected
 from the daemon, not the Gateway process, so Docker-outside-of-Docker deployments
 handle its synthetic DNS range correctly. The policy sidecar publishes only its
 fixed sandbox-API relay back to the Gateway; the sandbox API itself is not
-published.
+published. DeerFlow generates a separate relay token for each sandbox, requires
+it on every new relay connection, reconstructs it from Docker during discovery,
+and injects it only into Gateway control-plane clients. The token is excluded
+from `SandboxInfo` serialization, representations, and command logs.
 Mirror or digest-pin `network.proxy_image` in production environments that
 require supply-chain pinning.
 
