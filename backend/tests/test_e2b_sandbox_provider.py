@@ -11,6 +11,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +24,7 @@ from deerflow.community.e2b_sandbox.capacity import (
     CapacityBackendError,
     ReserveStatus,
 )
+from deerflow.community.e2b_sandbox.e2b_sandbox_provider import MountUploadResult
 from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
@@ -261,6 +263,7 @@ def _make_provider(
     provider._sandboxes = {}
     provider._thread_sandboxes = {}
     provider._acquire_serializer = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
+    provider._mount_results = {}
     provider._warm_pool = OrderedDict()
     provider._eviction_tombstones = set()
     provider._evictions_in_progress = set()
@@ -1423,6 +1426,171 @@ def test_apply_mounts_deadline_reason_shows_configured_value(monkeypatch, tmp_pa
     assert len(client.files.write_calls) == 1
     assert "time budget 180s" in caplog.text
     assert "attempted_files=1" in caplog.text
+
+
+def test_apply_mounts_returns_result_on_success(monkeypatch, tmp_path):
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(), user_id="user-1")
+
+    assert result.truncated is False
+    assert result.reason is None
+    assert result.completed_files == 2
+    assert result.completed_bytes == 11
+    assert result.attempted_files == 2
+    assert result.attempted_bytes == 11
+
+
+def test_apply_mounts_returns_truncated_result_on_deadline(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 2.0
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    provider._config["mount_upload_deadline_seconds"] = 1
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(files=DeadlineFilesAPI()), user_id="user-1")
+
+    assert result.truncated is True
+    assert result.reason == "time budget 1s"
+    assert result.completed_files <= result.attempted_files
+
+
+def test_apply_mounts_returns_truncated_result_on_file_count(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.txt").write_text("first", encoding="utf-8")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(), user_id="user-1")
+
+    assert result.truncated is True
+    assert result.reason is not None
+    assert "file count cap" in result.reason
+
+
+def test_apply_mounts_returns_truncated_result_on_byte_budget(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 7)
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.bin").write_bytes(b"1234")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.bin").write_bytes(b"5678")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(), user_id="user-1")
+
+    assert result.truncated is True
+    assert result.reason is not None
+    assert "byte budget" in result.reason
+
+
+def test_apply_mounts_non_limit_failure_is_not_reported_as_truncation(monkeypatch, tmp_path):
+    class FailWriteAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            raise RuntimeError("SDK write failed")
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(files=FailWriteAPI()), user_id="user-1")
+
+    assert result.truncated is False
+    assert result.reason is None
+
+
+def test_apply_mounts_missing_host_path_is_not_reported_as_truncation(monkeypatch, tmp_path):
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(tmp_path / "nonexistent"), container_path="/mnt/data", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(), user_id="user-1")
+
+    assert result.truncated is False
+    assert result.reason is None
+    assert result.attempted_files == 0
+
+
+def test_create_sandbox_stores_mount_result_on_sandbox(monkeypatch):
+    provider = _make_provider()
+    _install_fake_sdk(monkeypatch, provider)
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id, _thread_id=None: [])
+    provider._config["mounts"] = []
+
+    sandbox_id = provider._create_sandbox("t1", user_id="u1")
+    sandbox = provider.get(sandbox_id)
+
+    assert sandbox is not None
+    assert sandbox.mount_upload_result is not None
+    assert sandbox.mount_upload_result.truncated is False
+    assert sandbox.mount_upload_result.reason is None
+
+
+def test_mount_result_survives_warm_pool_reclaim(monkeypatch):
+    provider = _make_provider()
+    _install_fake_sdk(monkeypatch, provider)
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id, _thread_id=None: [])
+    provider._config["mounts"] = []
+
+    sandbox_id = provider._create_sandbox("t1", user_id="u1")
+    sandbox = provider.get(sandbox_id)
+    assert sandbox is not None
+    original_result = sandbox.mount_upload_result
+    assert original_result is not None
+
+    provider.release(sandbox_id)
+    reclaimed_id = provider.acquire("t1", user_id="u1")
+    reclaimed_sandbox = provider.get(reclaimed_id)
+
+    assert reclaimed_id == sandbox_id
+    assert reclaimed_sandbox is not None
+    assert reclaimed_sandbox.mount_upload_result == original_result
 
 
 def test_skill_projection_and_configured_mount_share_upload_budget(monkeypatch, tmp_path):
@@ -4899,6 +5067,130 @@ def test_stable_seed_matches_shared_identity():
     ).hexdigest()[:16]
 
     assert provider._stable_seed("t-1", "u-1") == expected
+
+
+def test_evict_oldest_warm_cleans_mount_result(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="sb-warm")
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    provider._warm_pool["sb-warm"] = ("seed", 12345.0)
+    provider._mount_results["sb-warm"] = MountUploadResult(
+        truncated=True,
+        reason="byte budget",
+        attempted_files=8,
+        attempted_bytes=4000,
+        completed_files=5,
+        completed_bytes=2500,
+    )
+    provider._kill_client = MagicMock(return_value=None)
+
+    assert provider._evict_oldest_warm() == "sb-warm"
+    assert "sb-warm" not in provider._mount_results
+
+
+def test_reuse_evicts_dead_sandbox_cleans_mount_result():
+    provider = _make_provider()
+    sandbox = _make_sandbox(FakeClient(), sandbox_id="sb-dead")
+    sandbox._dead = True
+    provider._sandboxes["sb-dead"] = sandbox
+    provider._thread_sandboxes[provider._thread_key("t1", "u1")] = "sb-dead"
+    provider._mount_results["sb-dead"] = MountUploadResult(
+        truncated=True,
+        reason="time budget 120s",
+        attempted_files=0,
+        attempted_bytes=0,
+        completed_files=0,
+        completed_bytes=0,
+    )
+
+    provider._reuse_in_process_sandbox("t1", user_id="u1")
+
+    assert "sb-dead" not in provider._mount_results
+
+
+def test_reclaim_warm_pool_cleans_mount_result_on_reconnect_failure(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+
+    def fail_connect(_sandbox_id, **_kwargs):
+        raise RuntimeError("404 Not Found")
+
+    fake_cls.connect_factory = fail_connect
+    provider._warm_pool["sb-broken"] = (provider._stable_seed("t1", "u1"), 12345.0)
+    provider._mount_results["sb-broken"] = MountUploadResult(
+        truncated=False,
+        reason=None,
+        attempted_files=0,
+        attempted_bytes=0,
+        completed_files=0,
+        completed_bytes=0,
+    )
+
+    provider._reclaim_warm_pool_sandbox("t1", user_id="u1")
+
+    assert "sb-broken" not in provider._mount_results
+
+
+def test_reclaim_warm_pool_cleans_mount_result_on_dead_entry(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="sb-zombie", commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
+    fake_cls.connect_factory = lambda _sandbox_id, **_kwargs: client
+    provider._warm_pool["sb-zombie"] = (provider._stable_seed("t1", "u1"), 12345.0)
+    provider._mount_results["sb-zombie"] = MountUploadResult(
+        truncated=True,
+        reason="file count cap",
+        attempted_files=0,
+        attempted_bytes=0,
+        completed_files=0,
+        completed_bytes=0,
+    )
+
+    provider._reclaim_warm_pool_sandbox("t1", user_id="u1")
+
+    assert "sb-zombie" not in provider._mount_results
+
+
+def test_forget_local_sandbox_cleans_mount_result():
+    provider = _make_provider()
+    provider._sandboxes["sb-peer"] = _make_sandbox(FakeClient(), sandbox_id="sb-peer")
+    provider._mount_results["sb-peer"] = MountUploadResult(
+        truncated=False,
+        reason=None,
+        attempted_files=0,
+        attempted_bytes=0,
+        completed_files=0,
+        completed_bytes=0,
+    )
+
+    provider._forget_local_sandbox("sb-peer")
+
+    assert "sb-peer" not in provider._mount_results
+    assert "sb-peer" not in provider._sandboxes
+
+
+def test_mount_upload_deadline_none_returns_default():
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    def option(name, default=None):
+        return None if name == "mount_upload_deadline_seconds" else default
+
+    assert mod.E2BSandboxProvider._resolve_mount_upload_deadline(option) == mod._MOUNT_PASS_DEADLINE_SECONDS
+
+
+def test_mount_upload_result_is_frozen():
+    result = MountUploadResult(
+        truncated=False,
+        reason=None,
+        attempted_files=0,
+        attempted_bytes=0,
+        completed_files=0,
+        completed_bytes=0,
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        result.truncated = True  # type: ignore[misc]
 
 
 def test_list_dir_preserves_trailing_space_in_filename():

@@ -121,3 +121,12 @@ An invalid mount does not block later mounts.
 Each successful upload logs its source, destination, file count, byte count, and elapsed time.
 
 A stopped pass logs its limit reason and elapsed time. It reports attempted and completed upload totals separately.
+
+A ``MountUploadResult`` is attached to ``E2BSandbox.mount_upload_result``
+after creation. ``result.truncated`` is ``True`` only when the upload pass
+was stopped early by a resource limit (deadline, file count cap, or byte
+budget).  Individual mount failures (missing host path, SDK errors) are
+logged but do NOT set ``truncated``.  ``None`` on a reclaimed sandbox
+means "not available" — the result was recorded at creation time and is
+preserved within the same Gateway process lifetime via a provider-level
+map.
