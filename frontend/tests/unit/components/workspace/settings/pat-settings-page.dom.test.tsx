@@ -84,6 +84,10 @@ const authMockState = rs.hoisted(() => ({
   userId: "test-user" as string | null,
 }));
 
+const deferLoginRedirectMock = rs.hoisted(() =>
+  rs.fn(() => () => undefined),
+);
+
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({
     user:
@@ -96,8 +100,9 @@ rs.mock("@/core/auth/AuthProvider", () => ({
   }),
   // The page defers the provider's 401 login redirect while the show-once
   // token is visible; the deferral mechanism has its own test file, so the
-  // page tests just need the import to exist.
-  useDeferLoginRedirect: () => undefined,
+  // page tests pin only that the imperative channel is armed in the same
+  // synchronous breath as the submission latch.
+  useDeferLoginRedirect: () => deferLoginRedirectMock,
 }));
 
 rs.mock("@/core/i18n/hooks", () => ({
@@ -235,6 +240,7 @@ afterEach(() => {
   authMockState.userId = "test-user";
   toastMockState.error.mockReset();
   toastMockState.success.mockReset();
+  deferLoginRedirectMock.mockReset();
   cleanup();
 });
 
@@ -382,6 +388,31 @@ describe("PatSettingsPage", () => {
     }) as BeforeUnloadEvent;
     window.dispatchEvent(afterUnmount);
     expect(afterUnmount.defaultPrevented).toBe(false);
+  });
+
+  it("arms the login-redirect deferral synchronously with the submission click", () => {
+    // The deferral's render-driven channel lags one commit; a /me refresh
+    // already in flight can answer 401 inside that window and navigate the
+    // page away while the POST still mints. The imperative arm must fire in
+    // the same synchronous breath as the submission latch.
+    const mutate = rs.fn(() => new Promise<never>(() => undefined));
+    patsMockState.createMutate = mutate;
+    deferLoginRedirectMock.mockReset();
+
+    renderWithQueryClient(<PatSettingsPage />);
+    fireEvent.click(screen.getByText("Create token"));
+    fireEvent.change(screen.getByPlaceholderText("e.g. ci-runner"), {
+      target: { value: "ci" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: "Read threads" }));
+    const submit = screen
+      .getAllByText("Create token")
+      .find((element) => element.closest("[role=dialog]") !== null)!;
+    fireEvent.click(submit);
+
+    // No await: still inside the pre-render latch window.
+    expect(deferLoginRedirectMock).toHaveBeenCalledTimes(1);
+    expect(mutate).toHaveBeenCalledTimes(1);
   });
 
   it("clears the show-once token when the account changes after creation", async () => {

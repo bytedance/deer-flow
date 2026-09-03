@@ -211,14 +211,27 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
  * stays active after a session expires (expiry does not revoke it), so
  * navigating its page away would permanently discard the credential's only
  * raw copy.
+ *
+ * Also returns an imperative ``arm()`` channel: it registers a deferral
+ * synchronously and hands back its release. The *active* channel rides a
+ * render+effect, which is one commit late — callers who must be protected
+ * inside the synchronous submission window (a pending /me refresh can
+ * answer 401 before the pending state has rendered) arm it in the same
+ * breath they start the request, then release once the *active* channel
+ * has taken over.
  */
-export function useDeferLoginRedirect(active: boolean) {
+export function useDeferLoginRedirect(active: boolean): () => () => void {
   const { setLoginRedirectDeferral } = useAuth();
   useEffect(() => {
     if (!active) return;
     setLoginRedirectDeferral(true);
     return () => setLoginRedirectDeferral(false);
   }, [active, setLoginRedirectDeferral]);
+  const arm = useCallback(() => {
+    setLoginRedirectDeferral(true);
+    return () => setLoginRedirectDeferral(false);
+  }, [setLoginRedirectDeferral]);
+  return arm;
 }
 
 /**

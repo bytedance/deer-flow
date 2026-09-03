@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
-import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { AuthProvider, useAuth, useDeferLoginRedirect } from "@/core/auth/AuthProvider";
 import type { User } from "@/core/auth/types";
@@ -111,6 +111,50 @@ describe("login redirect deferral", () => {
     expect(routerMock.push).not.toHaveBeenCalled();
 
     rerender(<TwoProbes first={false} second={false} />);
+    await waitFor(() => {
+      expect(routerMock.push).toHaveBeenCalledWith("/login?next=%2Fworkspace");
+    });
+  });
+
+  it("arms imperatively without waiting for a render or effect", async () => {
+    // The render-driven channel registers one commit late; a 401 that lands
+    // inside the synchronous submission window must still observe the
+    // deferral. arm() registers it in the same breath and hands back its
+    // release; the held redirect fires only after release().
+    meStatus = 401;
+    let arm!: () => () => void;
+    function ArmProbe({ expose }: { expose: (arm: () => () => void) => void }) {
+      const { refreshUser } = useAuth();
+      const armFn = useDeferLoginRedirect(false);
+      return (
+        <>
+          <button onClick={() => expose(armFn)}>expose</button>
+          <button onClick={() => void refreshUser()}>refresh</button>
+        </>
+      );
+    }
+    render(
+      <AuthProvider initialUser={user}>
+        <ArmProbe expose={(fn) => (arm = fn)} />
+      </AuthProvider>,
+    );
+
+    let release!: () => void;
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button")[0]!);
+      // arm() sets provider state: keep it inside the act boundary so the
+      // deferral count is flushed before the refresh click below.
+      release = arm();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button")[1]!);
+    });
+    expect(routerMock.push).not.toHaveBeenCalled();
+
+    await act(async () => {
+      release();
+    });
     await waitFor(() => {
       expect(routerMock.push).toHaveBeenCalledWith("/login?next=%2Fworkspace");
     });

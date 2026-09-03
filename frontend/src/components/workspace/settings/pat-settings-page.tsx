@@ -152,8 +152,10 @@ function InteractivePatSettingsPage() {
   // show-once value is on screen (or about to arrive): the soft navigation
   // unmounts this page without firing beforeunload, discarding the only
   // copy of an active credential — session expiry does not revoke a minted
-  // token. The held redirect fires when the result view closes.
-  useDeferLoginRedirect(created !== null || create.isPending);
+  // token. The held redirect fires when the result view closes. This
+  // passive channel rides a render+effect; the imperative channel covers
+  // the synchronous submission window (see handleCreate).
+  const armLoginRedirectDeferral = useDeferLoginRedirect(created !== null || create.isPending);
 
   // While the only copy of a token is on screen (or is about to arrive),
   // navigating away or closing the tab must at least warn: the credential is
@@ -189,6 +191,17 @@ function InteractivePatSettingsPage() {
   }, [create.isPending, setUnloadGuard]);
 
   const resetCreate = create.reset;
+  // The imperative deferral release, pending handover to the passive
+  // channel: armed at the submission latch (before any render can run),
+  // released once the show-once result has rendered and the passive
+  // channel owns the deferral.
+  const pendingDeferralReleaseRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (created !== null && pendingDeferralReleaseRef.current) {
+      pendingDeferralReleaseRef.current();
+      pendingDeferralReleaseRef.current = null;
+    }
+  }, [created]);
   // A displayed result belongs to the account that minted it. A *confirmed*
   // different signed-in user (another tab replaced the shared cookie and /me
   // converged onto the successor) must stop rendering it — and the mutation
@@ -216,6 +229,10 @@ function InteractivePatSettingsPage() {
   }
 
   function closeCreateDialog() {
+    if (pendingDeferralReleaseRef.current) {
+      pendingDeferralReleaseRef.current();
+      pendingDeferralReleaseRef.current = null;
+    }
     setCreateOpen(false);
     setCreated(null);
     setCreatedFor(null);
@@ -252,6 +269,12 @@ function InteractivePatSettingsPage() {
     const initiatingUser = user?.id ?? null;
     createLatchedRef.current = true;
     setUnloadGuard(true);
+    // The render-dependent deferral lags one commit: a /me refresh that is
+    // already in flight can answer 401 inside this window and navigate the
+    // page away with the only token copy mid-mint. Arm it imperatively in
+    // the same synchronous breath as the latch; the passive channel takes
+    // over once the result (or failure) has rendered.
+    pendingDeferralReleaseRef.current = armLoginRedirectDeferral();
     try {
       const result = await create.mutateAsync({
         name: name.trim(),
@@ -261,6 +284,10 @@ function InteractivePatSettingsPage() {
       setCreated(result);
       setCreatedFor(initiatingUser);
     } catch (err) {
+      if (pendingDeferralReleaseRef.current) {
+        pendingDeferralReleaseRef.current();
+        pendingDeferralReleaseRef.current = null;
+      }
       // No token copy is (or will be) on screen for these outcomes; the
       // result view keeps its own guard via created above.
       setUnloadGuard(false);
