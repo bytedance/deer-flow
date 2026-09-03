@@ -2,7 +2,7 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { KeyRoundIcon, PlusIcon, Trash2Icon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -131,6 +131,9 @@ function InteractivePatSettingsPage() {
   const [scopes, setScopes] = useState<Set<PatScope>>(new Set(DEFAULT_SCOPES));
   const [expiry, setExpiry] = useState<string>("90");
   const [created, setCreated] = useState<PatCreated | null>(null);
+  // The account that minted the displayed result; the raw token stops
+  // rendering the moment the signed-in user is someone else.
+  const [createdFor, setCreatedFor] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [revoking, setRevoking] = useState<PatSummary | null>(null);
   // Synchronous double-submit latches. TanStack's isPending only flips after
@@ -147,18 +150,53 @@ function InteractivePatSettingsPage() {
 
   // While the only copy of a token is on screen (or is about to arrive),
   // navigating away or closing the tab must at least warn: the credential is
-  // unrecoverable afterwards.
+  // unrecoverable afterwards. The listener is installed imperatively from
+  // the synchronous submission moment — create.isPending renders one batch
+  // late, and closing the tab inside that window could mint a credential
+  // whose only raw copy is never shown to anyone.
+  const unloadGuardActiveRef = useRef(false);
+  const warnUnrecoverable = useCallback((event: BeforeUnloadEvent) => {
+    event.preventDefault();
+    // Safari/WebKit still relies on the legacy returnValue signal, while
+    // preventDefault covers modern Chromium and Firefox.
+    event.returnValue = true;
+  }, []);
+  const setUnloadGuard = useCallback(
+    (active: boolean) => {
+      if (unloadGuardActiveRef.current === active) return;
+      unloadGuardActiveRef.current = active;
+      if (active) {
+        window.addEventListener("beforeunload", warnUnrecoverable);
+      } else {
+        window.removeEventListener("beforeunload", warnUnrecoverable);
+      }
+    },
+    [warnUnrecoverable],
+  );
+  useEffect(() => () => setUnloadGuard(false), [setUnloadGuard]);
+  // Belt-and-braces next to the imperative install: once the pending state
+  // has actually rendered, the guard stays on even if this component were
+  // to re-mount while the request is in flight.
   useEffect(() => {
-    if (created === null && !create.isPending) return;
-    const warnUnrecoverable = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      // Safari/WebKit still relies on the legacy returnValue signal, while
-      // preventDefault covers modern Chromium and Firefox.
-      event.returnValue = true;
-    };
-    window.addEventListener("beforeunload", warnUnrecoverable);
-    return () => window.removeEventListener("beforeunload", warnUnrecoverable);
-  }, [created, create.isPending]);
+    if (create.isPending) setUnloadGuard(true);
+  }, [create.isPending, setUnloadGuard]);
+
+  const resetCreate = create.reset;
+  // A displayed result belongs to the account that minted it. If a session
+  // handoff (another tab replaced the shared cookie and /me converged onto
+  // the successor) lands while the show-once dialog is open, the initiating
+  // account's raw token must stop rendering — and the mutation cache copy
+  // must go with it.
+  useEffect(() => {
+    if (created === null) return;
+    if (createdFor !== (user?.id ?? null)) {
+      setCreated(null);
+      setCreatedFor(null);
+      setCopied(false);
+      resetCreate();
+      setUnloadGuard(false);
+    }
+  }, [created, createdFor, user?.id, resetCreate, setUnloadGuard]);
 
   function resetCreateForm() {
     setName("");
@@ -170,7 +208,9 @@ function InteractivePatSettingsPage() {
   function closeCreateDialog() {
     setCreateOpen(false);
     setCreated(null);
+    setCreatedFor(null);
     resetCreateForm();
+    setUnloadGuard(false);
     // Detach the mutation observer; combined with gcTime: 0 on the mutation
     // this drops the show-once token from the in-memory cache as soon as the
     // user closes the result view.
@@ -196,6 +236,7 @@ function InteractivePatSettingsPage() {
     if (createLatchedRef.current || create.isPending) return;
     const days = EXPIRY_CHOICES.find((choice) => choice.value === expiry)?.days;
     createLatchedRef.current = true;
+    setUnloadGuard(true);
     try {
       const result = await create.mutateAsync({
         name: name.trim(),
@@ -203,7 +244,11 @@ function InteractivePatSettingsPage() {
         expires_in_days: days ?? null,
       });
       setCreated(result);
+      setCreatedFor(user?.id ?? null);
     } catch (err) {
+      // No token copy is (or will be) on screen for these outcomes; the
+      // result view keeps its own guard via created above.
+      setUnloadGuard(false);
       if (err instanceof UnauthorizedError) return;
       if (err instanceof PatStoreUnavailableError) {
         // The backend switched to (or restarted on) the memory store: close

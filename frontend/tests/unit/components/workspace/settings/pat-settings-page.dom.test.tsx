@@ -78,11 +78,17 @@ const PatStoreUnavailableError = rs.hoisted(() => {
 
 const authMockState = rs.hoisted(() => ({
   authDisabled: false,
+  // Mutable on purpose: the account-handoff regression needs to change the
+  // authenticated user between renders.
+  userId: "test-user" as string,
 }));
 
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({
-    user: { id: "test-user", auth_disabled: authMockState.authDisabled },
+    user: {
+      id: authMockState.userId,
+      auth_disabled: authMockState.authDisabled,
+    },
   }),
 }));
 
@@ -218,6 +224,7 @@ afterEach(() => {
   patsMockState.revokeMutate = async () => undefined;
   staticModeMockState.enabled = false;
   authMockState.authDisabled = false;
+  authMockState.userId = "test-user";
   toastMockState.error.mockReset();
   toastMockState.success.mockReset();
   cleanup();
@@ -337,6 +344,71 @@ describe("PatSettingsPage", () => {
 
     expect(screen.getByRole("dialog")).toBeDefined();
     expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("installs the unload warning synchronously with the submission click", () => {
+    // The guard must be active from the click itself: create.isPending
+    // renders one batch late, and closing the tab inside that synchronous
+    // window could mint a credential whose only raw copy is never shown.
+    const mutate = rs.fn(() => new Promise<never>(() => undefined));
+    patsMockState.createMutate = mutate;
+
+    const { unmount } = renderWithQueryClient(<PatSettingsPage />);
+    fireEvent.click(screen.getByText("Create token"));
+    fireEvent.change(screen.getByPlaceholderText("e.g. ci-runner"), {
+      target: { value: "ci" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: "Read threads" }));
+    const submit = screen
+      .getAllByText("Create token")
+      .find((element) => element.closest("[role=dialog]") !== null)!;
+    fireEvent.click(submit);
+
+    // No await: still inside the pre-render latch window.
+    expectBeforeUnloadWarning();
+
+    // The listener is removed with the component, not left on window.
+    unmount();
+    const afterUnmount = new Event("beforeunload", {
+      cancelable: true,
+    }) as BeforeUnloadEvent;
+    window.dispatchEvent(afterUnmount);
+    expect(afterUnmount.defaultPrevented).toBe(false);
+  });
+
+  it("clears the show-once token when the account changes after creation", async () => {
+    // The mint itself was legitimate (it resolved while account A still
+    // held the page), but a later /me handoff to account B must stop
+    // rendering — and drop the cache copy of — A's raw token.
+    patsMockState.createMutate = async () => ({
+      id: "pat-1",
+      name: "ci",
+      scopes: ["threads:read"],
+      expires_at: null,
+      created_at: "2026-01-01T00:00:00Z",
+      token: "dcp_show_once_result",
+    });
+
+    const { rerender } = renderWithQueryClient(<PatSettingsPage />);
+    fireEvent.click(screen.getByText("Create token"));
+    fireEvent.change(screen.getByPlaceholderText("e.g. ci-runner"), {
+      target: { value: "ci" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: "Read threads" }));
+    const submit = screen
+      .getAllByText("Create token")
+      .find((element) => element.closest("[role=dialog]") !== null)!;
+    fireEvent.click(submit);
+    await waitFor(() => {
+      expect(screen.getByText("dcp_show_once_result")).toBeDefined();
+    });
+
+    authMockState.userId = "user-b";
+    rerender(<PatSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.queryByText("dcp_show_once_result")).toBeNull();
+    });
   });
 
   it("latches revoke the same way", () => {
