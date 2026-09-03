@@ -61,6 +61,7 @@ def make_sync_tool_wrapper(coro: Callable[..., Any], tool_name: str) -> Callable
     """
     config_param = _get_runnable_config_param(coro)
 
+    @functools.wraps(coro)
     def run_coroutine(*args: Any, **kwargs: Any) -> Any:
         try:
             loop = asyncio.get_running_loop()
@@ -79,6 +80,7 @@ def make_sync_tool_wrapper(coro: Callable[..., Any], tool_name: str) -> Callable
 
     if config_param:
 
+        @functools.wraps(coro)
         def sync_wrapper(*args: Any, config: RunnableConfig = None, **kwargs: Any) -> Any:
             if config is not None or config_param not in kwargs:
                 kwargs[config_param] = config
@@ -86,6 +88,7 @@ def make_sync_tool_wrapper(coro: Callable[..., Any], tool_name: str) -> Callable
 
         return sync_wrapper
 
+    @functools.wraps(coro)
     def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
         return run_coroutine(*args, **kwargs)
 
