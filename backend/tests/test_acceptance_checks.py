@@ -1221,6 +1221,13 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["holds"] is True
 
+    def test_cd_to_child_of_windows_drive_root_is_in_scope(self):
+        thread_data = {"workspace_path": "D:/"}
+        executions = [_bash_execution("cd d:/project && pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=thread_data, bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
     @pytest.mark.parametrize(
         "wrapped",
         (

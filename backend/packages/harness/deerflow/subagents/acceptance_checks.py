@@ -539,7 +539,8 @@ def _cd_target_in_scope(target: str, thread_data: Mapping[str, Any] | None) -> b
             normalized_root, root_is_windows_drive_absolute = normalized_root_result
             candidate_for_comparison = normalized.casefold() if is_windows_drive_absolute and root_is_windows_drive_absolute else normalized
             root_for_comparison = normalized_root.casefold() if is_windows_drive_absolute and root_is_windows_drive_absolute else normalized_root
-            if candidate_for_comparison == root_for_comparison or candidate_for_comparison.startswith(root_for_comparison + "/"):
+            root_prefix = root_for_comparison if root_for_comparison.endswith("/") else root_for_comparison + "/"
+            if candidate_for_comparison == root_for_comparison or candidate_for_comparison.startswith(root_prefix):
                 return True
         return False
     return ".." not in normalized.split("/")
