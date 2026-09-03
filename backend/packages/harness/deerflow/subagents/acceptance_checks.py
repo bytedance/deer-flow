@@ -55,6 +55,7 @@ the async caller offloads the whole check with ``asyncio.to_thread``.
 
 from __future__ import annotations
 
+import ntpath
 import os
 import posixpath
 import re
@@ -537,9 +538,11 @@ def _cd_target_in_scope(target: str, thread_data: Mapping[str, Any] | None) -> b
             if normalized_root_result is None:
                 continue
             normalized_root, root_is_windows_drive_absolute = normalized_root_result
-            candidate_for_comparison = normalized.casefold() if is_windows_drive_absolute and root_is_windows_drive_absolute else normalized
-            root_for_comparison = normalized_root.casefold() if is_windows_drive_absolute and root_is_windows_drive_absolute else normalized_root
-            root_prefix = root_for_comparison if root_for_comparison.endswith("/") else root_for_comparison + "/"
+            use_windows_comparison = is_windows_drive_absolute and root_is_windows_drive_absolute
+            candidate_for_comparison = ntpath.normcase(normalized) if use_windows_comparison else normalized
+            root_for_comparison = ntpath.normcase(normalized_root) if use_windows_comparison else normalized_root
+            separator = "\\" if use_windows_comparison else "/"
+            root_prefix = root_for_comparison if root_for_comparison.endswith(separator) else root_for_comparison + separator
             if candidate_for_comparison == root_for_comparison or candidate_for_comparison.startswith(root_prefix):
                 return True
         return False
