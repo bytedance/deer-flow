@@ -9,7 +9,9 @@
 #   with `DEER_FLOW_HOME` when you need a different writable data directory.
 # - Set `DEER_FLOW_DATE_TIMEZONE` to an IANA timezone name (e.g. `Asia/Shanghai`)
 #   when the conversation date injected into agents should follow a zone other
-#   than the server's local timezone.
+#   than the server's local timezone. It is read at runtime by the date-context
+#   middlewares (not a config-schema field), so it can be set on a container
+#   without mounting a `config.yaml`.
 # - Environment variables are available for all field values. Example: `api_key: $OPENAI_API_KEY`
 # - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
 

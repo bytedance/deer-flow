@@ -830,8 +830,13 @@ def test_format_current_date_honors_configured_timezone(monkeypatch):
     # 2026-09-02 20:30 UTC is 2026-09-03 04:30 in Asia/Shanghai: a UTC-only
     # formatter would report the wrong day for a Shanghai user.
     fixed_utc = datetime(2026, 9, 2, 20, 30, 0, tzinfo=UTC)
+
+    def fake_now(tz=None):
+        # datetime.now(tz) semantics: the fixed instant expressed in *tz*.
+        return fixed_utc.astimezone(tz) if tz is not None else fixed_utc.replace(tzinfo=None)
+
     with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
-        mock_dt.now.return_value = fixed_utc
+        mock_dt.now.side_effect = fake_now
         monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Asia/Shanghai")
 
         assert _format_current_date() == "2026-09-03, Thursday"
@@ -903,3 +908,25 @@ def test_date_middlewares_declare_resolved_local_zone_for_invalid_env(monkeypatc
 
     assert _declared_date_timezone_policies() == [expected, expected]
     assert "DEER_FLOW_DATE_TIMEZONE" in caplog.text
+
+
+def test_server_local_timezone_name_reads_tz_env(monkeypatch):
+    """A POSIX TZ env var naming a real zone resolves to its IANA key."""
+    from deerflow.agents.middlewares.dynamic_context_middleware import _server_local_timezone_name
+
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    assert _server_local_timezone_name() == "Asia/Shanghai"
+
+
+def test_effective_timezone_sentinel_uses_offset_when_local_zone_is_not_resolvable(monkeypatch):
+    """Without a recoverable IANA key the declaration pins a stable sentinel."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.setattr(module, "_server_local_timezone_name", lambda: None)
+    monkeypatch.setattr(module, "_server_local_utc_offset_minutes", lambda: 8 * 60)
+    monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
+
+    assert module._effective_date_timezone_name() == "server-local(+08:00)"
+
+    monkeypatch.setattr(module, "_server_local_utc_offset_minutes", lambda: -5 * 60 - 30)
+    assert module._effective_date_timezone_name() == "server-local(-05:30)"

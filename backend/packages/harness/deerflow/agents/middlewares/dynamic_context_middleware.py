@@ -30,6 +30,12 @@ By default the injected date follows the server's local timezone. Set the
 example ``Asia/Shanghai``) when the host clock runs UTC but the conversation
 date should follow another zone. Invalid values log a warning and fall back to
 the server-local timezone.
+
+The knob is deliberately an environment variable rather than a config field:
+it is read directly by both date-context middlewares at injection time, so an
+operator can point a container at another zone without mounting a config.yaml,
+and the lead and built-in-subagent paths can never drift apart on which zone
+they render.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ import os
 import re
 import uuid
 from datetime import datetime, tzinfo
+from pathlib import Path
 from typing import TYPE_CHECKING, override
 from zoneinfo import ZoneInfo
 
@@ -99,34 +106,57 @@ def _date_timezone() -> tzinfo | None:
         return None
 
 
-def _server_local_timezone_name() -> str:
-    """Best-effort canonical label for the server's local timezone.
+_ZONEINFO_TREE_PREFIXES = ("/usr/share/zoneinfo/", "/var/db/timezone/zoneinfo/")
 
-    ``zoneinfo.ZoneInfo`` (Linux/macOS) exposes its IANA key; fixed-offset
-    timezones (Windows) expose only a ``tzname`` label, which is used as-is.
+
+def _server_local_timezone_name() -> str | None:
+    """IANA key of the server's local zone, or ``None`` when not resolvable.
+
+    ``datetime.now().astimezone().tzinfo`` is always a plain fixed-offset
+    ``datetime.timezone`` (an abbreviation such as ``CST`` is ambiguous and
+    DST-churns), never a ``zoneinfo.ZoneInfo`` carrying an IANA key. The key is
+    instead read from the platform: the ``TZ`` environment variable when it
+    names a real zone, or the ``/etc/localtime`` symlink target on
+    Linux/macOS. Hosts with neither (Windows, stripped containers) return
+    ``None``.
     """
-    local_tz = datetime.now().astimezone().tzinfo
-    if local_tz is None:
-        return "UTC"
-    key = getattr(local_tz, "key", None)
-    if isinstance(key, str) and key:
-        return key
-    tzname = getattr(local_tz, "tzname", None)
-    if callable(tzname):
-        name = tzname(None)
-        if isinstance(name, str) and name:
-            return name
-    return "UTC"
+    tz_env = os.environ.get("TZ", "").strip()
+    if tz_env:
+        try:
+            return ZoneInfo(tz_env).key
+        except Exception:
+            pass
+    localtime = Path("/etc/localtime")
+    try:
+        if not localtime.is_symlink():
+            return None
+        target = str(localtime.resolve(strict=False))
+    except OSError:
+        return None
+    for prefix in _ZONEINFO_TREE_PREFIXES:
+        if target.startswith(prefix):
+            return target[len(prefix) :] or None
+    return None
+
+
+def _server_local_utc_offset_minutes() -> int:
+    """Current UTC offset of the server's local zone, in minutes."""
+    offset = datetime.now().astimezone().utcoffset()
+    return int(offset.total_seconds() // 60) if offset is not None else 0
 
 
 def _effective_date_timezone_name() -> str:
-    """Canonical label of the timezone the injected date actually follows.
+    """Stable label of the timezone the injected date actually follows.
 
-    Mirrors ``_date_timezone()``: a configured, valid ``DEER_FLOW_DATE_TIMEZONE`` wins
-    and is reported by its IANA key; otherwise the resolved server-local zone is
-    reported. Declaring the effective zone (never a bare ``probed``) lets the
-    assembly descriptor tell deployments that anchor the injected date differently
-    apart.
+    A configured, valid ``DEER_FLOW_DATE_TIMEZONE`` is reported by its IANA
+    key; without one, the server-local zone is reported by its resolved IANA
+    key when the platform exposes it. When no IANA key is recoverable the
+    declaration falls back to a ``server-local(±HH:MM)`` sentinel carrying the
+    current UTC offset - never a bare abbreviation, which would be ambiguous
+    (``CST`` is shared by China, US Central, and Cuba) and would churn across
+    DST. Declaring the effective zone (never a bare ``probed``) lets the
+    assembly descriptor tell deployments that anchor the injected date
+    differently apart.
     """
     tz = _date_timezone()
     if tz is not None:
@@ -134,14 +164,18 @@ def _effective_date_timezone_name() -> str:
         if isinstance(key, str) and key:
             return key
         return "UTC"
-    return _server_local_timezone_name()
+    local_key = _server_local_timezone_name()
+    if local_key is not None:
+        return local_key
+    offset_minutes = _server_local_utc_offset_minutes()
+    sign = "+" if offset_minutes >= 0 else "-"
+    offset_minutes = abs(offset_minutes)
+    return f"server-local({sign}{offset_minutes // 60:02d}:{offset_minutes % 60:02d})"
 
 
 def _format_current_date() -> str:
     tz = _date_timezone()
     now = datetime.now(tz) if tz is not None else datetime.now()
-    if tz is not None:
-        now = now.astimezone(tz)
     return now.strftime("%Y-%m-%d, %A")
 
 
