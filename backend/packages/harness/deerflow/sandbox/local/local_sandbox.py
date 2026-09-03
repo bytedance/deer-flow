@@ -593,9 +593,10 @@ class LocalSandbox(Sandbox):
     ) -> str:
         """Run one Windows-native program without a shell command string.
 
-        ``program_path``, ``args`` and ``cwd`` are virtual sandbox paths. The
-        caller is responsible for translating configured host spellings to
-        virtual paths before entering this method. ``.cmd``/``.bat`` files use
+        ``program_path``, ``args`` and ``cwd`` are virtual sandbox paths. When
+        ``cwd`` is omitted, the mapped parent directory of ``program_path`` is
+        used. The caller is responsible for translating configured host spellings
+        to virtual paths before entering this method. ``.cmd``/``.bat`` files use
         an explicit ``cmd.exe`` wrapper and ``.ps1`` files use PowerShell's
         ``-File`` mode; executables are launched directly with ``shell=False``.
         Batch paths are quoted separately from model arguments so common
@@ -613,9 +614,13 @@ class LocalSandbox(Sandbox):
             raise PermissionError("Program path must be inside a configured sandbox mount")
         resolved_program = self._resolve_path(program_path)
         resolved_args = [_resolve_program_argument(self, value) for value in (args or [])]
-        if cwd and self._find_path_mapping(cwd) is None:
+        effective_cwd = cwd
+        if effective_cwd is None:
+            normalized_program_path = str(program_path).replace("\\", "/")
+            effective_cwd = normalized_program_path.rsplit("/", 1)[0] or "/"
+        if self._find_path_mapping(effective_cwd) is None:
             raise PermissionError("working directory must be inside a configured sandbox mount")
-        resolved_cwd = self._resolve_path(cwd) if cwd else None
+        resolved_cwd = self._resolve_path(effective_cwd)
         resolved_program = resolved_program.replace("/", "\\")
         if resolved_cwd:
             resolved_cwd = resolved_cwd.replace("/", "\\")

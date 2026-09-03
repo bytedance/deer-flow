@@ -91,6 +91,28 @@ def test_execute_program_resolves_virtual_path_embedded_in_key_value_arg(monkeyp
     assert calls[0][1] == f"--config={_native_path(str(_LAUNCHER_ROOT / 'config.tfx-dms'))}"
 
 
+def test_execute_program_defaults_cwd_to_program_directory(monkeypatch) -> None:
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
+    calls: list[tuple[list[str], str | None]] = []
+
+    def fake_run(args, timeout, env=None, *, cwd=None):
+        calls.append((args, cwd))
+        return "ok", "", 0, False
+
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+    sandbox = LocalSandbox("t", [_MOUNT])
+
+    result = sandbox.execute_program("/root/tools/app.exe", ["config.yaml"])
+
+    assert result == "ok"
+    assert calls == [
+        (
+            [_windows_path(str(_LAUNCHER_ROOT / "tools" / "app.exe")), "config.yaml"],
+            _windows_path(str(_LAUNCHER_ROOT / "tools")),
+        )
+    ]
+
+
 def test_execute_program_uses_cmd_call_for_cmd_files(monkeypatch) -> None:
     monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     calls: list[list[str] | str] = []

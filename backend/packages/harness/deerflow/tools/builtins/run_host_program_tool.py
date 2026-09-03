@@ -84,7 +84,7 @@ def run_host_program_tool(
         file URLs must resolve inside a configured mount. Network URLs
         remain opaque. ``%``, ``^``, quotes, and control characters are not
         supported for batch arguments.
-        cwd: Optional working directory, as a configured virtual or Windows host path.
+        cwd: Optional working directory, as a configured virtual or Windows host path. When omitted, the program's mapped parent directory is used.
         timeout: Optional wall-clock timeout in seconds.
     """
     sandbox = None

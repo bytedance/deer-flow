@@ -1308,7 +1308,9 @@ For native program arguments, absolute, rooted, drive-relative, traversal, and
 local `file://` paths must resolve under configured mounts. The Windows wrapper
 rejects `%`, `^`, quotes, and control characters because `cmd.exe` expands or
 interprets those characters before launch; other shell metacharacters are
-quoted. Network URLs remain opaque arguments.
+quoted. Network URLs remain opaque arguments. When `cwd` is omitted,
+`run_host_program` starts the process in the program's mapped parent directory,
+so relative arguments resolve inside that mount.
 
 `AioSandboxProvider` normally detects thread-data mounts from its backend: local
 containers use the mounted gateway directories, while remote/provisioner

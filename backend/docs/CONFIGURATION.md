@@ -713,7 +713,9 @@ For native program arguments, absolute, rooted, drive-relative, traversal, and
 local `file://` paths must resolve under configured mounts. Network URLs remain
 opaque arguments. The Windows wrapper rejects `%`, `^`, quotes, and control
 characters because `cmd.exe` expands or interprets those characters before
-launch; other shell metacharacters are quoted.
+launch; other shell metacharacters are quoted. When `cwd` is omitted, the
+process starts in the program's mapped parent directory so relative arguments
+resolve inside the configured mount.
 
 Sandbox control-plane HTTP calls to loopback/private IPs, single-label cluster
 hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`
