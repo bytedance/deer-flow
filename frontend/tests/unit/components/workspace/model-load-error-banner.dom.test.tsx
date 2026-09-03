@@ -52,6 +52,7 @@ function createAuthState(user: User | null): ReturnType<typeof useAuth> {
     logout: rs.fn(),
     refreshUser: rs.fn(),
     applyUser: rs.fn(),
+    setLoginRedirectDeferral: rs.fn(),
   };
 }
 

@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { UnauthorizedError } from "@/core/api/errors";
-import { useAuth } from "@/core/auth/AuthProvider";
+import { useAuth, useDeferLoginRedirect } from "@/core/auth/AuthProvider";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -147,6 +147,13 @@ function InteractivePatSettingsPage() {
   const storeUnavailable = error instanceof PatStoreUnavailableError;
   const nameValid = name.trim().length > 0;
   const scopesValid = scopes.size > 0;
+
+  // The provider's automatic 401 login redirect must not fire while the
+  // show-once value is on screen (or about to arrive): the soft navigation
+  // unmounts this page without firing beforeunload, discarding the only
+  // copy of an active credential — session expiry does not revoke a minted
+  // token. The held redirect fires when the result view closes.
+  useDeferLoginRedirect(created !== null || create.isPending);
 
   // While the only copy of a token is on screen (or is about to arrive),
   // navigating away or closing the tab must at least warn: the credential is

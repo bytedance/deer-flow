@@ -94,6 +94,10 @@ rs.mock("@/core/auth/AuthProvider", () => ({
             auth_disabled: authMockState.authDisabled,
           },
   }),
+  // The page defers the provider's 401 login redirect while the show-once
+  // token is visible; the deferral mechanism has its own test file, so the
+  // page tests just need the import to exist.
+  useDeferLoginRedirect: () => undefined,
 }));
 
 rs.mock("@/core/i18n/hooks", () => ({

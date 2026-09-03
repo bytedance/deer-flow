@@ -27,6 +27,14 @@ interface AuthContextType {
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
   applyUser: (user: User | null) => void;
+  /**
+   * Register/clear a deferral of the automatic 401 login redirect. The PAT
+   * show-once flow uses it: a session expiring while the raw token is
+   * displayed must not navigate the workspace away and discard the
+   * credential's only copy — the pending redirect fires as soon as the
+   * last deferral clears (see {@link useDeferLoginRedirect}).
+   */
+  setLoginRedirectDeferral: (active: boolean) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -47,11 +55,17 @@ interface AuthProviderProps {
 export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(initialUser);
   const [isLoading, setIsLoading] = useState(false);
+  const [loginRedirectDeferrals, setLoginRedirectDeferrals] = useState(0);
+  const [pendingLoginRedirect, setPendingLoginRedirect] = useState<string | null>(null);
   const router = useRouter();
   const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
 
   const isAuthenticated = user !== null;
+
+  const setLoginRedirectDeferral = useCallback((active: boolean) => {
+    setLoginRedirectDeferrals((count) => (active ? count + 1 : Math.max(0, count - 1)));
+  }, []);
 
   /**
    * Apply a user value supplied by a caller (e.g. banner probe) that has
@@ -81,9 +95,18 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       } else if (res.status === 401) {
         // Session expired or invalid
         setUser(null);
-        // Redirect to login if on a protected route
+        // Redirect to login if on a protected route. A deferral holds the
+        // redirect: the soft navigation would unmount the deferring flow
+        // (the PAT show-once dialog) without firing beforeunload and
+        // discard the only copy of an active credential — session expiry
+        // does not revoke a minted token.
         if (pathname?.startsWith("/workspace")) {
-          router.push(buildLoginUrl(pathname));
+          const target = buildLoginUrl(pathname);
+          if (loginRedirectDeferrals > 0) {
+            setPendingLoginRedirect(target);
+          } else {
+            router.push(target);
+          }
         }
       }
     } catch (err) {
@@ -92,7 +115,14 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     } finally {
       setIsLoading(false);
     }
-  }, [staticMode, pathname, router]);
+  }, [staticMode, pathname, router, loginRedirectDeferrals]);
+
+  // The held redirect fires the moment the last deferral clears.
+  useEffect(() => {
+    if (pendingLoginRedirect === null || loginRedirectDeferrals > 0) return;
+    router.push(pendingLoginRedirect);
+    setPendingLoginRedirect(null);
+  }, [pendingLoginRedirect, loginRedirectDeferrals, router]);
 
   /**
    * Logout - call FastAPI logout endpoint and clear local state
@@ -167,9 +197,28 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     logout,
     refreshUser,
     applyUser,
+    setLoginRedirectDeferral,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+/**
+ * Defer the provider's automatic 401 login redirect while *active* is true.
+ * Deferrals are counted — multiple deferrers never cancel each other — and
+ * the held redirect fires as soon as the last one clears. Used by flows
+ * whose one-time output cannot survive an unmount: the PAT show-once token
+ * stays active after a session expires (expiry does not revoke it), so
+ * navigating its page away would permanently discard the credential's only
+ * raw copy.
+ */
+export function useDeferLoginRedirect(active: boolean) {
+  const { setLoginRedirectDeferral } = useAuth();
+  useEffect(() => {
+    if (!active) return;
+    setLoginRedirectDeferral(true);
+    return () => setLoginRedirectDeferral(false);
+  }, [active, setLoginRedirectDeferral]);
 }
 
 /**

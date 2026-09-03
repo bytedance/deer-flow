@@ -31,6 +31,7 @@ import {
 import {
   patQueriesForUser,
   patQueryKey,
+  RECONCILE_RETRY_INTERVAL_MS,
   useCreatePat,
   usePats,
   useRevokePat,
@@ -535,6 +536,61 @@ describe("usePats", () => {
     expect(
       queryClient.getQueryData(patQueryKey(identity("user-a", 1756700000))),
     ).toBeUndefined();
+  });
+
+  it("retries reconciliation after an inconclusive refresh", async () => {
+    // A stale-identity 409 triggers reconciliation; the /me refresh then
+    // fails transiently and clears the user. With the identity gone, the
+    // auth layer skips visibility refreshes and this hook's query is
+    // disabled — without a steady retry the page sits in the reconciling
+    // state until a hard reload.
+    rs.useFakeTimers();
+    try {
+      authMock.user = { id: "user-a", session_generation: 1756700000 };
+      fetchMock.mockResolvedValue(staleIdentityResponse());
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const { result, rerender } = renderHook(() => usePats(), {
+        wrapper: createWrapper(queryClient),
+      });
+
+      await act(async () => {
+        await rs.advanceTimersByTimeAsync(0);
+      });
+      // The stale rejection reconciled exactly once.
+      expect(refreshUserMock).toHaveBeenCalledTimes(1);
+
+      // The refresh failed transiently: the identity is cleared.
+      act(() => {
+        authMock.user = null;
+      });
+      rerender();
+      expect(result.current.reconciling).toBe(true);
+
+      // The recovery loop keeps asking /me on a cadence…
+      await act(async () => {
+        await rs.advanceTimersByTimeAsync(RECONCILE_RETRY_INTERVAL_MS);
+      });
+      expect(refreshUserMock).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await rs.advanceTimersByTimeAsync(RECONCILE_RETRY_INTERVAL_MS);
+      });
+      expect(refreshUserMock).toHaveBeenCalledTimes(3);
+
+      // …until a complete identity returns; then the loop stops.
+      act(() => {
+        authMock.user = { id: "user-a", session_generation: 1756800000 };
+      });
+      rerender();
+      const callsAfterRecovery = refreshUserMock.mock.calls.length;
+      await act(async () => {
+        await rs.advanceTimersByTimeAsync(RECONCILE_RETRY_INTERVAL_MS * 3);
+      });
+      expect(refreshUserMock.mock.calls.length).toBe(callsAfterRecovery);
+    } finally {
+      rs.useRealTimers();
+    }
   });
 
   it("reconciles instead of rendering when the fence rejects the stale identity", async () => {

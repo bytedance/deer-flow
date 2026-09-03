@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
 
@@ -63,10 +63,18 @@ function useCompleteSessionIdentity(): DeclaredSessionIdentity | null {
  */
 function useIdentityReconciler() {
   const { refreshUser } = useAuth();
-  return function reconcile() {
-    void refreshUser?.();
-  };
+  // Stable across renders (refreshUser itself is callback-stable) so the
+  // recovery interval below is not reset on every render. The optional
+  // fallback lives inside the callback so the dependency list stays static.
+  return useCallback(function reconcile() {
+    if (refreshUser) {
+      void refreshUser();
+    }
+  }, [refreshUser]);
 }
+
+/** Cadence of the inconclusive-refresh recovery loop in `usePats`. */
+export const RECONCILE_RETRY_INTERVAL_MS = 3000;
 
 export function usePats() {
   const identity = useCompleteSessionIdentity();
@@ -127,6 +135,32 @@ export function usePats() {
       reconciled.current = false;
     }
   }, [query.error, reconcile]);
+  // A reconciliation whose /me refresh fails transiently clears the
+  // identity — and the auth layer skips visibility refreshes once the user
+  // is null, so nothing would recover it by itself: the page would sit in
+  // the reconciling state until a hard reload. Retry on a steady cadence
+  // until /me answers with a complete identity again. The latch must
+  // outlive the query object that set it: clearing the identity swaps the
+  // query key to the pending placeholder, which takes query.error with it.
+  const staleRejectionSeenRef = useRef(false);
+  useEffect(() => {
+    if (query.error instanceof StaleSessionIdentityError) {
+      staleRejectionSeenRef.current = true;
+    }
+  }, [query.error]);
+  const identityIncomplete = identity === null;
+  useEffect(() => {
+    if (!identityIncomplete) {
+      // A complete identity returned — recovery succeeded; reset the latch.
+      staleRejectionSeenRef.current = false;
+      return;
+    }
+    if (!staleRejectionSeenRef.current) return;
+    const timer = setInterval(() => {
+      reconcile();
+    }, RECONCILE_RETRY_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [identityIncomplete, reconcile]);
   return {
     pats: query.data ?? [],
     isLoading: query.isLoading,
