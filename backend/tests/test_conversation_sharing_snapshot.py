@@ -543,13 +543,15 @@ def test_resanitize_rebuilds_the_strict_public_dto():
     """The public read boundary reconstructs the allowlisted DTO rather
     than spreading stored fields: an older, malformed, or sanitizer-defect
     snapshot must not serialize tool_calls, reasoning, run ids, debug
-    metadata, or any other non-contract field to anonymous callers."""
+    metadata, or any other non-contract field to anonymous callers.
+    Stored ids are regenerated — a source event/run/thread identifier in
+    ``message.id`` is not snapshot-local just because it is a string."""
     stored = {
         "version": 1,
         "debug": {"owner_user_id": "u-1"},
         "messages": [
             {
-                "id": "m1",
+                "id": "run-source-id-9",
                 "role": "user",
                 "content": "see /api/threads/t-secret/u now",
                 "tool_calls": [{"id": "call_1"}],
@@ -574,26 +576,60 @@ def test_resanitize_rebuilds_the_strict_public_dto():
 
 
 async def test_snapshot_reports_the_source_history_boundary():
-    """The build reports the highest source seq observed during the bounded
-    scan — including tool/hidden rows the public DTO drops — so the audit
-    column records the true source-history boundary a snapshot represents."""
-    pages = [
-        [_row(6, {"type": "tool", "content": '{"args": 1}'}), _row(7, {"type": "human", "content": "newest"})],
-        [_row(1, {"type": "human", "content": "hello"}), _row(2, {"type": "human", "content": "mid"})],
-    ]
-    calls = {"n": 0}
+    """The audit boundary is the highest raw seq the bounded scan consumed,
+    observed before visibility filtering: when the newest rows are hidden
+    (hidden run or middleware), the boundary still records them, not the
+    newest row that survived into the public DTO."""
 
-    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
-        page = pages[calls["n"]]
-        calls["n"] += 1
-        return page, calls["n"] < len(pages)
+    class FakeEventStore:
+        def __init__(self):
+            self.rows = [
+                {
+                    "seq": seq,
+                    "run_id": "hidden-run",
+                    "content": {"type": "human", "content": f"hidden-{seq}"},
+                    "metadata": {},
+                }
+                for seq in (10, 11, 12)
+            ] + [
+                {
+                    "seq": 1,
+                    "run_id": "visible-run",
+                    "content": {"type": "human", "content": "hello"},
+                    "metadata": {},
+                }
+            ]
+
+        async def list_messages(self, thread_id, *, limit, before_seq=None, after_seq=None, user_id=None):
+            assert after_seq is None
+            eligible = [row for row in self.rows if before_seq is None or row["seq"] < before_seq]
+            return eligible[-limit:]
+
+    class FakeRunManager:
+        async def list_successful_regenerate_sources(self, thread_id, *, user_id):
+            return {"hidden-run"}
+
+        async def list_edit_replay_visibility(self, thread_id, *, user_id):
+            return SimpleNamespace(hidden_source_run_ids=set(), hidden_attempt_run_ids=set())
+
+    from app.gateway.routers import thread_runs
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                run_event_store=FakeEventStore(),
+                run_manager=FakeRunManager(),
+            )
+        )
+    )
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        snapshot, source_last_seq = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        mp.setattr(thread_runs, "THREAD_MESSAGE_PAGE_SCAN_BATCH", 2)
+        snapshot, source_last_seq = await build_share_snapshot("thread-1", request=request, user_id="user-1")
 
-    assert source_last_seq == 7
-    assert [message["content"] for message in snapshot["messages"]] == ["hello", "mid", "newest"]
+    assert [message["content"] for message in snapshot["messages"]] == ["hello"]
+    # seq 12 is hidden — the boundary follows raw consumption, not the DTO.
+    assert source_last_seq == 12
 
 
 async def test_neutralize_preserves_public_content_with_separators():

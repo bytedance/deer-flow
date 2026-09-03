@@ -82,6 +82,10 @@ class _RawMessageScanBudget:
 
     limit: int
     scanned_rows: int = 0
+    # Highest raw seq observed before visibility filtering. The share
+    # snapshot's audit boundary follows raw consumption — hidden rows the
+    # pager discards still advance the scan.
+    max_seq: int | None = None
 
     def __post_init__(self) -> None:
         if self.limit < 0:
@@ -97,6 +101,12 @@ class _RawMessageScanBudget:
         self.scanned_rows += count
         if self.scanned_rows > self.limit:
             raise _RawMessageScanLimitExceeded(self.scanned_rows, self.limit)
+
+    def observe(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            seq = row.get("seq")
+            if isinstance(seq, int) and (self.max_seq is None or seq > self.max_seq):
+                self.max_seq = seq
 
 
 def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
@@ -1289,6 +1299,7 @@ async def _scan_visible_thread_messages(
             _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=None, scan_after=scan_after)
             if raw_scan_budget is not None:
                 raw_scan_budget.consume(len(raw))
+                raw_scan_budget.observe(raw)
             reached_before_bound = False
             for row in raw:
                 if before_seq is not None and row["seq"] >= before_seq:
@@ -1323,6 +1334,7 @@ async def _scan_visible_thread_messages(
         _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=scan_before, scan_after=None)
         if raw_scan_budget is not None:
             raw_scan_budget.consume(len(raw))
+            raw_scan_budget.observe(raw)
         for row in reversed(raw):
             if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
                 continue

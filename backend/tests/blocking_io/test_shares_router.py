@@ -99,7 +99,7 @@ async def test_create_and_public_resolve_cold_pepper_do_not_block_event_loop(
         return _USER_ID
 
     async def _snapshot(*_args, **_kwargs):
-        return _SNAPSHOT
+        return _SNAPSHOT, None
 
     monkeypatch.setattr(shares_router, "get_current_user", _current_user)
     monkeypatch.setattr(shares_router, "build_share_snapshot", _snapshot)

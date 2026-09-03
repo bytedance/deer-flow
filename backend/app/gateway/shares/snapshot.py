@@ -214,7 +214,6 @@ async def build_share_snapshot(
     pages: list[list[dict[str, Any]]] = []
     public_messages = 0
     rendered_bytes = 0
-    source_last_seq: int | None = None
     raw_scan_budget = _RawMessageScanBudget(_SNAPSHOT_MAX_SCANNED_ROWS)
     before_seq: int | None = None
     while True:
@@ -241,14 +240,6 @@ async def build_share_snapshot(
             ) from exc
         if not rows:
             break
-        # The audit boundary follows the scan, not the public DTO: tool and
-        # hidden rows advance it exactly like public ones.
-        page_max_seq = max(
-            (row["seq"] for row in rows if isinstance(row.get("seq"), int)),
-            default=None,
-        )
-        if page_max_seq is not None and (source_last_seq is None or page_max_seq > source_last_seq):
-            source_last_seq = page_max_seq
         page_messages = [_public_message(row) for row in rows]
         page_messages = [message for message in page_messages if message is not None]
         if page_messages:
@@ -287,12 +278,15 @@ async def build_share_snapshot(
             messages.append(message)
 
     logger.debug("Share snapshot for thread %s: %d visible messages", thread_id, len(messages))
+    # The audit boundary is the highest raw seq the bounded scan consumed —
+    # observed inside the pager before visibility filtering, so hidden rows
+    # advance it exactly like public ones.
     return (
         {
             "version": 1,
             "messages": messages,
         },
-        source_last_seq,
+        raw_scan_budget.max_seq,
     )
 
 
@@ -958,6 +952,9 @@ def resanitize_share_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     fields in an older, malformed, or sanitizer-defect record (tool_calls,
     reasoning, run ids, debug metadata) can never serialize to anonymous
     callers, and messages that do not conform to the contract are dropped.
+    Message ids are regenerated (``m1``, ``m2``, …) rather than trusted:
+    a stored id could be a source event, run, or thread identifier, and a
+    string check does not make it snapshot-local.
     """
     messages_value = snapshot.get("messages")
     messages: list[dict[str, str]] = []
@@ -966,15 +963,14 @@ def resanitize_share_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(message, dict):
                 continue
             role = message.get("role")
-            message_id = message.get("id")
             content = message.get("content")
             if role not in ("user", "assistant"):
                 continue
-            if not isinstance(content, str) or not isinstance(message_id, str):
+            if not isinstance(content, str):
                 continue
             messages.append(
                 {
-                    "id": message_id,
+                    "id": f"m{len(messages) + 1}",
                     "role": role,
                     "content": _neutralize_private_references(content),
                 }
