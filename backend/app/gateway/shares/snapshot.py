@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+from bisect import bisect_left
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import unquote
@@ -132,36 +133,30 @@ _HTML_TYPE5_OPEN_RE = re.compile(r"^ {0,3}<!\[CDATA\[")
 _HTML_TYPE5_CLOSE = "]]>"
 # Type 7: a complete open or closing tag alone on a line (checked only when
 # no other HTML kind matches — a `<script>`/`<div>` line is type 1/6, not 7).
-# The tag scan is quote-aware: `>` inside a quoted attribute value does not
-# end the tag (markdown-it accepts `<span title="a>b">` as a type-7 block).
-_HTML_TYPE7_OPEN_RE = re.compile(r"^ {0,3}(</?[A-Za-z][^<>\s]*)")
+# The complete HTML tag grammar decides: an opener is type 7 only if the
+# line *is* a well-formed tag, so a syntactically invalid `<span =foo>` is
+# an ordinary paragraph line and the fence behind it is a real code fence.
+# Quoted attribute values may carry `>` (markdown-it accepts
+# `<span title="a>b">` as a type-7 block), which the grammar tracks.
+_HTML_TAG_NAME = r"[A-Za-z][A-Za-z0-9-]*"
+_HTML_ATTR_NAME = r"[A-Za-z_:][A-Za-z0-9_.:-]*"
+_HTML_UNQUOTED_ATTR_VALUE = r"[^ \t\n\"'=<>`]+"
+_HTML_ATTR = (
+    rf"{_HTML_ATTR_NAME}"
+    rf"(?:[ \t]*=[ \t]*(?:{_HTML_UNQUOTED_ATTR_VALUE}|'[^']*'|\"[^\"]*\"))?"
+)
+_HTML_OPEN_TAG_RE = re.compile(rf"<{_HTML_TAG_NAME}(?:[ \t]+{_HTML_ATTR})*[ \t]*/?>")
+_HTML_CLOSE_TAG_RE = re.compile(rf"</{_HTML_TAG_NAME}[ \t]*>")
 
 
 def _is_complete_tag_line(content: str) -> bool:
     indent = 0
     while indent < len(content) and content[indent] == " " and indent < 3:
         indent += 1
-    body = content[indent:]
-    opener = _HTML_TYPE7_OPEN_RE.match(body)
-    if opener is None:
+    body = content[indent:].strip()
+    if not body:
         return False
-    i = opener.end(1)
-    quote: str | None = None
-    while i < len(body):
-        char = body[i]
-        if quote is not None:
-            if char == quote:
-                quote = None
-        elif char == '"':
-            quote = '"'
-        elif char == "'":
-            quote = "'"
-        elif char == ">":
-            return body[i + 1 :].strip() == ""
-        elif char == "<":
-            return False
-        i += 1
-    return False
+    return _HTML_OPEN_TAG_RE.fullmatch(body) is not None or _HTML_CLOSE_TAG_RE.fullmatch(body) is not None
 
 
 # Word-initial branches (``api/…``, ``mnt/…``) anchor a token on any
@@ -457,51 +452,36 @@ def _strict_public_text(message: Any) -> str:
     return ""
 
 
-def _find_equal_backtick_run(text: str, start: int) -> int | None:
-    """End index of the first backtick run whose length equals the run
-    ending just before *start*. Runs of other lengths are skipped (neither
-    closes the other) and backslashes inside the scanned content are
-    literal — a code span's content is opaque, so only an exact-length run
-    closes it. Callers bound the search to one paragraph."""
-    length = 0
-    probe = start - 1
-    while probe >= 0 and text[probe] == "`":
-        length += 1
-        probe -= 1
-    n = len(text)
-    j = start
-    while j < n:
-        char = text[j]
-        if char == "`":
-            run_end = j
-            while run_end < n and text[run_end] == "`":
-                run_end += 1
-            if run_end - j == length:
-                return run_end
-            j = run_end
-            continue
-        j += 1
-    return None
-
-
 def _commonmark_inline_code_spans(text: str) -> list[tuple[int, int]]:
-    """Inline code span extents per CommonMark, not per backtick matching:
+    """Inline code span extents per CommonMark, not just backtick matching:
     only an unescaped backtick run of length N closed by the next
     exactly-length-N run within this paragraph opens a span. Escaped
-    delimiters (``\\``), mismatched run lengths, and runs that never close
+    delimiters (``\\````), mismatched run lengths, and runs that never close
     are literal text — the renderer shows their content as prose, so
     ``<think>`` blocks hiding there are model reasoning and must not be
     protected from stripping into an anonymous snapshot. *text* must be a
     single paragraph (no block-interrupting lines) — `_code_regions`
     guarantees that."""
     spans: list[tuple[int, int]] = []
-    # A length-L opener that finds no closer rules out every later
-    # length-L opener in the same paragraph (identical remaining tail) —
-    # without this memo, a pathological message of alternating unclosed
-    # runs turns the scan quadratic on snapshot-sized text.
-    doomed_lengths: set[int] = set()
-    i = 0
     n = len(text)
+    # One escape-agnostic pass indexes every maximal backtick run by length;
+    # closing a length-L opener is then a bisect lookup instead of rescanning
+    # the tail. The old doomed-lengths memo only deduplicated repeated
+    # lengths, so successively longer unmatched runs walked the paragraph
+    # once per distinct length — quadratic on snapshot-sized text (80 KiB
+    # ≈ 1s, and the sanitizer runs again on every anonymous resolution).
+    runs_by_length: dict[int, list[int]] = {}
+    i = 0
+    while i < n:
+        if text[i] == "`":
+            run_end = i + 1
+            while run_end < n and text[run_end] == "`":
+                run_end += 1
+            runs_by_length.setdefault(run_end - i, []).append(i)
+            i = run_end
+        else:
+            i += 1
+    i = 0
     while i < n:
         char = text[i]
         if char == "\\":
@@ -510,16 +490,16 @@ def _commonmark_inline_code_spans(text: str) -> list[tuple[int, int]]:
         if char != "`":
             i += 1
             continue
-        run_end = i
+        run_end = i + 1
         while run_end < n and text[run_end] == "`":
             run_end += 1
-        length = run_end - i
-        close = None if length in doomed_lengths else _find_equal_backtick_run(text, run_end)
-        if close is not None:
+        starts = runs_by_length.get(run_end - i, ())
+        closer = bisect_left(starts, run_end)
+        if closer < len(starts):
+            close = starts[closer] + (run_end - i)
             spans.append((i, close))
             i = close
         else:
-            doomed_lengths.add(length)
             i = run_end
     return spans
 

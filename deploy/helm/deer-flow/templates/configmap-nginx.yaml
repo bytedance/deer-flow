@@ -43,6 +43,32 @@ data:
             "/api/shares/***:1" "$request_method $share_log_path $server_protocol";
             ":1"                "$request_method *** $server_protocol";
         }
+        # Routes whose request line may legitimately carry the bearer: the share
+        # page and resolve surfaces (path), and the login redirect target (the
+        # frontend encodes a return path like /share/dfs_… into next=, where the
+        # token itself survives encodeURIComponent).
+        map $uri $share_token_route_exempt {
+            default                        0;
+            "~^/(share|login)(/|$)"        1;
+            "~^/api/(langgraph/)?shares/"  1;
+        }
+        # Full-strength bearers only (urlsafe 32-byte tokens render ~43 chars):
+        # a short dfs_-shaped word in an ordinary query (hdfs_files…) stays
+        # maskable-in-logs without making the request refusable below.
+        map $request $request_carries_share_bearer {
+            default 0;
+            "~*(?:d|%64)(?:f|%66)(?:s|%73)(?:_|%5f)(?:[A-Za-z0-9_-]|%[0-9a-f]{2}){32,}" 1;
+        }
+        # A valid bearer has no business on any non-share route. nginx error_log
+        # embeds the raw request line, severity does not redact it (nginx trac
+        # #2193), and error_log cannot be format-masked — so such requests are
+        # refused with a plain 404 (a `return` writes no error_log entry; the
+        # access log still records it masked) instead of being proxied into
+        # upstream failures that would retain the token.
+        map "$share_token_route_exempt:$request_carries_share_bearer" $reject_share_token_request {
+            default  0;
+            "0:1"    1;
+        }
         map $http_referer $masked_referer {
             default $http_referer;
             "~*(?:d|%64)(?:f|%66)(?:s|%73)(?:_|%5f)(?:[A-Za-z0-9_-]|%[0-9a-f]{2})+" dfs_***;
@@ -83,6 +109,11 @@ data:
         {{- end }}
 
         server {
+            # Share-surface guard: see $reject_share_token_request above —
+            # at server level it covers every location at once.
+            if ($reject_share_token_request) {
+                return 404;
+            }
             listen 2026 default_server;
             listen [::]:2026 default_server;
             server_name _;
@@ -286,6 +317,20 @@ data:
             }
 
             location ^~ /share/ {
+                error_log /dev/null crit;
+                proxy_pass http://frontend_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            # The login page is the one exempt route whose request line
+            # legitimately carries a bearer (next=/share/dfs_… — the token
+            # itself survives encodeURIComponent), so it cannot be refused;
+            # its upstream errors get the same non-retaining error_log.
+            location ^~ /login {
                 error_log /dev/null crit;
                 proxy_pass http://frontend_upstream;
                 proxy_http_version 1.1;

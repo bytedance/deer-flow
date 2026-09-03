@@ -1444,3 +1444,46 @@ def test_strip_cross_tag_raw_text_close_strips_reasoning():
     attack = "<pre>\n</script>\n```\n</pre>\n```\n<think>secret-cross-tag</think> plain\n```\n"
     out = strip(attack)
     assert "secret-cross-tag" not in out, out
+
+
+def test_strip_invalid_type7_tags_do_not_open_html_blocks():
+    """A type-7 HTML block requires a *complete* tag per the HTML grammar:
+    a syntactically invalid opener such as ``<span =foo>`` is an ordinary
+    paragraph line, the fence behind it is a real code fence whose closer
+    ends the block, and the reasoning after the fence is stripped — not
+    preserved behind a phantom HTML block. A well-formed tag with a quoted
+    attribute carrying ``>`` still opens the block (markdown-it behavior)."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    invalid = "<span =foo>\n```\ncode\n\n```\n<think>secret-invalid-type7</think> visible"
+    out = strip(invalid)
+    assert "secret-invalid-type7" not in out, out
+    assert "visible" in out
+
+    valid = '<span data-x="a>b">\n```\ncode\n\n```\n<think>secret-real-html</think> after'
+    kept = strip(valid)
+    assert "secret-real-html" in kept, kept
+
+
+def test_unmatched_backtick_scan_stays_linear_on_growing_runs():
+    """Successively longer unmatched backtick runs must not rescan the
+    paragraph once per distinct length: the span scan indexes delimiter
+    runs in one pass, so a hostile paragraph near the share budget stays
+    subsecond during creation and every anonymous resolution instead of
+    blocking the ASGI event loop (80 KiB already cost ~1s pre-fix)."""
+    from time import monotonic
+
+    from app.gateway.shares.snapshot import _commonmark_inline_code_spans
+
+    runs = " ".join("`" * length for length in range(2, 1200))
+    text = runs + " `real` tail"
+
+    started = monotonic()
+    spans = _commonmark_inline_code_spans(text)
+    elapsed = monotonic() - started
+
+    # Every growing run is unmatched; the only real span is the trailing pair.
+    assert [text[start:close] for start, close in spans] == ["`real`"]
+    assert elapsed < 5.0

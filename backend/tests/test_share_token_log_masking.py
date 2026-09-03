@@ -489,3 +489,67 @@ def test_nginx_langgraph_alias_is_routed_non_retaining(config_path: Path) -> Non
     # The alias location must not be shadowed: the generic langgraph prefix
     # is shorter, so nginx's longest-prefix match picks this one.
     assert "proxy_pass" in block
+
+
+def _reject_from_conf(config: Path, request_line: str) -> str:
+    """Evaluate the shipped rejection maps for one request line."""
+    config_text = config.read_text(encoding="utf-8")
+    method, target, protocol = request_line.split(" ", 2)
+    normalized_uri = unquote(urlsplit(target).path)
+    exempt = _apply_nginx_map(config_text, "$uri", "share_token_route_exempt", normalized_uri, {"uri": normalized_uri})
+    carries = _apply_nginx_map(config_text, "$request", "request_carries_share_bearer", request_line, {"request": request_line})
+    variables = {
+        "share_token_route_exempt": exempt,
+        "request_carries_share_bearer": carries,
+    }
+    return _apply_nginx_map(
+        config_text,
+        '"$share_token_route_exempt:$request_carries_share_bearer"',
+        "reject_share_token_request",
+        f"{exempt}:{carries}",
+        variables,
+    )
+
+
+@pytest.mark.parametrize("config_path", NGINX_CONFIGS, ids=lambda path: path.name)
+def test_nginx_rejects_full_bearers_on_non_share_routes(config_path: Path) -> None:
+    """nginx error messages embed the full request line and error_log cannot
+    be format-masked, so a full-strength bearer on a non-share route is
+    refused outright at server level — a plain `return 404` writes no
+    error_log entry, and the access log still records the request masked —
+    instead of being proxied into upstream failures that would retain the
+    token through the parent error_log."""
+    config_text = config_path.read_text(encoding="utf-8")
+    assert re.search(r"if \(\$reject_share_token_request\) \{\s*return 404;", config_text) is not None
+
+    rejected = (
+        f"GET /api/models?next=/share/{_TOKEN} HTTP/1.1",  # the finding's shape
+        f"GET /docs?x={_TOKEN} HTTP/1.1",  # any other route
+        f"GET /threads/{_TOKEN} HTTP/1.1",  # bearer in the path
+    )
+    for request_line in rejected:
+        assert _reject_from_conf(config_path, request_line) == "1", request_line
+
+    allowed = (
+        f"GET /share/{_TOKEN} HTTP/1.1",  # the share page
+        f"GET /api/shares/{_TOKEN} HTTP/1.1",  # the resolve route
+        f"GET /api/langgraph/shares/{_TOKEN} HTTP/1.1",  # the alias route
+        f"GET /login?next=%2Fshare%2F{_TOKEN} HTTP/1.1",  # login redirect target
+        "GET /api/threads?search=hdfs_files HTTP/1.1",  # short dfs_-shaped word
+        "GET /api/models HTTP/1.1",  # ordinary request
+    )
+    for request_line in allowed:
+        assert _reject_from_conf(config_path, request_line) == "0", request_line
+
+
+@pytest.mark.parametrize("config_path", NGINX_CONFIGS, ids=lambda path: path.name)
+def test_nginx_login_location_is_non_retaining(config_path: Path) -> None:
+    """/login is the one exempt route whose request line legitimately carries
+    a bearer (the frontend encodes a return path like /share/dfs_… into
+    next=, and the token charset survives encodeURIComponent), so it cannot
+    be refused — its upstream errors need the same non-retaining error_log
+    as the share surfaces."""
+    block = _location_block(config_path.read_text(encoding="utf-8"), "/login")
+    directives = re.findall(r"error_log\s+([^;]+);", block)
+    assert directives == ["/dev/null crit"], f"{config_path.name} /login: expected exactly one error_log to /dev/null crit, got {directives}"
+    assert "proxy_pass" in block

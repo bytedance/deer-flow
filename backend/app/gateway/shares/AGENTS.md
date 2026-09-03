@@ -143,7 +143,16 @@ Token-in-URL leakage also has repository-level log and diagnostic controls
   share locations route `error_log` to `/dev/null`, a sink that cannot
   retain the token (pinned by an exclusive test — the block's ONLY
   error_log directive; share-route upstream diagnostics are the accepted
-  trade-off, the Gateway still logs its own side). Known residual: the
+  trade-off, the Gateway still logs its own side). Non-share routes cannot
+  carry a valid bearer at all: a server-level guard refuses
+  (`return 404`, which writes no `error_log` entry) any request whose raw
+  request line carries a full-strength token (32+ tail chars — short
+  dfs_-shaped words stay maskable-in-logs without becoming refusable),
+  except the surfaces where the bearer is legitimate: `/share/…`,
+  `/api/(langgraph/)?shares/…`, and `/login` (the frontend encodes a
+  return path like `/share/dfs_…` into `next=`, where the token charset
+  survives encodeURIComponent — that page gets its own non-retaining
+  `error_log`, pinned like the share locations). Known residual: the
   rare pre-location-selection error line (request line already parsed)
   still reaches the parent `error_log`, which cannot be masked or routed
   per-location — deployments that must close even that gap should scrub
