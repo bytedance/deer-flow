@@ -1200,6 +1200,17 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["checked"] is False
 
+    @pytest.mark.parametrize("target", ("C:/", "C:/../tmp", "D:/ws/../../tmp"))
+    def test_cd_to_windows_drive_root_or_above_root_is_unprovable(self, target):
+        thread_data = {
+            "workspace_path": "D:/ws/thread/user-data/workspace",
+            "outputs_path": "D:/ws/thread/user-data/outputs",
+        }
+        executions = [_bash_execution(f"cd {target} && pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=thread_data, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
     def test_cd_to_in_scope_windows_drive_path_is_case_insensitive(self):
         thread_data = {
             "workspace_path": "D:/ws/thread/user-data/workspace",

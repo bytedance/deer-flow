@@ -476,6 +476,32 @@ def _carries_summary_shape(text: str) -> bool:
     return bool(_TEST_PASS_SHAPE_RE.search(text) or _TEST_FAIL_SHAPE_RE.search(text) or _TEST_ZERO_SHAPE_RE.search(text))
 
 
+def _normalize_cd_scope_path(path: str) -> tuple[str, bool] | None:
+    """Normalize a bash ``cd`` path and retain drive-absolute provenance.
+
+    ``posixpath.normpath`` drops the slash from a bare Windows drive root and
+    collapses traversal above that root into a relative-looking path. Handle
+    drive-qualified absolute paths component by component so those spellings
+    remain absolute, and fail closed when ``..`` would cross the drive root.
+    """
+    slash_path = path.replace("\\", "/")
+    if not _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path):
+        return posixpath.normpath(slash_path), False
+
+    parts: list[str] = []
+    for part in slash_path[3:].split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+        else:
+            parts.append(part)
+    normalized = slash_path[:2] + "/" + "/".join(parts)
+    return normalized, True
+
+
 def _cd_target_in_scope(target: str, thread_data: Mapping[str, Any] | None) -> bool:
     """Whether a preceding ``cd`` target provably keeps the criterion's
     relative path-like targets resolving inside the thread's data roots.
@@ -496,8 +522,10 @@ def _cd_target_in_scope(target: str, thread_data: Mapping[str, Any] | None) -> b
         return False
     # These paths come from a bash command and therefore keep POSIX semantics
     # even when the acceptance checker itself runs on Windows.
-    normalized = posixpath.normpath(target.replace("\\", "/"))
-    is_windows_drive_absolute = bool(_WINDOWS_DRIVE_ABSOLUTE_RE.match(normalized))
+    normalized_target = _normalize_cd_scope_path(target)
+    if normalized_target is None:
+        return False
+    normalized, is_windows_drive_absolute = normalized_target
     if normalized.startswith("/") or is_windows_drive_absolute:
         roots = [VIRTUAL_PATH_PREFIX]
         for key in ("workspace_path", "outputs_path", "uploads_path"):
@@ -505,8 +533,10 @@ def _cd_target_in_scope(target: str, thread_data: Mapping[str, Any] | None) -> b
             if isinstance(value, str) and value:
                 roots.append(value)
         for root in roots:
-            normalized_root = posixpath.normpath(root.replace("\\", "/"))
-            root_is_windows_drive_absolute = bool(_WINDOWS_DRIVE_ABSOLUTE_RE.match(normalized_root))
+            normalized_root_result = _normalize_cd_scope_path(root)
+            if normalized_root_result is None:
+                continue
+            normalized_root, root_is_windows_drive_absolute = normalized_root_result
             candidate_for_comparison = normalized.casefold() if is_windows_drive_absolute and root_is_windows_drive_absolute else normalized
             root_for_comparison = normalized_root.casefold() if is_windows_drive_absolute and root_is_windows_drive_absolute else normalized_root
             if candidate_for_comparison == root_for_comparison or candidate_for_comparison.startswith(root_for_comparison + "/"):
