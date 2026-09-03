@@ -167,9 +167,44 @@ def test_context_window_attaches_langchain_profile(monkeypatch):
     _patch_factory(monkeypatch, cfg)
 
     FakeChatModel.captured_kwargs = {}
-    factory_module.create_chat_model(name="windowed")
+    created = factory_module.create_chat_model(name="windowed")
 
-    assert FakeChatModel.captured_kwargs.get("profile") == {"max_input_tokens": 200_000}
+    assert "profile" not in FakeChatModel.captured_kwargs
+    assert created.profile == {"max_input_tokens": 200_000}
+
+
+def test_context_window_merges_into_inferred_profile(monkeypatch):
+    """A provider-inferred profile must survive the context_window translation:
+    passing ``profile`` to the constructor would REPLACE the whole inferred
+    metadata (tool_calling, structured_output, output limits) with the single
+    key, changing LangChain feature selection. The declared window wins on
+    ``max_input_tokens`` itself — the operator declared it because the inferred
+    value doesn't match their gateway."""
+    inferred = {
+        "tool_calling": True,
+        "structured_output": True,
+        "max_output_tokens": 16_384,
+        "max_input_tokens": 999_999,
+    }
+
+    class _InferredProfileChatModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.profile = dict(inferred)
+
+    model = _make_model("windowed")
+    model.context_window = 200_000
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg, model_class=_InferredProfileChatModel)
+
+    created = factory_module.create_chat_model(name="windowed")
+
+    assert created.profile == {
+        "tool_calling": True,
+        "structured_output": True,
+        "max_output_tokens": 16_384,
+        "max_input_tokens": 200_000,
+    }
 
 
 def test_unset_context_window_leaves_profile_unset(monkeypatch):
@@ -179,9 +214,10 @@ def test_unset_context_window_leaves_profile_unset(monkeypatch):
     _patch_factory(monkeypatch, cfg)
 
     FakeChatModel.captured_kwargs = {}
-    factory_module.create_chat_model(name="opaque")
+    created = factory_module.create_chat_model(name="opaque")
 
     assert "profile" not in FakeChatModel.captured_kwargs
+    assert created.profile is None
 
 
 def test_context_window_does_not_clobber_explicit_profile(monkeypatch):
@@ -192,9 +228,10 @@ def test_context_window_does_not_clobber_explicit_profile(monkeypatch):
     _patch_factory(monkeypatch, cfg)
 
     FakeChatModel.captured_kwargs = {}
-    factory_module.create_chat_model(name="windowed", profile={"max_input_tokens": 100})
+    created = factory_module.create_chat_model(name="windowed", profile={"max_input_tokens": 100})
 
     assert FakeChatModel.captured_kwargs.get("profile") == {"max_input_tokens": 100}
+    assert created.profile == {"max_input_tokens": 100}
 
 
 def test_appends_all_tracing_callbacks(monkeypatch):

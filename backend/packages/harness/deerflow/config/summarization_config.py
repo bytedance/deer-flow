@@ -30,14 +30,19 @@ class ContextSize(BaseModel):
         (``count >= nan`` is always False), and ``nan <= 0`` is False so the
         positivity check alone would not catch them. Failing at config load turns
         these foot-guns into actionable errors, consistent with how fraction
-        clauses degrade (loudly) elsewhere. Absolute ``tokens`` / ``messages``
-        values must simply be positive to describe a usable threshold.
+        clauses degrade (loudly) elsewhere. Absolute ``tokens`` values must simply
+        be positive to describe a usable threshold, while ``messages`` values must
+        additionally be whole numbers: langchain slices the message list with them
+        (``messages[-keep:]``), and a float index raises ``TypeError: list indices
+        must be integers or slices, not float`` mid-compaction.
         """
         if not math.isfinite(self.value):
             raise ValueError(f"ContextSize value must be finite (got {self.value!r})")
         if self.type == "fraction":
             if not 0 < self.value <= 1:
                 raise ValueError(f"fraction ContextSize value must be in (0, 1] (got {self.value!r}) — write 0.8 for 80%, not 80")
+        elif self.type == "messages" and not isinstance(self.value, int):
+            raise ValueError(f"messages ContextSize value must be a whole number of messages (got {self.value!r}) — it slices the message list, so a float index would raise TypeError at compaction time")
         elif self.value <= 0:
             raise ValueError(f"{self.type} ContextSize value must be positive (got {self.value!r})")
         return self

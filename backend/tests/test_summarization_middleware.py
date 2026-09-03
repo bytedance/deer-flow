@@ -1272,6 +1272,17 @@ def test_context_size_rejects_non_finite_values() -> None:
         ContextSize(type="fraction", value=float("inf"))
 
 
+def test_context_size_rejects_fractional_message_counts() -> None:
+    """``messages`` values slice the message list at compaction time
+    (``messages[-keep:]``) — a float raises ``TypeError: list indices must be
+    integers or slices, not float`` mid-compaction, so config load must reject
+    it first. Even an integral float (``20.0``) is a float index to a slice."""
+    with pytest.raises(ValidationError, match="messages ContextSize value must be a whole number"):
+        ContextSize(type="messages", value=1.5)
+    with pytest.raises(ValidationError, match="messages ContextSize value must be a whole number"):
+        ContextSize(type="messages", value=20.0)
+
+
 def test_context_size_accepts_boundary_values() -> None:
     assert ContextSize(type="fraction", value=1).to_tuple() == ("fraction", 1)
     assert ContextSize(type="fraction", value=0.8).to_tuple() == ("fraction", 0.8)
