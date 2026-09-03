@@ -71,11 +71,13 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [手动上下文压缩](#手动上下文压缩)
     - [Sub-Agents](#sub-agents)
     - [Sandbox 与文件系统](#sandbox-与文件系统)
+    - [Agentic Browser Control](#agentic-browser-control)
     - [Context Engineering](#context-engineering)
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
   - [定时任务 (Scheduled Tasks)](#定时任务-scheduled-tasks)
+    - [升级说明](#升级说明)
   - [终端工作台 (TUI)](#终端工作台-tui)
   - [文档](#文档)
   - [⚠️ 安全使用](#️-安全使用)
@@ -670,6 +672,24 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 └── outputs/          ← 最终交付物
 ```
 
+### Agentic Browser Control
+
+读取页面和真正“使用”页面不是一回事。除了只读的 `web_fetch` 和 `web_capture` 工具外，DeerFlow 还提供一组可选的 agentic browser 工具，为每次对话保持一个实时浏览器会话，让 agent 真正操作页面——导航、读取可交互元素、点击、输入、提交表单，并在重度 JavaScript 站点上完成多步流程。
+
+每次操作都会返回页面可交互元素的最新快照，每个元素用稳定的 `[ref]` 编号寻址，因此 agent 基于刚观察到的内容行动，而不是猜测选择器。出站 URL 默认会经过 SSRF 筛查。该能力由 Playwright 提供，作为 optional extra 发布，以保持核心安装精简：
+
+```bash
+cd backend
+uv sync --extra browser
+uv run playwright install chromium
+```
+
+然后在 `config.yaml` 中取消注释 `group: browser` 工具项（`browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_get_text`、`browser_back`、`browser_screenshot`、`browser_close`）。`make dev` / Docker 启动时如果检测到已启用 `browser_navigate`，会在依赖同步时保留 `browser` extra。如果配置了 browser control 但缺少 Playwright，Gateway 会启动失败；`/api/features` 也会在后端无法提供该能力时隐藏 Browser UI。除本地、受信任的调试外，请保持 `headless: true` 和 `allow_private_addresses: false`。通过 `cdp_url` 连接到已有 Chrome 时，DeerFlow 无法强制执行子资源和重定向的 SSRF 防护，因此会 fail closed，除非显式设置 `allow_unguarded_cdp: true` 确认该风险；仅用于受信任的本地浏览器。Browser session 是进程本地的；启用该工具组时请保持 `GATEWAY_WORKERS=1`，因为普通 uvicorn worker 调度不提供 thread affinity。
+
+已有的、非 mock 的 Custom Agent 对话会在 browser control 可用、且该 agent 未限制 `tool_groups` 或已包含 `browser` 组时，展示同样的 Browser Live 控件。如果显式 allowlist 里没有 `browser`，这些控件会保持隐藏。
+
+workspace 的 Browser Live 客户端通过二进制 JPEG WebSocket 帧协商画面，每个显示刷新只保留最新的待处理帧，并回收被替换的 object URL。Gateway 控制消息仍是 JSON；未请求二进制能力的客户端继续使用旧的 JSON/base64 帧协议。
+
 ### Context Engineering
 
 **隔离的 Sub-Agent Context**：每个 sub-agent 都在自己独立的上下文里运行。它看不到主 agent 的上下文，也看不到其他 sub-agents 的上下文。这样做的目的很直接，就是让它只聚焦当前任务，不被无关信息干扰。
@@ -748,6 +768,16 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 第一版没有 `interval` 调度类型
 
 通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
+
+定时任务运行会读取 `config.yaml` 中的 `scheduler.recursion_limit`（默认 `1000`，与 Web UI 的交互式预算一致）。超过 `max_recursion_limit` 的值会被截断。该字段在 dispatch 时读取，因此下一次定时运行即可生效，无需重启 Gateway。
+
+后台调度器默认是单实例。多 Pod 部署时，请设置 `scheduler.multi_instance: true`，并使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`；启动和周期性恢复会保留仍由对端持有的运行，把过期的 launch claim 原子退回队列，只接管过期的 run lease，并隔离过期的 launch 写入。`max_concurrent_runs` 是跨 Pod 共享的全局上限，只计入 `launching` / `running` 的执行；等待中的 `queued` 行不占用该配额。没有这些配置时，请只在一个 Gateway Pod 上启用调度器。这些 scheduler 字段只在启动时生效；修改后需要一起重启所有 Gateway Pod。
+
+### 升级说明
+
+- 升级 `GATEWAY_WORKERS > 1` 且 `scheduler.enabled: true` 的部署前，要么只在一个 Gateway worker 上启用调度器，要么配置 `scheduler.multi_instance: true`，并同时使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`。升级后的 Gateway 会在启动时拒绝这种不安全组合，而不是静默启动。
+- 多实例模式下，`scheduler.max_concurrent_runs` 是集群级执行上限，而不是每个 Pod 各自一份。它计入 `launching` 和 `running` 的定时执行，因此容量不会随副本数倍增；持久化等待行仍在上限之外。
+- `scheduler.multi_instance` 以及相关的 scheduler、ownership、run-event 设置都只在启动时生效。变更需要协调重启所有 Gateway Pod；只改 ConfigMap 不会启用多实例恢复。
 
 ## 终端工作台 (TUI)
 

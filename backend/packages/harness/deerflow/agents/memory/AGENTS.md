@@ -5,11 +5,17 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 #### Main components
 
 - `manager.py` defines the backend-neutral `MemoryManager` contract.
-- `memory_middleware.py` queues filtered conversations for passive capture.
+- `agents/middlewares/memory_middleware.py` queues filtered conversations for passive capture.
 - `summarization_hook.py` connects memory work to the summarization lifecycle.
 - `tools.py` provides `memory_search`, `memory_add`, `memory_update`, and `memory_delete`.
 - `backends/deermem/` contains the default local backend.
 - `backends/mem0/`, `backends/openviking/`, and `backends/honcho/` contain optional adapters.
+
+`cancel_by_agent` cancels only pending debounce contexts in one user scope.
+`user_id=None` selects only the legacy no-user root.
+`agent_name=None` selects all agent buckets in that user scope.
+It does not interrupt a context after `_process_queue` removes it from `_items`.
+Broader cancellation must iterate known user scopes.
 
 Focused updater tests live in `backend/tests/test_memory_updater.py`.
 Backend-specific tests use `backend/tests/test_<backend>_memory_backend.py`.
@@ -18,6 +24,11 @@ Backend-specific tests use `backend/tests/test_<backend>_memory_backend.py`.
 
 Resolve users with `resolve_runtime_user_id(runtime)` in middleware and tools.
 This keeps Gateway and standalone LangGraph runs in the same user scope.
+
+Server-owned `langgraph_auth_user_id` takes precedence over ordinary client identity.
+Lead-agent construction normalizes it with `make_safe_user_id`.
+Memory, custom agents, user skills, skill policy, and prompt assembly reuse that identity.
+Gateway removes client-supplied `langgraph_auth_user` and `langgraph_auth_user_id` before graph construction.
 
 Gateway memory routes use `_resolve_memory_user_id(request)`.
 Trusted IM requests can act for the connection owner.
@@ -97,7 +108,9 @@ Unexpected files stop migration and remain on disk.
 The v1-to-v2 migration is one-way during application operation.
 Operators must stop DeerFlow and snapshot the storage root before migration.
 Every destructive migration first writes a verified `{manifest_filename}.v1.bak` file.
+Missing or mismatched backups abort migration without changing v1 data.
 Delete legacy agent JSON only after safe summary adoption or equality checks.
+Summary conflicts keep the source file and return an error.
 
 Run the proactive migration from `backend/`:
 
@@ -127,6 +140,7 @@ SQLite index data lives below `.retrieval/` and remains rebuildable.
 Chinese tokenization uses `jieba` only with the `memory-zh` extra.
 Malformed facts are logged and skipped during rebuild.
 A fatal rebuild failure keeps lazy retry active.
+A corrupt persistent database is deleted and recreated once.
 
 Storage sends adapter updates after it releases durable locks.
 Adapter failures mark the scope dirty.
@@ -136,6 +150,7 @@ Gateway startup schedules `DeerMem.warm_retrieval()` without delaying readiness.
 The first search can rebuild its exact scope.
 Shutdown waits one second for retrieval warm-up.
 It reserves the full configured timeout for canonical memory flush.
+The Gateway closes the derived SQLite connection after that flush.
 
 #### Extraction safety
 
@@ -162,6 +177,8 @@ Shadow mode records disagreement while enforcing confidence-only selection.
 
 Only deterministic message processing can confirm a fact.
 The updater's `factsToReinforce` output supplies only the fact binding.
+The deterministic gate matches a human message in the last six filtered batch messages.
+It does not require a separate signal-to-fact match.
 Search increments access heat only for facts it returns.
 Prompt injection and `get_context()` do not increment access heat.
 
@@ -174,6 +191,7 @@ Staleness review reuses the regular updater call.
 It can keep, remove, or extend eligible aged facts.
 Protected categories and non-aged facts cannot become removal targets.
 Apply the per-cycle removal cap after candidate validation.
+Do not extend a fact proposed for removal, even when the cap keeps that fact.
 Extension bounds must prevent date overflow.
 
 Consolidation also reuses the regular updater call.
