@@ -24,6 +24,10 @@ MAX_HEADER_BYTES = 65_536
 POLICY_DB = Path(os.environ.get("DEERFLOW_POLICY_DB", "/tmp/deerflow-network-policy.sqlite3"))
 
 
+class _InvalidHttpBody(ValueError):
+    pass
+
+
 def _connect_db() -> sqlite3.Connection:
     db = sqlite3.connect(POLICY_DB, timeout=5)
     db.execute("PRAGMA journal_mode=WAL")
@@ -217,6 +221,88 @@ async def _reject(writer: asyncio.StreamWriter, status: str, body: str) -> None:
     await writer.wait_closed()
 
 
+def _http_request_body_framing(header_lines: list[str]) -> tuple[str, int]:
+    """Return the strictly validated framing for one HTTP proxy request."""
+    content_lengths = [line.split(":", 1)[1].strip() for line in header_lines if line.lower().startswith("content-length:")]
+    transfer_encodings = [line.split(":", 1)[1].strip().lower() for line in header_lines if line.lower().startswith("transfer-encoding:")]
+    if content_lengths and transfer_encodings:
+        raise _InvalidHttpBody("Content-Length and Transfer-Encoding cannot be combined")
+    if transfer_encodings:
+        if transfer_encodings != ["chunked"]:
+            raise _InvalidHttpBody("Only a single chunked Transfer-Encoding is supported")
+        return ("chunked", 0)
+    if not content_lengths:
+        return ("fixed", 0)
+    if len(content_lengths) != 1 or not content_lengths[0].isdigit():
+        raise _InvalidHttpBody("Content-Length must be one non-negative decimal integer")
+    return ("fixed", int(content_lengths[0]))
+
+
+def _build_http_outbound_header(method: str, path: str, version: str, header_lines: list[str]) -> bytes:
+    """Strip proxy/hop headers and force the one-request upstream connection closed."""
+    connection_tokens = {token.strip().lower() for line in header_lines if line.lower().startswith("connection:") for token in line.split(":", 1)[1].split(",") if token.strip()}
+    if connection_tokens & {"host", "content-length", "transfer-encoding"}:
+        raise _InvalidHttpBody("Connection cannot remove request framing headers")
+    hop_headers = {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "upgrade",
+        *connection_tokens,
+    }
+    kept_headers = [line for line in header_lines if line and line.split(":", 1)[0].strip().lower() not in hop_headers]
+    kept_headers.append("Connection: close")
+    return f"{method} {path} {version}\r\n".encode("latin-1") + "\r\n".join(kept_headers).encode("latin-1") + b"\r\n\r\n"
+
+
+async def _copy_exact_request_bytes(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, length: int) -> None:
+    remaining = length
+    while remaining:
+        chunk = await asyncio.wait_for(reader.readexactly(min(remaining, 65_536)), timeout=15)
+        writer.write(chunk)
+        await writer.drain()
+        remaining -= len(chunk)
+
+
+async def _copy_chunked_request_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Relay exactly one strictly framed chunked body, including its trailers."""
+    while True:
+        line = await asyncio.wait_for(reader.readuntil(b"\r\n"), timeout=15)
+        if len(line) > MAX_HEADER_BYTES:
+            raise _InvalidHttpBody("Chunk header is too large")
+        size_token = line[:-2].split(b";", 1)[0].strip()
+        if not size_token or any(value not in b"0123456789abcdefABCDEF" for value in size_token):
+            raise _InvalidHttpBody("Invalid chunk size")
+        size = int(size_token, 16)
+        writer.write(line)
+        await writer.drain()
+        if size:
+            await _copy_exact_request_bytes(reader, writer, size)
+            terminator = await asyncio.wait_for(reader.readexactly(2), timeout=15)
+            if terminator != b"\r\n":
+                raise _InvalidHttpBody("Invalid chunk terminator")
+            writer.write(terminator)
+            await writer.drain()
+            continue
+
+        trailer_bytes = len(line)
+        while True:
+            trailer = await asyncio.wait_for(reader.readuntil(b"\r\n"), timeout=15)
+            trailer_bytes += len(trailer)
+            if trailer_bytes > MAX_HEADER_BYTES:
+                raise _InvalidHttpBody("Chunk trailers are too large")
+            if trailer != b"\r\n" and (trailer.startswith((b" ", b"\t")) or b":" not in trailer):
+                raise _InvalidHttpBody("Invalid chunk trailer")
+            writer.write(trailer)
+            await writer.drain()
+            if trailer == b"\r\n":
+                return
+
+
 def _parse_authority(authority: str, default_port: int) -> tuple[str, int] | None:
     parsed = urlsplit("//" + authority)
     try:
@@ -316,6 +402,9 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     except ValueError:
         await _reject(writer, "400 Bad Request", "Invalid proxy request line")
         return
+    if version not in {"HTTP/1.0", "HTTP/1.1"}:
+        await _reject(writer, "400 Bad Request", "Unsupported HTTP version")
+        return
 
     method = method.upper()
     if method == "CONNECT":
@@ -350,8 +439,15 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
         if host_authority != (host, port):
             await _reject(writer, "400 Bad Request", "HTTP Host header must match the approved proxy destination")
             return
-        kept_headers = [line for line in header_lines if line and not line.lower().startswith(("proxy-authorization:", "proxy-connection:"))]
-        outbound_header = f"{method} {path} {version}\r\n".encode("latin-1") + "\r\n".join(kept_headers).encode("latin-1") + b"\r\n\r\n"
+        if any(line.lower().startswith("expect:") for line in header_lines):
+            await _reject(writer, "417 Expectation Failed", "Expect is not supported by the sandbox network proxy")
+            return
+        try:
+            body_mode, body_length = _http_request_body_framing(header_lines)
+            outbound_header = _build_http_outbound_header(method, path, version, header_lines)
+        except _InvalidHttpBody as exc:
+            await _reject(writer, "400 Bad Request", str(exc))
+            return
 
     try:
         ipaddress.ip_address(host)
@@ -389,10 +485,33 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
             return
         upstream_writer.write(client_hello[1])
         await upstream_writer.drain()
-    else:
-        upstream_writer.write(outbound_header or b"")
+        await asyncio.gather(_relay(reader, upstream_writer), _relay(upstream_reader, writer))
+        return
+
+    upstream_writer.write(outbound_header or b"")
+    await upstream_writer.drain()
+    try:
+        if body_mode == "chunked":
+            await _copy_chunked_request_body(reader, upstream_writer)
+        else:
+            await _copy_exact_request_bytes(reader, upstream_writer, body_length)
+    except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError, _InvalidHttpBody) as exc:
+        upstream_writer.close()
+        await upstream_writer.wait_closed()
+        await _reject(writer, "400 Bad Request", str(exc) or "Invalid HTTP request body")
+        return
+    if upstream_writer.can_write_eof():
+        upstream_writer.write_eof()
         await upstream_writer.drain()
-    await asyncio.gather(_relay(reader, upstream_writer), _relay(upstream_reader, writer))
+    try:
+        # One request per client connection is intentional. Relaying arbitrary
+        # remaining client bytes would let a pipelined request bypass the next
+        # destination/Host policy check.
+        await _relay(upstream_reader, writer)
+    finally:
+        with contextlib.suppress(Exception):
+            upstream_writer.close()
+            await upstream_writer.wait_closed()
 
 
 async def handle_relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import ssl
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -114,3 +116,71 @@ async def test_tls_client_hello_sni_is_extracted_for_connect_enforcement() -> No
     parsed = await network_proxy._read_tls_client_hello(reader)
 
     assert parsed == ("pypi.org", wire)
+
+
+def test_http_request_framing_rejects_ambiguous_or_duplicate_lengths() -> None:
+    with pytest.raises(ValueError, match="cannot be combined"):
+        network_proxy._http_request_body_framing(["Content-Length: 4", "Transfer-Encoding: chunked"])
+    with pytest.raises(ValueError, match="one non-negative"):
+        network_proxy._http_request_body_framing(["Content-Length: 4", "Content-Length: 4"])
+
+
+@pytest.mark.anyio
+async def test_chunked_request_body_rejects_non_hex_size() -> None:
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"+1\r\na\r\n0\r\n\r\n")
+    reader.feed_eof()
+    writer = MagicMock()
+
+    with pytest.raises(ValueError, match="Invalid chunk size"):
+        await network_proxy._copy_chunked_request_body(reader, writer)
+
+
+@pytest.mark.anyio
+async def test_http_proxy_relays_exactly_one_request_per_connection(monkeypatch) -> None:
+    received: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+
+    async def upstream_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        header = await reader.readuntil(b"\r\n\r\n")
+        body = await reader.readexactly(4)
+        received.set_result(header + body)
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    upstream = await asyncio.start_server(upstream_handler, "127.0.0.1", 0)
+    upstream_port = upstream.sockets[0].getsockname()[1]
+
+    async def fake_resolve_public(_host: str, _port: int):
+        return (socket.AF_INET, ("127.0.0.1", upstream_port))
+
+    async def fake_open_public(_resolved, _port: int):
+        return await asyncio.open_connection("127.0.0.1", upstream_port)
+
+    monkeypatch.setattr(network_proxy, "resolve_public", fake_resolve_public)
+    monkeypatch.setattr(network_proxy, "_open_public", fake_open_public)
+    monkeypatch.setattr(network_proxy, "policy_allows", lambda host, port: (host, port) == ("allowed.example", 80))
+
+    proxy = await asyncio.start_server(network_proxy.handle_proxy, "127.0.0.1", 0)
+    proxy_port = proxy.sockets[0].getsockname()[1]
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer.write(b"POST http://allowed.example/first HTTP/1.1\r\nHost: allowed.example\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\ndataGET http://denied.example/second HTTP/1.1\r\nHost: denied.example\r\n\r\n")
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=2)
+        writer.close()
+        await writer.wait_closed()
+
+        upstream_request = await asyncio.wait_for(received, timeout=2)
+        assert b"POST /first HTTP/1.1" in upstream_request
+        assert b"Connection: close" in upstream_request
+        assert b"Connection: keep-alive" not in upstream_request
+        assert upstream_request.endswith(b"data")
+        assert b"denied.example" not in upstream_request
+        assert b"200 OK" in response
+    finally:
+        proxy.close()
+        upstream.close()
+        await proxy.wait_closed()
+        await upstream.wait_closed()

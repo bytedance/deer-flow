@@ -91,17 +91,9 @@ CI.
 
 ### AIO Sandbox Network Policy
 
-Restricted local AIO sandboxes use a per-sandbox Docker internal bridge plus a
-trusted `network_proxy.py` sidecar. The sandbox container itself must never
-publish its API port or join an egress-capable network; only the sidecar publishes
-the fixed API relay. The proxy must resolve destinations itself and reject any
-answer set containing loopback, private, link-local, metadata, or other
-non-global addresses before connecting. Approval events come only from the
-sidecar policy database, never from model-controlled tool output. Middleware
-may present one trusted event through the generic Human Input protocol, but it
-must not replay the failed tool call automatically. Restricted-mode lifecycle
-changes must cover create, discover, list/reconcile, health, and destroy for the
-sandbox container, sidecar, and internal network together.
+Restricted AIO keeps sandboxes on internal bridges; only the policy/API sidecar
+has egress. DB approvals never replay tools; policy labels fence reuse.
+CONNECT/SNI cannot inspect encrypted authority. Destroy all resources together.
 
 ### E2B Mount Uploads
 

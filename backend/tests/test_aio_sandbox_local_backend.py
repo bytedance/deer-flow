@@ -9,8 +9,10 @@ import pytest
 
 from deerflow.community.aio_sandbox.local_backend import (
     LocalContainerBackend,
+    _ContainerInspection,
     _format_container_command_for_log,
     _format_container_mount,
+    _NetworkInspection,
     _redact_container_command_for_log,
     _resolve_docker_bind_host,
 )
@@ -149,6 +151,124 @@ def test_restricted_network_requires_docker_engine_28(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    ("operating_system", "expected"),
+    [
+        ('"Docker Desktop"', True),
+        ('"Ubuntu 24.04.3 LTS"', False),
+    ],
+)
+def test_docker_desktop_detection_uses_daemon_operating_system(monkeypatch, operating_system, expected):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+
+    def fake_run(cmd, **_kwargs):
+        assert cmd == ["docker", "info", "--format", "{{json .OperatingSystem}}"]
+        return SimpleNamespace(stdout=operating_system, stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert backend._docker_server_is_desktop() is expected
+
+
+def _restricted_backend() -> LocalContainerBackend:
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    backend._runtime = "docker"
+    backend._network_mode = "allowlist"
+    backend._network_config = {
+        "mode": "allowlist",
+        "allow_domains": ["pypi.org", "files.pythonhosted.org"],
+        "approval": "prompt",
+        "temporary_grant_ttl": 300,
+        "proxy_image": "proxy:latest",
+    }
+    return backend
+
+
+def test_network_policy_digest_is_canonical_and_covers_effective_policy():
+    backend = _restricted_backend()
+    original = backend._network_policy_digest()
+
+    backend._network_config["allow_domains"] = ["files.pythonhosted.org", "pypi.org"]
+    assert backend._network_policy_digest() == original
+
+    backend._network_config["allow_domains"] = ["pypi.org"]
+    assert backend._network_policy_digest() != original
+
+
+def test_create_internal_network_isolates_both_gateway_families_and_labels_policy(monkeypatch):
+    backend = _restricted_backend()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(backend, "_inspect_network", lambda _name: None)
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(stdout="network-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._create_internal_network("sandbox-network", "sandbox-id")
+
+    create = commands[0]
+    assert "com.docker.network.bridge.gateway_mode_ipv4=isolated" in create
+    assert "com.docker.network.bridge.gateway_mode_ipv6=isolated" in create
+    assert f"deerflow.network_policy_digest={backend._network_policy_digest()}" in create
+
+
+def test_restricted_resource_status_requires_matching_policy_image_and_network():
+    backend = _restricted_backend()
+    sandbox_id = "existing"
+    container_name = "sandbox-existing"
+    proxy_name, network_name = backend._resource_names(sandbox_id)
+    inspections = {
+        container_name: _ContainerInspection(
+            created_at=1.0,
+            host_port=None,
+            labels=backend._restricted_labels(sandbox_id, "sandbox"),
+            image="sandbox:latest",
+            networks=frozenset({network_name}),
+        ),
+        proxy_name: _ContainerInspection(
+            created_at=1.0,
+            host_port=18080,
+            labels=backend._restricted_labels(sandbox_id, "network-proxy"),
+            image="proxy:latest",
+            networks=frozenset({"bridge", network_name}),
+        ),
+    }
+    network = _NetworkInspection(
+        driver="bridge",
+        internal=True,
+        labels=backend._restricted_labels(sandbox_id, "network"),
+        options={
+            "com.docker.network.bridge.gateway_mode_ipv4": "isolated",
+            "com.docker.network.bridge.gateway_mode_ipv6": "isolated",
+        },
+    )
+    backend._inspect_network = lambda _name: network
+
+    assert backend._restricted_resources_status(sandbox_id, inspections=inspections) == "compatible"
+
+    inspections[proxy_name] = _ContainerInspection(
+        created_at=1.0,
+        host_port=18080,
+        labels={**backend._restricted_labels(sandbox_id, "network-proxy"), "deerflow.network_policy_digest": "stale"},
+        image="proxy:latest",
+        networks=frozenset({"bridge", network_name}),
+    )
+    assert backend._restricted_resources_status(sandbox_id, inspections=inspections) == "mismatch"
+
+
 def test_restricted_sandbox_has_no_published_port_and_forces_proxy_env(monkeypatch):
     backend = LocalContainerBackend(
         image="sandbox:latest",
@@ -188,7 +308,8 @@ def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
         environment={},
     )
     backend._network_mode = "allowlist"
-    monkeypatch.setattr(backend, "_create_internal_network", lambda _name: None)
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "missing")
+    monkeypatch.setattr(backend, "_create_internal_network", lambda _name, _sandbox_id: None)
     monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
     captured: dict[str, object] = {}
 
@@ -207,6 +328,22 @@ def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
     assert environment["HTTPS_PROXY"] == f"http://{proxy_name}:3128"
     assert environment["ALL_PROXY"] == f"http://{proxy_name}:3128"
     assert environment["PROXY_SERVER"] == f"{proxy_name}:3128"
+
+
+def test_restricted_start_recreates_resources_with_stale_policy(monkeypatch):
+    backend = _restricted_backend()
+    cleaned: list[str] = []
+    created: list[tuple[str, str]] = []
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "mismatch")
+    monkeypatch.setattr(backend, "_cleanup_restricted_resources", cleaned.append)
+    monkeypatch.setattr(backend, "_create_internal_network", lambda name, sandbox_id: created.append((name, sandbox_id)))
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
+
+    assert backend._start_restricted_sandbox("stale", "sandbox-stale", 18080, None, config_mount_exclusion_root=None) == "container-id"
+
+    assert cleaned == ["stale"]
+    assert created == [(backend._resource_names("stale")[1], "stale")]
 
 
 def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatch):
@@ -849,6 +986,7 @@ def test_restricted_discovery_uses_proxy_relay_port(monkeypatch):
     backend._network_mode = "allowlist"
     proxy_name, _ = backend._resource_names("existing")
     monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "compatible")
     monkeypatch.setattr(backend, "_get_container_port", lambda name: 18080 if name == proxy_name else None)
     monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
 
@@ -857,6 +995,57 @@ def test_restricted_discovery_uses_proxy_relay_port(monkeypatch):
     assert info is not None
     assert info.container_name == "sandbox-existing"
     assert info.sandbox_url == "http://localhost:18080"
+
+
+def test_restricted_discovery_removes_resources_with_stale_policy(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._network_mode = "allowlist"
+    cleaned: list[str] = []
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "mismatch")
+    monkeypatch.setattr(backend, "_cleanup_restricted_resources", cleaned.append)
+
+    assert backend.discover("stale") is None
+    assert cleaned == ["stale"]
+
+
+def test_restricted_health_rejects_resources_with_stale_policy(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._network_mode = "allowlist"
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "mismatch")
+
+    assert not backend.is_alive(
+        SandboxInfo(
+            sandbox_id="stale",
+            sandbox_url="http://localhost:18080",
+            container_name="sandbox-stale",
+        )
+    )
+
+
+def test_restricted_list_reconciliation_removes_resources_with_stale_policy(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._network_mode = "allowlist"
+    proxy_name, _ = backend._resource_names("stale")
+    cleaned: list[str] = []
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="sandbox-stale\n", stderr="", returncode=0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda _names, **_kwargs: {
+            "sandbox-stale": _ContainerInspection(1.0, None, {}, "sandbox:latest", frozenset()),
+            proxy_name: _ContainerInspection(1.0, 18080, {}, "proxy:latest", frozenset()),
+        },
+    )
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id, **_kwargs: "mismatch")
+    monkeypatch.setattr(backend, "_cleanup_restricted_resources", cleaned.append)
+
+    assert backend.list_running() == []
+    assert cleaned == ["stale"]
 
 
 def test_restricted_destroy_stops_pair_and_removes_internal_network(monkeypatch):
@@ -1228,8 +1417,10 @@ def test_restricted_network_proxy_enforces_and_approves_real_traffic(monkeypatch
     proxy_url = f"http://{proxy_name}:3128"
 
     try:
-        backend._create_internal_network(network_name)
+        assert backend._restricted_resources_status(sandbox_id) == "missing"
+        backend._create_internal_network(network_name, sandbox_id)
         backend._start_network_proxy(proxy_name, network_name, container_name, port, sandbox_id)
+        sandbox_labels = backend._restricted_labels(sandbox_id, "sandbox")
         sandbox = subprocess.run(
             [
                 "docker",
@@ -1240,6 +1431,7 @@ def test_restricted_network_proxy_enforces_and_approves_real_traffic(monkeypatch
                 network_name,
                 "--name",
                 container_name,
+                *(item for key, value in sandbox_labels.items() for item in ("--label", f"{key}={value}")),
                 "-e",
                 f"HTTP_PROXY={proxy_url}",
                 "-e",
@@ -1259,6 +1451,10 @@ def test_restricted_network_proxy_enforces_and_approves_real_traffic(monkeypatch
             timeout=60,
         )
         assert sandbox.returncode == 0, sandbox.stderr
+        assert backend._restricted_resources_status(sandbox_id) == "compatible"
+        backend._network_config["allow_domains"] = ["changed.example"]
+        assert backend._restricted_resources_status(sandbox_id) == "mismatch"
+        backend._network_config["allow_domains"] = ["pypi.org"]
 
         sandbox_url = f"http://127.0.0.1:{port}"
         deadline = time.time() + 20
