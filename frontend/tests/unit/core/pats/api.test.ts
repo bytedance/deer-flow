@@ -127,7 +127,12 @@ test("listPats maps a 503 memory-backend response to PatStoreUnavailableError", 
 
 test("createPat maps a 503 memory-backend response to PatStoreUnavailableError", async () => {
   stubFetch([
-    new Response(JSON.stringify({ detail: "no store" }), { status: 503 }),
+    new Response(
+      JSON.stringify({
+        detail: "Personal access tokens require a configured database",
+      }),
+      { status: 503 },
+    ),
   ]);
 
   const { createPat, PatStoreUnavailableError } =
@@ -140,7 +145,12 @@ test("createPat maps a 503 memory-backend response to PatStoreUnavailableError",
 
 test("revokePat maps a 503 memory-backend response to PatStoreUnavailableError", async () => {
   stubFetch([
-    new Response(JSON.stringify({ detail: "no store" }), { status: 503 }),
+    new Response(
+      JSON.stringify({
+        detail: "Personal access tokens require a configured database",
+      }),
+      { status: 503 },
+    ),
   ]);
 
   const { revokePat, PatStoreUnavailableError } =

@@ -24,6 +24,8 @@ rs.mock("@/core/auth/AuthProvider", () => ({
 
 import {
   MissingSessionIdentityError,
+  PatStoreUnavailableError,
+  SessionChangedDuringCreateError,
   StaleSessionIdentityError,
 } from "@/core/pats/api";
 import {
@@ -173,6 +175,104 @@ describe("useCreatePat", () => {
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("withholds the show-once token when the account changes mid-mint", async () => {
+    // The POST passed the fence as user-a, but another tab replaced the
+    // shared cookie and this tab's /me refresh already flipped the React
+    // user to user-b before the response resolved. The raw token is
+    // user-a's credential; returning it would render it inside user-b's
+    // settings UI where it could be copied as user-b's own.
+    let resolveCreate!: (value: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result, rerender } = renderHook(() => useCreatePat(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    const pending = result.current.mutateAsync({
+      name: "ci",
+      scopes: ["threads:read"],
+      expires_in_days: null,
+    });
+    // The mint must already be in flight (fetch issued with user-a's
+    // declaration) before the account flips, and the hook must re-render
+    // so the latest-identity ref sees the successor.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    act(() => {
+      authMock.user = { id: "user-b", session_generation: 1756800000 };
+    });
+    rerender();
+    await act(async () => {
+      resolveCreate(
+        Response.json({
+          id: "pat-1",
+          name: "ci",
+          scopes: ["threads:read"],
+          expires_at: null,
+          created_at: "2026-01-01T00:00:00Z",
+          token: "dcp_raw_show_once_value",
+        }),
+      );
+      await expect(pending).rejects.toBeInstanceOf(
+        SessionChangedDuringCreateError,
+      );
+    });
+    expect(result.current.data).toBeUndefined();
+  });
+
+  it("still exposes the token when only the same user's generation advanced", async () => {
+    // A same-account session replacement does not reinterpret the result:
+    // the minted credential belongs to the same user either way, so the
+    // generation component of the identity is deliberately not compared.
+    let resolveCreate!: (value: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result, rerender } = renderHook(() => useCreatePat(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    const pending = result.current.mutateAsync({
+      name: "ci",
+      scopes: ["threads:read"],
+      expires_in_days: null,
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    act(() => {
+      authMock.user = { id: "user-a", session_generation: 1756900000 };
+    });
+    rerender();
+    await act(async () => {
+      resolveCreate(
+        Response.json({
+          id: "pat-1",
+          name: "ci",
+          scopes: ["threads:read"],
+          expires_at: null,
+          created_at: "2026-01-01T00:00:00Z",
+          token: "dcp_raw_show_once_value",
+        }),
+      );
+      const created = await pending;
+      expect(created.token).toBe("dcp_raw_show_once_value");
+    });
+    await waitFor(() => {
+      expect(result.current.data?.token).toBe("dcp_raw_show_once_value");
+    });
+  });
 });
 
 describe("usePats", () => {
@@ -288,6 +388,62 @@ describe("usePats", () => {
       expect(result.current.reconciling).toBe(true);
       cleanup();
     }
+  });
+
+  it("retries a non-canonical 503 instead of pinning the store banner", async () => {
+    // Only deps.py's canonical "Personal access tokens require a configured
+    // database" means the memory backend. A proxy or load balancer 503 with
+    // any other body is transient: it must walk the retry path and recover
+    // when the next attempt succeeds — not suppress retries and hide token
+    // creation behind the database-required banner.
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: "Service Temporarily Unavailable" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(Response.json([summary("pat-a")]));
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result } = renderHook(() => usePats(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(
+      () => {
+        expect(result.current.pats.map((pat) => pat.id)).toEqual(["pat-a"]);
+      },
+      // TanStack's first retry delay is 1s; the default waitFor timeout
+      // would race it.
+      { timeout: 5000 },
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("treats only the canonical store-unavailable detail as permanent", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: "Personal access tokens require a configured database",
+        }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result } = renderHook(() => usePats(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => {
+      expect(result.current.error).toBeInstanceOf(PatStoreUnavailableError);
+    });
+    // Permanent deployment state: exactly one request, no retry walk.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("recovers on the new generation's key after the fence rejects a replaced session", async () => {

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
 
@@ -9,6 +9,7 @@ import {
   MissingSessionIdentityError,
   PatStoreUnavailableError,
   revokePat,
+  SessionChangedDuringCreateError,
   StaleSessionIdentityError,
 } from "./api";
 import type { DeclaredSessionIdentity } from "./api";
@@ -141,15 +142,38 @@ export function useCreatePat() {
   const { user } = useAuth();
   const identity = useCompleteSessionIdentity();
   const reconcile = useIdentityReconciler();
+  // The identity as of the most recent commit. The mutationFn closure that
+  // starts a mint freezes the initiating identity, but the fence decision
+  // at resolution time must read whatever /me has converged onto by then —
+  // a render-phase closure would still be the initiating one.
+  const identityRef = useRef<DeclaredSessionIdentity | null>(identity);
+  useLayoutEffect(() => {
+    identityRef.current = identity;
+  });
   return useMutation({
-    mutationFn: (request: CreatePatRequest) => {
+    mutationFn: async (request: CreatePatRequest) => {
       if (!identity) {
         // The page disables the controls; this guard enforces the contract:
         // an undeclared browser mint would bind the credential to whatever
         // account the cookie currently authenticates.
         throw new MissingSessionIdentityError();
       }
-      return createPat(request, identity);
+      const initiating = identity;
+      const created = await createPat(request, initiating);
+      // The POST passed the fence as the initiating account, so the minted
+      // credential is that account's. If the session this tab renders has
+      // since become a different account (or has no complete identity at
+      // all), exposing the raw token here would present the initiating
+      // account's credential inside the successor's settings UI, where it
+      // could be copied under the mistaken belief that it belongs to the
+      // signed-in user — withhold it. Only the user id is compared: a
+      // same-account session replacement does not reinterpret the result,
+      // the credential is that same user's either way.
+      const current = identityRef.current;
+      if (current?.userId !== initiating.userId) {
+        throw new SessionChangedDuringCreateError();
+      }
+      return created;
     },
     onSuccess: () => {
       // Deliberately NOT returned: TanStack awaits promises returned from

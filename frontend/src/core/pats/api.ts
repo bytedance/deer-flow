@@ -72,8 +72,41 @@ export function sessionIdentityHeaders(
   };
 }
 
+/**
+ * The creation POST already passed the backend fence for the initiating
+ * account, but this tab's session changed before the result resolved
+ * (another tab replaced the shared cookie). The show-once token belongs to
+ * the initiating account and must not be rendered inside the successor's
+ * settings UI, so the result is withheld and the credential stays
+ * discoverable only through the initiating account's token list.
+ */
+export class SessionChangedDuringCreateError extends Error {
+  constructor() {
+    super("Session changed while creating the token");
+    this.name = "SessionChangedDuringCreateError";
+  }
+}
+
+// The one 503 that means "this deployment has no PAT store": deps.py's
+// get_pat_repo raises it verbatim when the process runs on the memory
+// backend. Any other 503 (reverse proxy, load balancer, briefly overloaded
+// gateway) is transient and must not pin the page to the permanent
+// store-unavailable banner.
+const PAT_STORE_UNAVAILABLE_DETAIL =
+  "Personal access tokens require a configured database";
+
 async function throwForPatFailure(res: Response, fallback: string) {
-  if (res.status === 503) throw new PatStoreUnavailableError();
+  if (res.status === 503) {
+    const body = (await res.json().catch(() => null)) as {
+      detail?: unknown;
+    } | null;
+    if (body?.detail === PAT_STORE_UNAVAILABLE_DETAIL) {
+      throw new PatStoreUnavailableError();
+    }
+    throw new Error(
+      typeof body?.detail === "string" ? body.detail : fallback,
+    );
+  }
   if (res.status === 409) {
     const body = (await res.json().catch(() => null)) as {
       detail?: unknown;
