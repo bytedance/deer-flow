@@ -266,9 +266,6 @@ def reset_mcp_tools_cache() -> None:
     Also closes all persistent MCP sessions so they are recreated on
     the next tool load.
     """
-    with _init_condition:
-        _reset_mcp_tools_cache_state()
-
     # Close persistent sessions – they will be recreated by the next
     # get_mcp_tools() call with the (possibly updated) connection config.
     #
@@ -282,13 +279,19 @@ def reset_mcp_tools_cache() -> None:
     # loop to finish teardown here: that is a self-deadlock (the loop can only
     # run the teardown after this synchronous call returns control to it).
     try:
-        from deerflow.mcp.session_pool import get_session_pool
+        from deerflow.mcp.session_pool import reset_session_pool
 
-        get_session_pool().close_all_sync()
+        with _init_condition:
+            # Retire the session-pool singleton before cache waiters can start a
+            # fresh initialization. Otherwise a concurrent initializer can build
+            # tool wrappers against the soon-to-be-detached pool and publish
+            # them after this reset replaces the singleton.
+            retired_pool = reset_session_pool()
+            _reset_mcp_tools_cache_state()
+
+        if retired_pool is not None:
+            retired_pool.close_all_sync()
     except Exception:
         logger.debug("Could not close MCP session pool on cache reset", exc_info=True)
 
-    from deerflow.mcp.session_pool import reset_session_pool
-
-    reset_session_pool()
     logger.info("MCP tools cache reset")

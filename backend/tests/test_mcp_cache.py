@@ -496,6 +496,48 @@ def test_reset_mcp_tools_cache_does_not_wait_for_in_flight_initialization(cache_
     assert not reset_thread.is_alive()
 
 
+def test_reset_mcp_tools_cache_retires_session_pool_before_releasing_initializers(cache_globals, monkeypatch):
+    """A reset must not let fresh tool wrappers publish with the retiring pool."""
+    from deerflow.mcp import session_pool as session_pool_module
+
+    real_reset_session_pool = session_pool_module.reset_session_pool
+    real_reset_session_pool()
+    old_pool = session_pool_module.get_session_pool()
+
+    cache_module._mcp_tools_cache = ["cached-tools"]
+    cache_module._cache_initialized = True
+    race_results = []
+    loaded_pools = []
+
+    async def _fake_tools():
+        loaded_pools.append(session_pool_module.get_session_pool())
+        return ["race-tools"]
+
+    def _reset_with_concurrent_initializer():
+        # This simulates the old interleaving: a cache waiter starts exactly
+        # while reset_mcp_tools_cache() is retiring the session-pool singleton.
+        race_results.append(asyncio.run(cache_module.initialize_mcp_tools()))
+        return real_reset_session_pool()
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+    monkeypatch.setattr(session_pool_module, "reset_session_pool", _reset_with_concurrent_initializer)
+
+    try:
+        cache_module.reset_mcp_tools_cache()
+
+        # The racing initializer should see the still-valid old cache and avoid
+        # rebuilding tools until the pool has been swapped. Pre-fix, cache state
+        # was cleared first, so this race loaded and published wrappers against
+        # ``old_pool`` just before the singleton was replaced.
+        assert race_results == [["cached-tools"]]
+        assert loaded_pools == []
+        assert cache_module._cache_initialized is False
+        assert cache_module._mcp_tools_cache is None
+        assert session_pool_module.get_session_pool() is not old_pool
+    finally:
+        real_reset_session_pool()
+
+
 def test_cancelled_initializer_releases_generation_claim(cache_globals, monkeypatch, tmp_path):
     """Cancelling the owner task must not strand waiters on its generation claim."""
     cfg = tmp_path / "extensions_config.json"
