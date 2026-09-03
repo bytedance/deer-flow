@@ -57,9 +57,6 @@ class _StubTaskRepo:
     async def update_after_launch(self, *_args, **_kwargs):
         return None
 
-    async def cancel_stuck_once_tasks(self, **_kwargs):
-        return 0
-
 
 class _StubRunRepo:
     async def list_queued_runs(self, *, limit):
