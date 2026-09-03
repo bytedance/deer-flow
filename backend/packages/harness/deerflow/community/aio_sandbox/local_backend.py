@@ -18,6 +18,7 @@ import secrets
 import shlex
 import socket
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -816,8 +817,6 @@ class LocalContainerBackend(SandboxBackend):
                 err_lower = err.lower()
                 # Port already bound: skip this port and retry with the next one.
                 if "port is already allocated" in err or "address already in use" in err_lower:
-                    if self._network_mode != "open":
-                        self._cleanup_restricted_resources(sandbox_id)
                     logger.warning(f"Port {port} rejected by Docker (already allocated), retrying with next port")
                     _next_start = port + 1
                     continue
@@ -827,7 +826,7 @@ class LocalContainerBackend(SandboxBackend):
                 if "is already in use by container" in err_lower or "conflict. the container name" in err_lower:
                     logger.warning(f"Container name {container_name} already in use, attempting to discover existing sandbox instance")
                     existing = self.discover(sandbox_id)
-                    if existing is not None:
+                    if existing is not None and not existing.requires_replacement:
                         return existing
                 raise
         else:
@@ -856,11 +855,20 @@ class LocalContainerBackend(SandboxBackend):
     ) -> str:
         proxy_name, network_name = self._resource_names(sandbox_id)
         egress_network_name = self._egress_network_name(sandbox_id)
+        resource_status = self._restricted_resources_status(sandbox_id)
+        if resource_status == "mismatch":
+            # Enumeration/provisioning is deliberately non-destructive. A
+            # mismatched set can still belong to a live Gateway from an older
+            # rolling-deployment revision, so only the provider may replace it
+            # after acquiring both teardown fences.
+            raise RuntimeError(f"Restricted sandbox {sandbox_id} requires ownership-fenced replacement")
+        if resource_status == "compatible":
+            existing = self.discover(sandbox_id)
+            if existing is not None and not existing.requires_replacement:
+                raise _ExistingRestrictedSandbox(existing)
+            raise RuntimeError(f"Restricted sandbox {sandbox_id} already exists but is not ready for adoption")
+
         try:
-            resource_status = self._restricted_resources_status(sandbox_id)
-            if resource_status == "mismatch":
-                logger.warning("Removing restricted sandbox %s because its persisted network policy no longer matches", sandbox_id)
-                self._cleanup_restricted_resources(sandbox_id)
             self._create_internal_network(network_name, sandbox_id)
             self._create_egress_network(egress_network_name, sandbox_id)
             self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token)
@@ -892,8 +900,13 @@ class LocalContainerBackend(SandboxBackend):
             message = str(exc).lower()
             if "is already in use by container" in message or "conflict. the container name" in message:
                 existing = self.discover(sandbox_id)
-                if existing is not None:
+                if existing is not None and not existing.requires_replacement:
                     raise _ExistingRestrictedSandbox(existing) from exc
+                # A peer may still be provisioning the deterministic resource
+                # set. Never roll it back just because its readiness check has
+                # not completed yet.
+                if self._restricted_resources_status(sandbox_id) != "missing":
+                    raise
             self._cleanup_restricted_resources(sandbox_id)
             raise
 
@@ -1083,11 +1096,12 @@ class LocalContainerBackend(SandboxBackend):
             sandbox_id: The deterministic sandbox ID (determines container name).
 
         Returns:
-            SandboxInfo if container found and healthy, None otherwise. A
-            failed runtime check (e.g. transient daemon error) also returns
-            None — discovery must not adopt a container it cannot verify, and
-            falling through to create keeps acquire recoverable instead of
-            hard-failing on a hiccup.
+            SandboxInfo if a container is found and healthy, or a non-adoptable
+            SandboxInfo with ``requires_replacement=True`` when its persisted
+            restricted-network policy is incompatible. A failed runtime check
+            (e.g. transient daemon error) returns None — discovery must not
+            adopt a container it cannot verify, and falling through to create
+            keeps acquire recoverable instead of hard-failing on a hiccup.
         """
         container_name = f"{self._container_prefix}-{sandbox_id}"
 
@@ -1100,34 +1114,42 @@ class LocalContainerBackend(SandboxBackend):
         if not running:
             return None
 
-        port_container = container_name
         request_headers: dict[str, str] = {}
         restricted_port: int | None = None
+        created_at = time.time()
         if self._network_mode != "open":
             proxy_name, _ = self._resource_names(sandbox_id)
-            try:
-                if not self._is_container_running(proxy_name):
-                    return None
-            except RuntimeError as e:
-                logger.warning(f"Could not verify network proxy {proxy_name} during discovery: {e}")
-                return None
             try:
                 inspections = self._batch_inspect([container_name, proxy_name], strict=True)
                 resource_status = self._restricted_resources_status(sandbox_id, inspections=inspections)
             except RuntimeError as e:
                 logger.warning("Could not verify persisted network policy for sandbox %s: %s", sandbox_id, e)
                 return None
-            if resource_status != "compatible":
-                logger.warning("Removing restricted sandbox %s because its persisted network policy no longer matches", sandbox_id)
-                self._cleanup_restricted_resources(sandbox_id)
+            sandbox_inspection = inspections.get(container_name)
+            if sandbox_inspection is None:
                 return None
+            if sandbox_inspection.labels.get("deerflow.role") != "sandbox" or sandbox_inspection.labels.get("deerflow.sandbox_id") != sandbox_id:
+                logger.warning(
+                    "Container %s uses the sandbox name but lacks matching DeerFlow ownership labels; leaving it unmanaged",
+                    container_name,
+                )
+                return None
+            if resource_status != "compatible":
+                return SandboxInfo(
+                    sandbox_id=sandbox_id,
+                    sandbox_url="",
+                    container_name=container_name,
+                    created_at=sandbox_inspection.created_at,
+                    requires_replacement=True,
+                )
             proxy_inspection = inspections.get(proxy_name)
             if proxy_inspection is None or proxy_inspection.host_port is None or proxy_inspection.relay_token is None:
                 return None
             restricted_port = proxy_inspection.host_port
             request_headers = {RELAY_AUTH_HEADER: proxy_inspection.relay_token}
+            created_at = sandbox_inspection.created_at
 
-        port = restricted_port if restricted_port is not None else self._get_container_port(port_container)
+        port = restricted_port if restricted_port is not None else self._get_container_port(container_name)
         if port is None:
             return None
 
@@ -1141,6 +1163,7 @@ class LocalContainerBackend(SandboxBackend):
             sandbox_id=sandbox_id,
             sandbox_url=sandbox_url,
             container_name=container_name,
+            created_at=created_at,
             request_headers=request_headers,
         )
 
@@ -1168,6 +1191,7 @@ class LocalContainerBackend(SandboxBackend):
                     "ps",
                     "--filter",
                     f"name={self._container_prefix}-",
+                    *(("--filter", "label=deerflow.role=sandbox") if self._network_mode != "open" else ()),
                     "--format",
                     "{{.Names}}",
                 ],
@@ -1213,8 +1237,16 @@ class LocalContainerBackend(SandboxBackend):
                 # Container disappeared between ps and inspect, or inspect failed
                 continue
             sandbox_id = container_name[len(self._container_prefix) + 1 :]
+            if self._network_mode != "open" and (data.labels.get("deerflow.role") != "sandbox" or data.labels.get("deerflow.sandbox_id") != sandbox_id):
+                # A custom prefix such as ``deer-flow`` also matches the fixed
+                # ``deer-flow-netproxy-*`` sidecar names. Docker's label filter
+                # excludes them in production; this inspection check keeps the
+                # role boundary explicit and fail-closed even if a runtime
+                # returns a broader name-filter result.
+                continue
             created_at, host_port = data.created_at, data.host_port
             request_headers: dict[str, str] = {}
+            requires_replacement = False
             if self._network_mode != "open":
                 proxy_name, _ = self._resource_names(sandbox_id)
                 proxy_data = inspections.get(proxy_name)
@@ -1224,12 +1256,12 @@ class LocalContainerBackend(SandboxBackend):
                     logger.warning("Could not verify persisted network policy for sandbox %s during reconciliation: %s", sandbox_id, e)
                     continue
                 if resource_status != "compatible":
-                    logger.warning("Removing restricted sandbox %s during reconciliation because its persisted network policy no longer matches", sandbox_id)
-                    self._cleanup_restricted_resources(sandbox_id)
-                    continue
-                host_port = proxy_data.host_port if proxy_data is not None else None
-                if proxy_data is not None and proxy_data.relay_token is not None:
-                    request_headers = {RELAY_AUTH_HEADER: proxy_data.relay_token}
+                    requires_replacement = True
+                    host_port = None
+                else:
+                    host_port = proxy_data.host_port if proxy_data is not None else None
+                    if proxy_data is not None and proxy_data.relay_token is not None:
+                        request_headers = {RELAY_AUTH_HEADER: proxy_data.relay_token}
             sandbox_url = f"http://{sandbox_host}:{host_port}" if host_port else ""
 
             infos.append(
@@ -1239,6 +1271,7 @@ class LocalContainerBackend(SandboxBackend):
                     container_name=container_name,
                     created_at=created_at,
                     request_headers=request_headers,
+                    requires_replacement=requires_replacement,
                 )
             )
 

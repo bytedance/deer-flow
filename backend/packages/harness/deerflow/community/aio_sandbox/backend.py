@@ -195,7 +195,10 @@ class SandboxBackend(ABC):
             sandbox_id: The deterministic sandbox ID to look for.
 
         Returns:
-            SandboxInfo if found and healthy, None otherwise.
+            SandboxInfo if found, including ``requires_replacement=True`` when
+            the backend can identify an incompatible persisted provisioning
+            policy without safely adopting it. Enumeration must not destroy
+            resources; the provider owns replacement fencing. None otherwise.
         """
         ...
 
@@ -209,6 +212,9 @@ class SandboxBackend(ABC):
         The default implementation returns an empty list, which is correct
         for backends that don't manage local containers (e.g., RemoteSandboxBackend
         delegates lifecycle to the provisioner which handles its own cleanup).
+        Enumeration must be read-only. Backends report resources that need
+        replacement through ``SandboxInfo.requires_replacement`` so the
+        provider can apply ownership and local teardown fencing first.
 
         Returns:
             A list of SandboxInfo for all currently running sandboxes.

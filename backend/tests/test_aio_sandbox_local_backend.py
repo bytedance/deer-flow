@@ -26,9 +26,11 @@ def test_sandbox_info_does_not_serialize_or_repr_relay_credentials():
         sandbox_id="sandbox-id",
         sandbox_url="http://localhost:8080",
         request_headers={"X-DeerFlow-Relay-Token": "secret-token"},
+        requires_replacement=True,
     )
 
     assert "request_headers" not in info.to_dict()
+    assert "requires_replacement" not in info.to_dict()
     assert "secret-token" not in repr(info)
 
 
@@ -406,7 +408,7 @@ def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
     assert environment["PROXY_SERVER"] == f"{proxy_name}:3128"
 
 
-def test_restricted_start_recreates_resources_with_stale_policy(monkeypatch):
+def test_restricted_start_refuses_to_remove_resources_with_stale_policy(monkeypatch):
     backend = _restricted_backend()
     cleaned: list[str] = []
     created: list[tuple[str, str]] = []
@@ -417,7 +419,7 @@ def test_restricted_start_recreates_resources_with_stale_policy(monkeypatch):
     monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
     monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
 
-    assert (
+    with pytest.raises(RuntimeError, match="requires ownership-fenced replacement"):
         backend._start_restricted_sandbox(
             "stale",
             "sandbox-stale",
@@ -426,14 +428,9 @@ def test_restricted_start_recreates_resources_with_stale_policy(monkeypatch):
             config_mount_exclusion_root=None,
             relay_token="test-relay-token",
         )
-        == "container-id"
-    )
 
-    assert cleaned == ["stale"]
-    assert created == [
-        (backend._resource_names("stale")[1], "stale"),
-        (backend._egress_network_name("stale"), "stale"),
-    ]
+    assert cleaned == []
+    assert created == []
 
 
 def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatch):
@@ -1085,9 +1082,17 @@ def test_discover_returns_none_when_runtime_check_times_out(monkeypatch):
 def test_restricted_discovery_uses_proxy_relay_port(monkeypatch):
     backend = _backend_for_inspect_tests()
     backend._network_mode = "allowlist"
+    container_name = "sandbox-existing"
     proxy_name, _ = backend._resource_names("existing")
     monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
     inspections = {
+        container_name: _ContainerInspection(
+            1.0,
+            None,
+            {"deerflow.role": "sandbox", "deerflow.sandbox_id": "existing"},
+            "sandbox:latest",
+            frozenset(),
+        ),
         proxy_name: _ContainerInspection(
             1.0,
             18080,
@@ -1095,7 +1100,7 @@ def test_restricted_discovery_uses_proxy_relay_port(monkeypatch):
             "proxy:latest",
             frozenset(),
             "test-relay-token-that-is-at-least-32-bytes",
-        )
+        ),
     }
     monkeypatch.setattr(backend, "_batch_inspect", lambda *_args, **_kwargs: inspections)
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id, **_kwargs: "compatible")
@@ -1116,17 +1121,61 @@ def test_restricted_discovery_uses_proxy_relay_port(monkeypatch):
     assert readiness == [{"timeout": 5, "headers": info.request_headers}]
 
 
-def test_restricted_discovery_removes_resources_with_stale_policy(monkeypatch):
+def test_restricted_discovery_reports_stale_policy_without_removing_resources(monkeypatch):
     backend = _backend_for_inspect_tests()
     backend._network_mode = "allowlist"
     cleaned: list[str] = []
+    container_name = "sandbox-stale"
     monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
-    monkeypatch.setattr(backend, "_batch_inspect", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            container_name: _ContainerInspection(
+                1.0,
+                None,
+                {"deerflow.role": "sandbox", "deerflow.sandbox_id": "stale"},
+                "sandbox:latest",
+                frozenset(),
+            )
+        },
+    )
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id, **_kwargs: "mismatch")
     monkeypatch.setattr(backend, "_cleanup_restricted_resources", cleaned.append)
 
-    assert backend.discover("stale") is None
-    assert cleaned == ["stale"]
+    info = backend.discover("stale")
+
+    assert info is not None
+    assert info.sandbox_id == "stale"
+    assert info.container_name == "sandbox-stale"
+    assert info.requires_replacement is True
+    assert cleaned == []
+
+
+def test_restricted_discovery_leaves_unlabelled_name_collision_unmanaged(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._network_mode = "allowlist"
+    container_name = "sandbox-foreign"
+    cleaned: list[str] = []
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            container_name: _ContainerInspection(
+                1.0,
+                None,
+                {},
+                "foreign:latest",
+                frozenset(),
+            )
+        },
+    )
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id, **_kwargs: "mismatch")
+    monkeypatch.setattr(backend, "_cleanup_restricted_resources", cleaned.append)
+
+    assert backend.discover("foreign") is None
+    assert cleaned == []
 
 
 def test_restricted_health_rejects_resources_with_stale_policy(monkeypatch):
@@ -1144,7 +1193,7 @@ def test_restricted_health_rejects_resources_with_stale_policy(monkeypatch):
     )
 
 
-def test_restricted_list_reconciliation_removes_resources_with_stale_policy(monkeypatch):
+def test_restricted_list_reconciliation_reports_stale_policy_without_removing_resources(monkeypatch):
     backend = _backend_for_inspect_tests()
     backend._network_mode = "allowlist"
     proxy_name, _ = backend._resource_names("stale")
@@ -1157,15 +1206,85 @@ def test_restricted_list_reconciliation_removes_resources_with_stale_policy(monk
         backend,
         "_batch_inspect",
         lambda _names, **_kwargs: {
-            "sandbox-stale": _ContainerInspection(1.0, None, {}, "sandbox:latest", frozenset()),
-            proxy_name: _ContainerInspection(1.0, 18080, {}, "proxy:latest", frozenset()),
+            "sandbox-stale": _ContainerInspection(
+                1.0,
+                None,
+                {"deerflow.role": "sandbox", "deerflow.sandbox_id": "stale"},
+                "sandbox:latest",
+                frozenset(),
+            ),
+            proxy_name: _ContainerInspection(
+                1.0,
+                18080,
+                {"deerflow.role": "network-proxy", "deerflow.sandbox_id": "stale"},
+                "proxy:latest",
+                frozenset(),
+            ),
         },
     )
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id, **_kwargs: "mismatch")
     monkeypatch.setattr(backend, "_cleanup_restricted_resources", cleaned.append)
 
-    assert backend.list_running() == []
-    assert cleaned == ["stale"]
+    infos = backend.list_running()
+
+    assert len(infos) == 1
+    assert infos[0].sandbox_id == "stale"
+    assert infos[0].requires_replacement is True
+    assert cleaned == []
+
+
+def test_restricted_list_running_excludes_sidecars_for_overlapping_custom_prefix(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._network_mode = "allowlist"
+    backend._container_prefix = "deer-flow"
+    sandbox_id = "live"
+    sandbox_name = "deer-flow-live"
+    proxy_name, _ = backend._resource_names(sandbox_id)
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(
+            stdout=f"{sandbox_name}\n{proxy_name}\n",
+            stderr="",
+            returncode=0,
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda _names, **_kwargs: {
+            sandbox_name: _ContainerInspection(
+                1.0,
+                None,
+                {"deerflow.role": "sandbox", "deerflow.sandbox_id": sandbox_id},
+                "sandbox:latest",
+                frozenset(),
+            ),
+            proxy_name: _ContainerInspection(
+                1.0,
+                18080,
+                {"deerflow.role": "network-proxy", "deerflow.sandbox_id": sandbox_id},
+                "proxy:latest",
+                frozenset(),
+                "test-relay-token-that-is-at-least-32-bytes",
+            ),
+        },
+    )
+    checked: list[str] = []
+
+    def compatible(current_sandbox_id, **_kwargs):
+        checked.append(current_sandbox_id)
+        return "compatible"
+
+    monkeypatch.setattr(backend, "_restricted_resources_status", compatible)
+
+    infos = backend.list_running()
+
+    assert [info.sandbox_id for info in infos] == [sandbox_id]
+    assert checked == [sandbox_id]
+    assert "label=deerflow.role=sandbox" in commands[0]
 
 
 def test_restricted_destroy_stops_pair_and_removes_both_networks(monkeypatch):
