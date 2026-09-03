@@ -830,16 +830,18 @@ class LocalContainerBackend(SandboxBackend):
         # Container's CLI does not support these flags, so they are
         # Docker-only.
         if self._runtime == "docker":
-            # The default image (/opt/gem/run.sh) starts as root, creates the
-            # gem account at runtime, chown -R's /opt/jupyter, and drops to
-            # that user via su before starting the services. That needs
-            # CHOWN/SETUID/SETGID; additionally the root nginx master writes
-            # logs under /var/log/nginx that belong to the gem user, which
-            # requires DAC_OVERRIDE — without it nginx dies with
-            # "open() .../access.log failed (13: Permission denied)" on every
-            # start (a runtime need, not just startup: access.log is written
-            # per request). Dropping ALL of them makes the image fail before
-            # the readiness endpoint exists.
+            # The shipped/recommended AIO image starts as root, creates the
+            # gem account at runtime, chown -R's /opt/jupyter, prepares the
+            # gem-owned XDG runtime directory with chmod, and drops to that
+            # user via su before starting the services. CHOWN/SETUID/SETGID
+            # cover the ownership handoff; FOWNER is required by the 1.11.0
+            # entrypoint when chmod'ing /run/user/1000 after capabilities are
+            # dropped. The root nginx master also writes gem-owned logs under
+            # /var/log/nginx, which requires DAC_OVERRIDE — without it nginx
+            # dies with "open() .../access.log failed (13: Permission denied)"
+            # on every start (a runtime need, not just startup). Dropping ALL
+            # of these makes the image fail before the readiness endpoint
+            # exists.
             # no-new-privileges stays: it only blocks *gaining* privileges
             # through exec, it does not revoke the capabilities added here,
             # and su from the already-root entrypoint does not need to gain
@@ -848,10 +850,11 @@ class LocalContainerBackend(SandboxBackend):
             # For a pre-initialized non-root image nothing ever runs as
             # root, so the handoff capabilities are not needed — and leaving
             # them available for the container's lifetime would let
-            # sandboxed code chown bind-mounted paths or impersonate
+            # sandboxed code chown/chmod bind-mounted paths or impersonate
             # mounted-file UIDs/GIDs. Such images opt out with
             # DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS=0 (see CONFIGURATION.md),
-            # which drops every capability including these three.
+            # which drops every capability including these startup/runtime
+            # compatibility capabilities.
             if _env_flag_disabled("DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS"):
                 cmd.extend(["--cap-drop=ALL", "--security-opt", "no-new-privileges"])
             else:
@@ -859,6 +862,7 @@ class LocalContainerBackend(SandboxBackend):
                     [
                         "--cap-drop=ALL",
                         "--cap-add=CHOWN",
+                        "--cap-add=FOWNER",
                         "--cap-add=SETUID",
                         "--cap-add=SETGID",
                         "--cap-add=DAC_OVERRIDE",
