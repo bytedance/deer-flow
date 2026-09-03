@@ -642,6 +642,53 @@ models:
   #   max_tokens: 8192
   #   temperature: 0.7
 
+  # Example: aimlapi.com (OpenAI-compatible)
+  # One key in front of 350+ chat models. Model ids are namespaced
+  # (openai/gpt-5-5, anthropic/claude-sonnet-4.6); browse them at
+  # https://api.aimlapi.com/v1/models — the response is {"object":"list","data":[...]}
+  # and chat models are the entries whose "type" is "openai/chat-completions".
+  # Prefer the dotted spelling of a version (anthropic/claude-sonnet-4.6, not
+  # anthropic/claude-sonnet-4-6): both route, but only the dotted id currently
+  # publishes its capability flags.
+  # default_headers identifies DeerFlow to the gateway; it is per-model, so it
+  # never travels to another provider's base_url.
+  # - name: aimlapi-gpt-5-5
+  #   display_name: GPT-5.5 (aimlapi.com)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: openai/gpt-5-5
+  #   api_key: $AIMLAPI_API_KEY
+  #   base_url: https://api.aimlapi.com/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   temperature: 0.7
+  #   supports_vision: true
+  #   default_headers:
+  #     HTTP-Referer: https://github.com/bytedance/deer-flow
+  #     X-Title: DeerFlow
+  #     X-AIMLAPI-Partner-ID: part_deerflow
+  #     X-AIMLAPI-Source: agent/deer-flow
+  #
+  # For a reasoning model on aimlapi.com use the patched OpenAI-compatible
+  # adapter, so reasoning_content is replayed across multi-turn tool calls:
+  # - name: aimlapi-claude-sonnet-4-6
+  #   display_name: Claude Sonnet 4.6 (aimlapi.com)
+  #   use: deerflow.models.patched_openai:PatchedChatOpenAI
+  #   model: anthropic/claude-sonnet-4.6
+  #   api_key: $AIMLAPI_API_KEY
+  #   base_url: https://api.aimlapi.com/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   temperature: 0.7
+  #   supports_vision: true
+  #   supports_thinking: true
+  #   default_headers:
+  #     HTTP-Referer: https://github.com/bytedance/deer-flow
+  #     X-Title: DeerFlow
+  #     X-AIMLAPI-Partner-ID: part_deerflow
+  #     X-AIMLAPI-Source: agent/deer-flow
+
   # Example: Atlas Cloud (OpenAI-compatible)
   # Atlas Cloud exposes a single OpenAI-compatible endpoint in front of many open
   # models (DeepSeek, Qwen, Kimi, GLM, MiniMax, Llama, ...), so it uses the same

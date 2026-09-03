@@ -6,6 +6,8 @@ Run from repo root:
 
 from __future__ import annotations
 
+import re
+
 import yaml
 from wizard import ui as wizard_ui
 from wizard.providers import LLM_PROVIDERS, SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS, LLMProvider, with_thinking_support
@@ -44,6 +46,7 @@ class TestProviders:
             "minimax",
             "minimax_cn",
             "openrouter",
+            "aimlapi",
             "vllm",
             "mindie",
             "codex",
@@ -223,6 +226,78 @@ class TestBuildMinimalConfig:
         assert model["max_retries"] == 2
         assert model["max_tokens"] == 8192
         assert model["temperature"] == 0.7
+
+    def test_aimlapi_defaults_reach_the_generated_config(self):
+        provider = next(p for p in LLM_PROVIDERS if p.name == "aimlapi")
+        content = build_minimal_config(
+            provider_use=provider.use,
+            model_name=provider.default_model,
+            display_name=provider.display_name,
+            api_key_field=provider.api_key_field,
+            env_var=provider.env_var,
+            extra_model_config=provider.extra_config_for(provider.default_model),
+        )
+        data = yaml.safe_load(content)
+        model = data["models"][0]
+
+        assert model["use"] == "langchain_openai:ChatOpenAI"
+        assert model["model"] == "openai/gpt-5-5"
+        assert model["api_key"] == "$AIMLAPI_API_KEY"
+        assert model["base_url"] == "https://api.aimlapi.com/v1"
+        assert model["request_timeout"] == 600.0
+        assert model["max_retries"] == 2
+        assert model["max_tokens"] == 8192
+        assert model["temperature"] == 0.7
+        # The gateway rejects an explicit null for temperature/top_p/seed, so the
+        # generated config must carry a real number rather than leave the key unset
+        # for the OpenAI client to serialise as null.
+        assert model["temperature"] is not None
+        assert model["default_headers"] == {
+            "HTTP-Referer": "https://github.com/bytedance/deer-flow",
+            "X-Title": "DeerFlow",
+            "X-AIMLAPI-Partner-ID": "part_deerflow",
+            "X-AIMLAPI-Source": "agent/deer-flow",
+        }
+
+    def test_aimlapi_attribution_header_values_are_well_formed(self):
+        """A malformed partner id or source is accepted by the gateway and then ignored.
+
+        Nothing fails at runtime, so a typo is only ever caught here.
+        """
+        provider = next(p for p in LLM_PROVIDERS if p.name == "aimlapi")
+        headers = provider.extra_config["default_headers"]
+
+        assert re.fullmatch(r"part_[A-Za-z0-9]{1,64}", headers["X-AIMLAPI-Partner-ID"])
+        assert re.fullmatch(r"(web|agent|mcp)/[a-z0-9-]{1,32}", headers["X-AIMLAPI-Source"])
+        # HTTP-Referer / X-Title name the calling app, not the gateway.
+        assert headers["HTTP-Referer"] == "https://github.com/bytedance/deer-flow"
+        assert headers["X-Title"] == "DeerFlow"
+
+    def test_aimlapi_attribution_headers_do_not_leak_to_other_providers(self):
+        """Attribution must not ride a request to somebody else's endpoint."""
+        for provider in LLM_PROVIDERS:
+            headers = provider.extra_config.get("default_headers") or {}
+            attribution_keys = {key for key in headers if key.upper().startswith("X-AIMLAPI-")}
+            if provider.name == "aimlapi":
+                assert attribution_keys
+                assert provider.extra_config["base_url"] == "https://api.aimlapi.com/v1"
+            else:
+                assert not attribution_keys, f"{provider.name} carries aimlapi attribution headers"
+
+    def test_aimlapi_extra_config_never_mutates_the_shared_definition(self):
+        provider = next(p for p in LLM_PROVIDERS if p.name == "aimlapi")
+        original = dict(provider.extra_config["default_headers"])
+
+        first = provider.extra_config_for("deepseek/deepseek-chat")
+        assert first["supports_vision"] is False
+        first["default_headers"]["X-AIMLAPI-Partner-ID"] = "part_tampered"
+        first["temperature"] = 0.0
+
+        second = provider.extra_config_for(provider.default_model)
+        assert second["supports_vision"] is True
+        assert second["temperature"] == 0.7
+        assert second["default_headers"] == original
+        assert provider.extra_config["default_headers"] == original
 
     def test_web_fetch_tool_included(self):
         content = build_minimal_config(
