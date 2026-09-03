@@ -7,10 +7,16 @@ so links nobody can durably resolve cannot be minted.
 This phase is backend/API groundwork only: the Share dialog and the HTML
 `/share/{token}` page remain Phase 2 frontend work.
 
-## Owner endpoints — `threads:read` + owner_check
+## Owner endpoints — `threads:read`; ownership by actor
 
 - `POST /api/threads/{id}/shares` enforces **strict row ownership**: the thread
-  row must exist and name the caller as owner. The decorator's permissive
+  row must exist and name the caller as owner. `GET`/`DELETE` on the same
+  subtree authorize by the **share record's owner** instead (the repository
+  predicates scope by the calling user): thread ids are client-selectable, so
+  after the minter's thread is deleted and the id recreated under another
+  owner, the still-public share stays listable and revocable by whoever minted
+  it — and invisible to the new owner of the reused id. The thread-row
+  `owner_check` would have locked the record away from both. The decorator's permissive
   `owner_check` semantics (missing rows / `user_id=NULL` pass) deliberately do
   not apply to a publishing action — any authenticated user could otherwise
   mint public links for pre-auth shared data. Consequence: legacy `user_id=NULL`

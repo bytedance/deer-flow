@@ -453,12 +453,14 @@ def _location_block(config_text: str, location: str) -> str:
 
 
 @pytest.mark.parametrize("config_path", NGINX_CONFIGS, ids=lambda path: path.name)
-@pytest.mark.parametrize("location", ["/api/shares/", "/share/"])
+@pytest.mark.parametrize("location", ["/api/shares/", "/share/", "/api/langgraph/shares/"])
 def test_nginx_share_locations_suppress_request_lines_in_error_log(config_path: Path, location: str) -> None:
     """nginx error messages embed the full request line, severity does not
     redact it (nginx trac #2193 documents crit-level failures that still
     append the request line), and error_log cannot be format-masked — so the
-    share locations must route error_log to a non-retaining sink."""
+    share locations (including the /api/langgraph/* rewrite alias, whose
+    break keeps requests in the langgraph location) must route error_log to
+    a non-retaining sink."""
     block = _location_block(config_path.read_text(encoding="utf-8"), location)
     # Severity alone does not redact request lines (nginx trac #2193): the
     # sink itself must be non-retaining, and it must be the ONLY error_log
@@ -469,25 +471,14 @@ def test_nginx_share_locations_suppress_request_lines_in_error_log(config_path: 
 
 
 @pytest.mark.parametrize("config_path", NGINX_CONFIGS, ids=lambda path: path.name)
-def test_nginx_masks_share_tokens_on_the_langgraph_alias(config_path: Path) -> None:
-    """The /api/langgraph/* rewrite alias of the share surface must mask
-    exactly like the native path: an alias request resolves through the
-    langgraph location (break keeps it there), so without its own map
-    entries the raw bearer rides the access log."""
-    masked = _mask_request_from_conf(config_path, f"GET /api/langgraph/shares/{_TOKEN} HTTP/1.1")
-    assert masked == "GET /api/langgraph/shares/*** HTTP/1.1"
-
-    # Encoded forms ride the same normalization.
-    masked = _mask_request_from_conf(config_path, f"GET /api/langgraph/sh%61res/{_TOKEN} HTTP/1.1")
-    assert _TOKEN not in masked
-
-
-@pytest.mark.parametrize("config_path", NGINX_CONFIGS, ids=lambda path: path.name)
 def test_nginx_langgraph_alias_is_routed_non_retaining(config_path: Path) -> None:
     """An alias request never reaches the dedicated /api/shares/ location
     (the langgraph location rewrites and breaks in place), so the alias
     needs its own non-retaining location: error_log to /dev/null with the
-    same rewrite onto the gateway upstream."""
+    same rewrite onto the gateway upstream. Access-log masking is
+    inherited, not re-declared: the rewrite lands the request on
+    /api/shares/… before the log phase evaluates $uri, so the existing
+    /api/shares/ map rule classifies it — no separate alias map entries."""
     config = config_path.read_text(encoding="utf-8")
     open_match = re.search(r"^(\s*)location \^~ /api/langgraph/shares/ \{", config, flags=re.MULTILINE)
     assert open_match is not None, f"{config.name}: the langgraph share alias needs its own location"

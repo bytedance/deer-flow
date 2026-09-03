@@ -30,7 +30,6 @@ data:
             default                    "";
             "~^/share/"                "/share/***";
             "~^/api/shares/"           "/api/shares/***";
-        "~^/api/langgraph/shares/"  "/api/langgraph/shares/***";
         }
         map $request $request_has_share_token {
             default 0;
@@ -42,8 +41,6 @@ data:
             "/share/***:1"     "$request_method $share_log_path $server_protocol";
             "/api/shares/***:0" "$request_method $share_log_path $server_protocol";
             "/api/shares/***:1" "$request_method $share_log_path $server_protocol";
-            "/api/langgraph/shares/***:0" "$request_method $share_log_path $server_protocol";
-            "/api/langgraph/shares/***:1" "$request_method $share_log_path $server_protocol";
             ":1"                "$request_method *** $server_protocol";
         }
         map $http_referer $masked_referer {
