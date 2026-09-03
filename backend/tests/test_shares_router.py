@@ -658,3 +658,34 @@ def test_bundled_topologies_wire_trusted_proxies():
     assert "networkPolicy:" in values
     assert values.index("enabled: true", values.index("networkPolicy:")) - values.index("networkPolicy:") < 120
     assert 'trustedProxies: ""' in values
+
+
+def test_share_revocation_survives_thread_id_reuse(tmp_path):
+    """Round-13 P1: thread ids are client-selectable. After the original
+    owner's thread is deleted and the id recreated under another owner,
+    the still-public share (possibly never-expiring) must stay revocable
+    by whoever minted it — and unrevokable by the new owner of the reused
+    id. Authorization is by the share record's owner, not the thread row."""
+    reused_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(reused_store.create(THREAD_A, user_id=str(USER_B.id)))
+
+    with _client(tmp_path) as (client, repo):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):
+            created = _create(client)
+        share_id = created.json()["share_id"]
+
+        # The original owner's thread is deleted; another user recreates a
+        # thread with the same client-selectable id.
+        client.app.state.thread_store = reused_store
+
+        # The original owner can still list and revoke the share.
+        listed = client.get(f"/api/threads/{THREAD_A}/shares")
+        assert listed.status_code == 200
+        assert [s["share_id"] for s in listed.json()] == [share_id]
+
+        revoked = client.delete(f"/api/threads/{THREAD_A}/shares/{share_id}")
+        assert revoked.status_code == 204
+
+    # The new owner of the reused id sees none of the original owner's
+    # share records (repository scoping is by record owner).
+    assert asyncio.run(repo.list_by_thread(THREAD_A, str(USER_B.id))) == []

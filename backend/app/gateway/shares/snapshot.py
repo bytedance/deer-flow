@@ -51,7 +51,7 @@ _LIST_ITEM_RE = re.compile(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]")
 _THEMATIC_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 _SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 _HTML_TYPE1_OPEN_RE = re.compile(r"^ {0,3}<(script|pre|style|textarea)\b", re.IGNORECASE)
-_HTML_TYPE1_CLOSE_RE = re.compile(r"</(script|pre|style|textarea)>", re.IGNORECASE)
+
 _HTML_TYPE2_OPEN_RE = re.compile(r"^ {0,3}<!--")
 _HTML_TYPE2_CLOSE = "-->"
 _HTML_TYPE3_OPEN_RE = re.compile(r"^ {0,3}<\?")
@@ -127,6 +127,7 @@ _HTML_TYPE6_OPEN_RE = re.compile(
     r"^ {0,3}<(" + "|".join(_HTML_TYPE6_TAGS) + r")(?:[ \t]|/?>|$)",
     re.IGNORECASE,
 )
+_HTML_TYPE1_CLOSE_RE = re.compile(r"</(script|pre|style|textarea)>", re.IGNORECASE)
 _HTML_TYPE5_OPEN_RE = re.compile(r"^ {0,3}<!\[CDATA\[")
 _HTML_TYPE5_CLOSE = "]]>"
 # Type 7: a complete open or closing tag alone on a line (checked only when
@@ -565,6 +566,11 @@ def _fence_closes(content: str, char: str, min_len: int) -> bool:
 def _html_block_close(content: str, kind: str, tag: str | None) -> bool:
     """Has *content* ended the open HTML block of *kind*?"""
     if kind == "type1":
+        # CommonMark 0.31.2 §4.6: the end tag "need not match the start
+        # tag" — any of the four raw-text closers ends the block (verified
+        # against the shipped renderer, micromark). A cross-tag close is
+        # therefore a real paragraph boundary: the `<think>` behind it is
+        # prose and must be stripped.
         return tag is not None and _HTML_TYPE1_CLOSE_RE.search(content) is not None
     if kind == "type2":
         return _HTML_TYPE2_CLOSE in content
@@ -584,8 +590,12 @@ def _html_open(content: str) -> tuple[str | None, str | None, bool, bool]:
     caller must not stay in the block state in that case."""
     type1 = _HTML_TYPE1_OPEN_RE.match(content)
     if type1 is not None:
-        tag = type1.group(1)
-        return "type1", tag, False, _HTML_TYPE1_CLOSE_RE.search(content) is not None
+        return (
+            "type1",
+            type1.group(1),
+            False,
+            _HTML_TYPE1_CLOSE_RE.search(content) is not None,
+        )
     if _HTML_TYPE2_OPEN_RE.match(content) is not None:
         return "type2", None, False, _HTML_TYPE2_CLOSE in content
     if _HTML_TYPE3_OPEN_RE.match(content) is not None:

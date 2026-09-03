@@ -255,14 +255,15 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
 
 
 @router.get("/threads/{thread_id}/shares", response_model=list[ShareSummaryResponse])
-@require_permission("threads", "read", owner_check=True)
+@require_permission("threads", "read")
 async def list_shares(thread_id: ThreadId, request: Request) -> list[ShareSummaryResponse]:
     """List the caller's shares for a thread. Never returns token hashes.
 
-    Read-side owner_check stays permissive by design (matches every other
-    thread read): foreign-owned threads 404 at the decorator, and on a
-    null-owner thread the repository's owner scoping already returns only
-    the caller's own (strict-ownership create guarantees there are none).
+    Authorization is by the share RECORD's owner, not the thread row:
+    thread ids are client-selectable, so a deleted thread's id can be
+    recreated under a different owner — the original owner must still be
+    able to list (and revoke) the share that outlives the thread row. The
+    repository's owner scoping returns only the caller's own records.
     """
     _require_enabled()
     user_id = await get_current_user(request)
@@ -271,9 +272,16 @@ async def list_shares(thread_id: ThreadId, request: Request) -> list[ShareSummar
 
 
 @router.delete("/threads/{thread_id}/shares/{share_id}", status_code=status.HTTP_204_NO_CONTENT)
-@require_permission("threads", "read", owner_check=True)
+@require_permission("threads", "read")
 async def revoke_share(thread_id: ThreadId, share_id: str, request: Request) -> None:
-    """Revoke one of the caller's shares. Effective on the next public request."""
+    """Revoke one of the caller's shares. Effective on the next public request.
+
+    Authorized by the share record's owner via the repository predicate,
+    not the thread row: thread ids are client-selectable, so after the
+    original owner's thread is deleted and the id recreated under another
+    owner, the still-public share must stay revocable by whoever minted it
+    (and unrevokable by the new owner of the reused id).
+    """
     _require_enabled()
     user_id = await get_current_user(request)
     revoked = await _share_repo(request).revoke(share_id, thread_id, user_id or "")

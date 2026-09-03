@@ -466,3 +466,35 @@ def test_nginx_share_locations_suppress_request_lines_in_error_log(config_path: 
     # so a second, retaining directive would reintroduce the leak.
     directives = re.findall(r"error_log\s+([^;]+);", block)
     assert directives == ["/dev/null crit"], f"{config_path.name} {location}: expected exactly one error_log to /dev/null crit, got {directives}"
+
+
+@pytest.mark.parametrize("config_path", NGINX_CONFIGS, ids=lambda path: path.name)
+def test_nginx_masks_share_tokens_on_the_langgraph_alias(config_path: Path) -> None:
+    """The /api/langgraph/* rewrite alias of the share surface must mask
+    exactly like the native path: an alias request resolves through the
+    langgraph location (break keeps it there), so without its own map
+    entries the raw bearer rides the access log."""
+    masked = _mask_request_from_conf(config_path, f"GET /api/langgraph/shares/{_TOKEN} HTTP/1.1")
+    assert masked == "GET /api/langgraph/shares/*** HTTP/1.1"
+
+    # Encoded forms ride the same normalization.
+    masked = _mask_request_from_conf(config_path, f"GET /api/langgraph/sh%61res/{_TOKEN} HTTP/1.1")
+    assert _TOKEN not in masked
+
+
+@pytest.mark.parametrize("config_path", NGINX_CONFIGS, ids=lambda path: path.name)
+def test_nginx_langgraph_alias_is_routed_non_retaining(config_path: Path) -> None:
+    """An alias request never reaches the dedicated /api/shares/ location
+    (the langgraph location rewrites and breaks in place), so the alias
+    needs its own non-retaining location: error_log to /dev/null with the
+    same rewrite onto the gateway upstream."""
+    config = config_path.read_text(encoding="utf-8")
+    open_match = re.search(r"^(\s*)location \^~ /api/langgraph/shares/ \{", config, flags=re.MULTILINE)
+    assert open_match is not None, f"{config.name}: the langgraph share alias needs its own location"
+    indent = open_match.group(1)
+    block = config[open_match.start() : config.index(f"\n{indent}}}", open_match.start())]
+    assert "error_log /dev/null crit;" in block
+    assert "rewrite ^/api/langgraph/(.*) /api/$1 break;" in block
+    # The alias location must not be shadowed: the generic langgraph prefix
+    # is shorter, so nginx's longest-prefix match picks this one.
+    assert "proxy_pass" in block

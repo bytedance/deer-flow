@@ -1429,3 +1429,18 @@ def test_strip_quote_marker_depth_interrupts_and_dedent_continues():
     assert "s-dq" not in deeper
     dedent = strip("> > `a\nplain <think>s-keep</think>x\n> `b`")
     assert "s-keep" in dedent
+
+
+def test_strip_cross_tag_raw_text_close_strips_reasoning():
+    """CommonMark 0.31.2 §4.6: a raw-text block's end tag "need not match
+    the start tag" — `</script>` closes an open `<pre>` (verified against
+    the shipped renderer, micromark). The bot's per-tag reading is a
+    misreading; the cross-tag close is a real paragraph boundary and the
+    `<think>` behind it must strip, never ride a fence-desync protection."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    attack = "<pre>\n</script>\n```\n</pre>\n```\n<think>secret-cross-tag</think> plain\n```\n"
+    out = strip(attack)
+    assert "secret-cross-tag" not in out, out
