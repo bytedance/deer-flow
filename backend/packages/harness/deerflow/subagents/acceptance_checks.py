@@ -466,6 +466,7 @@ def _check_file_leaf(
 _SHELL_OPERATORS = ";&|"
 #: Leading ``VAR=value`` assignments are environment setup, not the executable.
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_WINDOWS_DRIVE_QUALIFIED_RE = re.compile(r"^[A-Za-z]:")
 _WINDOWS_DRIVE_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:/")
 
 
@@ -484,8 +485,12 @@ def _normalize_cd_scope_path(path: str) -> tuple[str, bool] | None:
     collapses traversal above that root into a relative-looking path. Handle
     drive-qualified absolute paths component by component so those spellings
     remain absolute, and fail closed when ``..`` would cross the drive root.
+    Drive-relative forms such as ``C:tmp`` also fail closed because their
+    resolution depends on the process's remembered directory for that drive.
     """
     slash_path = path.replace("\\", "/")
+    if _WINDOWS_DRIVE_QUALIFIED_RE.match(slash_path) and not _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path):
+        return None
     if not _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path):
         return posixpath.normpath(slash_path), False
 
