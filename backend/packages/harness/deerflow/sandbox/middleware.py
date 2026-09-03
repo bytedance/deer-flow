@@ -609,9 +609,6 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     ) -> ToolMessage | Command:
         if not events:
             return result
-        context = getattr(request.runtime, "context", None) or {}
-        if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
-            return result
         event = events[0]
         request_id = event.get("request_id")
         host = event.get("host")

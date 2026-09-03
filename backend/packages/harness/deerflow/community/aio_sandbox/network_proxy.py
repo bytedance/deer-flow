@@ -587,7 +587,8 @@ async def handle_relay(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
         return
     expected_token = os.environ.get(RELAY_TOKEN_ENV, "")
     presented_tokens = [value for _raw_name, name, value in header_fields if name == RELAY_AUTH_HEADER.lower()]
-    if not expected_token or len(presented_tokens) != 1 or not hmac.compare_digest(presented_tokens[0], expected_token):
+    presented_token = presented_tokens[0].encode("latin-1") if len(presented_tokens) == 1 else b""
+    if not expected_token or len(presented_tokens) != 1 or not hmac.compare_digest(presented_token, expected_token.encode()):
         await _reject(writer, "403 Forbidden", "Sandbox relay authentication failed")
         return
 

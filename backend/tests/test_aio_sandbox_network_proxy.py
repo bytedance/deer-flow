@@ -311,6 +311,25 @@ async def test_sandbox_api_relay_requires_per_sandbox_token(monkeypatch) -> None
 
 
 @pytest.mark.anyio
+async def test_sandbox_api_relay_rejects_non_ascii_token(monkeypatch) -> None:
+    monkeypatch.setenv(network_proxy.RELAY_TOKEN_ENV, "test-relay-token")
+    relay = await asyncio.start_server(network_proxy.handle_relay, "127.0.0.1", 0)
+    relay_port = relay.sockets[0].getsockname()[1]
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", relay_port)
+        writer.write(b"GET /v1/sandbox HTTP/1.1\r\nHost: sandbox\r\n" + network_proxy.RELAY_AUTH_HEADER.encode() + b": \xff\r\n\r\n")
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=2)
+        writer.close()
+        await writer.wait_closed()
+
+        assert b"403 Forbidden" in response
+    finally:
+        relay.close()
+        await relay.wait_closed()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "malformed_header",
     [
