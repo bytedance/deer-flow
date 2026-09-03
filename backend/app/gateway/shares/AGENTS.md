@@ -22,7 +22,13 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   `user`/`assistant` roles, renderable text only. Structured content admits
   only bare strings and explicit `text` / `output_text` blocks; reasoning,
   thinking, and tool-call blocks are ignored, and inline assistant `<think>`
-  sections are stripped outside Markdown code examples. Owner-only
+  sections are stripped outside Markdown code examples — code recognition
+  is block-structure-aware per CommonMark (fence opener/closer rules,
+  raw-HTML blocks of all seven types, indented code blocks, quote/list
+  lazy paragraphs) and, once any list or quote line appears in a message,
+  document-level fence/indented protection is deliberately suppressed
+  (item indents are not modeled; over-stripping item-scoped code is the
+  accepted trade-off against reasoning leaks). Owner-only
   `/mnt/user-data` and thread-route references — any
   `/api/threads/{id}` route, bare or with a `<segment>` subpath, not just
   artifacts/uploads, with or without a leading separator (the bundled nginx

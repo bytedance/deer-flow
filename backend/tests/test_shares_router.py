@@ -628,12 +628,18 @@ def test_bundled_topologies_wire_trusted_proxies():
 
     repo_root = Path(__file__).resolve().parents[2]
     compose = (repo_root / "docker/docker-compose.yaml").read_text(encoding="utf-8")
+    compose_dev = (repo_root / "docker/docker-compose-dev.yaml").read_text(encoding="utf-8")
     templates = repo_root / "deploy/helm/deer-flow/templates"
     helm = (templates / "gateway-deployment.yaml").read_text(encoding="utf-8")
     policy = (templates / "gateway-networkpolicy.yaml").read_text(encoding="utf-8")
     values = (repo_root / "deploy/helm/deer-flow/values.yaml").read_text(encoding="utf-8")
     assert "AUTH_TRUSTED_PROXIES" in compose
     assert compose.index("gateway:") < compose.index("AUTH_TRUSTED_PROXIES")
+    # `make docker-start` selects the dev compose file — the dev stack is
+    # unpublished behind nginx exactly like production, so it needs the same
+    # default or its anonymous share throttle keys everyone to one bucket.
+    assert "AUTH_TRUSTED_PROXIES" in compose_dev
+    assert compose_dev.index("gateway:") < compose_dev.index("AUTH_TRUSTED_PROXIES")
     assert "AUTH_TRUSTED_PROXIES" in helm
     assert "trustedProxies" in helm
     # No cluster-wide default trust in Kubernetes, and the env is wired only

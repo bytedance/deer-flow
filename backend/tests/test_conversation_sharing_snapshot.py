@@ -1158,3 +1158,274 @@ async def test_neutralize_decodes_named_entities_in_private_phrases():
     assert _neutralize_private_references("see /api&sol;threads&sol;thread-secret&num;x now") == "see [private artifact omitted] now"
     # a public path keeps its named-entity bytes verbatim
     assert _neutralize_private_references("temperature is 20&deg;C, humidity 50&percnt;") == "temperature is 20&deg;C, humidity 50&percnt;"
+
+
+async def test_snapshot_does_not_preserve_reasoning_in_fake_code_spans():
+    """The code-span protection must follow CommonMark, not just match
+    backtick runs: escaped delimiters (``\\````), mismatched run lengths,
+    and runs that never close before the paragraph ends do NOT open code
+    spans — a renderer shows their content as plain text, so ``<think>``
+    blocks hiding there are model reasoning and must be stripped, not
+    preserved verbatim into the anonymous snapshot."""
+    attacks = {
+        "escaped delimiters": "answer \\`<think>secret-reasoning-escaped</think>\\` done",
+        "mismatched run lengths": "```<think>secret-reasoning-mismatch</think>``tail",
+        "span across paragraphs": "`intro\n\n<think>secret-reasoning-paragraph</think>\n\noutro`",
+    }
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        content = "\n\n".join(attacks.values())
+        return [_row(1, {"type": "ai", "content": content})], False
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot, _source_last_seq = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    content = snapshot["messages"][0]["content"]
+    for secret in (
+        "secret-reasoning-escaped",
+        "secret-reasoning-mismatch",
+        "secret-reasoning-paragraph",
+    ):
+        assert secret not in content, content
+    # The visible prose around the attacks survives.
+    assert "answer" in content
+    assert "outro" in content
+
+
+def test_resanitize_strips_stored_assistant_reasoning():
+    """The read-time rebuild owes the same reasoning guarantee as create:
+    an older or sanitizer-defect snapshot carrying a ``<think>`` block must
+    not serve it to anonymous readers forever — the assistant filter runs
+    again at the public boundary, while real code spans keep their literal
+    tags."""
+    from app.gateway.shares.snapshot import resanitize_share_snapshot
+
+    stored = {
+        "version": 1,
+        "messages": [
+            {"id": "m1", "role": "assistant", "content": "<think>secret-stored-reasoning</think>visible answer"},
+            {"id": "m2", "role": "assistant", "content": "literal ``<think>`` tag in a real span"},
+            {"id": "m3", "role": "user", "content": "user text <think>secret-user-side</think> kept raw"},
+        ],
+    }
+    out = resanitize_share_snapshot(stored)
+    contents = [message["content"] for message in out["messages"]]
+    assert "secret-stored-reasoning" not in contents[0]
+    assert "visible answer" in contents[0]
+    # A genuinely balanced code span is preserved verbatim.
+    assert contents[1] == stored["messages"][1]["content"]
+    # The create path never strips user-side tags; the rebuild must not
+    # start treating user messages as assistant reasoning either.
+    assert contents[2] == stored["messages"][2]["content"]
+
+
+async def test_snapshot_strips_reasoning_at_block_boundaries():
+    """Round-13 adversarial review: a paragraph ends at every block-
+    interrupting line (fence, blockquote, list), not only at blank lines —
+    an inline span can never reach across one, so ``<think>`` content on
+    the far side is reasoning and must be stripped."""
+    attacks = {
+        "fence interrupt": "a `\n```c\n```\n<think>secret-y</think> ` z",
+        "blockquote interrupt": "a `\n> <think>secret-z</think> ` b",
+        "list interrupt": "a `\n- item `x`\n<think>secret-t</think> ` y",
+    }
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        content = "\n".join(attacks.values())
+        return [_row(1, {"type": "ai", "content": content})], False
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot, _seq = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    content = snapshot["messages"][0]["content"]
+    for secret in ("secret-y", "secret-z", "secret-t"):
+        assert secret not in content, content
+    # No internal marker bytes or fence destruction may ride along.
+    assert "\x00" not in content
+    assert "```c\n```" in content
+
+
+async def test_snapshot_strips_reasoning_behind_fence_regex_divergences():
+    """The fence recognizer must follow CommonMark, not one greedy regex:
+    an info string containing a backtick is not a fence opener, a closer
+    needs at least the opener's length, and fences inside raw-HTML blocks
+    are not fences — in every case the swallowed ``<think>`` renders as
+    prose and must be stripped."""
+    attacks = {
+        "info-string backtick": "``` ```\n<think>secret-w</think>\n```\nafter",
+        "longer closer": "```\ncode\n`````\n<think>secret-v</think>\n```\ntail",
+        "script raw block": "<script>\n```\n</script>\n<think>secret-u</think>\n```\ncode\n```\n",
+    }
+
+    # Each attack rides its own message: a preceding unclosed fence would
+    # change the parse context of the next one (block structure is not
+    # compositional across messages).
+    for attack in attacks.values():
+
+        async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None, _content=attack):
+            return [_row(1, {"type": "ai", "content": _content})], False
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+            snapshot, _seq = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+        content = snapshot["messages"][0]["content"]
+        assert "secret-w" not in content and "secret-v" not in content and "secret-u" not in content, content
+        assert "\x00" not in content
+
+
+def test_resanitize_drops_messages_that_restrip_to_empty():
+    """Create-path parity: a stored message whose public text re-strips to
+    nothing is dropped, not published as an empty shell."""
+    from app.gateway.shares.snapshot import resanitize_share_snapshot
+
+    out = resanitize_share_snapshot(
+        {
+            "version": 1,
+            "messages": [
+                {"id": "m1", "role": "assistant", "content": "<think>only-reasoning</think>"},
+                {"id": "m2", "role": "assistant", "content": "kept"},
+            ],
+        }
+    )
+    assert [message["content"] for message in out["messages"]] == ["kept"]
+    assert [message["id"] for message in out["messages"]] == ["m1"]
+
+
+def test_resanitize_strips_reasoning_behind_hard_break_memo_edge():
+    """A backslash hard break followed by a blank line starts a fresh
+    paragraph: the later real code span must keep its literal ``<think>``
+    tag even though an earlier same-length opener found no closer."""
+    from app.gateway.shares.snapshot import resanitize_share_snapshot
+
+    stored = {
+        "version": 1,
+        "messages": [
+            {"id": "m1", "role": "assistant", "content": "``A\n\\\n\n``<think>keep-me</think>`` done"},
+        ],
+    }
+    out = resanitize_share_snapshot(stored)
+    assert "keep-me" in out["messages"][0]["content"]
+
+
+def test_strip_html_blocks_do_not_bridge_spans_or_duplicate_regions():
+    """Round-2 adversarial review: (A) an HTML block must terminate the
+    paragraph its opener lived in — spans may not bridge it, and regions
+    must not be re-appended (the corruption was doubled output); (B) type
+    5/7 HTML blocks (CDATA, a complete tag alone) are raw blocks too."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    # A: leak repro — the think after the script block is prose.
+    out = strip("a `\n<script>\n</script>\n<think>secret-html</think> ` b")
+    assert "secret-html" not in out
+    # A: corruption repro — each code span exactly once, no doubling.
+    out = strip("x `AAAA`y\n<div>\n\nz `BBBB`w\n")
+    assert out.count("AAAA") == 1, out
+    assert out.count("BBBB") == 1, out
+    # B: type 5 (CDATA) and type 7 (complete tag alone) are raw blocks.
+    assert "secret-b7" not in strip("<span>\n`<think>secret-b7</think>`\ntail\n")
+    assert "secret-cdata" not in strip("<![CDATA[\n`<think>secret-cdata</think>`\n]]>\n")
+    assert "secret-sy" not in strip("<scripty>\n`<think>secret-sy</think>`\n")
+
+
+def test_strip_preserves_code_in_heading_and_selfclosed_script_fence():
+    """Round-2 over-strip fixes: a type-1 block that closes on its opening
+    line does not swallow the rest of the document, and inline code inside
+    a heading is still code."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    fence_after_selfclosed = strip("<script>x</script>\n```\n<think>in-code</think>\n```\n")
+    assert "in-code" in fence_after_selfclosed
+    assert "in-heading" in strip("# `x<think>in-heading</think>x`")
+
+
+def test_strip_preserves_indented_code_blocks():
+    """Four-space-indented lines after a blank line are an indented code
+    block — the renderer shows them literally, so their tags survive."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    out = strip("intro\n\n    <think>in-indented</think>\n\noutro")
+    assert "in-indented" in out
+
+
+def test_strip_restore_is_linear_on_many_regions():
+    """The restore must rejoin in one pass: ~131k regions from alternating
+    fence lines used to cost a full-string scan per region (quadratic on
+    every anonymous read)."""
+    import time
+
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    big = "```\ncode\n```\n" * 21_000  # ~294KB, ~42k protected regions
+    started = time.monotonic()
+    out = strip(big)
+    elapsed = time.monotonic() - started
+    assert out.count("```") == 42_000
+    assert elapsed < 2.0, elapsed
+
+
+async def test_snapshot_suppresses_document_protection_in_list_context():
+    """Round-4 adversarial review: item indents approximate document indents
+    badly, and every misread leaks — an item fence kept open past its item,
+    a dedented fence line eaten as fence content, item-continuation indents
+    taken as document code, a quote→list transition bridged, and a nested
+    empty quote line missed as a paragraph split. Once a list or quote line
+    is seen, document-level fence and indented protection is suppressed
+    (strip instead — the module's leak-vs-loss asymmetry)."""
+    attacks = {
+        "item fence": "- i\n   ```\n<think>s-lf</think>\n   ```",
+        "item indented": "- i\n\n    <think>s-li4</think>",
+        "quote-to-list": "> `a\nplain <think>s-ql</think>x\n- `b`",
+        "nested empty quote": "> `a\n  >\n<think>s-bq</think>b",
+    }
+
+    # Each attack rides its own message (block structure is not
+    # compositional across concatenated attacks).
+    for attack in attacks.values():
+
+        async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None, _content=attack):
+            return [_row(1, {"type": "ai", "content": _content})], False
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+            snapshot, _seq = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+        content = snapshot["messages"][0]["content"]
+        for secret in ("s-lf", "s-li4", "s-ql", "s-bq"):
+            assert secret not in content, (attack, content)
+        assert "\x00" not in content
+
+
+def test_strip_indented_eligible_after_selfclosed_html_block():
+    """A self-closed HTML block is a leaf-block boundary: the indented line
+    after it is an indented code block, not paragraph text."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    out = strip("<script>x</script>\n    <think>s-oc</think>")
+    assert "s-oc" in out
+
+
+def test_strip_quote_marker_depth_interrupts_and_dedent_continues():
+    """Round-5: a deeper-nested quote line interrupts the outer quote's
+    paragraph (its ``<think>`` is prose and must strip), while the dedent
+    mirror is lazy continuation whose real span is preserved."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    deeper = strip("> `a\nplain <think>s-dq</think>x\n> > `b`")
+    assert "s-dq" not in deeper
+    dedent = strip("> > `a\nplain <think>s-keep</think>x\n> `b`")
+    assert "s-keep" in dedent

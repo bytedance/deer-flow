@@ -35,12 +35,134 @@ _SNAPSHOT_MAX_RENDERED_BYTES = 2 * 1024 * 1024
 # would walk an unbounded history while the public-message count stays under
 # the share cap.
 _SNAPSHOT_MAX_SCANNED_ROWS = 50_000
-_FENCED_CODE_RE = re.compile(
-    r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]{0,3}(?P=fence)[ \t]*(?:\n|$)",
-    re.MULTILINE | re.DOTALL,
-)
-_INLINE_CODE_RE = re.compile(r"(?P<ticks>`+).*?(?P=ticks)", re.DOTALL)
 _MARKDOWN_LINK_RE = re.compile(r"!?\[(?P<label>[^\]]*)\]\((?P<target>[^)]+)\)")
+# --- Block-structure classification for code protection ------------------
+# The think-strip may only preserve what the Markdown renderer will also
+# render as code, so code regions are recognized per CommonMark block
+# rules instead of one greedy fence regex: an opener's info string must
+# not contain a backtick (backtick fences only), a closer needs at least
+# the opener's length (not exactly it), fences inside raw-HTML blocks are
+# not fences, and every block-interrupting line ends a paragraph (an
+# inline span can never reach across one).
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_HEADING_RE = re.compile(r"^ {0,3}#{1,6}[ \t]")
+_BLOCKQUOTE_RE = re.compile(r"^ {0,3}>")
+_LIST_ITEM_RE = re.compile(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]")
+_THEMATIC_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
+_HTML_TYPE1_OPEN_RE = re.compile(r"^ {0,3}<(script|pre|style|textarea)\b", re.IGNORECASE)
+_HTML_TYPE1_CLOSE_RE = re.compile(r"</(script|pre|style|textarea)>", re.IGNORECASE)
+_HTML_TYPE2_OPEN_RE = re.compile(r"^ {0,3}<!--")
+_HTML_TYPE2_CLOSE = "-->"
+_HTML_TYPE3_OPEN_RE = re.compile(r"^ {0,3}<\?")
+_HTML_TYPE3_CLOSE = "?>"
+_HTML_TYPE4_OPEN_RE = re.compile(r"^ {0,3}<![A-Za-z]")
+_HTML_TYPE4_CLOSE = ">"
+# CommonMark type-6 block tags (spec'd list; the block ends at a blank line).
+_HTML_TYPE6_TAGS = (
+    "address",
+    "article",
+    "aside",
+    "base",
+    "basefont",
+    "blockquote",
+    "body",
+    "caption",
+    "center",
+    "col",
+    "colgroup",
+    "dd",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hr",
+    "html",
+    "iframe",
+    "legend",
+    "li",
+    "link",
+    "main",
+    "menu",
+    "menuitem",
+    "nav",
+    "noframes",
+    "ol",
+    "optgroup",
+    "option",
+    "p",
+    "param",
+    "search",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "track",
+    "ul",
+)
+_HTML_TYPE6_OPEN_RE = re.compile(
+    r"^ {0,3}<(" + "|".join(_HTML_TYPE6_TAGS) + r")(?:[ \t]|/?>|$)",
+    re.IGNORECASE,
+)
+_HTML_TYPE5_OPEN_RE = re.compile(r"^ {0,3}<!\[CDATA\[")
+_HTML_TYPE5_CLOSE = "]]>"
+# Type 7: a complete open or closing tag alone on a line (checked only when
+# no other HTML kind matches — a `<script>`/`<div>` line is type 1/6, not 7).
+# The tag scan is quote-aware: `>` inside a quoted attribute value does not
+# end the tag (markdown-it accepts `<span title="a>b">` as a type-7 block).
+_HTML_TYPE7_OPEN_RE = re.compile(r"^ {0,3}(</?[A-Za-z][^<>\s]*)")
+
+
+def _is_complete_tag_line(content: str) -> bool:
+    indent = 0
+    while indent < len(content) and content[indent] == " " and indent < 3:
+        indent += 1
+    body = content[indent:]
+    opener = _HTML_TYPE7_OPEN_RE.match(body)
+    if opener is None:
+        return False
+    i = opener.end(1)
+    quote: str | None = None
+    while i < len(body):
+        char = body[i]
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char == '"':
+            quote = '"'
+        elif char == "'":
+            quote = "'"
+        elif char == ">":
+            return body[i + 1 :].strip() == ""
+        elif char == "<":
+            return False
+        i += 1
+    return False
+
+
 # Word-initial branches (``api/…``, ``mnt/…``) anchor a token on any
 # separator-ish follower — raw, backslash, or percent; layers mix freely
 # (literal ``api`` ahead of a percent-encoded ``threads``). No lookbehind
@@ -334,6 +456,353 @@ def _strict_public_text(message: Any) -> str:
     return ""
 
 
+def _find_equal_backtick_run(text: str, start: int) -> int | None:
+    """End index of the first backtick run whose length equals the run
+    ending just before *start*. Runs of other lengths are skipped (neither
+    closes the other) and backslashes inside the scanned content are
+    literal — a code span's content is opaque, so only an exact-length run
+    closes it. Callers bound the search to one paragraph."""
+    length = 0
+    probe = start - 1
+    while probe >= 0 and text[probe] == "`":
+        length += 1
+        probe -= 1
+    n = len(text)
+    j = start
+    while j < n:
+        char = text[j]
+        if char == "`":
+            run_end = j
+            while run_end < n and text[run_end] == "`":
+                run_end += 1
+            if run_end - j == length:
+                return run_end
+            j = run_end
+            continue
+        j += 1
+    return None
+
+
+def _commonmark_inline_code_spans(text: str) -> list[tuple[int, int]]:
+    """Inline code span extents per CommonMark, not per backtick matching:
+    only an unescaped backtick run of length N closed by the next
+    exactly-length-N run within this paragraph opens a span. Escaped
+    delimiters (``\\``), mismatched run lengths, and runs that never close
+    are literal text — the renderer shows their content as prose, so
+    ``<think>`` blocks hiding there are model reasoning and must not be
+    protected from stripping into an anonymous snapshot. *text* must be a
+    single paragraph (no block-interrupting lines) — `_code_regions`
+    guarantees that."""
+    spans: list[tuple[int, int]] = []
+    # A length-L opener that finds no closer rules out every later
+    # length-L opener in the same paragraph (identical remaining tail) —
+    # without this memo, a pathological message of alternating unclosed
+    # runs turns the scan quadratic on snapshot-sized text.
+    doomed_lengths: set[int] = set()
+    i = 0
+    n = len(text)
+    while i < n:
+        char = text[i]
+        if char == "\\":
+            i += 2
+            continue
+        if char != "`":
+            i += 1
+            continue
+        run_end = i
+        while run_end < n and text[run_end] == "`":
+            run_end += 1
+        length = run_end - i
+        close = None if length in doomed_lengths else _find_equal_backtick_run(text, run_end)
+        if close is not None:
+            spans.append((i, close))
+            i = close
+        else:
+            doomed_lengths.add(length)
+            i = run_end
+    return spans
+
+
+def _quote_depth(content: str) -> int:
+    """Number of leading blockquote markers (a line starting "> > " nests two)."""
+    depth = 0
+    rest = content
+    while True:
+        marker = re.match(r"^ {0,3}>[ \t]?", rest)
+        if marker is None:
+            return depth
+        depth += 1
+        rest = rest[marker.end() :]
+
+
+def _indent_columns(content: str) -> int:
+    """Indent width in columns: a space is one column, a tab advances to
+    the next multiple of four (CommonMark tab expansion)."""
+    columns = 0
+    for char in content:
+        if char == " ":
+            columns += 1
+        elif char == "\t":
+            columns += 4 - (columns % 4)
+        else:
+            return columns
+    return columns
+
+
+def _fence_closes(content: str, char: str, min_len: int) -> bool:
+    """A closing fence: up to three spaces of indent, at least *min_len*
+    copies of the opening fence character, nothing but whitespace after."""
+    indent = 0
+    while indent < len(content) and content[indent] == " " and indent < 3:
+        indent += 1
+    body = content[indent:]
+    length = 0
+    while length < len(body) and body[length] == char:
+        length += 1
+    return length >= min_len and body[length:].strip() == ""
+
+
+def _html_block_close(content: str, kind: str, tag: str | None) -> bool:
+    """Has *content* ended the open HTML block of *kind*?"""
+    if kind == "type1":
+        return tag is not None and _HTML_TYPE1_CLOSE_RE.search(content) is not None
+    if kind == "type2":
+        return _HTML_TYPE2_CLOSE in content
+    if kind == "type3":
+        return _HTML_TYPE3_CLOSE in content
+    if kind == "type4":
+        return _HTML_TYPE4_CLOSE in content
+    if kind == "type5":
+        return _HTML_TYPE5_CLOSE in content
+    return False  # blank-line-ended kinds are handled by the caller
+
+
+def _html_open(content: str) -> tuple[str | None, str | None, bool, bool]:
+    """(kind, tag, ends-at-blank-line, closes-on-the-open-line) when
+    *content* opens a CommonMark HTML block, else all-None/False. Types 1-4
+    may close on their own opening line (``<script>x</script>``) — the
+    caller must not stay in the block state in that case."""
+    type1 = _HTML_TYPE1_OPEN_RE.match(content)
+    if type1 is not None:
+        tag = type1.group(1)
+        return "type1", tag, False, _HTML_TYPE1_CLOSE_RE.search(content) is not None
+    if _HTML_TYPE2_OPEN_RE.match(content) is not None:
+        return "type2", None, False, _HTML_TYPE2_CLOSE in content
+    if _HTML_TYPE3_OPEN_RE.match(content) is not None:
+        return "type3", None, False, _HTML_TYPE3_CLOSE in content
+    if _HTML_TYPE4_OPEN_RE.match(content) is not None:
+        return "type4", None, False, _HTML_TYPE4_CLOSE in content
+    if _HTML_TYPE5_OPEN_RE.match(content) is not None:
+        return "type5", None, False, _HTML_TYPE5_CLOSE in content
+    if _HTML_TYPE6_OPEN_RE.match(content) is not None:
+        return "type6", None, True, False
+    if _is_complete_tag_line(content):
+        return "type7", None, True, False
+    return None, None, False, False
+
+
+def _code_regions(text: str) -> list[tuple[int, int]]:
+    """Byte extents the Markdown renderer will treat as code: fenced code
+    blocks (CommonMark opener/closer rules — backtick fences reject info
+    strings containing backticks, closers need at least the opener's
+    length) and inline code spans. HTML blocks are deliberately NOT
+    protected — their lines merely terminate paragraphs, so any
+    ``<think>`` inside them is stripped rather than served.
+
+    The walk is line-structured (linear in the text; the old DOTALL fence
+    regex was quadratic per line start) and yields disjoint regions, which
+    is what makes the single-layer marker restore in
+    `_strip_think_blocks_outside_markdown_code` safe."""
+    regions: list[tuple[int, int]] = []
+    n = len(text)
+
+    # Precompute line extents (content end, line end including the line
+    # terminator). CommonMark line endings are LF, CRLF, and bare CR.
+    line_spans: list[tuple[int, int, int]] = []
+    for match in re.finditer(r"[^\r\n]*(?:\r\n|\r|\n|$)", text):
+        line_start, line_end = match.span()
+        if line_start == n:
+            break
+        content_end = line_end
+        if content_end > line_start and text[content_end - 1] == "\n":
+            content_end -= 1
+            if content_end > line_start and text[content_end - 1] == "\r":
+                content_end -= 1
+        elif content_end > line_start and text[content_end - 1] == "\r":
+            content_end -= 1
+        line_spans.append((line_start, content_end, line_end))
+
+    fence_char: str | None = None
+    fence_len = 0
+    fence_start = 0
+    html_kind: str | None = None
+    html_tag: str | None = None
+    html_blank_end = False
+    indented_start: int | None = None
+    indented_end = 0
+    # An indented code block may open only where no paragraph is open —
+    # after a blank line, the document start, or a leaf block (heading,
+    # fence close, HTML block end, thematic break, setext underline) — and
+    # never after an ordinary/quote/list line, whose paragraph a deeper
+    # indent would lazily continue.
+    indented_eligible = True
+    segment_start: int | None = None
+    segment_end = 0
+    # Quote/list lines root a segment whose later plain lines are lazy
+    # continuations of the same paragraph (an inline span may bridge them);
+    # an ordinary line roots a segment a quote/list line would interrupt.
+    # `saw_quotelike` latches for the whole message: item-scoped fences and
+    # indents cannot be told from document-level ones by a flat walk, so
+    # once a list or quote appears, both document-level protections are
+    # suppressed (strip instead — the module's leak-vs-loss asymmetry).
+    segment_kind: str | None = None
+    segment_quote_depth = 0
+    saw_quotelike = False
+
+    def flush_segment() -> None:
+        # Resets the segment on flush: a caller that keeps extending the
+        # segment across a non-paragraph line (an HTML block, say) would let
+        # inline spans bridge it — the leak/corruption vector the reset
+        # closes.
+        nonlocal segment_start
+        if segment_start is None:
+            return
+        for begin, end in _commonmark_inline_code_spans(text[segment_start:segment_end]):
+            regions.append((segment_start + begin, segment_start + end))
+        segment_start = None
+
+    def close_indented() -> None:
+        nonlocal indented_start
+        if indented_start is not None:
+            regions.append((indented_start, indented_end))
+            indented_start = None
+
+    for start, content_end, line_end in line_spans:
+        content = text[start:content_end]
+        if fence_char is not None:
+            if _fence_closes(content, fence_char, fence_len):
+                regions.append((fence_start, line_end))
+                fence_char = None
+                indented_eligible = True
+            continue
+        if html_kind is not None:
+            if html_blank_end:
+                if content.strip() == "":
+                    html_kind = None
+                    # The blank that ends the block leaves no open paragraph.
+                    indented_eligible = True
+            elif _html_block_close(content, html_kind, html_tag):
+                html_kind = None
+                indented_eligible = True
+            continue
+        if indented_start is not None:
+            if content.strip() == "" or _indent_columns(content) >= 4:
+                indented_end = line_end
+                indented_eligible = content.strip() == ""
+                continue
+            close_indented()
+        if content.strip() == "":
+            flush_segment()
+            indented_eligible = True
+            continue
+        fence_match = _FENCE_OPEN_RE.match(content)
+        if fence_match is not None and not (fence_match.group(1)[0] == "`" and "`" in fence_match.group(2)):
+            if saw_quotelike:
+                # List/quote context: an item-scoped fence's extent depends
+                # on the item's content indent, which this document-level
+                # walk does not model — and both misreads leak (an item
+                # fence kept open past its item, or a dedented fence line
+                # eaten as document fence content). Conservative inversion:
+                # no document-level fence protection once a list or quote
+                # has been seen. The fence line only BREAKS the segment so
+                # fake inline spans cannot pair across it; item-scoped
+                # fences are stripped instead of protected.
+                flush_segment()
+                indented_eligible = False
+                continue
+            # A fence interrupts any open paragraph.
+            close_indented()
+            flush_segment()
+            fence_char = fence_match.group(1)[0]
+            fence_len = len(fence_match.group(1))
+            fence_start = start
+            indented_eligible = False
+            continue
+        kind, tag, ends_at_blank, closes_on_open = _html_open(content)
+        if kind is not None and not (kind == "type7" and segment_start is not None):
+            # HTML blocks interrupt paragraphs and are deliberately NOT
+            # protected — their content is stripped like any other prose so
+            # a `<think>` inside one is never served. Type 7 is the
+            # exception that cannot interrupt a paragraph: mid-paragraph it
+            # is lazy continuation text.
+            close_indented()
+            flush_segment()
+            if not closes_on_open:
+                html_kind, html_tag, html_blank_end = kind, tag, ends_at_blank
+                indented_eligible = False
+            else:
+                # A self-closed HTML block is a leaf-block boundary.
+                indented_eligible = True
+            continue
+        quote_match = _BLOCKQUOTE_RE.match(content) is not None
+        list_match = (not quote_match) and _LIST_ITEM_RE.match(content) is not None
+        if quote_match or list_match:
+            # An empty quote line at any nesting depth is a blank line
+            # inside the quote: it splits the quoted paragraph.
+            blank_quote = quote_match and re.fullmatch(r" {0,3}>[ \t]*(?:>[ \t]*)*", content) is not None
+            if blank_quote:
+                flush_segment()
+                indented_eligible = True
+                continue
+            saw_quotelike = True
+            kind_root = "quote" if quote_match else "list"
+            # A list line always starts a fresh item (two items are two
+            # paragraphs — a span can never bridge them). A quote line
+            # continues a quote-rooted segment only when its marker depth
+            # is not deeper — the `>` markers are lazy paragraph
+            # continuation at the same nesting; a deeper-nested quote line
+            # interrupts the outer quote's paragraph.
+            depth = _quote_depth(content) if quote_match else 0
+            if list_match or segment_kind != "quote" or depth > segment_quote_depth:
+                flush_segment()
+                segment_start = start
+                segment_kind = kind_root
+                segment_quote_depth = depth
+            segment_end = line_end
+            indented_eligible = False
+            continue
+        if _HEADING_RE.match(content) is not None or _THEMATIC_RE.match(content) is not None or _SETEXT_UNDERLINE_RE.match(content) is not None:
+            # Leaf-block lines end the paragraph an inline span lives in;
+            # the span can never reach across one. A heading's own inline
+            # code is still code to the renderer, so it is protected too
+            # (thematic/setext lines carry no backticks by shape).
+            flush_segment()
+            if _HEADING_RE.match(content) is not None:
+                for begin, end in _commonmark_inline_code_spans(content):
+                    regions.append((start + begin, start + end))
+            indented_eligible = True
+            continue
+        if indented_eligible and not saw_quotelike and _indent_columns(content) >= 4:
+            # An indented code block (it cannot interrupt a paragraph, so
+            # entry requires a blank line, the document start, or a leaf
+            # block boundary); its content is protected verbatim.
+            flush_segment()
+            indented_start = start
+            indented_end = line_end
+            continue
+        if segment_start is None:
+            segment_start = start
+            segment_kind = None
+        segment_end = line_end
+        indented_eligible = False
+    flush_segment()
+    close_indented()
+    if fence_char is not None:
+        # CommonMark: an unclosed fence runs to the end of the document.
+        regions.append((fence_start, n))
+    return regions
+
+
 def _strip_think_blocks_outside_markdown_code(text: str) -> str:
     """Remove model reasoning while preserving literal tags in code examples."""
     protected: list[str] = []
@@ -341,17 +810,36 @@ def _strip_think_blocks_outside_markdown_code(text: str) -> str:
     while marker_prefix in text:
         marker_prefix += "_"
 
-    def protect(match: re.Match[str]) -> str:
+    # `_code_regions` yields disjoint, non-nested regions, so each marker is
+    # spliced exactly once and the index-based restore below cannot collide
+    # (a region inside another region — the old corruption vector — cannot
+    # exist). A marker swallowed by a removed <think> block simply restores
+    # nothing: its code content was part of the removed reasoning.
+    without_code_parts: list[str] = []
+    cursor = 0
+    for begin, end in _code_regions(text):
+        without_code_parts.append(text[cursor:begin])
         marker = f"{marker_prefix}{len(protected)}\x00"
-        protected.append(match.group(0))
-        return marker
-
-    without_fences = _FENCED_CODE_RE.sub(protect, text)
-    without_code = _INLINE_CODE_RE.sub(protect, without_fences)
+        protected.append(text[begin:end])
+        without_code_parts.append(marker)
+        cursor = end
+    without_code_parts.append(text[cursor:])
+    without_code = "".join(without_code_parts)
     stripped = strip_think_blocks(without_code)
-    for index, code in enumerate(protected):
-        stripped = stripped.replace(f"{marker_prefix}{index}\x00", code)
-    return stripped
+    if not protected:
+        return stripped
+    # Single-pass rejoin: a per-region `stripped.replace(marker, code)` is
+    # quadratic (full-string scan per region — ~170s at the 2 MiB snapshot
+    # cap with ~131k regions, paid on every anonymous read).
+    marker_map = {f"{marker_prefix}{index}\x00": code for index, code in enumerate(protected)}
+    parts: list[str] = []
+    restore_cursor = 0
+    for marker_match in re.finditer(re.escape(marker_prefix) + r"\d+\x00", stripped):
+        parts.append(stripped[restore_cursor : marker_match.start()])
+        parts.append(marker_map.get(marker_match.group(0), marker_match.group(0)))
+        restore_cursor = marker_match.end()
+    parts.append(stripped[restore_cursor:])
+    return "".join(parts)
 
 
 def _collapse_separators_once(text: str) -> tuple[str, list[tuple[int, int]]]:
@@ -968,11 +1456,26 @@ def resanitize_share_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 continue
             if not isinstance(content, str):
                 continue
+            # Assistant reasoning owes the same guarantee at read time as at
+            # create: an older or sanitizer-defect snapshot carrying a
+            # <think> block must not serve it to anonymous readers forever.
+            # Same order as the create path — strip reasoning, then
+            # neutralize private paths in what remains. User messages are
+            # never treated as assistant reasoning (create-path parity).
+            sanitized = content
+            if role == "assistant":
+                sanitized = _strip_think_blocks_outside_markdown_code(sanitized)
+            sanitized = _neutralize_private_references(sanitized)
+            if not sanitized.strip():
+                # Create-path parity: `_public_message` drops a message whose
+                # public text is empty; a stored record that re-strips to
+                # empty must not publish an empty shell either.
+                continue
             messages.append(
                 {
                     "id": f"m{len(messages) + 1}",
                     "role": role,
-                    "content": _neutralize_private_references(content),
+                    "content": sanitized,
                 }
             )
     version = snapshot.get("version")
