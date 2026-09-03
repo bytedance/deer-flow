@@ -1031,10 +1031,7 @@ def _assert_image_starts_under_hardened_capabilities(
                 timeout=30,
             )
             tail = "\n".join((logs.stdout + logs.stderr).splitlines()[-40:]) + "\n" + (prog_logs.stdout or "")
-            pytest.fail(
-                f"{failure_label} never became ready under the hardened capabilities: "
-                f"{info.sandbox_url}\n--- last 40 container log lines ---\n{tail}"
-            )
+            pytest.fail(f"{failure_label} never became ready under the hardened capabilities: {info.sandbox_url}\n--- last 40 container log lines ---\n{tail}")
         assert backend.is_alive(info)
     finally:
         backend.destroy(info)
