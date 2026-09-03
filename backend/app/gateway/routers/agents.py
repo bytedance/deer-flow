@@ -8,6 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from deerflow.agents.memory.manager import get_memory_manager
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import (
     AgentConfig,
@@ -566,12 +567,11 @@ async def delete_agent(name: str) -> None:
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
-    try:
-        # Off the event loop: file rmtree or a DB delete plus memory cleanup.
-        def _delete_agent() -> AgentDeleteOutcome:
-            return get_agent_store().delete(name, user_id=user_id)
 
-        outcome = await asyncio.to_thread(_delete_agent)
+    try:
+        # Off the event loop: resolve store + cancel → delete → cancel-on-success
+        # (get_agent_store / memory manager do blocking config and FS I/O).
+        outcome = await asyncio.to_thread(_delete_agent_with_memory_cancel, name, user_id)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
@@ -590,3 +590,45 @@ async def delete_agent(name: str) -> None:
         )
 
     logger.info(f"Deleted agent '{name}'")
+
+
+def _delete_agent_with_memory_cancel(name: str, user_id: str | None) -> AgentDeleteOutcome:
+    """Cancel buffered memory, delete the agent, then cancel again on success.
+
+    Runs entirely in a worker thread so blocking store/memory/config I/O stays
+    off the event loop. Pre-delete cancel closes the debounce-timer race during
+    rmtree; post-success cancel covers work enqueued mid-delete. A rejected
+    delete may still drop buffered work; that update is re-fed on the next turn.
+    """
+    store = get_agent_store()
+    _cancel_pending_memory_for_agent(name, user_id)
+    outcome = store.delete(name, user_id=user_id)
+    if outcome == "deleted":
+        _cancel_pending_memory_for_agent(name, user_id)
+    return outcome
+
+
+def _cancel_pending_memory_for_agent(name: str, user_id: str | None) -> None:
+    """Best-effort cancel of buffered memory extraction for one agent scope.
+
+    Always attempts cancellation even if memory is currently disabled: settings
+    are hot-reloadable and disabling does not destroy an already-live queue.
+    Failure must never fail agent deletion: a dropped update is re-fed on the
+    next conversation turn per the queue contract.
+
+    Callers must run this off the event loop (blocking config/manager I/O).
+    """
+    try:
+        cancelled = get_memory_manager().cancel_by_agent(name, user_id=user_id)
+        if cancelled:
+            logger.info(
+                "Cancelled %d pending memory update(s) for agent '%s'",
+                cancelled,
+                name,
+            )
+    except Exception:
+        logger.warning(
+            "Failed to cancel pending memory updates for agent '%s' (non-fatal)",
+            name,
+            exc_info=True,
+        )
