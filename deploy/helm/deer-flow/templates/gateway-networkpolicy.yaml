@@ -22,7 +22,7 @@ spec:
           throttle buckets. Same-namespace peers (frontend, provisioner)
           talk to the gateway too, so they are named alongside nginx:
           the policy's job is to exclude what must never connect — user
-          code — not to enumerate every internal caller. */ }}
+          code — not to enumerate every internal caller. */}}
     - from:
         - podSelector:
             matchLabels:
