@@ -9,13 +9,59 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.runtime import resolve_authorization_provider
 from deerflow.config.app_config import AppConfig
 
+if TYPE_CHECKING:
+    from deerflow.authz.provider import AuthorizationProvider
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedSkillAuthorization:
+    """Provider + principal resolved once per agent assembly.
+
+    Shared by the Layer 1 visibility filter above and the runtime
+    ``skill:activate`` action check in ``SkillActivationMiddleware`` so both
+    layers see the same provider instance and identity without resolving
+    twice. ``fail_closed`` is the provider-error policy from config.
+    """
+
+    provider: AuthorizationProvider
+    principal: Any
+    fail_closed: bool
+
+
+def resolve_skill_authorization(
+    context: Mapping[str, Any],
+    app_config: AppConfig,
+) -> ResolvedSkillAuthorization | None:
+    """Resolve the skill authorization context, or ``None`` when disabled.
+
+    ``None`` means "authorization is disabled or no provider is configured" —
+    callers treat that as "no extra enforcement" (the pre-authorization
+    behavior). Mock-friendly in the same style as the filter below: a config
+    object without a real ``AuthorizationConfig`` also yields ``None``.
+    """
+    authz_config = getattr(app_config, "authorization", None)
+    if authz_config is None or getattr(authz_config, "enabled", None) is not True:
+        return None
+
+    provider = resolve_authorization_provider(authz_config)
+    if provider is None:
+        return None
+
+    principal = build_principal_from_context(context, default_role=authz_config.default_role)
+    return ResolvedSkillAuthorization(
+        provider=provider,
+        principal=principal,
+        fail_closed=bool(getattr(authz_config, "fail_closed", False)),
+    )
 
 
 def filter_available_skills_by_authorization(
@@ -25,6 +71,7 @@ def filter_available_skills_by_authorization(
     app_config: AppConfig,
     user_id: str | None = None,
     candidate_skill_names: list[str] | None = None,
+    authorization: ResolvedSkillAuthorization | None = None,
 ) -> set[str] | None:
     """Filter a skill-name allowlist by the provider's ``"skill"`` policy.
 
@@ -57,15 +104,13 @@ def filter_available_skills_by_authorization(
     # Guard against Mock/SimpleNamespace app_config objects in tests that
     # don't carry a real AuthorizationConfig. getattr avoids AttributeError
     # and the ``is not True`` identity check avoids truthy Mock attributes.
-    authz_config = getattr(app_config, "authorization", None)
-    if authz_config is None or getattr(authz_config, "enabled", None) is not True:
+    if authorization is None:
+        authorization = resolve_skill_authorization(context, app_config)
+    if authorization is None:
         return available_skills
+    fail_closed = authorization.fail_closed
 
-    provider = resolve_authorization_provider(authz_config)
-    if provider is None:
-        return available_skills
-
-    principal = build_principal_from_context(context, default_role=authz_config.default_role)
+    principal = authorization.principal
 
     # If the agent already allows no skills, nothing to filter.
     if available_skills is not None and len(available_skills) == 0:
@@ -89,7 +134,7 @@ def filter_available_skills_by_authorization(
             candidates = _all_configured_skill_names(app_config, user_id=user_id)
         except Exception:
             logger.warning("Could not resolve configured skill names for authorization filtering", exc_info=True)
-            return set() if authz_config.fail_closed else available_skills
+            return set() if fail_closed else available_skills
 
     if not candidates:
         # Genuinely no skills configured (or agent allowlist is empty after
@@ -97,12 +142,12 @@ def filter_available_skills_by_authorization(
         return available_skills
 
     try:
-        allowed = provider.filter_resources(principal, "skill", candidates)
+        allowed = authorization.provider.filter_resources(principal, "skill", candidates)
         if not isinstance(allowed, list) or any(not isinstance(n, str) for n in allowed):
             raise TypeError("AuthorizationProvider.filter_resources must return list[str]")
     except Exception:
         logger.warning("Authorization provider failed while filtering available skills", exc_info=True)
-        return set() if authz_config.fail_closed else available_skills
+        return set() if fail_closed else available_skills
 
     # Defensive intersection with the candidate set: the provider contract says
     # results must be a subset of candidates, but we only validated list[str].

@@ -37,7 +37,10 @@ from deerflow.skills.types import SKILL_MD_FILE, SecretRequirement, Skill, Skill
 from deerflow.utils.messages import get_original_user_content_text, is_real_user_message
 
 if TYPE_CHECKING:
+    from deerflow.authz.skill_filter import ResolvedSkillAuthorization
     from deerflow.config.app_config import AppConfig
+
+from deerflow.authz.provider import AuthzDecision, AuthzRequest
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +102,7 @@ class SkillActivationMiddleware(AgentMiddleware):
         app_config: AppConfig | None = None,
         user_id: str | None = None,
         slash_source_owner_token: str,
+        skill_authorization: ResolvedSkillAuthorization | None = None,
     ) -> None:
         super().__init__()
         if not isinstance(slash_source_owner_token, str) or not slash_source_owner_token:
@@ -107,6 +111,29 @@ class SkillActivationMiddleware(AgentMiddleware):
         self._app_config = app_config
         self._user_id = user_id
         self._slash_source_owner_token = slash_source_owner_token
+        self._skill_authorization = skill_authorization
+
+    def _activation_allowed(self, skill_name: str) -> bool:
+        """Action-scoped ``skill:activate`` check for explicit slash activation.
+
+        ``_available_skills`` is the Layer 1 *visibility* set (filter_resources,
+        action-agnostic); an action-aware custom provider may expose a skill
+        there while denying its activation. Mirrors ``_authorize_model_name``'s
+        second ``authorize("model", "use")`` check. Provider errors follow the
+        configured fail-closed / fail-open policy. ``None`` (authorization
+        disabled) allows — membership in the visibility set already decided.
+        """
+        authz = self._skill_authorization
+        if authz is None:
+            return True
+        try:
+            decision = authz.provider.authorize(AuthzRequest(principal=authz.principal, resource="skill", action="activate", target=skill_name))
+            if not isinstance(decision, AuthzDecision):
+                raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
+            return decision.allow
+        except Exception:
+            logger.warning("Authorization provider failed while checking skill:activate for '%s'", skill_name, exc_info=True)
+            return not authz.fail_closed
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {
@@ -157,6 +184,11 @@ class SkillActivationMiddleware(AgentMiddleware):
         if not skill.enabled:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is installed but disabled. Enable it before using slash activation.")
         if self._available_skills is not None and reference.name not in self._available_skills:
+            return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not available for this agent.")
+        if not self._activation_allowed(reference.name):
+            # Visible in the Layer 1 set but denied by the action-scoped
+            # skill:activate policy — same user-facing message as the
+            # membership denial so the reason is not leaked.
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not available for this agent.")
 
         resolved = resolve_slash_skill(

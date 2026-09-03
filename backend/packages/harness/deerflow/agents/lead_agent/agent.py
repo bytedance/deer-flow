@@ -467,6 +467,7 @@ def build_middlewares(
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
     authorization_provider=None,
+    skill_authorization=None,
     extensions=None,
     subagent_execution_capacity: int | None = None,
 ):
@@ -494,6 +495,11 @@ def build_middlewares(
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
         authorization_provider: Provider already resolved for assembly-time
             filtering. Reused by the execution-time authorization middleware.
+        skill_authorization: Provider + principal already resolved for the
+            skill visibility filter. Passed through to
+            ``SkillActivationMiddleware`` so explicit slash activation also
+            enforces the action-scoped ``skill:activate`` decision (custom
+            providers may distinguish visibility from activation).
         subagent_execution_capacity: Startup-frozen process capacity used to
             keep advertised and enforced task concurrency aligned after reloads.
         extensions: Loaded extensions whose middleware contributions are merged
@@ -538,6 +544,7 @@ def build_middlewares(
             app_config=resolved_app_config,
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
+            skill_authorization=skill_authorization,
         )
     )
 
@@ -918,14 +925,38 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     # slash-activated (SkillActivationMiddleware checks this set). When
     # authorization is disabled, this is a no-op. ``available_skills=None``
     # means "no agent-level allowlist" (all enabled skills); authorization
-    # still constrains via filter_resources in that case.
-    from deerflow.authz.skill_filter import filter_available_skills_by_authorization
+    # still constrains via filter_resources in that case. The resolved
+    # provider/principal are threaded into ``SkillActivationMiddleware`` so
+    # explicit activation additionally enforces the action-scoped
+    # ``skill:activate`` decision (visibility != activation for custom
+    # providers).
+    from deerflow.authz.skill_filter import filter_available_skills_by_authorization, resolve_skill_authorization
+
+    skill_authorization = resolve_skill_authorization(cfg, resolved_app_config)
+    # Resolve the filter's candidate names through the cached catalog loader
+    # instead of letting the filter rescan storage: the enabled-skills load
+    # below (``_load_enabled_available_skills``) uses the same
+    # config-identity cache, so a build pays one skill-tree walk when the
+    # cache is cold and none when warm — the filter's own uncached fallback
+    # double-pays it on every build (notably costly on NFS/CSI roots).
+    candidate_skill_names = None
+    if available_skills is None and skill_authorization is not None:
+        try:
+            from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
+
+            candidate_skill_names = [s.name for s in get_enabled_skills_for_config(resolved_app_config, user_id=resolved_user_id)]
+        except Exception:
+            logger.warning("Failed to pre-load enabled skills for authorization candidates", exc_info=True)
+            # Leave None: the filter resolves candidates itself and applies
+            # its fail-closed semantics when that resolution also fails.
 
     available_skills = filter_available_skills_by_authorization(
         available_skills,
         context=cfg,
         app_config=resolved_app_config,
         user_id=resolved_user_id,
+        candidate_skill_names=candidate_skill_names,
+        authorization=skill_authorization,
     )
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
@@ -1055,6 +1086,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             mcp_routing_middleware=mcp_routing_middleware,
             user_id=resolved_user_id,
             authorization_provider=_authz_provider,
+            skill_authorization=skill_authorization,
             subagent_execution_capacity=subagent_execution_capacity,
         )
         system_prompt = apply_prompt_template(
@@ -1171,6 +1203,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         mcp_routing_middleware=mcp_routing_middleware,
         user_id=resolved_user_id,
         authorization_provider=_authz_provider,
+        skill_authorization=skill_authorization,
         subagent_execution_capacity=subagent_execution_capacity,
     )
     system_prompt = apply_prompt_template(

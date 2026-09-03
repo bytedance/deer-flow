@@ -318,13 +318,29 @@ class DeerFlowClient:
         # and the catalog/prompt would see the unfiltered set. ``self._available_skills``
         # is left untouched (it feeds the cache key at line 282); the filtered
         # result is a local used for assembly only.
-        from deerflow.authz.skill_filter import filter_available_skills_by_authorization
+        from deerflow.authz.skill_filter import filter_available_skills_by_authorization, resolve_skill_authorization
+
+        skill_authorization = resolve_skill_authorization(cfg, self._app_config)
+        # Resolve the filter's candidate names through the cached catalog
+        # loader (same source as ``skills_list`` below) instead of letting the
+        # filter rescan storage on every build; only relevant when no
+        # agent-level allowlist is set.
+        candidate_skill_names = None
+        if self._available_skills is None and skill_authorization is not None:
+            try:
+                candidate_skill_names = [s.name for s in get_enabled_skills_for_config(self._app_config, user_id=cfg.get("user_id"))]
+            except Exception:
+                logger.warning("Failed to pre-load enabled skills for authorization candidates", exc_info=True)
+                # Leave None: the filter resolves candidates itself and applies
+                # its fail-closed semantics when that resolution also fails.
 
         available_skills = filter_available_skills_by_authorization(
             self._available_skills,
             context=cfg,
             app_config=self._app_config,
             user_id=cfg.get("user_id"),
+            candidate_skill_names=candidate_skill_names,
+            authorization=skill_authorization,
         )
         subagent_enabled = cfg.get("subagent_enabled", False)
         from deerflow.config.subagents_config import effective_subagent_concurrency
@@ -402,6 +418,7 @@ class DeerFlowClient:
                     mcp_routing_middleware=mcp_routing_middleware,
                     user_id=effective_user_id,
                     authorization_provider=_authz_provider,
+                    skill_authorization=skill_authorization,
                     subagent_execution_capacity=subagent_execution_capacity,
                 ),
                 self._checkpoint_channel_mode,
