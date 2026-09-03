@@ -47,6 +47,54 @@ test.describe("Agent chat", () => {
     ).toBeVisible();
   });
 
+  test("mobile agent welcome keeps the sidebar trigger clickable", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 664 });
+    mockLangGraphAPI(page, {
+      agents: [
+        {
+          ...MOCK_AGENTS[0]!,
+          description: "这是一个用于验证移动端欢迎页布局的测试智能体。".repeat(
+            16,
+          ),
+        },
+      ],
+    });
+
+    await page.goto("/workspace/agents/test-agent/chats/new");
+    await page.evaluate(() => {
+      document.cookie = "locale=zh-CN; path=/; SameSite=Lax";
+    });
+    await page.reload();
+
+    const sidebarTrigger = page
+      .locator("[data-sidebar='trigger']:visible")
+      .first();
+    await expect(sidebarTrigger).toBeVisible({ timeout: 15_000 });
+    const triggerBox = await sidebarTrigger.boundingBox();
+    expect(triggerBox).not.toBeNull();
+    const triggerReceivesPointerEvents = await page.evaluate(
+      ({ x, y }) => {
+        const trigger = document.elementFromPoint(x, y);
+        return trigger?.closest("[data-sidebar='trigger']") !== null;
+      },
+      {
+        x: triggerBox!.x + triggerBox!.width / 2,
+        y: triggerBox!.y + triggerBox!.height / 2,
+      },
+    );
+    expect(triggerReceivesPointerEvents).toBe(true);
+    await page.mouse.click(
+      triggerBox!.x + triggerBox!.width / 2,
+      triggerBox!.y + triggerBox!.height / 2,
+    );
+
+    await expect(
+      page.locator("[data-mobile='true'][data-sidebar='sidebar']"),
+    ).toBeVisible();
+  });
+
   test("keeps new-chat drafts isolated between agents", async ({ page }) => {
     mockLangGraphAPI(page, { agents: MOCK_AGENTS });
 
