@@ -92,8 +92,10 @@ CI.
 ### AIO Sandbox Network Policy
 
 Restricted AIO keeps sandboxes on internal bridges; only the policy/API sidecar
-has egress. DB approvals never replay tools; policy labels fence reuse.
-CONNECT/SNI cannot inspect encrypted authority. Destroy all resources together.
+has egress. Reject hostnames before DNS resolution; scheduled/non-interactive
+runs auto-deny without Human Input. DB approvals never replay tools; policy
+labels fence reuse. CONNECT/SNI cannot inspect encrypted authority. Destroy all
+resources together.
 
 ### E2B Mount Uploads
 

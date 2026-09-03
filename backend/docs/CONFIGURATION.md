@@ -706,10 +706,12 @@ With `approval: prompt`, a denied public domain becomes a Human Input card with
 **Deny**, **Allow temporarily**, and **Allow for this sandbox** choices. DeerFlow
 does not replay the failed command after approval because it may already have
 performed local side effects; the agent must retry it explicitly. Non-interactive
-runs fail closed without waiting for input. Loopback, private, link-local,
-multicast, IPv6 ULA/site-local, and cloud metadata destinations are rejected
-after DNS resolution and can never be approved. Raw TCP/UDP, Git-over-SSH, and
-other non-HTTP protocols remain unavailable in restricted modes.
+runs auto-deny without opening a card or waiting for input. The sidecar rejects
+hostnames that policy does not allow before DNS resolution; allowed hostnames
+that resolve to loopback, private, link-local, multicast, IPv6 ULA/site-local,
+or cloud metadata destinations are rejected and can never be approved. Raw
+TCP/UDP, Git-over-SSH, and other non-HTTP protocols remain unavailable in
+restricted modes.
 
 Restricted modes currently require the local Docker backend and Docker Engine
 28 or newer. They fail closed on Apple Container, provisioner mode, and older

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import NotRequired, override
 
@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 NETWORK_POLICY_HUMAN_INPUT_SOURCE = "sandbox_network"
 _NETWORK_POLICY_DECISIONS = frozenset({"deny", "allow_temporary", "allow_sandbox"})
+
+
+def _network_approval_is_non_interactive(context: Mapping[str, object]) -> bool:
+    return bool(context.get("disable_clarification") or context.get("non_interactive"))
 
 
 class SandboxMiddlewareState(AgentState):
@@ -570,7 +574,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if provider.sandbox_network_mode() != "allowlist":
             return result
         events = await provider.consume_network_policy_events_async(sandbox_id, since=started_at - 0.25)
-        if context.get("disable_clarification"):
+        if _network_approval_is_non_interactive(context):
             for event in events:
                 request_id = event.get("request_id")
                 if isinstance(request_id, str):
@@ -596,7 +600,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if provider.sandbox_network_mode() != "allowlist":
             return result
         events = provider.consume_network_policy_events(sandbox_id, since=started_at - 0.25)
-        if context.get("disable_clarification"):
+        if _network_approval_is_non_interactive(context):
             for event in events:
                 request_id = event.get("request_id")
                 if isinstance(request_id, str):
@@ -614,7 +618,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if not events:
             return result
         context = getattr(request.runtime, "context", None) or {}
-        if context.get("disable_clarification") or context.get("is_subagent"):
+        if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
             return result
         event = events[0]
         request_id = event.get("request_id")

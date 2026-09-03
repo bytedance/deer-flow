@@ -1295,7 +1295,8 @@ compatibility. Operators can set `sandbox.network.mode` to `isolated` or
 `allowlist`; allowlist mode supports operator-defined domains and an interactive
 Human Input card for temporary or sandbox-lifetime HTTP(S) approval. Private,
 loopback, link-local, multicast, and cloud metadata addresses remain
-unapprovable. See
+unapprovable. Denied hostnames are rejected before DNS resolution, and
+scheduled or otherwise non-interactive runs auto-deny without opening a card. See
 [Sandbox configuration](backend/docs/CONFIGURATION.md#sandbox-network-policy)
 for runtime requirements and the complete policy model.
 

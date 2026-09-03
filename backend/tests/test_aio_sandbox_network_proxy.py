@@ -100,6 +100,38 @@ async def test_resolve_public_fails_closed_when_dns_contains_private_answer(monk
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["isolated", "allowlist"])
+async def test_denied_destination_is_rejected_without_dns_resolution(tmp_path, monkeypatch, mode: str) -> None:
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    monkeypatch.setenv("DEERFLOW_NETWORK_MODE", mode)
+    monkeypatch.setenv("DEERFLOW_ALLOW_DOMAINS_JSON", json.dumps(["allowed.example"]))
+    monkeypatch.delenv("DEERFLOW_RECORD_DENIALS", raising=False)
+    resolutions: list[tuple[str, int]] = []
+
+    async def fake_resolve_public(host: str, port: int):
+        resolutions.append((host, port))
+        return None
+
+    monkeypatch.setattr(network_proxy, "resolve_public", fake_resolve_public)
+
+    proxy = await asyncio.start_server(network_proxy.handle_proxy, "127.0.0.1", 0)
+    proxy_port = proxy.sockets[0].getsockname()[1]
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer.write(b"CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\n\r\n")
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=2)
+        writer.close()
+        await writer.wait_closed()
+
+        assert b"403 Forbidden" in response
+        assert resolutions == []
+    finally:
+        proxy.close()
+        await proxy.wait_closed()
+
+
+@pytest.mark.anyio
 async def test_tls_client_hello_sni_is_extracted_for_connect_enforcement() -> None:
     incoming = ssl.MemoryBIO()
     outgoing = ssl.MemoryBIO()

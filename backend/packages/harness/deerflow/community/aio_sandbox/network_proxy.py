@@ -456,10 +456,6 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     else:
         await _reject(writer, "403 Forbidden", "IP-literal destinations are not allowed by sandbox network policy")
         return
-    resolved = await resolve_public(host, port)
-    if resolved is None:
-        await _reject(writer, "403 Forbidden", "Destination did not resolve exclusively to public addresses")
-        return
     if not policy_allows(host, port):
         if os.environ.get("DEERFLOW_RECORD_DENIALS") == "1":
             request_id = record_denial(host, port, method)
@@ -467,6 +463,10 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
         else:
             detail = ""
         await _reject(writer, "403 Forbidden", f"Sandbox network policy denied {host}:{port}{detail}")
+        return
+    resolved = await resolve_public(host, port)
+    if resolved is None:
+        await _reject(writer, "403 Forbidden", "Destination did not resolve exclusively to public addresses")
         return
     upstream = await _open_public(resolved, port)
     if upstream is None:

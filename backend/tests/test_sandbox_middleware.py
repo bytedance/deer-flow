@@ -688,16 +688,40 @@ def test_before_agent_does_not_reapply_network_approval_after_new_user_turn() ->
     assert provider.decisions == []
 
 
-def test_noninteractive_network_denial_is_recorded_without_prompt() -> None:
+@pytest.mark.parametrize("context_key", ["disable_clarification", "non_interactive"])
+def test_sync_noninteractive_network_denial_is_recorded_without_prompt(context_key: str) -> None:
     provider = _NetworkPolicyProvider()
     provider.events = [{"request_id": "req-1", "host": "example.com", "port": 443, "method": "CONNECT"}]
     state: dict = {"sandbox": {"sandbox_id": "existing"}}
     request = _make_tool_call_request(state)
-    request.runtime.context["disable_clarification"] = True
+    request.runtime.context[context_key] = True
     original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
     set_sandbox_provider(provider)
     try:
         result = SandboxMiddleware().wrap_tool_call(request, lambda _request: original)
+    finally:
+        reset_sandbox_provider()
+
+    assert result is original
+    assert provider.decisions == [("existing", "req-1", "deny")]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("context_key", ["disable_clarification", "non_interactive"])
+async def test_async_noninteractive_network_denial_is_recorded_without_prompt(context_key: str) -> None:
+    provider = _NetworkPolicyProvider()
+    provider.events = [{"request_id": "req-1", "host": "example.com", "port": 443, "method": "CONNECT"}]
+    state: dict = {"sandbox": {"sandbox_id": "existing"}}
+    request = _make_tool_call_request(state)
+    request.runtime.context[context_key] = True
+    original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
+    set_sandbox_provider(provider)
+    try:
+        result = await SandboxMiddleware().awrap_tool_call(request, handler)
     finally:
         reset_sandbox_provider()
 
