@@ -36,21 +36,33 @@ network.
 
 ## Identity mapping
 
+mem0 attributes every extracted fact to exactly ONE entity (per its
+[entity-scoped memory](https://docs.mem0.ai/platform/features/entity-scoped-memory)
+semantics), so each DeerFlow bucket maps to one single queryable mem0 entity
+scope -- a joint `AND(user_id, agent_id)` filter can never match a record:
+
 | DeerFlow | mem0 |
 |---|---|
-| `user_id` | `user_id` |
-| `agent_name` | `agent_id` |
+| default bucket (`agent_name` omitted) | the `user_id` entity (records without an `agent_id`) |
+| agent bucket (`user_id`, `agent_name`) | composite `agent_id` `"{user_id}::{agent_name}"` |
+| agent-bucket writes | `add` passes only the composite `agent_id`, plus `app_id={user_id}` (stamped on every record) |
 | `thread_id` | `run_id` |
-| omitted `agent_name` (default bucket) | records without an `agent_id` |
 
 Default-bucket semantics: reading without an `agent_name` (the Settings "Main
 memory" view, export, status, main-agent context injection, and main-agent
 `memory_search`) returns only the user's unscoped records -- never another
 custom agent's facts -- mirroring DeerMem's reserved `__default__` bucket.
 mem0's filter syntax cannot express agent-id absence, so the default scope is
-applied client-side after a user-wide listing. `clear_memory` with no
-`agent_name` still clears the user's whole memory (all buckets), per the
-`MemoryManager` contract.
+applied client-side after a user-wide listing (an over-fetched window for
+search/context, since the server truncates to the requested `top_k` before
+any client-side filtering).
+
+`clear_memory` with no `agent_name` clears the user's whole memory (all
+buckets), per the `MemoryManager` contract: two delete-all sweeps -- the
+`user_id` entity (default bucket plus legacy pre-agent records) and the
+`app_id` stamp (every agent bucket of that user). An agent-scoped clear
+deletes exactly that composite `agent_id`, so it cannot touch another user's
+bucket for the same agent name.
 
 ## Limitations
 

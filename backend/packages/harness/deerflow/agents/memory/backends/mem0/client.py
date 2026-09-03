@@ -64,14 +64,22 @@ class Mem0Client:
         messages: list[dict[str, str]],
         user_id: str | None = None,
         agent_id: str | None = None,
+        app_id: str | None = None,
         run_id: str | None = None,
     ) -> dict[str, Any]:
-        """Queue extraction (async server-side; response carries an event_id)."""
+        """Queue extraction (async server-side; response carries an event_id).
+
+        ``app_id`` is stamped on every memory the call produces (documented,
+        non-inferred) -- the manager uses it to mark agent-bucket writes with
+        the owning user id for user-wide sweeps.
+        """
         body: dict[str, Any] = {"messages": messages}
         if user_id:
             body["user_id"] = user_id
         if agent_id:
             body["agent_id"] = agent_id
+        if app_id:
+            body["app_id"] = app_id
         if run_id:
             body["run_id"] = run_id
         return self._request("POST", "/v3/memories/add/", json=body)
@@ -114,9 +122,10 @@ class Mem0Client:
         *,
         user_id: str | None = None,
         agent_id: str | None = None,
+        app_id: str | None = None,
         run_id: str | None = None,
     ) -> None:
-        params = {k: v for k, v in {"user_id": user_id, "agent_id": agent_id, "run_id": run_id}.items() if v}
+        params = {k: v for k, v in {"user_id": user_id, "agent_id": agent_id, "app_id": app_id, "run_id": run_id}.items() if v}
         self._request("DELETE", "/v1/memories/", params=params)
 
     def ping(self) -> None:

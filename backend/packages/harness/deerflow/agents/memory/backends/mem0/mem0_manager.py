@@ -2,17 +2,27 @@
 
 All state lives server-side in mem0 (dedup, extraction, storage): this backend
 keeps no queue, watermark, or cache, so it is safe for multi-worker Gateway
-deployments. Identity maps 1:1: (user_id, agent_name) -> mem0 (user_id,
-agent_id); thread_id -> mem0 run_id.
+deployments. thread_id maps to mem0 run_id.
 
-Default-bucket semantics: an omitted ``agent_name`` selects the *default*
-fact bucket, not the user's whole memory -- mirroring DeerMem's reserved
-``__default__`` bucket. In mem0 the default bucket is represented by the
-absence of ``agent_id`` (main-agent writes have never carried one), so reads
-with no ``agent_name`` post-filter unscoped records out of the user-wide
-listing; mem0's filter syntax cannot express agent-id absence server-side.
-``clear_memory`` is the exception: ``agent_name=None`` clears the user's whole
-memory, per the MemoryManager contract.
+Bucket mapping (mem0 entity scoping -- see the entity-scoped-memory docs):
+mem0 attributes each extracted fact to exactly ONE entity, so a joint
+``AND(user_id, agent_id)`` filter can never match a record. Every DeerFlow
+bucket therefore maps to one single queryable mem0 entity scope:
+
+- default bucket (no ``agent_name``): the ``user_id`` entity. Main-agent
+  writes have always landed there, so existing unscoped records are the
+  default bucket by construction. Reads additionally post-filter out
+  records that also carry an ``agent_id`` (a user_id-only filter does not
+  require agent-id absence server-side), guarding against records written
+  jointly in between.
+- custom-agent bucket: the composite ``agent_id`` ``"{user_id}::{agent_name}"``
+  -- a single agent entity unique per (user, agent), so list/search/delete
+  scope it exactly server-side. ``add`` for an agent bucket passes only that
+  composite id (never both entity ids: user-message facts would then be
+  attributed to ``user_id`` and leak into the default bucket) and stamps
+  ``app_id=user_id``, which mem0 records on every memory the call produces,
+  so an unscoped clear can sweep every agent bucket of that user via the
+  delete-all ``app_id`` filter.
 """
 
 from __future__ import annotations
@@ -39,6 +49,25 @@ _ROLE_MAP = {"human": "user", "ai": "assistant"}
 # other agents' facts and starve the default bucket's injection/view.
 _DEFAULT_SCOPE_OVERFETCH = 10
 
+# mem0's search endpoint accepts top_k up to 1000 -- the ceiling for the
+# default-scope over-fetch window.
+_MEM0_SEARCH_TOP_K_MAX = 1000
+
+# Composite agent-scope separator. Custom-agent names are restricted to
+# ``[A-Za-z0-9-]`` (the public agent-name grammar), so ``::`` can never occur
+# inside the agent segment and ``user_id + "::" + agent_name`` is injective.
+_AGENT_SCOPE_SEPARATOR = "::"
+
+
+def _agent_scope_id(user_id: str | None, agent_name: str) -> str:
+    """mem0 agent entity id uniquely identifying the (user, agent) bucket.
+
+    ``user_id`` is None only on degenerate no-user calls (standalone runs
+    without an authenticated user); the bucket then degrades to a plain
+    agent-scoped bucket, matching pre-isolation behavior.
+    """
+    return f"{user_id}{_AGENT_SCOPE_SEPARATOR}{agent_name}" if user_id else agent_name
+
 
 def _default_scope_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep only default-bucket records (no ``agent_id``).
@@ -56,15 +85,21 @@ def _build_filters(
     agent_name: str | None = None,
     run_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Build a mem0 ``filters`` object from the available identity parts.
+    """Build a mem0 ``filters`` object for the selected bucket.
+
+    Each bucket maps to exactly ONE mem0 entity scope (mem0 attributes every
+    fact to a single entity, so a joint ``AND(user_id, agent_id)`` filter can
+    never match a record): ``agent_name`` selects the composite agent entity,
+    otherwise the bucket is the ``user_id`` entity. ``run_id`` (thread) is
+    ANDed in when available.
 
     Returns None when no entity id is available (mem0 requires at least one).
     """
     parts: list[dict[str, Any]] = []
-    if user_id:
-        parts.append({"user_id": user_id})
     if agent_name:
-        parts.append({"agent_id": agent_name})
+        parts.append({"agent_id": _agent_scope_id(user_id, agent_name)})
+    elif user_id:
+        parts.append({"user_id": user_id})
     if run_id:
         parts.append({"run_id": run_id})
     if not parts:
@@ -164,20 +199,37 @@ class Mem0Manager(MemoryManager):
         Fire-and-forget: mem0 processes asynchronously (response event_id is
         not polled). ``thread_id`` maps to mem0 ``run_id`` and always satisfies
         mem0's at-least-one-entity-id requirement.
+
+        An agent bucket write passes ONLY the composite agent entity -- with
+        both entity ids mem0 attributes user-message facts to ``user_id``,
+        leaking them into the default bucket. ``app_id`` is stamped on every
+        memory the call produces (documented, non-inferred), carrying the
+        user id so an unscoped clear can sweep this bucket later.
         """
         kept = filter_messages_for_memory(messages)
         payload = [{"role": _ROLE_MAP[getattr(m, "type", "")], "content": extract_message_text(m).strip()} for m in kept if getattr(m, "type", "") in _ROLE_MAP]
         payload = [p for p in payload if p["content"]]
         if not payload:
             return
-        self._write_or_drop(
-            lambda: self._client.add_memories(
-                messages=payload,
-                user_id=user_id,
-                agent_id=agent_name,
-                run_id=thread_id,
+        if agent_name:
+            self._write_or_drop(
+                lambda: self._client.add_memories(
+                    messages=payload,
+                    user_id=None,
+                    agent_id=_agent_scope_id(user_id, agent_name),
+                    app_id=user_id,
+                    run_id=thread_id,
+                )
             )
-        )
+        else:
+            self._write_or_drop(
+                lambda: self._client.add_memories(
+                    messages=payload,
+                    user_id=user_id,
+                    agent_id=None,
+                    run_id=thread_id,
+                )
+            )
 
     async def aadd(
         self,
@@ -292,21 +344,25 @@ class Mem0Manager(MemoryManager):
         if category:
             parts = filters["AND"] if "AND" in filters else [filters]
             filters = {"AND": [*parts, {"categories": {"contains": category}}]}
+        # Default scope (no agent_name) post-filters agent records out of the
+        # ranked results, so request a wider window first and slice back down
+        # to the caller's top_k afterwards: the server truncates to the
+        # requested top_k BEFORE any client-side filtering, and mem0 accepts
+        # top_k up to 1000 -- without the over-fetch, other agents' higher-
+        # ranking facts would crowd every default-bucket match out of the
+        # window (search(top_k=5) could then return nothing).
+        requested_top_k = top_k if agent_name else min(top_k * _DEFAULT_SCOPE_OVERFETCH, _MEM0_SEARCH_TOP_K_MAX)
         results = self._read_or_fallback(
             [],
             lambda: self._client.search_memories(
                 query=query,
                 filters=filters,
-                top_k=top_k,
+                top_k=requested_top_k,
                 threshold=self._config.score_threshold,
             ),
         )
-        # Default scope (no agent_name): keep only unscoped records so the main
-        # agent's search never recalls a custom agent's facts. The post-filter
-        # can shrink the result below top_k -- over-fetching a ranked search
-        # would change server-side semantics, so the shortfall is accepted.
         if not agent_name:
-            results = _default_scope_records(results)
+            results = _default_scope_records(results)[:top_k]
         return [_to_fact(r) for r in results]
 
     async def asearch(
@@ -368,7 +424,18 @@ class Mem0Manager(MemoryManager):
         an explicit agent clears only that agent's bucket."""
         if not user_id and not agent_name:
             return {"facts": []}
-        self._write_or_drop(lambda: self._client.delete_all_memories(user_id=user_id, agent_id=agent_name, run_id=None))
+        if agent_name:
+            # Single agent-entity scope: the composite agent_id is unique per
+            # (user, agent), so this delete cannot touch other users' buckets.
+            self._write_or_drop(lambda: self._client.delete_all_memories(agent_id=_agent_scope_id(user_id, agent_name), user_id=None, run_id=None))
+        else:
+            # User-wide clear = the default bucket (user_id entity, covering
+            # legacy pre-agent records) plus every agent bucket of that user.
+            # Agent buckets carry no user_id (single-entity attribution), but
+            # every agent-bucket write stamps app_id=user_id, which delete-all
+            # filters on -- so the second call sweeps them all.
+            self._write_or_drop(lambda: self._client.delete_all_memories(user_id=user_id, agent_id=None, run_id=None))
+            self._write_or_drop(lambda: self._client.delete_all_memories(user_id=None, agent_id=None, app_id=user_id, run_id=None))
         return {"facts": []}
 
     def delete_memory(
@@ -379,4 +446,8 @@ class Mem0Manager(MemoryManager):
     ) -> None:
         if not user_id and not agent_name:
             return None
-        self._write_or_drop(lambda: self._client.delete_all_memories(user_id=user_id, agent_id=agent_name, run_id=None))
+        if agent_name:
+            self._write_or_drop(lambda: self._client.delete_all_memories(agent_id=_agent_scope_id(user_id, agent_name), user_id=None, run_id=None))
+        else:
+            self._write_or_drop(lambda: self._client.delete_all_memories(user_id=user_id, agent_id=None, run_id=None))
+            self._write_or_drop(lambda: self._client.delete_all_memories(user_id=None, agent_id=None, app_id=user_id, run_id=None))
