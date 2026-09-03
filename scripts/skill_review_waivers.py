@@ -26,7 +26,8 @@ _REQUIRED_ENTRY_FIELDS = {
     "reason",
     "expires_on",
 }
-_OPTIONAL_ENTRY_FIELDS = {"approved_in"}
+_OPTIONAL_ENTRY_FIELDS = {"approved_in", "preapproved_file_sha256s"}
+_MAX_PREAPPROVED_FILE_SHA256S = 8
 
 
 class WaiverManifestError(ValueError):
@@ -45,10 +46,15 @@ class SkillReviewWaiver:
     reason: str
     expires_on: date
     approved_in: str | None = None
+    preapproved_file_sha256s: tuple[str, ...] = ()
 
     @property
     def finding_key(self) -> tuple[str, str, str, int, str]:
         return (self.source, self.rule_id, self.path, self.line, self.evidence)
+
+    @property
+    def approved_file_sha256s(self) -> tuple[str, ...]:
+        return (self.file_sha256, *self.preapproved_file_sha256s)
 
 
 @dataclass(frozen=True)
@@ -100,9 +106,17 @@ def parse_manifest(payload: bytes | str, *, source: str) -> WaiverManifest:
         source_name = _nonempty_string(raw["source"], field=f"{entry_source}.source")
         rule_id = _nonempty_string(raw["rule_id"], field=f"{entry_source}.rule_id")
         evidence = _nonempty_string(raw["evidence"], field=f"{entry_source}.evidence")
-        file_sha256 = _nonempty_string(raw["file_sha256"], field=f"{entry_source}.file_sha256")
-        if not _SHA256_RE.fullmatch(file_sha256):
-            raise WaiverManifestError(f"{entry_source}.file_sha256: must be sha256 followed by 64 lowercase hex characters")
+        file_sha256 = _parse_sha256(raw["file_sha256"], field=f"{entry_source}.file_sha256")
+        raw_preapproved_hashes = raw.get("preapproved_file_sha256s", [])
+        if not isinstance(raw_preapproved_hashes, list):
+            raise WaiverManifestError(f"{entry_source}.preapproved_file_sha256s: must be an array")
+        if len(raw_preapproved_hashes) > _MAX_PREAPPROVED_FILE_SHA256S:
+            raise WaiverManifestError(f"{entry_source}.preapproved_file_sha256s: must contain at most {_MAX_PREAPPROVED_FILE_SHA256S} entries")
+        preapproved_file_sha256s = tuple(_parse_sha256(value, field=f"{entry_source}.preapproved_file_sha256s[{hash_index}]") for hash_index, value in enumerate(raw_preapproved_hashes))
+        if len(set(preapproved_file_sha256s)) != len(preapproved_file_sha256s):
+            raise WaiverManifestError(f"{entry_source}.preapproved_file_sha256s: entries must be unique")
+        if file_sha256 in preapproved_file_sha256s:
+            raise WaiverManifestError(f"{entry_source}.preapproved_file_sha256s: must not repeat file_sha256")
         reason = _nonempty_string(raw["reason"], field=f"{entry_source}.reason")
         if len(reason) < 20:
             raise WaiverManifestError(f"{entry_source}.reason: must contain at least 20 characters")
@@ -125,6 +139,7 @@ def parse_manifest(payload: bytes | str, *, source: str) -> WaiverManifest:
             reason=reason,
             expires_on=expires_on,
             approved_in=approved_in,
+            preapproved_file_sha256s=preapproved_file_sha256s,
         )
         identity = (*waiver.finding_key, waiver.package)
         if identity in identities:
@@ -204,7 +219,7 @@ def matching_waiver(
             continue
         if waiver.expires_on < current_date:
             continue
-        if file_sha256(repo_root, waiver) != waiver.file_sha256:
+        if file_sha256(repo_root, waiver) not in waiver.approved_file_sha256s:
             continue
         return waiver
     return None
@@ -240,8 +255,9 @@ def validate_manifest_against_facts(
             errors.append(f"{description}: waivers may target error findings only; blockers can never be waived")
             continue
         actual_hash = file_sha256(repo_root, waiver)
-        if actual_hash != waiver.file_sha256:
-            errors.append(f"{description}: file digest changed (expected {waiver.file_sha256}, found {actual_hash or 'unavailable'})")
+        if actual_hash not in waiver.approved_file_sha256s:
+            expected_hashes = ", ".join(waiver.approved_file_sha256s)
+            errors.append(f"{description}: file digest changed (expected one of {expected_hashes}, found {actual_hash or 'unavailable'})")
     return errors
 
 
@@ -259,6 +275,13 @@ def _nonempty_string(value: object, *, field: str) -> str:
     if not isinstance(value, str) or not value.strip() or value != value.strip():
         raise WaiverManifestError(f"{field}: must be a non-empty string without surrounding whitespace")
     return value
+
+
+def _parse_sha256(value: object, *, field: str) -> str:
+    digest = _nonempty_string(value, field=field)
+    if not _SHA256_RE.fullmatch(digest):
+        raise WaiverManifestError(f"{field}: must be sha256 followed by 64 lowercase hex characters")
+    return digest
 
 
 def _parse_date(value: object, *, field: str) -> date:

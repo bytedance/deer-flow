@@ -5,12 +5,16 @@ import logging
 import re
 import shlex
 import threading
+from typing import TYPE_CHECKING
 
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+
+if TYPE_CHECKING:
+    from deerflow.community.e2b_sandbox.e2b_sandbox_provider import MountUploadResult
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +68,7 @@ class E2BSandbox(Sandbox):
         self._lock = threading.Lock()
         self._closed = False
         self._dead = False
+        self.mount_upload_result: MountUploadResult | None = None
 
     # ── Properties / lifecycle ───────────────────────────────────────────
 
@@ -338,7 +343,10 @@ class E2BSandbox(Sandbox):
             try:
                 result = client.commands.run(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
                 output = getattr(result, "stdout", "") or ""
-                return [line.strip() for line in output.splitlines() if line.strip()]
+                # splitlines() already removed the terminators; do NOT strip
+                # entries — a filename that legitimately ends in whitespace
+                # would be corrupted and never resolve again.
+                return [line for line in output.splitlines() if line]
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
                 return []
@@ -405,7 +413,7 @@ class E2BSandbox(Sandbox):
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
         for entry in output.splitlines():
-            entry = entry.strip()
+            # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry:
                 continue
             if entry != root and not entry.startswith(root_prefix):

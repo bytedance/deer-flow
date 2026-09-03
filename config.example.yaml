@@ -102,8 +102,12 @@ max_recursion_limit: 1000
 # Two token fields look similar but mean different things:
 # - `max_tokens` is the per-call OUTPUT cap passed to the provider.
 # - `context_window` is a positive integer for the total context capacity
-#   (prompt + completion) and drives the real-time "% context used" indicator
-#   in the chat UI.
+#   (prompt + completion). It drives the real-time "% context used" indicator
+#   in the chat UI and feeds the model's langchain profile, which fraction-based
+#   summarization triggers (`summarization.trigger: [{type: fraction, ...}]`)
+#   resolve their thresholds from. Third-party OpenAI-compatible models carry no
+#   built-in profile, so without `context_window` a fraction trigger degrades
+#   (dropped with a warning) instead of crashing the agent build.
 # Leave `context_window` unset if the provider limit is unknown; the percentage
 # will not render. Verify configured values against the provider's model docs.
 #
@@ -1766,7 +1770,14 @@ summarization:
     # Uncomment to also trigger when message count reaches 50
     # - type: messages
     #   value: 50
-    # Uncomment to trigger when 80% of model's max input tokens is reached
+    # Uncomment to trigger when 80% of model's max input tokens is reached.
+    # The percentage resolves from the SUMMARY model's declared `context_window`
+    # (summarization.model_name when set, else the run's own model): declare it
+    # on that models entry — third-party OpenAI-compatible models carry no
+    # built-in profile. Without it the fraction clause is dropped with a warning
+    # and any remaining absolute clauses keep working. If a separate summary
+    # model with a larger window is configured, prefer absolute `tokens`
+    # thresholds sized for the run model instead.
     # - type: fraction
     #   value: 0.8
 
@@ -2728,6 +2739,19 @@ authorization:
 # auth:
 #   local:
 #     allow_registration: false
+#     # Login throttling per client IP (in-process, per worker). Raise
+#     # max_login_attempts when many users share one egress IP (corporate
+#     # proxy / NAT) so shared-IP lockouts don't block the whole office;
+#     # lower it for a stricter posture (minimum 2 — one failed attempt must
+#     # never lock an IP, or a single typo would block the shared egress).
+#     # Defaults preserve the historical hardcoded policy (5 failures /
+#     # 5 minutes). Live-read per login, so a config reload applies without
+#     # a Gateway restart: lowering lockout_seconds releases an active lock
+#     # early and tightening max_login_attempts keeps already-counted
+#     # failures; a raised lockout_seconds extends a still-active lock but
+#     # never resurrects one that already expired.
+#     # max_login_attempts: 5
+#     # lockout_seconds: 300
 #
 #   oidc:
 #     enabled: true

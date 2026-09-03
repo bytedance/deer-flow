@@ -12,6 +12,7 @@ from deerflow.agents.middlewares import title_middleware as title_middleware_mod
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.config.title_config import TitleConfig, get_title_config, set_title_config
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
 def _clone_title_config(config: TitleConfig) -> TitleConfig:
@@ -62,6 +63,82 @@ class TestTitleMiddlewareCoreLogic:
         }
 
         assert middleware._should_generate_title(state) is True
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            HumanMessage(
+                content="<current_uploads>\nThe following files were uploaded in this message:\n\n- report.pdf\n</current_uploads>\n\n分析这份报告",
+                additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "分析这份报告"},
+            ),
+            {
+                "type": "human",
+                "content": "<current_uploads>\n...\n</current_uploads>\n\n分析这份报告",
+                "additional_kwargs": {ORIGINAL_USER_CONTENT_KEY: "分析这份报告"},
+            },
+        ],
+        ids=["langchain-message", "checkpoint-dict"],
+    )
+    def test_title_uses_original_user_content_when_upload_context_is_injected(self, message):
+        middleware = TitleMiddleware()
+
+        state = {
+            "messages": [message, AIMessage(content="好的，我来分析报告")],
+        }
+
+        assert middleware._get_title_user_message(state) == "分析这份报告"
+
+    def test_attachment_only_title_falls_back_to_new_conversation(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="<current_uploads>\nThe following files were uploaded in this message:\n\n- report.pdf\n</current_uploads>\n\n",
+                    additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""},
+                ),
+                AIMessage(content="好的，我来分析 report.pdf"),
+            ]
+        }
+
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "New Conversation"}
+
+    @pytest.mark.parametrize("original_user_content", ["", " \t\n"], ids=["empty", "whitespace-only"])
+    def test_attachment_only_title_skips_configured_title_model(self, monkeypatch, original_user_content):
+        _set_test_title_config(enabled=True, model_name="title-model")
+        middleware = TitleMiddleware()
+        create_model = MagicMock()
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", create_model)
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="<current_uploads>\nThe following files were uploaded in this message:\n\n- report.pdf\n</current_uploads>\n\n",
+                    additional_kwargs={ORIGINAL_USER_CONTENT_KEY: original_user_content},
+                ),
+                AIMessage(content="好的，我来分析 report.pdf"),
+            ]
+        }
+
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "New Conversation"}
+        create_model.assert_not_called()
+
+    def test_title_preserves_structured_content_without_original_user_content(self):
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                {
+                    "type": "human",
+                    "content": [{"type": "text", "content": "嵌套的用户请求"}],
+                },
+                {"type": "ai", "content": "好的"},
+            ]
+        }
+
+        assert middleware._get_title_user_message(state) == "嵌套的用户请求"
 
     def test_should_not_generate_title_when_disabled_or_already_set(self):
         middleware = TitleMiddleware()

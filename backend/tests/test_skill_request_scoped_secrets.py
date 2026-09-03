@@ -191,6 +191,9 @@ class TestEnvPolicy:
             "GIT_ASKPASS",
             "SSH_ASKPASS",
             "SUDO_ASKPASS",
+            # ssh-agent socket: a credential pointer like the ASKPASS helpers —
+            # inheriting it lets the sandbox sign with every key the agent holds.
+            "SSH_AUTH_SOCK",
         ],
     )
     def test_secret_like_names_are_blocked(self, name):

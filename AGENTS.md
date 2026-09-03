@@ -105,9 +105,13 @@ Skill quality review note:
   edits from their head revision, but only the manifest from the trusted base
   revision can suppress that run. Entries match one error finding exactly,
   include the reviewed file's SHA-256 and an expiry date, remain visible in CI
-  output, and can never waive blocker findings. Adding a waiver and relying on
-  it therefore requires two steps: merge the reviewed waiver first, then update
-  the affected public skill in a later pull request.
+  output, and can never waive blocker findings. An entry may also preapprove a
+  bounded list of future full-file SHA-256 values. Those hashes become effective
+  only after the manifest change lands in the trusted base. Adding or changing a
+  waiver and relying on it therefore requires two steps: merge the reviewed
+  manifest change first, then update the affected public skill in a later pull
+  request. After that skill change lands, promote its hash to `file_sha256` and
+  remove the consumed preapproval in a follow-up manifest cleanup.
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
@@ -224,6 +228,9 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
+- **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
+  Python utilities that read or write them must pass `encoding="utf-8"` rather than
+  relying on the platform locale.
 - **Version sources must stay in lockstep** — a release version must match identically in
   `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
   (`version` + `appVersion`). Pushing a `v*` git tag triggers CI that runs
