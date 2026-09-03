@@ -447,12 +447,13 @@ def test_start_container_hardens_docker_run_by_default(monkeypatch):
 
     assert "--cap-drop=ALL" in captured_cmd
     # The shipped image's entrypoint starts as root, creates the gem user,
-    # chowns /opt/jupyter, and drops to that user via su — CHOWN/SETUID/SETGID
-    # must survive the drop or the container exits before readiness. The root
-    # nginx master also writes gem-owned logs under /var/log/nginx for the
-    # container's lifetime, which needs DAC_OVERRIDE.
+    # chowns /opt/jupyter, prepares /run/user/1000 with chmod, and drops to
+    # that user via su. CHOWN/FOWNER/SETUID/SETGID must survive the drop or
+    # the container exits before readiness. The root nginx master also writes
+    # gem-owned logs under /var/log/nginx for the container's lifetime, which
+    # needs DAC_OVERRIDE.
     cap_adds = [arg.split("=", 1)[1] for arg in captured_cmd if arg.startswith("--cap-add=")]
-    assert cap_adds == ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"]
+    assert cap_adds == ["CHOWN", "FOWNER", "SETUID", "SETGID", "DAC_OVERRIDE"]
     security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
     assert "no-new-privileges" in security_opts
     # The shipped AIO image needs seccomp=unconfined for its Chromium
@@ -978,12 +979,13 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
     """Real smoke test against the shipped default image — no subprocess mock.
 
     The image's entrypoint (/opt/gem/run.sh) starts as root, creates the gem
-    account at runtime, chown -R's /opt/jupyter, and drops to that user via
-    su before starting the services. Under the default hardened argv
-    (--cap-drop=ALL + no-new-privileges) that initialization needs
-    CHOWN/SETUID/SETGID to be re-added, or the container exits (set -e)
-    before the readiness endpoint exists. Reaching readiness through the
-    real docker run proves the whole startup chain survives the hardening.
+    account at runtime, chown -R's /opt/jupyter, prepares /run/user/1000 with
+    chmod, and drops to that user via su before starting the services. Under
+    the default hardened argv (--cap-drop=ALL + no-new-privileges), that
+    initialization needs CHOWN/FOWNER/SETUID/SETGID to be re-added, or the
+    container exits (set -e) before the readiness endpoint exists. Reaching
+    readiness through the real docker run proves the whole startup chain
+    survives the hardening.
     """
     from deerflow.community.aio_sandbox.backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT
     from deerflow.community.aio_sandbox.local_backend import wait_for_sandbox_ready
@@ -1012,8 +1014,8 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
         ready = wait_for_sandbox_ready(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT)
         if not ready:
             # Fail diagnosably: the entrypoint's own log tells us whether the
-            # capability set is still incomplete (chown/useradd/su errors) or
-            # the services are merely slow.
+            # capability set is still incomplete (chown/chmod/useradd/su
+            # errors) or the services are merely slow.
             logs = subprocess.run(
                 ["docker", "logs", info.container_name],
                 capture_output=True,
@@ -1045,9 +1047,10 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
 
 def test_start_container_preinitialized_image_can_drop_startup_caps(monkeypatch):
     """A custom, pre-initialized non-root image never runs the root handoff,
-    so CHOWN/SETUID/SETGID must not stay available for the container's
-    lifetime (chown on bind mounts, UID/GID impersonation). Opting out with
-    DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS=0 drops every capability."""
+    so CHOWN/FOWNER/SETUID/SETGID/DAC_OVERRIDE must not stay available for
+    the container's lifetime (chown/chmod on bind mounts, UID/GID
+    impersonation). Opting out with DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS=0
+    drops every capability."""
     backend = LocalContainerBackend(
         image="my-preinitialized-sandbox:latest",
         base_port=8080,
