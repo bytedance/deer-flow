@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -810,6 +811,27 @@ class TestSidecarWriteBounds:
             assert not companion_identity_path(tmp_path, oldest.id).exists()
         sidecar_size = (tmp_path / COMPANION_MAP_FILENAME).stat().st_size
         assert sidecar_size <= size_two
+
+    def test_persist_failure_does_not_unpin_evicted_entries(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_ENTRIES", 2)
+        for stem in ("a", "b"):
+            (tmp_path / f"{stem}.md").write_text(stem, encoding="utf-8")
+            record_companion_mapping(tmp_path, f"{stem}.pdf", f"{stem}.md")
+        oldest = load_companion_entries(tmp_path)["a.pdf"]
+        assert oldest.id is not None
+        assert companion_identity_path(tmp_path, oldest.id).exists()
+
+        (tmp_path / "c.md").write_text("c", encoding="utf-8")
+
+        def failing_replace(_src, _dst):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(os, "replace", failing_replace)
+        with pytest.raises(OSError, match="No space left on device"):
+            record_companion_mapping(tmp_path, "c.pdf", "c.md")
+
+        assert load_companion_map(tmp_path) == {"a.pdf": "a.md", "b.pdf": "b.md"}
+        assert companion_identity_path(tmp_path, oldest.id).exists()
 
 
 class TestReplacementCleansPreviousCompanion:

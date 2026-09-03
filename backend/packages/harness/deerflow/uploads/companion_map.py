@@ -479,8 +479,10 @@ def _serialized_map_bytes(mapping: dict[str, CompanionEntry]) -> int:
     return len(json.dumps(_mapping_payload(mapping), ensure_ascii=False, indent=2).encode("utf-8"))
 
 
-def _trim_mapping_to_limits(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> dict[str, CompanionEntry]:
-    """Drop oldest rows until the payload fits the reader caps; unpin evicted pins."""
+def _trim_mapping_to_limits(
+    mapping: dict[str, CompanionEntry],
+) -> tuple[dict[str, CompanionEntry], list[CompanionEntry]]:
+    """Drop oldest rows until the payload fits the reader caps."""
     items = list(mapping.items())
     evicted: list[CompanionEntry] = []
     while len(items) > MAX_COMPANION_MAP_ENTRIES:
@@ -489,19 +491,16 @@ def _trim_mapping_to_limits(uploads_dir: Path, mapping: dict[str, CompanionEntry
         if len(items) == 1:
             raise ValueError(f"Companion map exceeds {MAX_COMPANION_MAP_BYTES} bytes even after pruning")
         evicted.append(items.pop(0)[1])
-    if evicted:
-        logger.warning("Companion map exceeded persist limits; dropping %s older entries", len(evicted))
-        for entry in evicted:
-            _unpin_companion(uploads_dir, entry.id)
-    return dict(items)
+    return dict(items), evicted
 
 
 def _persist_unlocked(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> None:
     path = _map_path(uploads_dir)
     if path.is_symlink():
         raise ValueError("Companion map path is a symlink")
+    evicted: list[CompanionEntry] = []
     if mapping:
-        mapping = _trim_mapping_to_limits(uploads_dir, mapping)
+        mapping, evicted = _trim_mapping_to_limits(mapping)
     if not mapping:
         try:
             path.unlink()
@@ -525,6 +524,11 @@ def _persist_unlocked(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> 
         except FileNotFoundError:
             pass
         raise
+
+    if evicted:
+        logger.warning("Companion map exceeded persist limits; dropping %s older entries", len(evicted))
+        for entry in evicted:
+            _unpin_companion(uploads_dir, entry.id)
 
 
 def load_companion_map(uploads_dir: Path) -> dict[str, str]:
