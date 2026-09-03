@@ -1582,7 +1582,7 @@ class RunManager:
                     # schedule cleanup for the re-hydrated record — indexing
                     # a terminal record here would retain it for the process
                     # lifetime (the #5009 leak, one stable-key retry at a time).
-                    if existing.status in (RunStatus.pending, RunStatus.running):
+                    if existing.status in (RunStatus.pending, RunStatus.running) and existing.owner_worker_id == self._worker_id:
                         self._runs[existing.run_id] = existing
                         self._index_run_locked(existing)
                     current = existing

@@ -773,6 +773,24 @@ async def test_idempotent_reuse_still_indexes_active_records(manager_with_store:
 
 
 @pytest.mark.anyio
+async def test_idempotent_reuse_does_not_index_foreign_active_records():
+    """A peer worker must not retain a taskless active record in its indexes."""
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+    record = await owner.create_or_reject("thread-1", idempotency_key="peer-key")
+
+    reused = await peer.create_or_reject("thread-1", idempotency_key="peer-key")
+
+    assert reused.run_id == record.run_id
+    assert reused.idempotency_reused is True
+    assert reused.owner_worker_id == "worker-a"
+    assert reused.run_id not in peer._runs
+    assert "thread-1" not in peer._runs_by_thread
+    assert await peer.has_inflight("thread-1") is False
+
+
+@pytest.mark.anyio
 async def test_fail_start_if_pending_schedules_cleanup_only_with_store():
     """Spawn-failure terminalization schedules eviction only when store-backed."""
     store_mgr = RunManager(store=MemoryRunStore())
