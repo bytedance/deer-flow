@@ -1,6 +1,6 @@
 ### Gateway API (`app/gateway/`)
 
-FastAPI listens on port 8001; health: `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable the default `/docs`, `/redoc`, and `/openapi.json` endpoints.
+FastAPI listens on port 8001; health: `GET /health` (liveness) and `GET /health/ready` (readiness; probes the persistence engine with a bounded `SELECT 1`, 503 while the database is unreachable, `not_configured`/ok for `backend=memory`). Set `GATEWAY_ENABLE_DOCS=false` to disable the default `/docs`, `/redoc`, and `/openapi.json` endpoints.
 
 Durable MCP notifications use internal Agent runs. Keep their trusted delivery instruction outside the user-input boundary, and frame serialized remote events as untrusted before model invocation. Strict thread existence/ownership admission dead-letters events whose task outlives its deleted chat instead of recreating the thread.
 
