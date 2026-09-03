@@ -818,7 +818,7 @@ def test_format_current_date_defaults_to_server_local_without_env(monkeypatch):
         monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
 
         assert _format_current_date() == "2026-05-08, Friday"
-        mock_dt.now.assert_called_once_with(None)
+        mock_dt.now.assert_called_once_with()
 
 
 def test_format_current_date_honors_configured_timezone(monkeypatch):

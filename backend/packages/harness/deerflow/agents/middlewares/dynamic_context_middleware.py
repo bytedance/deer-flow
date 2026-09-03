@@ -101,7 +101,7 @@ def _date_timezone() -> tzinfo | None:
 
 def _format_current_date() -> str:
     tz = _date_timezone()
-    now = datetime.now(tz)
+    now = datetime.now(tz) if tz is not None else datetime.now()
     if tz is not None:
         now = now.astimezone(tz)
     return now.strftime("%Y-%m-%d, %A")
