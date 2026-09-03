@@ -144,3 +144,24 @@ class TestSendWsContentLimit:
         )
         _run(ch._send_ws(msg))
         ch._ws_client.send_message.assert_called_once()
+
+
+class TestEmojiBoundaries:
+    def test_split_all_emoji_input_terminates_and_preserves(self):
+        # 4-byte emoji only: a byte cut lands mid-character, and the split must
+        # carry that character into the next chunk rather than dropping it.
+        text = "😀" * 10000
+        chunks = _split_for_byte_limit(text, _WECOM_MAX_CONTENT_BYTES)
+        assert len(chunks) == 2
+        assert "".join(chunks) == text
+        assert all(_byte_len(c) <= _WECOM_MAX_CONTENT_BYTES for c in chunks)
+
+    def test_split_tiny_limit_with_emoji_never_loops_or_loses(self):
+        chunks = _split_for_byte_limit("😀" * 10, 9)
+        assert "".join(chunks) == "😀" * 10
+        assert all(_byte_len(c) <= 9 for c in chunks)
+
+    def test_clip_at_emoji_boundary_stays_within_budget(self):
+        out = _clip_to_byte_limit("😀" * 10000, 105)
+        assert _byte_len(out) <= 105
+        assert out.endswith("(truncated)")
