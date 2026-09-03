@@ -188,7 +188,7 @@ def test_mcp_tool_sync_wrapper_exception_logging():
         assert mock_log_error.call_args[0][1] == "error_tool"
 
 
-def test_funopatched_mcp_tool_keeps_toolnode_runtime_injection(tmp_path):
+def test_func_patched_mcp_tool_keeps_toolnode_runtime_injection(tmp_path):
     """The sync wrapper must not erase the coroutine's annotations, otherwise
     LangGraph's ToolNode stops injecting the ToolRuntime into MCP tools.
 
@@ -295,3 +295,33 @@ def test_funopatched_mcp_tool_keeps_toolnode_runtime_injection(tmp_path):
 
     assert seen["runtime"] is not None, "ToolNode did not inject runtime into the func-patched MCP tool"
     assert seen["runtime"].context["user_id"] == "alice"
+
+
+def test_sync_wrapped_builtin_tools_still_resolve_runtime():
+    """Built-in tools expose ``runtime`` as a pydantic schema field, so
+    ``_get_all_injected_args`` detects it from the input schema rather than
+    from the wrapper's annotations. Wrapping their ``func`` with
+    ``make_sync_tool_wrapper`` must keep ``runtime`` resolved, otherwise a
+    sync-only caller would run them with ``runtime=None``.
+
+    This pins the wrapper against the built-ins for the case that is easy to
+    break: one of them later drops ``runtime`` from its schema *and* a wrapper
+    refactor removes ``get_type_hints`` propagation. The MCP test above covers
+    the adapter tools, which carry no ``runtime`` schema field and therefore
+    depend purely on the wrapped coroutine annotations.
+    """
+    import copy
+
+    from langgraph.prebuilt.tool_node import _get_all_injected_args
+
+    from deerflow.tools.builtins.background_tasks_tool import (
+        cancel_background_task,
+        list_background_tasks,
+    )
+    from deerflow.tools.builtins.batch_task_tool import batch_status, cancel_batch
+
+    for tool in (list_background_tasks, cancel_background_task, batch_status, cancel_batch):
+        patched = copy.copy(tool)
+        # _ensure_sync_invocable_tool does exactly this to async-only tools.
+        patched.func = make_sync_tool_wrapper(patched.coroutine, patched.name)
+        assert _get_all_injected_args(patched).runtime == "runtime", f"sync wrapper dropped runtime resolution for built-in tool {patched.name}"
