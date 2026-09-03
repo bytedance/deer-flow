@@ -40,7 +40,10 @@ import {
   patchThreadMetadata,
   type ThreadMetadataPatch,
 } from "./api";
-import { reduceThreadStateUpdates } from "./stream-state";
+import {
+  hasRenderedThreadStateUpdate,
+  reduceThreadStateUpdates,
+} from "./stream-state";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -1776,7 +1779,9 @@ export function useThreadStream({
       }
     },
     onUpdateEvent(data, { mutate }) {
-      mutate((previous) => reduceThreadStateUpdates(previous, data) ?? {});
+      if (hasRenderedThreadStateUpdate(data)) {
+        mutate((previous) => reduceThreadStateUpdates(previous, data) ?? {});
+      }
 
       const _messages = getSummarizationMiddlewareMessages(data);
       if (_messages && _messages.length >= 2) {

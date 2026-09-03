@@ -69,13 +69,13 @@ test("sanitizes streamResumable while preserving valid stream modes", () => {
 test("forces incremental modes for chat streams instead of values snapshots", () => {
   const sanitized = forceChatRunStreamOptions({
     streamResumable: true,
-    streamMode: ["values", "messages-tuple", "updates", "custom"],
+    streamMode: ["values", "messages-tuple", "updates", "custom", "debug"],
     signal: "keep-me",
   });
 
   expect(sanitized).toEqual({
     signal: "keep-me",
-    streamMode: [...CHAT_RUN_STREAM_MODES],
+    streamMode: [...CHAT_RUN_STREAM_MODES, "debug"],
   });
   expect(sanitized.streamMode).not.toContain("values");
 });

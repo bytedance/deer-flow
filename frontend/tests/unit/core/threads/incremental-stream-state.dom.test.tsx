@@ -87,7 +87,7 @@ test("updates rendered thread state without receiving a values frame", async () 
     { wrapper },
   );
 
-  const goal: GoalState = {
+  const goal = {
     objective: "Finish the report",
     status: "active",
     created_at: "2026-09-02T00:00:00Z",
@@ -95,9 +95,19 @@ test("updates rendered thread state without receiving a values frame", async () 
     continuation_count: 1,
     max_continuations: 8,
     no_progress_count: 0,
-    max_no_progress_continuations: 2,
-  };
+  } as GoalState;
   const todos = [{ content: "Draft", status: "in_progress" as const }];
+
+  act(() => {
+    streamMockState.options?.onUpdateEvent?.(
+      { agent: { messages: [existingMessage], summary_text: "internal" } },
+      {
+        mutate() {
+          throw new Error("irrelevant updates must not mutate thread values");
+        },
+      },
+    );
+  });
 
   act(() => {
     streamMockState.options?.onUpdateEvent?.(

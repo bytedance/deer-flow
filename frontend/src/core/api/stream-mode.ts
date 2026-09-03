@@ -94,9 +94,19 @@ export function forceChatRunStreamOptions<T>(options: T): T {
       : typeof sanitizedOptions === "object" && sanitizedOptions !== null
         ? sanitizedOptions
         : {};
+  const requestedMode = Reflect.get(preservedOptions, "streamMode");
+  const streamModes = new Set<string>([
+    ...CHAT_RUN_STREAM_MODES,
+    ...((Array.isArray(requestedMode)
+      ? requestedMode
+      : requestedMode == null
+        ? []
+        : [requestedMode]) as string[]),
+  ]);
+  streamModes.delete("values");
 
   return {
     ...preservedOptions,
-    streamMode: [...CHAT_RUN_STREAM_MODES],
+    streamMode: [...streamModes],
   } as T;
 }

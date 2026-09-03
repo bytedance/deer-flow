@@ -12,11 +12,18 @@ function isGoalState(value: unknown): value is GoalState {
     typeof value.objective === "string" &&
     value.status === "active" &&
     typeof value.created_at === "string" &&
-    typeof value.updated_at === "string" &&
-    typeof value.continuation_count === "number" &&
-    typeof value.max_continuations === "number" &&
-    typeof value.no_progress_count === "number" &&
-    typeof value.max_no_progress_continuations === "number"
+    typeof value.updated_at === "string"
+  );
+}
+
+const RENDERED_THREAD_STATE_KEYS = ["title", "artifacts", "todos", "goal"];
+
+export function hasRenderedThreadStateUpdate(data: unknown): boolean {
+  if (!isRecord(data)) return false;
+  return Object.values(data).some(
+    (update) =>
+      isRecord(update) &&
+      RENDERED_THREAD_STATE_KEYS.some((key) => Object.hasOwn(update, key)),
   );
 }
 
