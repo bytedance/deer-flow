@@ -822,36 +822,39 @@ class LocalContainerBackend(SandboxBackend):
         # Docker-only security hardening. The sandbox container executes
         # untrusted, model-authored code, so it must not run with the
         # daemon's permissive defaults: all Linux capabilities are dropped
-        # except the minimum the shipped image's entrypoint needs to
-        # initialize itself, privilege escalation (setuid/sudo) is blocked,
+        # except a small compatibility set needed across supported AIO image
+        # startup/runtime paths, privilege escalation (setuid/sudo) is blocked,
         # and CPU/memory/PID footprints are bounded so one runaway sandbox
         # cannot exhaust the host or fork-bomb it. Each knob has an env
         # escape hatch documented in backend/docs/CONFIGURATION.md. Apple
         # Container's CLI does not support these flags, so they are
         # Docker-only.
         if self._runtime == "docker":
-            # The default image (/opt/gem/run.sh) starts as root, creates the
-            # gem account at runtime, chown -R's /opt/jupyter, and drops to
-            # that user via su before starting the services. That needs
-            # CHOWN/SETUID/SETGID; additionally the root nginx master writes
-            # logs under /var/log/nginx that belong to the gem user, which
-            # requires DAC_OVERRIDE — without it nginx dies with
-            # "open() .../access.log failed (13: Permission denied)" on every
-            # start (a runtime need, not just startup: access.log is written
-            # per request). Dropping ALL of them makes the image fail before
-            # the readiness endpoint exists.
+            # Supported shipped/recommended AIO images start as root, create
+            # the gem account at runtime, chown -R /opt/jupyter, and drop to
+            # that user via su. CHOWN/SETUID/SETGID cover that ownership
+            # handoff. FOWNER is specifically required by the newer 1.11.x
+            # startup path (regression-tested against 1.11.0), which chmods
+            # /run/user/1000 after capabilities are dropped. Images that do
+            # not perform that chmod do not need FOWNER; DeerFlow deliberately
+            # keeps this compatibility allowlist version-agnostic instead of
+            # guessing from mutable tags/digests or arbitrary custom images.
+            # The root nginx master also writes gem-owned logs under
+            # /var/log/nginx, which requires DAC_OVERRIDE — without it nginx
+            # dies with "open() .../access.log failed (13: Permission denied)"
+            # on every start (a runtime need, not just startup). Dropping ALL
+            # of these can make root-initialized images fail before readiness.
             # no-new-privileges stays: it only blocks *gaining* privileges
             # through exec, it does not revoke the capabilities added here,
             # and su from the already-root entrypoint does not need to gain
             # anything. Everything else (NET_RAW, SYS_PTRACE, ...) stays
             # dropped, which is the bulk of the attack-surface reduction.
-            # For a pre-initialized non-root image nothing ever runs as
-            # root, so the handoff capabilities are not needed — and leaving
-            # them available for the container's lifetime would let
-            # sandboxed code chown bind-mounted paths or impersonate
-            # mounted-file UIDs/GIDs. Such images opt out with
-            # DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS=0 (see CONFIGURATION.md),
-            # which drops every capability including these three.
+            # A pre-initialized non-root image that needs none of these
+            # compatibility capabilities should opt out with
+            # DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS=0 (see CONFIGURATION.md).
+            # That switch drops the whole set; it is intentionally not used
+            # to infer or trim individual capabilities for older/custom root-
+            # initialized images that may still need the remaining entries.
             if _env_flag_disabled("DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS"):
                 cmd.extend(["--cap-drop=ALL", "--security-opt", "no-new-privileges"])
             else:
@@ -859,6 +862,7 @@ class LocalContainerBackend(SandboxBackend):
                     [
                         "--cap-drop=ALL",
                         "--cap-add=CHOWN",
+                        "--cap-add=FOWNER",
                         "--cap-add=SETUID",
                         "--cap-add=SETGID",
                         "--cap-add=DAC_OVERRIDE",
