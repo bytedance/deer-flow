@@ -2381,7 +2381,9 @@ class TestThreadSafety:
 
         class BlockingDateTime:
             @staticmethod
-            def now():
+            def now(tz=None):
+                # Signature mirrors datetime.now's optional tz argument: the
+                # production writer stamps UTC via datetime.now(UTC).
                 now_entered.set()
                 release_now.wait(timeout=5)
                 return completed_at
@@ -4876,3 +4878,27 @@ class TestBashExecutionHarvest:
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.bash_executions is None
+
+
+def test_timestamp_writers_stamp_utc_aware_datetimes(classes):
+    """Terminal transitions must stamp UTC-aware datetimes, not naive local wall-clock values."""
+    SubagentResult = classes["SubagentResult"]
+    SubagentStatus = classes["SubagentStatus"]
+
+    result = SubagentResult(task_id="tz-check", trace_id="trace-1", status=SubagentStatus.PENDING)
+    assert result.try_set_terminal(SubagentStatus.COMPLETED, result="done")
+
+    assert result.completed_at is not None
+    assert result.completed_at.tzinfo is not None
+    assert result.completed_at.utcoffset() is not None
+    assert result.completed_at.utcoffset().total_seconds() == 0.0
+
+
+def test_utcnow_helper_returns_utc_aware_datetime(classes):
+    """The shared timestamp writer must never depend on the host wall clock."""
+    executor_module = sys.modules["deerflow.subagents.executor"]
+
+    now = executor_module._utcnow()
+    assert now.tzinfo is not None
+    assert now.utcoffset() is not None
+    assert now.utcoffset().total_seconds() == 0.0

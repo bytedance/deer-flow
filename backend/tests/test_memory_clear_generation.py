@@ -368,6 +368,30 @@ def test_queued_before_clear_extraction_does_not_restore_facts_after_cross_manag
     assert manager_b.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
 
 
+def test_same_manager_clear_does_not_restore_cancelled_pending_on_next_turn(tmp_path: Path) -> None:
+    """#5123 drops the debounce buffer; the fence must still consume that snapshot."""
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(side_effect=AssertionError("cancelled pending extraction must not restore after clear"))
+    manager = _manager(tmp_path, host_llm)
+    manager.create_fact("User likes Python", category="preference", confidence=0.9, agent_name="researcher", user_id="alice")
+
+    conversation = _queue_conversation()
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    assert manager._queue.pending_count == 1
+    _stop_debounce(manager)
+
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    assert manager._queue.pending_count == 0
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
 def test_queued_coalesce_after_clear_extracts_post_clear_turns(tmp_path: Path) -> None:
     host_llm = MagicMock()
     host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User prefers typed Python")))

@@ -77,6 +77,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
   - [定时任务 (Scheduled Tasks)](#定时任务-scheduled-tasks)
+    - [升级说明](#升级说明)
   - [终端工作台 (TUI)](#终端工作台-tui)
   - [文档](#文档)
   - [⚠️ 安全使用](#️-安全使用)
@@ -767,6 +768,16 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 第一版没有 `interval` 调度类型
 
 通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
+
+定时任务运行会读取 `config.yaml` 中的 `scheduler.recursion_limit`（默认 `1000`，与 Web UI 的交互式预算一致）。超过 `max_recursion_limit` 的值会被截断。该字段在 dispatch 时读取，因此下一次定时运行即可生效，无需重启 Gateway。
+
+后台调度器默认是单实例。多 Pod 部署时，请设置 `scheduler.multi_instance: true`，并使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`；启动和周期性恢复会保留仍由对端持有的运行，把过期的 launch claim 原子退回队列，只接管过期的 run lease，并隔离过期的 launch 写入。`max_concurrent_runs` 是跨 Pod 共享的全局上限，只计入 `launching` / `running` 的执行；等待中的 `queued` 行不占用该配额。没有这些配置时，请只在一个 Gateway Pod 上启用调度器。这些 scheduler 字段只在启动时生效；修改后需要一起重启所有 Gateway Pod。
+
+### 升级说明
+
+- 升级 `GATEWAY_WORKERS > 1` 且 `scheduler.enabled: true` 的部署前，要么只在一个 Gateway worker 上启用调度器，要么配置 `scheduler.multi_instance: true`，并同时使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`。升级后的 Gateway 会在启动时拒绝这种不安全组合，而不是静默启动。
+- 多实例模式下，`scheduler.max_concurrent_runs` 是集群级执行上限，而不是每个 Pod 各自一份。它计入 `launching` 和 `running` 的定时执行，因此容量不会随副本数倍增；持久化等待行仍在上限之外。
+- `scheduler.multi_instance` 以及相关的 scheduler、ownership、run-event 设置都只在启动时生效。变更需要协调重启所有 Gateway Pod；只改 ConfigMap 不会启用多实例恢复。
 
 ## 终端工作台 (TUI)
 
