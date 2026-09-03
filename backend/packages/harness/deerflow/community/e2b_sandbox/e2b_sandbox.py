@@ -5,12 +5,16 @@ import logging
 import re
 import shlex
 import threading
+from typing import TYPE_CHECKING
 
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+
+if TYPE_CHECKING:
+    from deerflow.community.e2b_sandbox.e2b_sandbox_provider import MountUploadResult
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +68,7 @@ class E2BSandbox(Sandbox):
         self._lock = threading.Lock()
         self._closed = False
         self._dead = False
+        self.mount_upload_result: MountUploadResult | None = None
 
     # ── Properties / lifecycle ───────────────────────────────────────────
 
