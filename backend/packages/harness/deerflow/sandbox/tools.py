@@ -67,6 +67,7 @@ _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
 _URL_WITH_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _URL_IN_COMMAND_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE)
 _DOTDOT_PATH_SEGMENT_PATTERN = re.compile(r"(?:^|[/\\=])\.\.(?:$|[/\\])")
+_LOCAL_BASH_PATH_RECOVERY_GUIDANCE = "For environment questions, use command-only probes such as uname; otherwise use an allowed virtual path. Do not repeat the rejected path."
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
     "/usr/bin/",
@@ -1261,7 +1262,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     # Block file:// URLs which bypass the absolute-path regex but allow local file exfiltration
     file_url_match = _FILE_URL_PATTERN.search(command)
     if file_url_match:
-        raise PermissionError(f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}. {_LOCAL_BASH_PATH_RECOVERY_GUIDANCE}")
 
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
@@ -1281,7 +1282,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
-        raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}. {_LOCAL_BASH_PATH_RECOVERY_GUIDANCE}")
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
@@ -2004,12 +2005,18 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
 
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
-    """Execute a bash command in a Linux environment.
+    """Execute a bash command in the configured execution environment.
 
 
     - Use `python` to run Python code.
     - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
     - Use `python -m pip` (inside the virtual environment) to install Python packages.
+    - When running against the local host via host bash, inspect the current environment instead of
+      guessing. For OS detection, start with `uname -s`; on Darwin follow with `sw_vers`. On Linux,
+      start with `uname -a` and read host system files such as `/etc/os-release` only when the active
+      sandbox policy permits it.
+    - If local host bash rejects a path, do not repeat the rejected command. For environment questions,
+      retry with command-only probes; otherwise use allowed virtual paths or explain the restriction.
     - To start a long-lived process such as a web server, ALWAYS run it in the background with its
       output redirected, e.g. `your-command > /mnt/user-data/workspace/server.log 2>&1 &`, then check
       the log file or poll the port. A long-lived process run in the foreground blocks the turn until
