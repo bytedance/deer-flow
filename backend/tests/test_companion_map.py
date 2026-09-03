@@ -52,6 +52,7 @@ class TestCompanionMapFilePredicate:
         assert is_companion_map_file(".deer-flow-companions.lock")
         assert is_companion_map_file(".deer-flow-companions.abc.tmp")
         assert is_companion_map_file(".deer-flow-companions.id." + "a" * 32)
+        assert is_companion_map_file(".deer-flow-companions.quarantine." + "ab" * 16)
         assert not is_companion_map_file("report.md")
         assert not is_companion_map_file(".env")
 
@@ -461,6 +462,63 @@ class TestDeleteUsesSidecar:
         assert lookup_companion_mapping(tmp_path, "a.pdf") is None
         assert lookup_companion_mapping(tmp_path, "a.docx") == "a.md"
 
+    def test_delete_preserves_companion_replaced_after_original_unlink(self, tmp_path, monkeypatch):
+        """Sandbox can replace the companion basename after the original is gone.
+
+        lookup/fingerprint ran against the conversion artifact, but the later
+        unlink must not delete whatever now occupies that name.
+        """
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF")
+        companion = tmp_path / "report.md"
+        companion.write_text("# converted\n", encoding="utf-8")
+        record_companion_mapping(tmp_path, "report.pdf", "report.md")
+
+        real_unlink = Path.unlink
+
+        def unlink_then_plant(path_self, missing_ok=False):
+            name = path_self.name
+            result = real_unlink(path_self, missing_ok=missing_ok)
+            if name == "report.pdf":
+                planted = path_self.with_name("report.md")
+                if planted.exists() or planted.is_symlink():
+                    real_unlink(planted, missing_ok=True)
+                planted.write_text("# sandbox replacement\n", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(Path, "unlink", unlink_then_plant)
+        delete_file_safe(tmp_path, "report.pdf", convertible_extensions={".pdf"})
+
+        planted = tmp_path / "report.md"
+        assert planted.read_text(encoding="utf-8") == "# sandbox replacement\n"
+        assert lookup_companion_mapping(tmp_path, "report.pdf") is None
+
+    def test_delete_preserves_replacement_outside_sandbox_mount_layout(self, tmp_path, monkeypatch):
+        uploads = _thread_uploads(tmp_path)
+        pdf = uploads / "report.pdf"
+        pdf.write_bytes(b"%PDF")
+        (uploads / "report.md").write_text("# converted\n", encoding="utf-8")
+        record_companion_mapping(uploads, "report.pdf", "report.md")
+
+        real_unlink = Path.unlink
+
+        def unlink_then_plant(path_self, missing_ok=False):
+            name = path_self.name
+            result = real_unlink(path_self, missing_ok=missing_ok)
+            if name == "report.pdf":
+                planted = path_self.with_name("report.md")
+                if planted.exists() or planted.is_symlink():
+                    real_unlink(planted, missing_ok=True)
+                planted.write_text("# sandbox replacement\n", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(Path, "unlink", unlink_then_plant)
+        delete_file_safe(uploads, "report.pdf", convertible_extensions={".pdf"})
+
+        planted = uploads / "report.md"
+        assert planted.read_text(encoding="utf-8") == "# sandbox replacement\n"
+        assert not list(uploads.glob(".deer-flow-companions.quarantine.*"))
+
     def test_legacy_stem_companion_without_sidecar(self, tmp_path):
         (tmp_path / "report.pdf").write_bytes(b"pdf-bytes")
         (tmp_path / "report.md").write_text("converted", encoding="utf-8")
@@ -714,6 +772,46 @@ class TestSidecarReadBounds:
         assert load_companion_map(tmp_path) == {"a.pdf": "a.md", "b.pdf": "b.md"}
 
 
+class TestSidecarWriteBounds:
+    def test_persist_prunes_to_entry_cap_and_unpins_oldest(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_ENTRIES", 2)
+        for stem in ("a", "b"):
+            (tmp_path / f"{stem}.md").write_text(stem, encoding="utf-8")
+            record_companion_mapping(tmp_path, f"{stem}.pdf", f"{stem}.md")
+        oldest = load_companion_entries(tmp_path)["a.pdf"]
+
+        (tmp_path / "c.md").write_text("c", encoding="utf-8")
+        record_companion_mapping(tmp_path, "c.pdf", "c.md")
+
+        loaded = load_companion_entries(tmp_path)
+        assert {original: entry.name for original, entry in loaded.items()} == {"b.pdf": "b.md", "c.pdf": "c.md"}
+        if oldest.id is not None:
+            assert not companion_identity_path(tmp_path, oldest.id).exists()
+        newest = loaded["c.pdf"]
+        if newest.id is not None:
+            assert companion_identity_path(tmp_path, newest.id).exists()
+
+    def test_persist_prunes_to_byte_cap_instead_of_dropping_the_map(self, tmp_path, monkeypatch):
+        for stem in ("a", "b"):
+            (tmp_path / f"{stem}.md").write_text(stem, encoding="utf-8")
+            record_companion_mapping(tmp_path, f"{stem}.pdf", f"{stem}.md")
+        size_two = (tmp_path / COMPANION_MAP_FILENAME).stat().st_size
+        oldest = load_companion_entries(tmp_path)["a.pdf"]
+        monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_BYTES", size_two)
+
+        (tmp_path / "c.md").write_text("c", encoding="utf-8")
+        record_companion_mapping(tmp_path, "c.pdf", "c.md")
+
+        loaded = load_companion_map(tmp_path)
+        assert loaded, "a persist that exceeds the reader byte cap must prune, not write an unreadable map"
+        assert loaded.get("c.pdf") == "c.md"
+        assert "a.pdf" not in loaded
+        if oldest.id is not None:
+            assert not companion_identity_path(tmp_path, oldest.id).exists()
+        sidecar_size = (tmp_path / COMPANION_MAP_FILENAME).stat().st_size
+        assert sidecar_size <= size_two
+
+
 class TestReplacementCleansPreviousCompanion:
     def test_rerecord_unlinks_unmodified_previous_companion(self, tmp_path):
         (tmp_path / "report.md").write_text("# v1\n", encoding="utf-8")
@@ -738,6 +836,18 @@ class TestReplacementCleansPreviousCompanion:
         assert companion.read_text(encoding="utf-8") == "# v1\nedited in the sandbox\n"
         assert lookup_companion_mapping(tmp_path, "report.pdf") == "report_1.md"
         assert "report.md" not in mapped_companion_names(tmp_path)
+
+    def test_rerecord_unlinks_unmodified_previous_companion_without_hardlink_pins(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(companion_map_mod, "_pin_companion", lambda *args: None)
+        (tmp_path / "report.md").write_text("# v1\n", encoding="utf-8")
+        record_companion_mapping(tmp_path, "report.pdf", "report.md")
+        assert load_companion_entries(tmp_path)["report.pdf"].id is None
+
+        (tmp_path / "report_1.md").write_text("# v2\n", encoding="utf-8")
+        record_companion_mapping(tmp_path, "report.pdf", "report_1.md")
+
+        assert not (tmp_path / "report.md").exists()
+        assert lookup_companion_mapping(tmp_path, "report.pdf") == "report_1.md"
 
 
 class TestDeleteSidecarCleanupIsAdvisory:

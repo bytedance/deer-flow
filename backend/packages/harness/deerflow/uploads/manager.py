@@ -14,10 +14,11 @@ from urllib.parse import quote
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.companion_map import (
+    companion_entry_matches,
     forget_companion_mapping,
-    has_companion_entry,
     is_companion_map_file,
-    lookup_companion_mapping,
+    load_companion_entries,
+    unlink_verified_companion,
 )
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -385,10 +386,12 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
 
     If *convertible_extensions* is provided and the file's extension matches,
     the converted-markdown companion is also removed (if it exists). The
-    companion path comes from the sidecar when present and still current;
-    a stale sidecar entry (companion deleted or replaced outside this API)
-    disables companion cleanup so no unrelated file is removed. Without any
-    sidecar entry the legacy ``<stem>.md`` heuristic applies.
+    companion path comes from the sidecar when present and still current.
+    Removal quarantines that directory entry and re-checks the moved inode
+    against the identity pin so a sandbox replacement of the basename is
+    preserved. A stale sidecar entry (companion deleted or replaced outside
+    this API) disables companion cleanup so no unrelated file is removed.
+    Without any sidecar entry the legacy ``<stem>.md`` heuristic applies.
 
     Args:
         base_dir: Directory containing the file.
@@ -412,30 +415,28 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     if not file_path.is_file():
         raise FileNotFoundError(f"File not found: {filename}")
 
-    mapped = lookup_companion_mapping(base_dir, safe_name)
+    entries = load_companion_entries(base_dir)
+    entry = entries.get(safe_name)
+    matched = entry is not None and companion_entry_matches(base_dir, entry)
     file_path.unlink()
 
     try:
         # Clean up companion markdown generated during upload conversion.
         if convertible_extensions and file_path.suffix.lower() in convertible_extensions:
-            companion_name: str | None
-            if mapped is not None:
-                companion_name = mapped
-            elif has_companion_entry(base_dir, safe_name):
-                # Stale entry: the recorded companion was deleted or replaced
-                # outside this API, so no file may be removed in its name.
-                companion_name = None
-            else:
+            if entry is not None and matched:
+                unlink_verified_companion(base_dir, entry)
+                forget_companion_mapping(base_dir, companion=entry.name)
+            elif entry is None:
                 companion_name = file_path.with_suffix(".md").name
-            if companion_name is not None and companion_name != safe_name:
-                companion_path = file_path.with_name(companion_name)
-                try:
-                    validate_path_traversal(companion_path.resolve(), base_dir)
-                except PathTraversalError:
-                    companion_path = None
-                if companion_path is not None:
-                    companion_path.unlink(missing_ok=True)
-                    forget_companion_mapping(base_dir, companion=companion_name)
+                if companion_name != safe_name:
+                    companion_path = file_path.with_name(companion_name)
+                    try:
+                        validate_path_traversal(companion_path.resolve(), base_dir)
+                    except PathTraversalError:
+                        companion_path = None
+                    if companion_path is not None:
+                        companion_path.unlink(missing_ok=True)
+                        forget_companion_mapping(base_dir, companion=companion_name)
 
         forget_companion_mapping(base_dir, original=safe_name)
         if file_path.suffix.lower() == ".md":

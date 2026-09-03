@@ -11,11 +11,16 @@ replacement file cannot masquerade as the companion even when the number is
 reused, while an in-place edit of the same inode stays attached.
 The sidecar JSON lives beside the files it describes and is hidden from
 listings. Reads open it no-follow with a byte and entry cap so a sandbox
-cannot turn the mapping file into an unbounded Gateway parse. The lock file
-lives *outside* sandbox-visible directories (beside ``user-data``, not inside
-``uploads``), is opened with no-follow semantics, and is acquired with a
-bounded non-blocking flock so a held lock cannot pin the shared Gateway
-file-IO pool.
+cannot turn the mapping file into an unbounded Gateway parse. Writes prune
+to those same caps (oldest entries first) and unpin evicted rows so this
+module cannot persist a map its own reader would drop. Companion deletion
+renames the directory entry to a quarantine name, then verifies the moved
+inode against the pin before unlinking, so a sandbox replacement of the
+basename is restored instead of deleted. The lock file lives *outside*
+sandbox-visible directories (beside ``user-data``, not inside ``uploads``),
+is opened with no-follow semantics, and is acquired with a bounded
+non-blocking flock so a held lock cannot pin the shared Gateway file-IO
+pool.
 """
 
 from __future__ import annotations
@@ -453,18 +458,8 @@ def _load_unlocked(uploads_dir: Path) -> dict[str, CompanionEntry]:
     return _sanitize_mapping(raw)
 
 
-def _persist_unlocked(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> None:
-    path = _map_path(uploads_dir)
-    if path.is_symlink():
-        raise ValueError("Companion map path is a symlink")
-    if not mapping:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        return
-
-    payload = {
+def _mapping_payload(mapping: dict[str, CompanionEntry]) -> dict:
+    return {
         "version": _MAP_VERSION,
         "companions": {
             original: {
@@ -478,6 +473,43 @@ def _persist_unlocked(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> 
             for original, entry in mapping.items()
         },
     }
+
+
+def _serialized_map_bytes(mapping: dict[str, CompanionEntry]) -> int:
+    return len(json.dumps(_mapping_payload(mapping), ensure_ascii=False, indent=2).encode("utf-8"))
+
+
+def _trim_mapping_to_limits(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> dict[str, CompanionEntry]:
+    """Drop oldest rows until the payload fits the reader caps; unpin evicted pins."""
+    items = list(mapping.items())
+    evicted: list[CompanionEntry] = []
+    while len(items) > MAX_COMPANION_MAP_ENTRIES:
+        evicted.append(items.pop(0)[1])
+    while items and _serialized_map_bytes(dict(items)) > MAX_COMPANION_MAP_BYTES:
+        if len(items) == 1:
+            raise ValueError(f"Companion map exceeds {MAX_COMPANION_MAP_BYTES} bytes even after pruning")
+        evicted.append(items.pop(0)[1])
+    if evicted:
+        logger.warning("Companion map exceeded persist limits; dropping %s older entries", len(evicted))
+        for entry in evicted:
+            _unpin_companion(uploads_dir, entry.id)
+    return dict(items)
+
+
+def _persist_unlocked(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> None:
+    path = _map_path(uploads_dir)
+    if path.is_symlink():
+        raise ValueError("Companion map path is a symlink")
+    if mapping:
+        mapping = _trim_mapping_to_limits(uploads_dir, mapping)
+    if not mapping:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+
+    payload = _mapping_payload(mapping)
     data = json.dumps(payload, ensure_ascii=False, indent=2)
     fd, tmp_name = tempfile.mkstemp(prefix=f"{_COMPANION_MAP_PREFIX}.", suffix=".tmp", dir=uploads_dir)
     tmp_path = Path(tmp_name)
@@ -554,6 +586,92 @@ def companion_entry_matches(uploads_dir: Path, entry: CompanionEntry) -> bool:
     return entry.mtime_ns is None or current.st_mtime_ns == entry.mtime_ns
 
 
+def _quarantine_companion_path(uploads_dir: Path) -> Path:
+    """Return a unique quarantine path, preferring the pin directory."""
+    token = secrets.token_hex(16)
+    directory = companion_identity_dir(uploads_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    if directory.resolve() == uploads_dir.resolve():
+        return directory / f"{_COMPANION_MAP_PREFIX}.quarantine.{token}"
+    return directory / f"quarantine.{token}"
+
+
+def _restore_quarantined(quarantine: Path, dest: Path) -> None:
+    try:
+        os.rename(quarantine, dest)
+    except OSError:
+        logger.warning("Failed to restore quarantined companion to %s", dest, exc_info=True)
+
+
+def _stat_matches_entry(
+    uploads_dir: Path,
+    entry: CompanionEntry,
+    current: os.stat_result,
+    *,
+    unmodified: bool,
+) -> bool:
+    if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode):
+        return False
+    if unmodified:
+        if entry.id and not _identity_pin_matches(uploads_dir, entry, current):
+            return False
+        if entry.size is not None and current.st_size != entry.size:
+            return False
+        if entry.mtime_ns is not None and current.st_mtime_ns != entry.mtime_ns:
+            return False
+        return True
+    if entry.id:
+        return _identity_pin_matches(uploads_dir, entry, current)
+    if entry.size is None and entry.mtime_ns is None:
+        return True
+    if entry.size is not None and current.st_size != entry.size:
+        return False
+    return entry.mtime_ns is None or current.st_mtime_ns == entry.mtime_ns
+
+
+def unlink_verified_companion(
+    uploads_dir: Path,
+    entry: CompanionEntry,
+    *,
+    unmodified: bool = False,
+) -> bool:
+    """Quarantine the companion basename, then unlink only if it still matches *entry*.
+
+    ``os.rename`` steals the directory entry atomically. The moved inode is
+    checked against the identity pin (and, when *unmodified* is true, the
+    convert-time size/mtime). A mismatch restores the file so a sandbox
+    replacement of the basename is not deleted.
+
+    Returns:
+        True if the quarantined file was removed, False if it was preserved
+        or missing.
+    """
+    if not _is_safe_companion(entry.name):
+        return False
+    src = uploads_dir / entry.name
+    quarantine = _quarantine_companion_path(uploads_dir)
+    try:
+        os.rename(src, quarantine)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            return False
+        quarantine = uploads_dir / f"{_COMPANION_MAP_PREFIX}.quarantine.{secrets.token_hex(16)}"
+        try:
+            os.rename(src, quarantine)
+        except OSError:
+            return False
+    try:
+        current = os.lstat(quarantine)
+        if _stat_matches_entry(uploads_dir, entry, current, unmodified=unmodified):
+            os.unlink(quarantine)
+            return True
+        _restore_quarantined(quarantine, src)
+        return False
+    except OSError:
+        _restore_quarantined(quarantine, src)
+        return False
+
+
 def _unlink_unmodified_companion(uploads_dir: Path, entry: CompanionEntry, *, keep_name: str) -> None:
     """Remove a still-current, unmodified conversion artifact being replaced.
 
@@ -564,32 +682,7 @@ def _unlink_unmodified_companion(uploads_dir: Path, entry: CompanionEntry, *, ke
         return
     if not companion_entry_matches(uploads_dir, entry):
         return
-    path = uploads_dir / entry.name
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    fd = -1
-    try:
-        fd = os.open(path, flags)
-        current = os.fstat(fd)
-        if not stat.S_ISREG(current.st_mode):
-            return
-        if entry.id and not _identity_pin_matches(uploads_dir, entry, current):
-            return
-        if entry.size is not None and current.st_size != entry.size:
-            return
-        if entry.mtime_ns is not None and current.st_mtime_ns != entry.mtime_ns:
-            return
-        os.close(fd)
-        fd = -1
-        os.unlink(path)
-    except OSError:
-        return
-    finally:
-        if fd >= 0:
-            os.close(fd)
+    unlink_verified_companion(uploads_dir, entry, unmodified=True)
 
 
 def lookup_companion_mapping(uploads_dir: Path, original: str) -> str | None:
@@ -672,10 +765,10 @@ def record_companion_mapping(uploads_dir: Path, original: str, companion: str) -
                 _unpin_companion(uploads_dir, pin_token)
                 raise FileNotFoundError(f"Companion file does not exist: {companion!r}") from exc
             mapping = _load_unlocked(uploads_dir)
-            previous = mapping.get(original)
+            previous = mapping.pop(original, None)
             displaced: list[CompanionEntry] = []
             for key, entry in list(mapping.items()):
-                if entry.name == companion and key != original:
+                if entry.name == companion:
                     displaced.append(mapping.pop(key))
             mapping[original] = CompanionEntry(
                 name=companion,
@@ -690,11 +783,12 @@ def record_companion_mapping(uploads_dir: Path, original: str, companion: str) -
             except Exception:
                 _unpin_companion(uploads_dir, pin_token)
                 raise
-            if previous is not None and previous.id != pin_token:
+            if previous is not None:
                 _unlink_unmodified_companion(uploads_dir, previous, keep_name=companion)
-                _unpin_companion(uploads_dir, previous.id)
+                if previous.id and previous.id != pin_token:
+                    _unpin_companion(uploads_dir, previous.id)
             for entry in displaced:
-                if entry.id != pin_token:
+                if entry.id and entry.id != pin_token:
                     _unpin_companion(uploads_dir, entry.id)
     except CompanionMapLockTimeout:
         logger.warning(
