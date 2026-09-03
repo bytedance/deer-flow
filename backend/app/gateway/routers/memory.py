@@ -9,7 +9,7 @@ they are returned unchanged regardless of ``agent_name``.
 import asyncio
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
@@ -28,6 +28,22 @@ router = APIRouter(prefix="/api", tags=["memory"])
 # ``agent_name`` selects the default bucket.
 _AGENT_NAME_QUERY_PATTERN = r"^[A-Za-z0-9-]+$"
 _AGENT_NAME_QUERY_DESCRIPTION = "Optional custom-agent name selecting which agent's fact bucket to read/write; omitted selects the default bucket. Summaries are user-global and shared across agents."
+
+
+def _canonical_agent_name(
+    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+) -> str | None:
+    """Validate and canonicalize the bucket selector once at the wire boundary.
+
+    Custom agents are stored under their lowercased name (the public
+    agent-management API lowercases on create, and DeerMem lowercases
+    internally), so a mixed-case ``agent_name`` must never reach the manager:
+    the Mem0 backend builds its composite agent scope from the raw value and a
+    mixed-case selector would silently read/clear a bucket that does not
+    exist. Every data endpoint receives the selector through this dependency
+    instead of declaring the Query itself.
+    """
+    return agent_name.lower() if agent_name else agent_name
 
 
 def _resolve_memory_user_id(request: Request) -> str:
@@ -227,7 +243,7 @@ class MemoryStatusResponse(BaseModel):
 )
 async def get_memory(
     http_request: Request,
-    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+    agent_name: str | None = Depends(_canonical_agent_name),
 ) -> MemoryResponse:
     """Get the current memory data.
 
@@ -281,7 +297,7 @@ async def get_memory(
 )
 async def reload_memory(
     http_request: Request,
-    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+    agent_name: str | None = Depends(_canonical_agent_name),
 ) -> MemoryResponse:
     """Reload memory data from file.
 
@@ -317,7 +333,7 @@ async def reload_memory(
 )
 async def clear_memory(
     http_request: Request,
-    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+    agent_name: str | None = Depends(_canonical_agent_name),
 ) -> MemoryResponse:
     """Clear persisted memory data.
 
@@ -347,7 +363,7 @@ async def clear_memory(
 async def create_memory_fact_endpoint(
     request: FactCreateRequest,
     http_request: Request,
-    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+    agent_name: str | None = Depends(_canonical_agent_name),
 ) -> MemoryResponse:
     """Create a single fact manually."""
     manager = await asyncio.to_thread(get_memory_manager)
@@ -385,7 +401,7 @@ async def create_memory_fact_endpoint(
 async def delete_memory_fact_endpoint(
     fact_id: str,
     http_request: Request,
-    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+    agent_name: str | None = Depends(_canonical_agent_name),
 ) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
     manager = await asyncio.to_thread(get_memory_manager)
@@ -414,7 +430,7 @@ async def update_memory_fact_endpoint(
     fact_id: str,
     request: FactPatchRequest,
     http_request: Request,
-    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+    agent_name: str | None = Depends(_canonical_agent_name),
 ) -> MemoryResponse:
     """Partially update a single fact manually."""
     manager = await asyncio.to_thread(get_memory_manager)
@@ -451,7 +467,7 @@ async def update_memory_fact_endpoint(
 )
 async def export_memory(
     http_request: Request,
-    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+    agent_name: str | None = Depends(_canonical_agent_name),
 ) -> MemoryResponse:
     """Export the current memory data."""
     manager = await asyncio.to_thread(get_memory_manager)
@@ -469,7 +485,7 @@ async def export_memory(
 async def import_memory(
     request: MemoryResponse,
     http_request: Request,
-    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+    agent_name: str | None = Depends(_canonical_agent_name),
 ) -> MemoryResponse:
     """Import and persist memory data."""
     manager = await asyncio.to_thread(get_memory_manager)
@@ -548,7 +564,7 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
 )
 async def get_memory_status(
     http_request: Request,
-    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+    agent_name: str | None = Depends(_canonical_agent_name),
 ) -> MemoryStatusResponse:
     """Get the memory system status including configuration and data.
 

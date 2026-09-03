@@ -548,6 +548,27 @@ def test_get_memory_route_rejects_invalid_agent_name() -> None:
     mock_mgr.get_memory.assert_not_called()
 
 
+def test_agent_name_is_canonicalized_to_lowercase_before_the_manager() -> None:
+    """Custom agents are stored under their lowercased name (the agent API
+    lowercases on create; DeerMem lowercases internally), so a mixed-case
+    selector must never reach the manager: Mem0 builds its composite agent
+    scope from the raw value and would silently target a bucket that does not
+    exist (reads/clears miss the real data)."""
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.get_memory.return_value = _sample_memory()
+    mock_mgr.clear_memory.return_value = _sample_memory()
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            read = client.get("/api/memory", params={"agent_name": "Coding-Agent"})
+            cleared = client.delete("/api/memory", params={"agent_name": "Coding-Agent"})
+    assert read.status_code == 200
+    assert cleared.status_code == 200
+    assert mock_mgr.get_memory.call_args.kwargs["agent_name"] == "coding-agent"
+    assert mock_mgr.clear_memory.call_args.kwargs["agent_name"] == "coding-agent"
+
+
 def test_fact_crud_routes_forward_agent_name() -> None:
     app = FastAPI()
     app.include_router(memory.router)
