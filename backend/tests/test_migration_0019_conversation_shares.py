@@ -1,4 +1,4 @@
-"""Migration tests for 0018_conversation_shares (#4548).
+"""Migration tests for 0019_conversation_shares (#4548).
 
 Runs the full alembic chain on an empty SQLite database (not
 ``create_all`` + stamp), then exercises the 0018 downgrade/upgrade cycle.
@@ -20,7 +20,7 @@ from deerflow.persistence.bootstrap import _MIGRATIONS_DIR
 pytestmark = pytest.mark.asyncio
 
 _SCRIPT_LOCATION = str(_MIGRATIONS_DIR)
-_REVISION = "0018_conversation_shares"
+_REVISION = "0019_conversation_shares"
 _PREVIOUS = "0017_personal_access_tokens"
 
 _EXPECTED_COLUMNS = {

@@ -613,6 +613,17 @@ def test_validate_local_bash_command_paths_blocks_host_paths() -> None:
         validate_local_bash_command_paths("cat /etc/passwd", _THREAD_DATA)
 
 
+@pytest.mark.parametrize("command", ["cat /etc/os-release", "curl file:///etc/os-release"])
+def test_validate_local_bash_command_paths_guides_environment_probe_recovery(command: str) -> None:
+    with pytest.raises(PermissionError) as exc_info:
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+    message = str(exc_info.value)
+    assert "For environment questions, use command-only probes" in message
+    assert "otherwise use an allowed virtual path" in message
+    assert "Do not repeat the rejected path" in message
+
+
 def test_validate_local_bash_command_paths_allows_https_urls() -> None:
     """URLs like https://github.com/... must not be flagged as unsafe absolute paths."""
     validate_local_bash_command_paths(
@@ -820,6 +831,38 @@ def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> 
     )
 
     assert "Host bash execution is disabled" in result
+
+
+def test_bash_tool_description_scopes_environment_detection_to_local_host_bash() -> None:
+    description = bash_tool.description
+
+    assert "local host via host bash" in description
+    assert "inspect the current environment instead of" in description
+    assert "`uname -s`" in description
+    assert "`sw_vers`" in description
+    assert "`uname -a`" in description
+    assert "`/etc/os-release` only when the active" in description
+    assert "sandbox policy permits it" in description
+    assert "do not repeat the rejected command" in description
+    assert "otherwise use allowed virtual paths or explain the restriction" in description
+
+
+def test_bash_tool_guides_recovery_after_host_path_rejection(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        context={"thread_id": "thread-1"},
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("unsafe command should not execute")),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+    result = bash_tool.func(runtime=runtime, description="detect the OS", command="cat /etc/os-release")
+
+    assert "For environment questions, use command-only probes" in result
+    assert "Do not repeat the rejected path" in result
 
 
 def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) -> None:
