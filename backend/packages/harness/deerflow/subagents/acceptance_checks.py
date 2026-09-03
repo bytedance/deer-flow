@@ -56,6 +56,7 @@ the async caller offloads the whole check with ``asyncio.to_thread``.
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 import shlex
 import stat
@@ -464,6 +465,7 @@ def _check_file_leaf(
 _SHELL_OPERATORS = ";&|"
 #: Leading ``VAR=value`` assignments are environment setup, not the executable.
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_WINDOWS_DRIVE_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:/")
 
 
 def _carries_summary_shape(text: str) -> bool:
@@ -492,16 +494,22 @@ def _cd_target_in_scope(target: str, thread_data: Mapping[str, Any] | None) -> b
     """
     if not target or target == "-" or target.startswith("~"):
         return False
-    normalized = os.path.normpath(target.replace("\\", "/"))
-    if normalized.startswith("/"):
+    # These paths come from a bash command and therefore keep POSIX semantics
+    # even when the acceptance checker itself runs on Windows.
+    normalized = posixpath.normpath(target.replace("\\", "/"))
+    is_windows_drive_absolute = bool(_WINDOWS_DRIVE_ABSOLUTE_RE.match(normalized))
+    if normalized.startswith("/") or is_windows_drive_absolute:
         roots = [VIRTUAL_PATH_PREFIX]
         for key in ("workspace_path", "outputs_path", "uploads_path"):
             value = (thread_data or {}).get(key)
             if isinstance(value, str) and value:
                 roots.append(value)
         for root in roots:
-            normalized_root = os.path.normpath(root.replace("\\", "/"))
-            if normalized == normalized_root or normalized.startswith(normalized_root + "/"):
+            normalized_root = posixpath.normpath(root.replace("\\", "/"))
+            root_is_windows_drive_absolute = bool(_WINDOWS_DRIVE_ABSOLUTE_RE.match(normalized_root))
+            candidate_for_comparison = normalized.casefold() if is_windows_drive_absolute and root_is_windows_drive_absolute else normalized
+            root_for_comparison = normalized_root.casefold() if is_windows_drive_absolute and root_is_windows_drive_absolute else normalized_root
+            if candidate_for_comparison == root_for_comparison or candidate_for_comparison.startswith(root_for_comparison + "/"):
                 return True
         return False
     return ".." not in normalized.split("/")

@@ -124,7 +124,7 @@ class TestFileLeaves:
 
         from deerflow.sandbox.tools import _resolve_local_read_path
 
-        assert Path(_resolve_local_read_path(seen[0], THREAD_DATA)) == Path("/ws/thread/user-data/outputs/report.md")  # type: ignore[arg-type]
+        assert Path(_resolve_local_read_path(seen[0], THREAD_DATA)) == Path("/ws/thread/user-data/outputs/report.md").resolve()  # type: ignore[arg-type]
 
     def test_non_empty_fails_on_empty_file(self):
         files = {"/mnt/user-data/outputs/report.md": ""}
@@ -656,7 +656,7 @@ class TestProbeInnerScriptRealLayouts:
         (outputs / "report.md").write_text("hello", encoding="utf-8")
         assert self._run_read_probe(str(outputs / "report.md"), str(outputs)) == "READABLE"
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root reads through mode-000")
+    @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="mode-000 readability needs POSIX permissions and a non-root euid")
     def test_read_probe_mode_000_is_unreadable(self, tmp_path):
         outputs = tmp_path / "outputs"
         outputs.mkdir()
@@ -1189,6 +1189,26 @@ class TestTestsPassedLeaf:
         verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=THREAD_DATA, bash_executions=executions)
 
         assert verdict["leaves"][0]["checked"] is False
+
+    def test_cd_to_out_of_scope_windows_drive_path_is_unprovable(self):
+        thread_data = {
+            "workspace_path": "D:/ws/thread/user-data/workspace",
+            "outputs_path": "D:/ws/thread/user-data/outputs",
+        }
+        executions = [_bash_execution("cd D:/tmp/fake && pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=thread_data, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_cd_to_in_scope_windows_drive_path_is_case_insensitive(self):
+        thread_data = {
+            "workspace_path": "D:/ws/thread/user-data/workspace",
+            "outputs_path": "D:/ws/thread/user-data/outputs",
+        }
+        executions = [_bash_execution("cd d:/WS/thread/user-data/workspace/project && pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=thread_data, bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
 
     @pytest.mark.parametrize(
         "wrapped",
