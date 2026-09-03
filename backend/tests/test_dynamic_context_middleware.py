@@ -849,3 +849,57 @@ def test_format_current_date_invalid_timezone_falls_back(monkeypatch, caplog):
 
         assert _format_current_date() == "2026-05-08, Friday"
     assert "DEER_FLOW_DATE_TIMEZONE" in caplog.text
+
+
+def _declared_date_timezone_policies():
+    from deerflow.agents.middlewares.dynamic_context_middleware import (
+        DynamicContextMiddleware,
+        SubagentDateContextMiddleware,
+    )
+
+    return [
+        DynamicContextMiddleware().release_policy_parameters(),
+        SubagentDateContextMiddleware().release_policy_parameters(),
+    ]
+
+
+def test_date_middlewares_declare_configured_timezone(monkeypatch):
+    """Assembly identity must reflect the zone the injected date follows."""
+    monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Asia/Shanghai")
+
+    assert _declared_date_timezone_policies() == [
+        {"current_date_timezone": "Asia/Shanghai"},
+        {"current_date_timezone": "Asia/Shanghai"},
+    ]
+
+
+def test_date_middlewares_declare_utc_timezone(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "UTC")
+
+    assert _declared_date_timezone_policies() == [
+        {"current_date_timezone": "UTC"},
+        {"current_date_timezone": "UTC"},
+    ]
+
+
+def test_date_middlewares_declare_resolved_local_zone_without_env(monkeypatch):
+    """Without the knob the declaration resolves the actual local zone, so two
+    hosts that render different dates still get different assembly fingerprints."""
+    from deerflow.agents.middlewares.dynamic_context_middleware import _effective_date_timezone_name
+
+    monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
+    expected = {"current_date_timezone": _effective_date_timezone_name()}
+    assert expected["current_date_timezone"]
+
+    assert _declared_date_timezone_policies() == [expected, expected]
+
+
+def test_date_middlewares_declare_resolved_local_zone_for_invalid_env(monkeypatch, caplog):
+    """An invalid IANA name degrades to server-local and is declared as such."""
+    from deerflow.agents.middlewares.dynamic_context_middleware import _effective_date_timezone_name
+
+    monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Not/A_Zone")
+    expected = {"current_date_timezone": _effective_date_timezone_name()}
+
+    assert _declared_date_timezone_policies() == [expected, expected]
+    assert "DEER_FLOW_DATE_TIMEZONE" in caplog.text

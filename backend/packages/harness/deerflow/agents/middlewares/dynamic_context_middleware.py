@@ -99,6 +99,44 @@ def _date_timezone() -> tzinfo | None:
         return None
 
 
+def _server_local_timezone_name() -> str:
+    """Best-effort canonical label for the server's local timezone.
+
+    ``zoneinfo.ZoneInfo`` (Linux/macOS) exposes its IANA key; fixed-offset
+    timezones (Windows) expose only a ``tzname`` label, which is used as-is.
+    """
+    local_tz = datetime.now().astimezone().tzinfo
+    if local_tz is None:
+        return "UTC"
+    key = getattr(local_tz, "key", None)
+    if isinstance(key, str) and key:
+        return key
+    tzname = getattr(local_tz, "tzname", None)
+    if callable(tzname):
+        name = tzname(None)
+        if isinstance(name, str) and name:
+            return name
+    return "UTC"
+
+
+def _effective_date_timezone_name() -> str:
+    """Canonical label of the timezone the injected date actually follows.
+
+    Mirrors ``_date_timezone()``: a configured, valid ``DEER_FLOW_DATE_TIMEZONE`` wins
+    and is reported by its IANA key; otherwise the resolved server-local zone is
+    reported. Declaring the effective zone (never a bare ``probed``) lets the
+    assembly descriptor tell deployments that anchor the injected date differently
+    apart.
+    """
+    tz = _date_timezone()
+    if tz is not None:
+        key = getattr(tz, "key", None)
+        if isinstance(key, str) and key:
+            return key
+        return "UTC"
+    return _server_local_timezone_name()
+
+
 def _format_current_date() -> str:
     tz = _date_timezone()
     now = datetime.now(tz) if tz is not None else datetime.now()
@@ -190,6 +228,10 @@ class SubagentDateContextMiddleware(AgentMiddleware):
     model call without coupling the two runtime paths.
     """
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        """The injected date's effective timezone is this middleware's behaviour identity."""
+        return {"current_date_timezone": _effective_date_timezone_name()}
+
     @staticmethod
     def _inject() -> dict:
         current_date = _format_current_date()
@@ -248,6 +290,10 @@ class DynamicContextMiddleware(AgentMiddleware):
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        """Declare the injected date's effective timezone for assembly identity."""
+        return {"current_date_timezone": _effective_date_timezone_name()}
 
     def _build_full_reminder(self, runtime: Runtime | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).

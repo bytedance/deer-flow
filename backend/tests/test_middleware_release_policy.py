@@ -189,6 +189,18 @@ def _make_system_message_coalescing_middleware():
     return SystemMessageCoalescingMiddleware()
 
 
+def _make_dynamic_context_middleware():
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+
+    return DynamicContextMiddleware()
+
+
+def _make_subagent_date_context_middleware():
+    from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
+
+    return SubagentDateContextMiddleware()
+
+
 # Single source of truth for "which middlewares declare a release policy" so
 # the existence check and the construct-call-hash check below can never drift
 # apart into two separately-maintained middleware lists. Every entry here is
@@ -210,6 +222,11 @@ _MIDDLEWARE_DECLARATIONS = [
     ("deerflow.agents.middlewares.tool_output_budget_middleware", "ToolOutputBudgetMiddleware", _make_tool_output_budget_middleware),
     ("deerflow.agents.middlewares.skill_activation_middleware", "SkillActivationMiddleware", _make_skill_activation_middleware),
     ("deerflow.agents.middlewares.system_message_coalescing_middleware", "SystemMessageCoalescingMiddleware", _make_system_message_coalescing_middleware),
+    # The date middlewares declare the effective timezone the injected
+    # <current_date> follows, so differently-anchored deployments fingerprint
+    # differently.
+    ("deerflow.agents.middlewares.dynamic_context_middleware", "DynamicContextMiddleware", _make_dynamic_context_middleware),
+    ("deerflow.agents.middlewares.dynamic_context_middleware", "SubagentDateContextMiddleware", _make_subagent_date_context_middleware),
 ]
 
 
