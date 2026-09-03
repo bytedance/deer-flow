@@ -273,6 +273,52 @@ describe("useCreatePat", () => {
       expect(result.current.data?.token).toBe("dcp_raw_show_once_value");
     });
   });
+
+  it("still exposes the token when the refresh is inconclusive mid-mint", async () => {
+    // /me can fail transiently while the POST is in flight; a null identity
+    // is "unknown", not a confirmed handoff — withholding the resolved raw
+    // token would permanently destroy the only copy of an active
+    // credential. The page-level guard clears the result only after a
+    // different non-null user is confirmed.
+    let resolveCreate!: (value: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result, rerender } = renderHook(() => useCreatePat(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    const pending = result.current.mutateAsync({
+      name: "ci",
+      scopes: ["threads:read"],
+      expires_in_days: null,
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    act(() => {
+      authMock.user = null;
+    });
+    rerender();
+    await act(async () => {
+      resolveCreate(
+        Response.json({
+          id: "pat-1",
+          name: "ci",
+          scopes: ["threads:read"],
+          expires_at: null,
+          created_at: "2026-01-01T00:00:00Z",
+          token: "dcp_raw_show_once_value",
+        }),
+      );
+      const created = await pending;
+      expect(created.token).toBe("dcp_raw_show_once_value");
+    });
+  });
 });
 
 describe("usePats", () => {

@@ -79,16 +79,20 @@ const PatStoreUnavailableError = rs.hoisted(() => {
 const authMockState = rs.hoisted(() => ({
   authDisabled: false,
   // Mutable on purpose: the account-handoff regression needs to change the
-  // authenticated user between renders.
-  userId: "test-user" as string,
+  // authenticated user between renders. null models an inconclusive /me
+  // refresh (transient network or parsing failure), not a sign-out.
+  userId: "test-user" as string | null,
 }));
 
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({
-    user: {
-      id: authMockState.userId,
-      auth_disabled: authMockState.authDisabled,
-    },
+    user:
+      authMockState.userId === null
+        ? null
+        : {
+            id: authMockState.userId,
+            auth_disabled: authMockState.authDisabled,
+          },
   }),
 }));
 
@@ -406,6 +410,56 @@ describe("PatSettingsPage", () => {
     authMockState.userId = "user-b";
     rerender(<PatSettingsPage />);
 
+    await waitFor(() => {
+      expect(screen.queryByText("dcp_show_once_result")).toBeNull();
+    });
+  });
+
+  it("keeps the show-once token through an inconclusive refresh and clears only on a confirmed handoff", async () => {
+    // A transient /me refresh failure clears the React user while the
+    // account and session cookie are unchanged. That null is "identity
+    // unknown", not a handoff — clearing on it would permanently destroy
+    // the only copy of an already-active credential. The result survives
+    // null and a recovery onto the same account, and disappears only when
+    // a different non-null user is confirmed.
+    patsMockState.createMutate = async () => ({
+      id: "pat-1",
+      name: "ci",
+      scopes: ["threads:read"],
+      expires_at: null,
+      created_at: "2026-01-01T00:00:00Z",
+      token: "dcp_show_once_result",
+    });
+
+    const { rerender } = renderWithQueryClient(<PatSettingsPage />);
+    fireEvent.click(screen.getByText("Create token"));
+    fireEvent.change(screen.getByPlaceholderText("e.g. ci-runner"), {
+      target: { value: "ci" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: "Read threads" }));
+    const submit = screen
+      .getAllByText("Create token")
+      .find((element) => element.closest("[role=dialog]") !== null)!;
+    fireEvent.click(submit);
+    await waitFor(() => {
+      expect(screen.getByText("dcp_show_once_result")).toBeDefined();
+    });
+
+    // inconclusive: the refresh failed, identity unknown — token stays
+    authMockState.userId = null;
+    rerender(<PatSettingsPage />);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.getByText("dcp_show_once_result")).toBeDefined();
+
+    // recovery onto the same account — still A's own token
+    authMockState.userId = "test-user";
+    rerender(<PatSettingsPage />);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(screen.getByText("dcp_show_once_result")).toBeDefined();
+
+    // confirmed different account — the handoff reinterpretation
+    authMockState.userId = "user-b";
+    rerender(<PatSettingsPage />);
     await waitFor(() => {
       expect(screen.queryByText("dcp_show_once_result")).toBeNull();
     });

@@ -161,16 +161,21 @@ export function useCreatePat() {
       const initiating = identity;
       const created = await createPat(request, initiating);
       // The POST passed the fence as the initiating account, so the minted
-      // credential is that account's. If the session this tab renders has
-      // since become a different account (or has no complete identity at
-      // all), exposing the raw token here would present the initiating
+      // credential is that account's. If a *confirmed* different account now
+      // holds this tab, exposing the raw token would present the initiating
       // account's credential inside the successor's settings UI, where it
       // could be copied under the mistaken belief that it belongs to the
-      // signed-in user — withhold it. Only the user id is compared: a
-      // same-account session replacement does not reinterpret the result,
-      // the credential is that same user's either way.
+      // signed-in user — withhold it. A null identity is only an
+      // inconclusive /me refresh (transient network or parsing failure) with
+      // the account and cookie potentially unchanged; withholding the
+      // resolved raw token on it would permanently destroy the only copy of
+      // an active credential, so it is exposed, and the page-level guard
+      // clears the result once a different non-null user is confirmed. Only
+      // the user id is compared: a same-account session replacement does not
+      // reinterpret the result, the credential is that same user's either
+      // way.
       const current = identityRef.current;
-      if (current?.userId !== initiating.userId) {
+      if (current != null && current.userId !== initiating.userId) {
         throw new SessionChangedDuringCreateError();
       }
       return created;

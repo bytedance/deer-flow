@@ -182,20 +182,23 @@ function InteractivePatSettingsPage() {
   }, [create.isPending, setUnloadGuard]);
 
   const resetCreate = create.reset;
-  // A displayed result belongs to the account that minted it. If a session
-  // handoff (another tab replaced the shared cookie and /me converged onto
-  // the successor) lands while the show-once dialog is open, the initiating
-  // account's raw token must stop rendering — and the mutation cache copy
-  // must go with it.
+  // A displayed result belongs to the account that minted it. A *confirmed*
+  // different signed-in user (another tab replaced the shared cookie and /me
+  // converged onto the successor) must stop rendering it — and the mutation
+  // cache copy must go with it. A null user is only an inconclusive /me
+  // refresh (transient network or parsing failure) with the account and
+  // cookie potentially unchanged; clearing on it would permanently destroy
+  // the only copy of an already-active credential, so the result survives
+  // until a different non-null identity is confirmed.
   useEffect(() => {
     if (created === null) return;
-    if (createdFor !== (user?.id ?? null)) {
-      setCreated(null);
-      setCreatedFor(null);
-      setCopied(false);
-      resetCreate();
-      setUnloadGuard(false);
-    }
+    const confirmedUser = user?.id;
+    if (confirmedUser == null || createdFor == null || confirmedUser === createdFor) return;
+    setCreated(null);
+    setCreatedFor(null);
+    setCopied(false);
+    resetCreate();
+    setUnloadGuard(false);
   }, [created, createdFor, user?.id, resetCreate, setUnloadGuard]);
 
   function resetCreateForm() {
@@ -235,6 +238,11 @@ function InteractivePatSettingsPage() {
     // ref latch covers the pre-re-render window isPending cannot see.
     if (createLatchedRef.current || create.isPending) return;
     const days = EXPIRY_CHOICES.find((choice) => choice.value === expiry)?.days;
+    // The initiating account is captured at submission — the identity is
+    // complete here (the mutation requires it), and the page must attribute
+    // the result to the account that minted it even if /me goes
+    // inconclusive before the response resolves.
+    const initiatingUser = user?.id ?? null;
     createLatchedRef.current = true;
     setUnloadGuard(true);
     try {
@@ -244,7 +252,7 @@ function InteractivePatSettingsPage() {
         expires_in_days: days ?? null,
       });
       setCreated(result);
-      setCreatedFor(user?.id ?? null);
+      setCreatedFor(initiatingUser);
     } catch (err) {
       // No token copy is (or will be) on screen for these outcomes; the
       // result view keeps its own guard via created above.
