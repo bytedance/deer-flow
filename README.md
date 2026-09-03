@@ -713,9 +713,14 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 | `/status` | Show current thread info |
 | `/models` | List available models |
 | `/memory` | View memory |
+| `/agent list` | List your Custom Agents |
+| `/agent use <name>` | Start a new conversation with a Custom Agent |
 | `/help` | Show help |
 
 > Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
+
+Agent selection is conversation-scoped: `/agent use <name>` starts a fresh conversation and pins that Custom Agent in the thread metadata. Existing conversations never switch agents midway, and the selection survives a Gateway restart.
+Use `/agent use lead_agent` to return to the default agent in a new conversation.
 
 #### Request Trace Correlation
 

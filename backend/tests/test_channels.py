@@ -31,6 +31,7 @@ def test_known_channel_command_detection_only_matches_control_commands():
     from app.channels.commands import is_known_channel_command
 
     assert is_known_channel_command("/new")
+    assert is_known_channel_command("/agent list")
     assert is_known_channel_command("/HELP now")
     assert not is_known_channel_command("/mnt/user-data/uploads/report.pdf")
     assert not is_known_channel_command("/data-analysis analyze uploads/foo.csv")
@@ -2425,6 +2426,7 @@ class TestChannelManager:
             manager._get_client = MagicMock(return_value=object())
             manager._get_or_create_thread = AsyncMock(return_value=(thread_id, False))
             manager._update_thread_channel_metadata = AsyncMock()
+            manager._load_thread_agent = AsyncMock(return_value=None)
             manager._publish_progress_update = AsyncMock(side_effect=asyncio.CancelledError())
             manager._handle_chat_on_thread = AsyncMock()
 
@@ -3135,6 +3137,152 @@ class TestChannelManager:
 
             # threads.create should be called for /new
             mock_client.threads.create.assert_called_once()
+
+        _run(go())
+
+    def test_handle_command_agent_list_is_owner_scoped(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        seen_user_ids = []
+
+        def fake_list_custom_agents(*, user_id=None):
+            seen_user_ids.append(user_id)
+            return [
+                SimpleNamespace(name="researcher", description="Researches sources"),
+                SimpleNamespace(name="writer", description=""),
+            ]
+
+        monkeypatch.setattr("app.channels.manager.list_custom_agents", fake_list_custom_agents)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received = []
+
+            async def capture_outbound(message):
+                outbound_received.append(message)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="platform-user",
+                    owner_user_id="deerflow-user-1",
+                    text="/agent list",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            assert seen_user_ids == ["deerflow-user-1"]
+            assert outbound_received[0].text == ("Available agents:\n• lead_agent — Default agent\n• researcher — Researches sources\n• writer")
+
+        _run(go())
+
+    def test_handle_command_agent_use_starts_pinned_conversation(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        loaded = []
+
+        def fake_load_agent_config(name, *, user_id=None):
+            loaded.append((name, user_id))
+            return SimpleNamespace(name=name)
+
+        monkeypatch.setattr("app.channels.manager.load_agent_config", fake_load_agent_config)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("test", "chat1", "old-thread")
+            manager = ChannelManager(bus=bus, store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="research-thread")
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                owner_user_id="deerflow-user-1",
+                text="/agent use Researcher",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_agent_command(msg, "use Researcher")
+
+            assert loaded == [("researcher", "deerflow-user-1")]
+            assert store.get_thread_id("test", "chat1") == "research-thread"
+            create_kwargs = mock_client.threads.create.call_args.kwargs
+            assert create_kwargs["metadata"]["channel_agent_name"] == "researcher"
+            assert reply == "Agent 'researcher' selected. New conversation started."
+            _, _, run_context = manager._resolve_run_params(msg, "research-thread")
+            assert run_context["agent_name"] == "researcher"
+
+        _run(go())
+
+    def test_selected_agent_is_restored_from_thread_metadata(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            manager = ChannelManager(
+                bus=bus,
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                channel_sessions={
+                    "test": {
+                        "assistant_id": "configured-writer",
+                        "context": {"agent_name": "configured-context-agent"},
+                    }
+                },
+            )
+            mock_client = _make_mock_langgraph_client(thread_id="research-thread")
+            mock_client.threads.get.return_value = {
+                "thread_id": "research-thread",
+                "metadata": {"channel_agent_name": "researcher"},
+            }
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                owner_user_id="deerflow-user-1",
+                text="Continue",
+            )
+
+            await manager._load_thread_agent(mock_client, msg, "research-thread")
+            mock_client.threads.get.assert_awaited_once()
+            _, _, run_context = manager._resolve_run_params(msg, "research-thread")
+            assert run_context["agent_name"] == "researcher"
+
+        _run(go())
+
+    def test_agent_use_lead_agent_overrides_configured_default(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                channel_sessions={"test": {"assistant_id": "configured-writer"}},
+            )
+            mock_client = _make_mock_langgraph_client(thread_id="default-thread")
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/agent use lead_agent",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            await manager._handle_agent_command(msg, "use lead_agent")
+
+            create_metadata = mock_client.threads.create.call_args.kwargs["metadata"]
+            assert create_metadata["channel_agent_name"] == "lead_agent"
+            _, _, run_context = manager._resolve_run_params(msg, "default-thread")
+            assert "agent_name" not in run_context
 
         _run(go())
 
