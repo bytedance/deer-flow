@@ -55,10 +55,11 @@ export function useAgentsApiEnabled() {
   };
 }
 
-export function useAgents() {
+export function useAgents(options?: { enabled?: boolean }) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["agents"],
     queryFn: () => listAgents(),
+    enabled: options?.enabled ?? true,
   });
   return { agents: data ?? [], isLoading, error };
 }

@@ -835,6 +835,9 @@ export const zhCN: Translations = {
       importFileLabel: "已选择文件",
       importInvalidFile: "读取记忆文件失败，请选择有效的 JSON 导出文件。",
       importSuccess: "记忆已导入",
+      importAgentConfirmTitle: "要导入到该智能体的记忆吗？",
+      importAgentConfirmDescription:
+        "备份中的事实会覆盖该智能体的事实。其中的摘要是用户全局的，会替换主记忆和所有其他智能体共享的摘要。",
       manualFactSource: "手动添加",
       addFact: "添加事实",
       addFactTitle: "添加记忆事实",
@@ -869,6 +872,13 @@ export const zhCN: Translations = {
       filterFacts: "事实",
       filterSummaries: "摘要",
       noMatches: "没有找到匹配的记忆。",
+      agentScopeLabel: "智能体",
+      agentScopeDefault: "主记忆",
+      clearAgent: "清空智能体事实",
+      clearAgentConfirmTitle: "要清空该智能体的事实吗？",
+      clearAgentConfirmDescription:
+        "这会删除该智能体保存的所有事实。共享摘要和其他智能体的事实不受影响。此操作无法撤销。",
+      clearAgentSuccess: "已清空该智能体的事实",
       markdown: {
         overview: "概览",
         userContext: "用户上下文",
