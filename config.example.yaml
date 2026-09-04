@@ -618,6 +618,22 @@ models:
   #   max_tokens: 8192
   #   temperature: 0.7
 
+  # Example: TrustedRouter (OpenAI-compatible)
+  # Model ids are namespaced (anthropic/claude-opus-4-7); a bare id is rejected.
+  # Ids under trustedrouter/ are routing policies rather than single models: each
+  # picks an upstream per request and fails over, and trustedrouter/zdr restricts
+  # routing to providers that retain no data.
+  # - name: trustedrouter-auto
+  #   display_name: TrustedRouter Auto
+  #   use: langchain_openai:ChatOpenAI
+  #   model: trustedrouter/auto
+  #   api_key: $TRUSTEDROUTER_API_KEY
+  #   base_url: https://api.trustedrouter.com/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   temperature: 0.7
+
   # Example: Atlas Cloud (OpenAI-compatible)
   # Atlas Cloud exposes a single OpenAI-compatible endpoint in front of many open
   # models (DeepSeek, Qwen, Kimi, GLM, MiniMax, Llama, ...), so it uses the same
