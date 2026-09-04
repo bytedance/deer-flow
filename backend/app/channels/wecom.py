@@ -63,8 +63,12 @@ def _split_for_byte_limit(text: str, limit: int) -> list[str]:
         cut = window.rfind("\n")
         if cut <= 0:
             cut = len(window)
+        else:
+            # Keep the delimiter on this chunk's tail: the sequential messages
+            # must round-trip to the original text exactly.
+            cut += 1
         chunks.append(remaining[:cut])
-        remaining = remaining[cut:].lstrip("\n")
+        remaining = remaining[cut:]
     if remaining:
         chunks.append(remaining)
     return chunks

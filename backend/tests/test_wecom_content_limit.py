@@ -66,7 +66,21 @@ class TestSplitForByteLimit:
         assert len(chunks) > 1
         for chunk in chunks:
             assert _byte_len(chunk) <= _WECOM_MAX_CONTENT_BYTES
-        assert "".join(chunks).replace("\n", "") == text.replace("\n", "")
+        # Exact round trip: the sequential messages must rebuild the original
+        # text byte for byte, delimiters included.
+        assert "".join(chunks) == text
+
+    def test_boundary_newline_lands_on_chunk_tail(self):
+        # Regression for the review on #5148: a boundary delimiter used to be
+        # stripped by lstrip, so one newline per split silently vanished.
+        text = "ab\ncd\n" + "x" * (_WECOM_MAX_CONTENT_BYTES * 2)
+        chunks = _split_for_byte_limit(text, _WECOM_MAX_CONTENT_BYTES)
+        assert "".join(chunks) == text
+
+    def test_leading_blank_lines_are_content_not_dropped(self):
+        text = "第一段\n\n\n" + "字" * (_WECOM_MAX_CONTENT_BYTES * 2)
+        chunks = _split_for_byte_limit(text, _WECOM_MAX_CONTENT_BYTES)
+        assert "".join(chunks) == text
 
     def test_no_newline_falls_back_to_hard_cut(self):
         text = "x" * (_WECOM_MAX_CONTENT_BYTES * 2 + 500)
