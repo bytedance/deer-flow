@@ -61,13 +61,15 @@ fetch-and-decode of every message row's tool outputs on long threads.
 client input, because a welded-in seq goes stale when a fork re-seeds the feed
 (#4380).
 
-**Canonical LLM response events** (`runtime/journal.py`): the first
-`on_llm_end` callback for a LangChain `run_id` owns the associated durable
-`llm.ai.response`. Re-fired callbacks must not append or rewrite the message,
-because the seq-ordered event feed treats each stored row as a distinct message.
-Token accounting remains independent: provider usage may arrive only on a later
-callback, and the run summary is the authoritative token source even when the
-canonical event metadata has empty `usage`.
+**LLM response callback coalescing** (`runtime/journal.py`): a provider may fire
+`on_llm_end` twice for one LangChain run id, first without usage (or with all token
+counts zero) and immediately again with the complete usage-bearing generations.
+`RunJournal` stages that incomplete callback as one pending unit containing its events,
+messages, and caller. A same-id positive-usage callback replaces the whole staged
+payload; only committing that final unit updates the run message summary. The next
+unrelated event or explicit/synchronous flush commits it before later events, so the
+append-only message feed and summary receive the same response at its original ordering
+position. Once that boundary is crossed, the normal per-run-id dedup guard drops replays.
 
 **Run delivery receipts** (`runtime/journal.py` + `runs/worker.py`):
 `RunJournal` records each non-empty artifact update once per tool `Command` for
