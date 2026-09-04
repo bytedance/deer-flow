@@ -636,6 +636,64 @@ async def test_startup_sweep_reconciles_stale_runs_and_stuck_once_tasks():
     assert task_repo.cancelled_stuck_once == run_repo.stale_marked
 
 
+@pytest.mark.parametrize("failure_stage", ["occurrence", "parent"])
+@pytest.mark.asyncio
+async def test_single_instance_start_fails_closed_before_polling(failure_stage):
+    order = []
+
+    class StartupTaskRepo(DummyTaskRepo):
+        def __init__(self):
+            super().__init__([])
+            self.recovery_attempts = 0
+
+        async def cancel_stuck_once_tasks(self, *, error):
+            self.recovery_attempts += 1
+            order.append("parent")
+            assert service._task is None
+            if failure_stage == "parent" and self.recovery_attempts == 1:
+                raise RuntimeError("simulated parent recovery failure")
+            return await super().cancel_stuck_once_tasks(error=error)
+
+    class StartupRunRepo(DummyRunRepo):
+        def __init__(self):
+            super().__init__()
+            self.recovery_attempts = 0
+
+        async def mark_stale_active_runs(self, *, error):
+            self.recovery_attempts += 1
+            order.append("occurrence")
+            assert service._task is None
+            if failure_stage == "occurrence" and self.recovery_attempts == 1:
+                raise RuntimeError("simulated occurrence recovery failure")
+            return await super().mark_stale_active_runs(error=error)
+
+    task_repo = StartupTaskRepo()
+    run_repo = StartupRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=lambda **_kwargs: None,
+        poll_interval_seconds=0,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    async def parked_run_loop():
+        await service._stop.wait()
+
+    service._run_loop = parked_run_loop
+    try:
+        with pytest.raises(RuntimeError, match=f"simulated {failure_stage} recovery failure"):
+            await service.start()
+        assert run_repo.recovery_attempts == 1
+        assert task_repo.recovery_attempts == (0 if failure_stage == "occurrence" else 1)
+        assert order == (["occurrence"] if failure_stage == "occurrence" else ["occurrence", "parent"])
+        assert service._task is None
+        assert task_repo.claimed is False
+    finally:
+        await service.stop()
+
+
 @pytest.mark.asyncio
 async def test_multi_instance_start_uses_lease_aware_reconciliation():
     task_repo = DummyTaskRepo([])

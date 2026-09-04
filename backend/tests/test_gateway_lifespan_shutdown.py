@@ -25,6 +25,58 @@ async def _noop_langgraph_runtime(_app, _startup_config):
     yield
 
 
+@asynccontextmanager
+async def _langgraph_runtime_with_scheduler_repositories(app, _startup_config):
+    app.state.scheduled_task_repo = object()
+    app.state.scheduled_task_run_repo = object()
+    yield
+
+
+def test_enabled_scheduler_start_failure_aborts_gateway_lifespan():
+    """An enabled scheduler must fail lifespan before channel or request admission."""
+    from app.gateway.app import lifespan
+
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        startup_config.scheduler.enabled = True
+        startup_config.scheduler.multi_instance = False
+        startup_config.scheduler.poll_interval_seconds = 5
+        startup_config.scheduler.lease_seconds = 120
+        startup_config.scheduler.max_concurrent_runs = 3
+        startup_config.scheduler.queue_timeout_seconds = 3600
+        startup_config.run_ownership.grace_seconds = 10
+        channel_service = MagicMock()
+        channel_service.get_status.return_value = {}
+        start_channel_service = AsyncMock(return_value=channel_service)
+        scheduler_service = MagicMock()
+        scheduler_service.start = AsyncMock(side_effect=RuntimeError("scheduled recovery failed"))
+        scheduler_service.stop = AsyncMock()
+
+        with (
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+            patch("app.gateway.app.langgraph_runtime", _langgraph_runtime_with_scheduler_repositories),
+            patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+            patch("app.channels.service.start_channel_service", start_channel_service),
+            patch("app.channels.service.stop_channel_service", AsyncMock()),
+            patch("app.scheduler.ScheduledTaskService", return_value=scheduler_service),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="scheduled recovery failed"):
+                async with lifespan(app):
+                    pass
+
+        scheduler_service.start.assert_awaited_once()
+        start_channel_service.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
 async def _run_lifespan_with_hanging_stop() -> float:
     """Drive the lifespan context with stop_channel_service hanging forever.
 

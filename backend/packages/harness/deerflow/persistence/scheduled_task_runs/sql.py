@@ -11,14 +11,11 @@ from sqlalchemy.orm import aliased
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES, ScheduledTaskRow
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
 
-TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"success", "failed", "skipped", "interrupted"})
-QUEUED_RUN_STATUSES: tuple[str, ...] = ("queued",)
 EXECUTING_RUN_STATUSES: tuple[str, ...] = ("launching", "running")
-ACTIVE_RUN_STATUSES: tuple[str, ...] = (*QUEUED_RUN_STATUSES, *EXECUTING_RUN_STATUSES)
 _SCHEDULER_BUDGET_LOCK_KEY = 4694001
 
 

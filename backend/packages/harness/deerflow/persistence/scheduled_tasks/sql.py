@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES, ScheduledTaskRow
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -477,6 +477,74 @@ class ScheduledTaskRepository:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
+    @staticmethod
+    async def _fetch_latest_run(session: AsyncSession, task_id: str) -> ScheduledTaskRunRow | None:
+        """Return the latest ``scheduled_task_runs`` row for a task (no status filter).
+
+        The caller must not hold a pre-lock snapshot of this row; the outcome
+        used for finalization must come from a fresh read.  ``populate_existing``
+        bypasses the session identity map so a concurrently committed status is
+        read back fresh.
+        """
+        stmt = (
+            select(ScheduledTaskRunRow)
+            .where(ScheduledTaskRunRow.task_id == task_id)
+            .order_by(
+                ScheduledTaskRunRow.created_at.desc(),
+                ScheduledTaskRunRow.scheduled_for.desc(),
+                ScheduledTaskRunRow.id.desc(),
+            )
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+        result = await session.execute(stmt)
+        return result.scalars().first()
+
+    @staticmethod
+    def _finalise_once_task_from_run(
+        task_row: ScheduledTaskRow,
+        run_row: ScheduledTaskRunRow | None,
+        *,
+        error: str,
+        now: datetime,
+    ) -> bool:
+        """Finalise a stuck ``once`` task parent to match its latest run outcome.
+
+        success -> completed, failed -> failed, interrupted -> cancelled,
+        skipped -> cancelled (no work performed).  An active occurrence
+        (queued/launching/running) is left untouched — a concurrent completion
+        or a later recovery pass will finalize it once the run reaches a
+        terminal state.  When there is no run row at all the parent keeps
+        the original generic cancellation.
+
+        Returns ``True`` if the parent was finalised, ``False`` for an active
+        occurrence that must be retried by a later recovery pass.
+        """
+        if run_row is not None and run_row.status in TERMINAL_RUN_STATUSES:
+            if run_row.status == "success":
+                task_row.status = "completed"
+                task_row.last_error = None
+            elif run_row.status == "failed":
+                task_row.status = "failed"
+                task_row.last_error = run_row.error
+            elif run_row.status == "interrupted":
+                task_row.status = "cancelled"
+                task_row.last_error = run_row.error or error
+            elif run_row.status == "skipped":
+                task_row.status = "cancelled"
+                task_row.last_error = run_row.error
+            task_row.updated_at = now
+            return True
+        if run_row is not None and run_row.status in ACTIVE_RUN_STATUSES:
+            # Active occurrence — leave the parent unchanged.  A concurrent
+            # completion or a later recovery pass will finalize it.
+            return False
+        # No run row, or an unrecognised legacy status — generic cancel.
+        task_row.status = "cancelled"
+        task_row.last_error = error
+        task_row.updated_at = now
+        return True
+
     async def cancel_stuck_once_tasks(self, *, error: str) -> int:
         """Reconcile ``once`` tasks orphaned in ``running`` by a process crash.
 
@@ -486,6 +554,14 @@ class ScheduledTaskRepository:
         it. After a crash the hook is gone and the task would be stuck forever.
         Tasks still holding a lease are left alone — they were claimed but not
         launched, and expired-lease reclaim recovers them safely.
+
+        Outcome-aware: for each stuck task, looks up the latest
+        ``scheduled_task_runs`` row.  If the run already reached a terminal
+        status the parent task is finalised to match (``success`` →
+        ``completed``, ``failed`` → ``failed``, ``interrupted`` →
+        ``cancelled``, ``skipped`` → ``cancelled``).  Active occurrences
+        (queued/launching/running) are left untouched.  Tasks whose latest
+        run row is absent receive the generic cancellation.
         """
         stmt = select(ScheduledTaskRow).where(
             ScheduledTaskRow.schedule_type == "once",
@@ -494,14 +570,17 @@ class ScheduledTaskRepository:
         )
         async with self._sf() as session:
             result = await session.execute(stmt)
-            rows = list(result.scalars())
+            stuck_rows = list(result.scalars())
+            if not stuck_rows:
+                return 0
             now = datetime.now(UTC)
-            for row in rows:
-                row.status = "cancelled"
-                row.last_error = error
-                row.updated_at = now
+            reconciled = 0
+            for task_row in stuck_rows:
+                run_row = await self._fetch_latest_run(session, task_row.id)
+                if self._finalise_once_task_from_run(task_row, run_row, error=error, now=now):
+                    reconciled += 1
             await session.commit()
-            return len(rows)
+            return reconciled
 
     async def reconcile_stuck_once_tasks(
         self,
@@ -540,9 +619,10 @@ class ScheduledTaskRepository:
                 if candidate is not None and candidate.status in {"pending", "running"}:
                     if _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
                         continue
-                    # Run takeover commits in its own short transaction. If this
-                    # outer commit fails, the next poll finishes task bookkeeping
-                    # while the underlying run remains safely terminal.
+                    # Run takeover commits the durable RunRow in its own short
+                    # transaction.  Its occurrence projection may remain active
+                    # until reconcile_active_runs runs, so this pass can defer the
+                    # parent and let the next poll finish task bookkeeping.
                     claimed = await self._run_repository.claim_for_takeover(
                         candidate.run_id,
                         grace_seconds=lease_grace_seconds,
@@ -553,10 +633,12 @@ class ScheduledTaskRepository:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
                         if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
                             continue
-                task.status = "cancelled"
-                task.last_error = error
-                task.updated_at = datetime.now(UTC)
-                cancelled += 1
+                # Finalise from the latest scheduled_task_run (unconditional lookup).
+                # Filtering by terminal status only could exclude a newer skipped
+                # or active row, causing us to finalise based on an older run.
+                run_row = await self._fetch_latest_run(session, task.id)
+                if self._finalise_once_task_from_run(task, run_row, error=error, now=now):
+                    cancelled += 1
             await session.commit()
             return cancelled
 
