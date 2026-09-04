@@ -404,6 +404,43 @@ def test_delete_thread_route_closes_browser_session(tmp_path):
     manager.close_session.assert_awaited_once_with("thread-browser")
 
 
+def test_delete_thread_route_closes_user_scoped_mcp_sessions(tmp_path):
+    paths = Paths(tmp_path)
+    app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_scope=AsyncMock())
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp")
+
+    assert response.status_code == 200
+    reserved_user_id = app.state.run_manager.reservations[0][1]["user_id"]
+    pool.close_scope.assert_awaited_once_with(f"{reserved_user_id}:thread-mcp")
+
+
+def test_delete_thread_route_ignores_mcp_session_cleanup_failure(tmp_path):
+    paths = Paths(tmp_path)
+    app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_scope=AsyncMock(side_effect=RuntimeError("cleanup failed")))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp-failure")
+
+    assert response.status_code == 200
+    pool.close_scope.assert_awaited_once()
+
+
 def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
     paths = Paths(tmp_path)
 

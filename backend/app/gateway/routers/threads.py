@@ -714,6 +714,17 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     """Delete a thread while its durable exclusive reservation is held."""
     from app.gateway.deps import get_thread_store
 
+    user_id = get_effective_user_id()
+
+    # Close stateful MCP sessions before removing their workspace so a deleted
+    # thread cannot keep writing there or expose retained state if its ID is reused.
+    try:
+        from deerflow.mcp.session_pool import get_session_pool
+
+        await get_session_pool().close_scope(f"{user_id}:{thread_id}")
+    except Exception:
+        logger.debug("Could not close MCP sessions for thread %s (not critical)", sanitize_log_param(thread_id))
+
     # Legacy IDs may predate the canonical filesystem-safe contract. They can
     # still be removed from metadata/checkpoint stores, but must never be
     # interpolated into a host path during cleanup.
@@ -725,7 +736,7 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
             message="Skipped local data cleanup for legacy thread ID",
         )
     else:
-        response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
+        response = _delete_thread_data(thread_id, user_id=user_id)
 
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
