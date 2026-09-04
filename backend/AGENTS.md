@@ -237,6 +237,14 @@ float filters accept integer or real JSON numbers through `json_value_matches`.
 - For lightweight config/utility modules, prefer pure unit tests with no external dependencies
 - If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `deerflow.subagents.executor`)
 
+`tests/test_replay_golden.py` also contains a key-free orchestration regression
+for Lead Agent → `task` → real `SubagentExecutor` → sandbox `write_file`. It
+subscribes to `values` and `custom`, then checks the correlated `task_*`
+lifecycle, delegated file side effect, returned task result, final Lead Agent
+answer, and stable SSE event shape. Because `tests/conftest.py` preloads a mock
+executor to break import cycles for unit tests, this scenario installs the real
+executor only for its own lifetime and restores the shared modules afterwards.
+
 ```bash
 # Run default offline tests
 make test
