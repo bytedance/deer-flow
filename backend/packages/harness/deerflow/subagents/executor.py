@@ -912,7 +912,9 @@ class SubagentExecutor:
             allowed,
             context=self._skill_authz_context(),
             app_config=resolved_app_config,
-            user_id=self.user_id,
+            # Same bucket convention as the middleware chain (self.user_id or
+            # DEFAULT_USER_ID); only consulted if candidates were not supplied.
+            user_id=self.user_id or DEFAULT_USER_ID,
             candidate_skill_names=[s.name for s in all_skills],
         )
 
