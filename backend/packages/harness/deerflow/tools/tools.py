@@ -76,8 +76,9 @@ def get_available_tools(
         model_name: Optional model name to determine if vision tools should be included.
         subagent_enabled: Whether to include subagent tools (task, task_status).
         include_upload_tool: Whether to include ``list_uploaded_files`` (default: True).
-            Set to False for subagent tool assembly — subagents have independent
-            ThreadState and cannot exclude current-run files.
+            Ordinary task subagents enable it only after snapshotting the
+            parent's current-run upload state. Durable batch and non-standard
+            subagent callers without that state keep it disabled.
 
     Returns:
         List of available tools.
