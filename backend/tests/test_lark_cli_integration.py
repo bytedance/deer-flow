@@ -1833,7 +1833,9 @@ def test_lark_cli_env_rejects_symlinks_in_credential_tree(monkeypatch, tmp_path)
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"symlinks are not available: {exc}")
 
-    with pytest.raises(ValueError, match="reparse"):
+    # POSIX reports a symlink; the Windows walker reports a reparse point.
+    expected_error = "reparse" if os.name == "nt" else "symlink"
+    with pytest.raises(ValueError, match=expected_error):
         lark_cli.lark_cli_env_overlay("alice")
 
 
