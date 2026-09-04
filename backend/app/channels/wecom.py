@@ -85,6 +85,7 @@ class WeComChannel(Channel):
         self._lifecycle_lock = asyncio.Lock()
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
+        self._ws_send_locks: dict[str, asyncio.Lock] = {}
         self._working_message = "Working on it..."
 
     @property
@@ -511,14 +512,19 @@ class WeComChannel(Channel):
 
         # No replyable frame (e.g. a scheduled-task push): a stream reply is one
         # stream per reply and cannot split mid-way, but this path can, so the
-        # full text goes out as sequential markdown messages.
-        for chunk in _split_for_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES):
-            body = {"msgtype": "markdown", "markdown": {"content": chunk}}
-            await self._send_with_retry(
-                lambda body=body: self._ws_client.send_message(msg.chat_id, body),
-                max_retries=_max_retries,
-                log_prefix="[WeCom]",
-            )
+        # full text goes out as sequential markdown messages. Each send awaits,
+        # so hold a per-chat lock across the whole batch: manager workers run
+        # concurrently, and two long pushes to the same chat would otherwise
+        # interleave chunks (A1, B1, A2, B2) and break the sequential contract.
+        lock = self._ws_send_locks.setdefault(msg.chat_id, asyncio.Lock())
+        async with lock:
+            for chunk in _split_for_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES):
+                body = {"msgtype": "markdown", "markdown": {"content": chunk}}
+                await self._send_with_retry(
+                    lambda body=body: self._ws_client.send_message(msg.chat_id, body),
+                    max_retries=_max_retries,
+                    log_prefix="[WeCom]",
+                )
 
     async def _upload_media_ws(
         self,

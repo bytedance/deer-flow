@@ -160,6 +160,74 @@ class TestSendWsContentLimit:
         ch._ws_client.send_message.assert_called_once()
 
 
+class TestSendWsChatSerialization:
+    """Review on #5148: manager workers run concurrently, and each chunk send
+    awaits, so two long pushes to the same chat used to interleave (A1, B1,
+    A2, B2). The per-chat lock must keep each batch contiguous.
+    """
+
+    @staticmethod
+    def _recording_channel():
+        ch = WeComChannel(bus=MessageBus(), config={})
+        sent: list[tuple[str, str]] = []
+
+        class RecordingClient:
+            async def send_message(self, chat_id, body):
+                sent.append((chat_id, body["markdown"]["content"]))
+                # Yield so a lockless batch would interleave with the other
+                # coroutine after every single chunk.
+                await asyncio.sleep(0)
+
+        ch._ws_client = RecordingClient()
+        return ch, sent
+
+    @staticmethod
+    def _push(chat_id: str, text: str) -> OutboundMessage:
+        return OutboundMessage(
+            channel_name="wecom",
+            chat_id=chat_id,
+            thread_id="th1",
+            text=text,
+            thread_ts=None,
+        )
+
+    def test_concurrent_batches_to_same_chat_stay_contiguous(self):
+        ch, sent = self._recording_channel()
+        text_a = "\n".join(f"报告甲 第{i}段 " + "字" * 50 for i in range(400))
+        text_b = "\n".join(f"推送乙 第{i}段 " + "文" * 50 for i in range(400))
+        chunks_a = _split_for_byte_limit(text_a, _WECOM_MAX_CONTENT_BYTES)
+        chunks_b = _split_for_byte_limit(text_b, _WECOM_MAX_CONTENT_BYTES)
+        assert len(chunks_a) > 1 and len(chunks_b) > 1
+
+        async def both():
+            await asyncio.gather(
+                ch._send_ws(self._push("c1", text_a)),
+                ch._send_ws(self._push("c1", text_b)),
+            )
+
+        _run(both())
+        contents = [content for _, content in sent]
+        # Either batch order is fine; what matters is no interleaving.
+        assert contents in (chunks_a + chunks_b, chunks_b + chunks_a)
+
+    def test_different_chats_keep_their_own_order(self):
+        ch, sent = self._recording_channel()
+        text_a = "\n".join(f"给甲群 第{i}段 " + "字" * 50 for i in range(300))
+        text_b = "\n".join(f"给乙群 第{i}段 " + "文" * 50 for i in range(300))
+
+        async def both():
+            await asyncio.gather(
+                ch._send_ws(self._push("chat-a", text_a)),
+                ch._send_ws(self._push("chat-b", text_b)),
+            )
+
+        _run(both())
+        # Different chats may interleave freely, but each chat's own chunks
+        # must arrive in order and complete.
+        assert [c for chat, c in sent if chat == "chat-a"] == _split_for_byte_limit(text_a, _WECOM_MAX_CONTENT_BYTES)
+        assert [c for chat, c in sent if chat == "chat-b"] == _split_for_byte_limit(text_b, _WECOM_MAX_CONTENT_BYTES)
+
+
 class TestEmojiBoundaries:
     def test_split_all_emoji_input_terminates_and_preserves(self):
         # 4-byte emoji only: a byte cut lands mid-character, and the split must
