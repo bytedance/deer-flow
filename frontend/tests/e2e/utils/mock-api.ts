@@ -375,6 +375,18 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return updated;
   };
 
+  const patchThreadTitle = (threadId: string, title: string) => {
+    let updated: MockThread | undefined;
+    threads = threads.map((thread) => {
+      if (thread.thread_id !== threadId) {
+        return thread;
+      }
+      updated = { ...thread, title };
+      return updated;
+    });
+    return updated;
+  };
+
   // Auth — keep workspace tests independent from a real gateway session.
   void page.route("**/api/v1/auth/me", (route) => {
     if (route.request().method() === "GET") {
@@ -1054,9 +1066,13 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Thread state — getState for individual thread
   void page.route("**/api/langgraph/threads/*/state", (route) => {
+    const url = new URL(route.request().url());
+    const threadId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
+    const matchingThread = threads.find(
+      (thread) => thread.thread_id === threadId,
+    );
+
     if (route.request().method() === "GET") {
-      const url = route.request().url();
-      const matchingThread = threads.find((t) => url.includes(t.thread_id));
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1083,6 +1099,33 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           next: [],
           metadata: {},
           created_at: "2025-01-01T00:00:00Z",
+        }),
+      });
+    }
+    if (route.request().method() === "POST") {
+      const body = route.request().postDataJSON() as {
+        values?: { title?: unknown };
+      };
+      const updated =
+        typeof body.values?.title === "string"
+          ? patchThreadTitle(threadId, body.values.title)
+          : matchingThread;
+      if (!updated) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "Thread not found" }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          configurable: {
+            thread_id: threadId,
+            checkpoint_ns: "",
+            checkpoint_id: "mock-checkpoint",
+          },
         }),
       });
     }

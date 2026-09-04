@@ -137,6 +137,25 @@ def _restore_title_config_singleton():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_trace_context():
+    """Give every test an unbound request trace context.
+
+    Entry points bind a trace id unconditionally, and ``ensure_trace_id()``
+    binds one for the remainder of whatever context it is called in. pytest
+    runs the whole session in a single context, so without this reset one
+    test's trace would leak into the next and quietly satisfy assertions
+    about ids the test under exercise never bound.
+    """
+    from deerflow.trace_context import bind_trace_id, reset_trace_id
+
+    token = bind_trace_id(None)
+    try:
+        yield
+    finally:
+        reset_trace_id(token)
+
+
+@pytest.fixture(autouse=True)
 def _auto_user_context(request):
     """Inject a default ``test-user-autouse`` into the contextvar.
 

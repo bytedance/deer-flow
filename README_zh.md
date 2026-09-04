@@ -71,11 +71,13 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [手动上下文压缩](#手动上下文压缩)
     - [Sub-Agents](#sub-agents)
     - [Sandbox 与文件系统](#sandbox-与文件系统)
+    - [Agentic Browser Control](#agentic-browser-control)
     - [Context Engineering](#context-engineering)
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
   - [定时任务 (Scheduled Tasks)](#定时任务-scheduled-tasks)
+    - [升级说明](#升级说明)
   - [终端工作台 (TUI)](#终端工作台-tui)
   - [文档](#文档)
   - [⚠️ 安全使用](#️-安全使用)
@@ -171,6 +173,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    OpenRouter 以及类似的 OpenAI 兼容网关，建议通过 `langchain_openai:ChatOpenAI` 配合 `base_url` 来配置。如果你更想用 provider 自己的环境变量名，也可以直接把 `api_key` 指向对应变量，例如 `api_key: $OPENROUTER_API_KEY`。
 
    如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
+
+   Setup Wizard 已内置 Z.AI GLM-5.3-Flash 配置。由于该模型强制开启 thinking，且只接受自身限定的 effort 档位，当前兼容配置会在前台和后台调用中始终保持 thinking 开启，并暂时屏蔽 DeerFlow 的通用 effort 选择器。等价的手动配置见 `config.example.yaml`。
 
    对于 vLLM 0.19.0，请使用 `deerflow.models.vllm_provider:VllmChatModel`。对于 Qwen 风格的推理模型，DeerFlow 通过 `extra_body.chat_template_kwargs.enable_thinking` 开关推理，并在多轮 tool-call 对话中保留 vLLM 非标准的 `reasoning` 字段。旧版 `thinking` 配置会自动规范化以保持向后兼容。推理模型可能还需要在启动 vLLM 服务时加上 `--reasoning-parser ...` 参数。如果你的本地 vLLM 部署接受任意非空 API key，可以把 `VLLM_API_KEY` 设为一个占位值。
 
@@ -536,7 +540,7 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 - `user_id` = 来自 `get_effective_user_id()` 的有效用户（在无鉴权模式下回退为 `default`）
 - `trace_name` = assistant id（默认为 `lead-agent`）
 - `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]`（未设置时省略）
-- `metadata.deerflow_trace_id` = DeerFlow 的请求关联 id，当启用请求链路关联（request trace correlation）时与 `X-Trace-Id` 一致
+- `metadata.deerflow_trace_id` = DeerFlow 的请求关联 id，始终与同一请求返回的 `X-Trace-Id` 响应头一致（`logging.enhance.enabled` 只控制该 id 是否打印到日志中）
 
 这些字段会在图（graph）调用的根部注入到 `RunnableConfig.metadata`，同时覆盖 gateway 路径（`runtime/runs/worker.py::run_agent`）和内嵌路径（`client.py::DeerFlowClient.stream`），因此任何兼容 LangChain 的 callback 都能读取到它们。设置 `DEER_FLOW_ENV`（或 `ENVIRONMENT`）可按部署环境为 trace 打标签。
 
@@ -668,6 +672,24 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 └── outputs/          ← 最终交付物
 ```
 
+### Agentic Browser Control
+
+读取页面和真正“使用”页面不是一回事。除了只读的 `web_fetch` 和 `web_capture` 工具外，DeerFlow 还提供一组可选的 agentic browser 工具，为每次对话保持一个实时浏览器会话，让 agent 真正操作页面——导航、读取可交互元素、点击、输入、提交表单，并在重度 JavaScript 站点上完成多步流程。
+
+每次操作都会返回页面可交互元素的最新快照，每个元素用稳定的 `[ref]` 编号寻址，因此 agent 基于刚观察到的内容行动，而不是猜测选择器。出站 URL 默认会经过 SSRF 筛查。该能力由 Playwright 提供，作为 optional extra 发布，以保持核心安装精简：
+
+```bash
+cd backend
+uv sync --extra browser
+uv run playwright install chromium
+```
+
+然后在 `config.yaml` 中取消注释 `group: browser` 工具项（`browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_get_text`、`browser_back`、`browser_screenshot`、`browser_close`）。`make dev` / Docker 启动时如果检测到已启用 `browser_navigate`，会在依赖同步时保留 `browser` extra。如果配置了 browser control 但缺少 Playwright，Gateway 会启动失败；`/api/features` 也会在后端无法提供该能力时隐藏 Browser UI。除本地、受信任的调试外，请保持 `headless: true` 和 `allow_private_addresses: false`。通过 `cdp_url` 连接到已有 Chrome 时，DeerFlow 无法强制执行子资源和重定向的 SSRF 防护，因此会 fail closed，除非显式设置 `allow_unguarded_cdp: true` 确认该风险；仅用于受信任的本地浏览器。Browser session 是进程本地的；启用该工具组时请保持 `GATEWAY_WORKERS=1`，因为普通 uvicorn worker 调度不提供 thread affinity。
+
+已有的、非 mock 的 Custom Agent 对话会在 browser control 可用、且该 agent 未限制 `tool_groups` 或已包含 `browser` 组时，展示同样的 Browser Live 控件。如果显式 allowlist 里没有 `browser`，这些控件会保持隐藏。
+
+workspace 的 Browser Live 客户端通过二进制 JPEG WebSocket 帧协商画面，每个显示刷新只保留最新的待处理帧，并回收被替换的 object URL。Gateway 控制消息仍是 JSON；未请求二进制能力的客户端继续使用旧的 JSON/base64 帧协议。
+
 ### Context Engineering
 
 **隔离的 Sub-Agent Context**：每个 sub-agent 都在自己独立的上下文里运行。它看不到主 agent 的上下文，也看不到其他 sub-agents 的上下文。这样做的目的很直接，就是让它只聚焦当前任务，不被无关信息干扰。
@@ -730,6 +752,7 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 
 - 在 `/workspace/scheduled-tasks` 管理任务
 - 每个定时任务可以选择复用同一个 thread 及其历史对话，也可以选择每次运行新建一个 thread
+- 将现有任务复制到创建表单中作为可编辑草稿，不复制运行历史
 - 支持 `once` 和 `cron` 两种调度方式
 - 后台定时执行以非交互式 DeerFlow run 运行（那里不会暴露 `ask_clarification`）
 - 当所复用的 thread 或全局执行配额正忙时，到期执行会持久化为 `queued`，并在可用后启动；队列项在 Gateway 重启后保留，超过 `scheduler.queue_timeout_seconds` 后标记为失败
@@ -745,6 +768,16 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 第一版没有 `interval` 调度类型
 
 通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
+
+定时任务运行会读取 `config.yaml` 中的 `scheduler.recursion_limit`（默认 `1000`，与 Web UI 的交互式预算一致）。超过 `max_recursion_limit` 的值会被截断。该字段在 dispatch 时读取，因此下一次定时运行即可生效，无需重启 Gateway。
+
+后台调度器默认是单实例。多 Pod 部署时，请设置 `scheduler.multi_instance: true`，并使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`；启动和周期性恢复会保留仍由对端持有的运行，把过期的 launch claim 原子退回队列，只接管过期的 run lease，并隔离过期的 launch 写入。`max_concurrent_runs` 是跨 Pod 共享的全局上限，只计入 `launching` / `running` 的执行；等待中的 `queued` 行不占用该配额。没有这些配置时，请只在一个 Gateway Pod 上启用调度器。这些 scheduler 字段只在启动时生效；修改后需要一起重启所有 Gateway Pod。
+
+### 升级说明
+
+- 升级 `GATEWAY_WORKERS > 1` 且 `scheduler.enabled: true` 的部署前，要么只在一个 Gateway worker 上启用调度器，要么配置 `scheduler.multi_instance: true`，并同时使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`。升级后的 Gateway 会在启动时拒绝这种不安全组合，而不是静默启动。
+- 多实例模式下，`scheduler.max_concurrent_runs` 是集群级执行上限，而不是每个 Pod 各自一份。它计入 `launching` 和 `running` 的定时执行，因此容量不会随副本数倍增；持久化等待行仍在上限之外。
+- `scheduler.multi_instance` 以及相关的 scheduler、ownership、run-event 设置都只在启动时生效。变更需要协调重启所有 Gateway Pod；只改 ConfigMap 不会启用多实例恢复。
 
 ## 终端工作台 (TUI)
 
@@ -781,6 +814,16 @@ DeerFlow 具备**系统指令执行、资源操作、业务逻辑调用**等关�
 
 - **未授权的非法调用**：agent 功能被未授权的第三方、公网恶意扫描程序探测到，进而发起批量非法调用请求，执行系统命令、文件读写等高危操作，可能导致安全后果。
 - **合规与法律风险**：若 agent 被非法调用用于实施网络攻击、信息窃取等违法违规行为，可能产生法律责任与合规风险。
+
+### Gateway 管理员权限等同于代码执行
+
+管理员可以注册 stdio 类型的 MCP server，其命令会在 Gateway 容器内执行。API 会把可执行命令限制在一个允许清单内（默认为 `npx`、`uvx`，可通过 `DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST` 扩展），并拒绝会导致任意代码求值的参数与环境变量。这属于纵深防御，而不是安全边界：这类启动器本身的用途就是拉取并运行远程包，因此请**将 Gateway 管理员权限视为等同于在宿主机上执行代码**，并据此谨慎授权。
+
+### 部署默认值
+
+Docker 部署栈默认只把入口端口发布在 `127.0.0.1` 上，与上文所述的本地可信环境模型一致。若需要从其他机器访问，请在 `.env` 中设置 `BIND_HOST`（例如 `BIND_HOST=0.0.0.0`），并且必须在落实下方的安全措施之后再这样做。
+
+**请在主机变为可访问之前完成首次初始化设置。** 全新实例尚未创建任何账号，因此对于任何非仅回环访问的部署，请在启动后立即通过 `/setup` 创建管理员账号。
 
 ### 安全使用建议
 
