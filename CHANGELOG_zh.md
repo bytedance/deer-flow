@@ -153,6 +153,11 @@
 - **记忆：** 混合事实淘汰策略综合多种信号，决定容量满时应丢弃哪些事实。([#4789])
 
 #### 技能
+- **技能：** SkillScan 新增非阻断规则 `python-client-exfil-heuristic`，用于覆盖阻断
+  型 instance-client 信号有意保持沉默的场景——经由重新绑定、分支、海象运算符、属性、
+  容器元素、工厂返回值或跨作用域获得的 client handle。仅当文件读取敏感数据或批量读取
+  环境变量、且未证明存在 client sink、但仍构造了已知 client 并调用其方法时才触发；该
+  结论交由 LLM 扫描器裁决，不会阻断安装。([#5169])
 - **技能：** 原生 SkillScan（阶段一）在加载时静态分析技能包；`describe_skill` 支
   持延迟发现，模型按需获取技能 schema，而非一开始就加载全部技能。([#3033]、[#3775])
 - **技能：** 按用户的自定义技能隔离，并配合沙箱挂载。([#3889])
@@ -1862,3 +1867,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5119]: https://github.com/bytedance/deer-flow/pull/5119
 [#5133]: https://github.com/bytedance/deer-flow/pull/5133
 [#5136]: https://github.com/bytedance/deer-flow/pull/5136
+[#5169]: https://github.com/bytedance/deer-flow/pull/5169
