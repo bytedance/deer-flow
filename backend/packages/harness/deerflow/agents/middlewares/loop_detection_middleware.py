@@ -186,6 +186,21 @@ _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. P
 
 _TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."
 
+_PROVIDER_TOOL_CALL_CONTENT_TYPES = frozenset({"function_call", "tool_call", "tool_use"})
+
+
+def _remove_provider_tool_call_content_blocks(content: str | list) -> str | list:
+    """Remove provider-native calls when their structured calls are cleared.
+
+    Responses-style models can preserve a function call both in
+    ``AIMessage.tool_calls`` and as a native block in list-valued ``content``.
+    Clearing only the structured view leaves an unanswered call in the replay
+    payload, which strict providers reject on the next turn.
+    """
+    if not isinstance(content, list):
+        return content
+    return [block for block in content if not (isinstance(block, dict) and block.get("type") in _PROVIDER_TOOL_CALL_CONTENT_TYPES)]
+
 
 @dataclass(frozen=True)
 class _LoopDecision:
@@ -625,7 +640,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         """Clear tool-call metadata so forced-stop messages serialize as plain assistant text."""
         update = {
             "tool_calls": [],
-            "content": content,
+            "content": _remove_provider_tool_call_content_blocks(content),
         }
 
         additional_kwargs = dict(getattr(last_msg, "additional_kwargs", {}) or {})
