@@ -1,6 +1,7 @@
 import asyncio
 import os
 import stat
+import threading
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
+from deerflow.sandbox.lease import get_sandbox_lease_manager
 
 
 class ChunkedUpload:
@@ -132,6 +134,50 @@ def test_upload_files_auto_renames_duplicate_form_filenames(tmp_path):
     assert (thread_uploads_dir / "data_1.txt").read_bytes() == b"second"
 
 
+def test_upload_files_deduplicates_max_length_filenames_without_failing_the_batch(tmp_path):
+    # A 255-byte filename is the longest normalize_filename accepts. Before
+    # the byte-budget truncation in claim_unique_filename, deduplicating a
+    # duplicate at that length produced a 257-byte name that the write path
+    # rejected, failing the whole request with a 500 and rolling back files
+    # that had already been written.
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    max_length_name = "a" * 251 + ".txt"
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[
+                    UploadFile(filename="innocent.txt", file=BytesIO(b"kept")),
+                    UploadFile(filename=max_length_name, file=BytesIO(b"first")),
+                    UploadFile(filename=max_length_name, file=BytesIO(b"second")),
+                ],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is True
+    assert len(result.files) == 3
+    deduped_name = result.files[2].filename
+    assert deduped_name != max_length_name
+    assert deduped_name.endswith("_1.txt")
+    assert len(deduped_name.encode("utf-8")) <= 255
+    assert (thread_uploads_dir / "innocent.txt").read_bytes() == b"kept"
+    assert (thread_uploads_dir / max_length_name).read_bytes() == b"first"
+    assert (thread_uploads_dir / deduped_name).read_bytes() == b"second"
+
+
 def test_upload_files_skips_acquire_when_thread_data_is_mounted(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
@@ -220,6 +266,77 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
 
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.pdf", b"pdf-bytes")
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.md", b"converted")
+
+
+def test_upload_sync_holds_non_releasing_lease_while_active_agent_finishes(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    update_started = threading.Event()
+    allow_update = threading.Event()
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire.side_effect = AssertionError("upload route should use acquire_async")
+    provider.acquire_async = AsyncMock(return_value="aio-1")
+    sandbox = MagicMock()
+
+    def blocking_update(*_args) -> None:
+        update_started.set()
+        assert allow_update.wait(timeout=1)
+
+    sandbox.update_file.side_effect = blocking_update
+    provider.get.return_value = sandbox
+    manager = get_sandbox_lease_manager(provider)
+    manager.retain(
+        "active-agent",
+        "aio-1",
+        thread_id="thread-aio",
+        user_id="user-1",
+    )
+    results = []
+    errors: list[BaseException] = []
+
+    def run_upload() -> None:
+        try:
+            file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
+            results.append(
+                asyncio.run(
+                    call_unwrapped(
+                        uploads.upload_files,
+                        "thread-aio",
+                        request=MagicMock(),
+                        files=[file],
+                        config=SimpleNamespace(),
+                    )
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    with (
+        patch.object(uploads, "get_effective_user_id", return_value="user-1"),
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        upload_thread = threading.Thread(target=run_upload)
+        upload_thread.start()
+        assert update_started.wait(timeout=1)
+
+        manager.release("active-agent")
+        provider.release.assert_not_called()
+
+        allow_update.set()
+        upload_thread.join(timeout=2)
+
+    assert not upload_thread.is_alive()
+    assert errors == []
+    assert len(results) == 1
+    assert results[0].success is True
+    provider.release.assert_called_once_with("aio-1")
+    assert sandbox.release_command_scope.call_count == 2
+    request_scope_id = sandbox.release_command_scope.call_args_list[-1].args[0]
+    assert request_scope_id.startswith("gateway:upload:")
 
 
 def test_upload_files_makes_non_local_files_sandbox_writable(tmp_path):
@@ -428,7 +545,8 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
     assert exc_info.value.status_code == 413
     provider.acquire.assert_not_called()
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
-    provider.get.assert_called_once_with("aio-1")
+    assert provider.get.call_count == 2
+    assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
     sandbox.update_file.assert_not_called()
 
 
@@ -457,7 +575,8 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     assert exc_info.value.status_code == 500
     provider.acquire.assert_not_called()
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
-    provider.get.assert_called_once_with("aio-1")
+    assert provider.get.call_count == 2
+    assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
     sandbox.update_file.assert_not_called()
     assert not (thread_uploads_dir / "report.pdf").exists()
 

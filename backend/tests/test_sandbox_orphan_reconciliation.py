@@ -421,6 +421,7 @@ def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker
     ``tmp_path`` is accepted and ignored: ownership no longer lives on disk.
     """
     from deerflow.config.sandbox_config import SandboxOwnershipConfig
+    from deerflow.sandbox.acquire_serialization import AcquireSerializer
 
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
@@ -428,7 +429,7 @@ def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker
     provider._sandboxes = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
-    provider._thread_locks = {}
+    provider._acquire_serializer = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
     provider._last_activity = {}
     provider._warm_pool = {}
     provider._active_sandbox_identity = {}

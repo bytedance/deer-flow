@@ -95,6 +95,18 @@ summarization:
      value: 0.8  # 80% of max input tokens
    ```
 
+   The percentage resolves from the **summary model's** declared `context_window`
+   — the anchor that generates summaries: `summarization.model_name` when set,
+   otherwise the run's own model. Declare `context_window` on that models entry
+   in `config.yaml`. Third-party OpenAI-compatible models carry no built-in
+   capacity profile, so without a declared `context_window` the fraction clause
+   is dropped with a warning at agent build — any remaining absolute clauses
+   (`tokens` / `messages`) keep working. Caveat: when a separate summary model
+   is configured, its window sizes the threshold — a 64k run model paired with
+   a 128k-window summary model resolves `fraction: 0.8` to ~102k tokens and
+   auto-summarization cannot fire before the run model overflows; in that setup
+   prefer absolute `tokens` thresholds sized for the run model.
+
 **Multiple Triggers:**
 ```yaml
 trigger:

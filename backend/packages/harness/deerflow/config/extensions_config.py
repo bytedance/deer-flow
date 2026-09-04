@@ -132,6 +132,51 @@ class McpUserScopedAuthConfig(BaseModel):
         return value
 
 
+class McpContextHeadersConfig(BaseModel):
+    """Per-request credential injection for an MCP server (HTTP/SSE transports).
+
+    Maps HTTP header names to keys of the run request's ``config.context.secrets``
+    carrier, so one configured MCP server can serve callers that each supply their
+    own credential *per request* rather than per configured user. The built-in
+    context-headers interceptor resolves the mapping on every tool call; the
+    server entry's static ``headers`` are only used for startup tool discovery.
+
+    Unlike ``user_auth``, this block stores **no credential** — only header names
+    and run-context key names — so it is safe to return unmasked from the config
+    API. The values arrive out-of-band with each run and never enter the prompt,
+    tool arguments, or trace payloads (see ``runtime/secret_context.py``).
+    """
+
+    enabled: bool = Field(default=True, description="Whether request-scoped header injection is enabled")
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of HTTP header name to the key to read from the run request's config.context.secrets (e.g. {'X-Tenant-Id': 'tenant_id'})",
+    )
+    on_missing: Literal["deny", "passthrough"] = Field(
+        default="deny",
+        description=("Behavior when a mapped key is absent from the request secrets (or resolved empty): 'deny' fails the tool call with an actionable error; 'passthrough' forwards the request with the server's static headers"),
+    )
+    model_config = ConfigDict(extra="allow")
+
+    @field_validator("headers")
+    @classmethod
+    def _validate_mapping_entries(cls, value: dict[str, str]) -> dict[str, str]:
+        seen: dict[str, str] = {}
+        for header_name, secret_key in value.items():
+            if not header_name.strip():
+                raise ValueError("headers_from_context.headers must not contain a blank header name")
+            if not isinstance(secret_key, str) or not secret_key.strip():
+                raise ValueError(f"headers_from_context.headers[{header_name!r}] must name a non-blank secret key from config.context.secrets")
+            # HTTP field names are case-insensitive, so two spellings of one
+            # header are one header with two candidate values, and which one
+            # reaches the remote would depend on dict ordering.
+            lowered = header_name.lower()
+            if lowered in seen:
+                raise ValueError(f"headers_from_context.headers maps the same HTTP header under two spellings ({seen[lowered]!r} and {header_name!r}); header names are case-insensitive, so keep only one")
+            seen[lowered] = header_name
+        return value
+
+
 class McpOAuthConfig(BaseModel):
     """OAuth configuration for an MCP server (HTTP/SSE transports)."""
 
@@ -170,6 +215,10 @@ class McpServerConfig(BaseModel):
         default=None,
         description="Per-user credential injection (for sse or http type): map DeerFlow user ids to per-user credential header values",
     )
+    headers_from_context: McpContextHeadersConfig | None = Field(
+        default=None,
+        description="Per-request credential injection (for sse or http type): map HTTP header names to keys of the run request's config.context.secrets",
+    )
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
@@ -195,6 +244,23 @@ class McpServerConfig(BaseModel):
         description="Ordinary submit/status/cancel tool groups managed by the durable MCP task runtime",
     )
     model_config = ConfigDict(extra="allow")
+
+    @field_validator("headers")
+    @classmethod
+    def _validate_header_names(cls, value: dict[str, str]) -> dict[str, str]:
+        # HTTP field names are case-insensitive, so two spellings of one header
+        # are one field with two candidate values. The adapter copies the static
+        # mapping verbatim, so both would reach the wire; a later per-request or
+        # OAuth override only replaces one spelling, leaving the other to leak a
+        # shared credential across tenant authority. Reject at config time so a
+        # bad mapping cannot reach the connection.
+        seen: dict[str, str] = {}
+        for header_name in value:
+            lowered = header_name.lower()
+            if lowered in seen:
+                raise ValueError(f"headers maps the same HTTP header under two spellings ({seen[lowered]!r} and {header_name!r}); header names are case-insensitive, so keep only one")
+            seen[lowered] = header_name
+        return value
 
     @model_validator(mode="before")
     @classmethod

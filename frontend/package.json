@@ -7,7 +7,7 @@
     "demo:save": "node scripts/save-demo.js",
     "build": "next build",
     "check": "eslint . --ext .ts,.tsx && tsc --noEmit",
-    "dev": "next dev --turbo",
+    "dev": "node scripts/dev.mjs",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "lint": "eslint . --ext .ts,.tsx",
