@@ -360,6 +360,97 @@ async def test_lead_stop_interrupt_is_deferred_until_final_cleanup():
 
 
 @pytest.mark.asyncio
+async def test_completion_cancellation_does_not_skip_survivor_after_rogue_stop_cancel():
+    completion_hook_entered = asyncio.Event()
+
+    async def _block_completion(_record):
+        completion_hook_entered.set()
+        await asyncio.wait_for(asyncio.Event().wait(), timeout=1)
+
+    class _Rogue:
+        async def on_task_stop(self, app_store, task_store, info, outcome):
+            raise asyncio.CancelledError()
+
+    survivor = _RunRecorder()
+    manager = RunManager()
+    record = await manager.create("thread-completion-cancel-rogue-stop")
+    bridge = _bridge()
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=RunContext(
+                checkpointer=InMemorySaver(),
+                extensions=_extensions(_Rogue(), survivor),
+                on_run_completed=_block_completion,
+            ),
+            agent_factory=lambda *, config: _OkAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+
+    await asyncio.wait_for(completion_hook_entered.wait(), timeout=1)
+    task.cancel("first completion cancellation")
+
+    with pytest.raises(asyncio.CancelledError, match="first completion cancellation"):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert survivor.events[-1] == ("stop", record.run_id, "completed")
+    assert task.cancelling() == 0
+    assert record.finalizing is False
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.asyncio
+async def test_second_real_stop_cancellation_preserves_first_completion_cancellation():
+    completion_hook_entered = asyncio.Event()
+    task_stop_entered = asyncio.Event()
+
+    async def _block_completion(_record):
+        completion_hook_entered.set()
+        await asyncio.wait_for(asyncio.Event().wait(), timeout=1)
+
+    class _SlowStop(_RunRecorder):
+        async def on_task_stop(self, app_store, task_store, info, outcome):
+            await super().on_task_stop(app_store, task_store, info, outcome)
+            task_stop_entered.set()
+            await asyncio.wait_for(asyncio.Event().wait(), timeout=1)
+
+    manager = RunManager()
+    record = await manager.create("thread-double-finalization-cancel")
+    bridge = _bridge()
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=RunContext(
+                checkpointer=InMemorySaver(),
+                extensions=_extensions(_SlowStop()),
+                on_run_completed=_block_completion,
+            ),
+            agent_factory=lambda *, config: _OkAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+
+    await asyncio.wait_for(completion_hook_entered.wait(), timeout=1)
+    task.cancel("first completion cancellation")
+    await asyncio.wait_for(task_stop_entered.wait(), timeout=1)
+    task.cancel("second task-stop cancellation")
+
+    with pytest.raises(asyncio.CancelledError, match="first completion cancellation"):
+        await asyncio.wait_for(task, timeout=1)
+
+    assert task.cancelling() == 0
+    assert record.finalizing is False
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.asyncio
 async def test_contributor_raising_cancellederror_cannot_interrupt_run_cleanup():
     # Fail-open is decided by origin, not base class: a contributor that lets a
     # CancelledError escape must not skip its successors, and must not reach the
