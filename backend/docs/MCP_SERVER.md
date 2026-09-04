@@ -80,6 +80,43 @@ For Docker, point `url` at the OpenViking address reachable from the Gateway
 container, such as `http://openviking:1933/mcp` for a shared Compose network or
 `http://host.docker.internal:1933/mcp` for a host-installed server.
 
+## Parallel Search (optional)
+
+The `parallel-search` entry in `extensions_config.example.json` is disabled by
+default. To opt in, copy that entry into `mcpServers` in your root
+`extensions_config.json`, set `"enabled": true`, and restart DeerFlow. It connects
+to `https://search.parallel.ai/mcp` over HTTP and adds Parallel's search and fetch
+tools. With DeerFlow's default tool-name prefix, the agent sees
+`parallel-search_web_search` and `parallel-search_web_fetch`. Existing search
+providers and defaults stay unchanged.
+
+This is a third-party service operated by Parallel.ai. Search calls send
+objectives and queries to Parallel; fetch calls send requested page URLs and
+any extraction objective. These inputs can contain information from your
+conversation, so enable it only if you are comfortable sending that data to
+Parallel.
+
+Access is anonymous by default: no API key or authentication headers are needed.
+For higher rate limits, optionally add this `headers` field to the
+`parallel-search` entry in your local `extensions_config.json`:
+
+```json
+{
+  "headers": {
+    "Authorization": "$PARALLEL_AUTHORIZATION"
+  }
+}
+```
+
+Set `PARALLEL_AUTHORIZATION` in the DeerFlow backend's environment to the full
+value `Bearer <your-parallel-api-key>`, then restart DeerFlow. Include `Bearer `
+in the environment variable because DeerFlow expands only whole-string
+`$ENV_VAR` references, not `Bearer $ENV_VAR`. Keep the actual key out of committed
+files. Remove the `headers` field and restart DeerFlow to return to anonymous
+access. See the
+[Parallel Search MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp)
+for details.
+
 ## Routing Hints
 
 Use `routing` when an MCP server should be preferred for specific requests, such

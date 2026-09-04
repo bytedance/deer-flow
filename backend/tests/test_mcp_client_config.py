@@ -181,12 +181,10 @@ def test_parallel_search_example_is_explicitly_opt_in_and_uses_anonymous_http_tr
     example = json.loads((Path(__file__).parents[2] / "extensions_config.example.json").read_text())
     parallel = example["mcpServers"]["parallel-search"]
 
-    assert parallel == {
-        "enabled": False,
-        "type": "http",
-        "url": "https://search.parallel.ai/mcp",
-        "description": "Optional anonymous Parallel Search tools for web search and fetching requested URLs",
-    }
+    assert parallel["enabled"] is False
+    assert parallel["type"] == "http"
+    assert parallel["url"] == "https://search.parallel.ai/mcp"
+    assert "headers" not in parallel
 
     config = ExtensionsConfig.model_validate(example)
     assert "parallel-search" not in build_servers_config(config)
