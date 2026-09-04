@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+import deerflow.sandbox.host_path_compat as host_path_compat
 from deerflow.config.sandbox_config import VolumeMountConfig
 from deerflow.sandbox.host_path_compat import (
     is_program_argument_path,
@@ -160,6 +161,16 @@ def test_volume_mount_canonicalizes_container_path() -> None:
     assert mount.container_path == "/root/nested"
 
 
+def test_normalize_host_path_uses_canonicalized_container_path() -> None:
+    mount = VolumeMountConfig(
+        host_path="C:/Users/lichen",
+        container_path="/root/",
+        read_only=False,
+    )
+
+    assert normalize_host_path(r"C:\Users\lichen\report.txt", mount) == "/root/report.txt"
+
+
 def test_volume_mount_rejects_drive_relative_container_path() -> None:
     with pytest.raises(ValidationError, match="POSIX virtual path"):
         VolumeMountConfig(
@@ -185,6 +196,12 @@ def test_normalize_host_path_preserves_single_letter_posix_container_root() -> N
         (r"/LIBPATH:C:\outside", ("/LIBPATH:", r"C:\outside")),
         (r"@C:\outside\args.rsp", ("@", r"C:\outside\args.rsp")),
         (r"--input=C:\Windows\secret.txt,http://example.test", ("--input=", r"C:\Windows\secret.txt,http://example.test")),
+        ("--input=https://example.test,C:\\Windows\\secret.txt", ("--input=", "https://example.test,C:\\Windows\\secret.txt")),
+        ("--input=https://example.test,/etc/passwd", ("--input=", "https://example.test,/etc/passwd")),
+        ("--input=@https://example.test,C:\\Windows\\secret.txt", ("--input=@", "https://example.test,C:\\Windows\\secret.txt")),
+        ("--x=--inner=/etc/passwd", ("--x=--inner=", "/etc/passwd")),
+        ("--x=foo=/etc/passwd", ("--x=foo=", "/etc/passwd")),
+        ("--x=@foo=/etc/passwd", ("--x=@foo=", "/etc/passwd")),
         ("--mode=release", ("--mode=", "release")),
         ("https://example.test/path", ("", "https://example.test/path")),
         ("url:http://example.test/path", ("", "url:http://example.test/path")),
@@ -221,6 +238,12 @@ def test_split_program_argument_does_not_hide_path_before_embedded_url() -> None
         "/out:file:///C:/Windows/secret.txt",
         "--input=C:\\Windows\\secret.txt,http://example.test",
         "--input=C:\\Windows\\secret.txt,foo=http://example.test",
+        "--input=https://example.test,C:\\Windows\\secret.txt",
+        "--input=https://example.test,/etc/passwd",
+        "--input=@https://example.test,C:\\Windows\\secret.txt",
+        "--x=--inner=/etc/passwd",
+        "--x=foo=/etc/passwd",
+        "--x=@foo=/etc/passwd",
         " file:///etc/passwd ",
         "/out: file:///C:/Windows/secret.txt",
         "/out:\tFILE:///etc/passwd",
@@ -249,6 +272,7 @@ def test_program_argument_path_predicate_covers_rooted_drive_and_traversal_forms
         "--url=HTTPS://example.test/../etc/passwd",
         "HTTPS://example.test/?next=FILE:///C:/Windows/secret.txt",
         " https://example.test/?next=file:///C:/Windows/secret.txt ",
+        "--input=https://example.test,relative.txt",
     ],
 )
 def test_program_argument_path_predicate_keeps_non_path_arguments_opaque(value: str) -> None:
@@ -259,3 +283,19 @@ def test_program_argument_path_predicate_handles_long_colon_arguments() -> None:
     value = ":".join(["0"] * 1000)
 
     assert not is_program_argument_path(value)
+
+
+def test_program_argument_path_predicate_scans_long_colon_input_once(monkeypatch) -> None:
+    value = ":".join(["0"] * 1000)
+    calls = 0
+    original = host_path_compat._has_program_path_syntax
+
+    def count_path_checks(candidate: str) -> bool:
+        nonlocal calls
+        calls += 1
+        return original(candidate)
+
+    monkeypatch.setattr(host_path_compat, "_has_program_path_syntax", count_path_checks)
+
+    assert not is_program_argument_path(value)
+    assert calls <= 2

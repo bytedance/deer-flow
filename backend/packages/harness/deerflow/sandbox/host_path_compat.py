@@ -22,6 +22,8 @@ _PROGRAM_ARGUMENT_TRAVERSAL = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
 _URL_SCHEME_ANYWHERE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 _URL_SCHEME_AT_START = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _FILE_URL_SCHEME = re.compile(r"^file://", re.IGNORECASE)
+_OPTION_COLON_PATH = re.compile(r":(?=\s*(?:file://|[A-Za-z]:|[/\\]|\.\.(?:[/\\]|$)))", re.IGNORECASE)
+_NETWORK_URL_PATH_SUFFIX = re.compile(r"(?:^|[,;\s])\s*(?:[A-Za-z]:[\\/]|[/\\]|\.\.(?:[\\/]|$))")
 
 # Match only absolute Windows drive spellings in command text.  POSIX paths
 # remain opaque command arguments unless the caller explicitly normalizes one.
@@ -58,6 +60,24 @@ def _has_program_path_syntax(value: str) -> bool:
     return bool(value) and (normalized.startswith("/") or value.startswith("\\") or _PROGRAM_ARGUMENT_DRIVE.match(normalized) is not None or _PROGRAM_ARGUMENT_TRAVERSAL.search(normalized) is not None)
 
 
+def _find_colon_path_separator(value: str, start: int = 0) -> int | None:
+    """Find one option colon whose suffix begins path syntax in one scan."""
+    match = _OPTION_COLON_PATH.search(value, start)
+    while match:
+        index = match.start()
+        if value[index + 1 : index + 3] == "//" or index == start or (index == start + 1 and value[start].isalpha()):
+            match = _OPTION_COLON_PATH.search(value, index + 1)
+            continue
+        return index
+
+    traversal = _PROGRAM_ARGUMENT_TRAVERSAL.search(value, start)
+    if traversal:
+        index = value.find(":", start, traversal.start())
+        if index >= 0 and not (index + 2 < len(value) and value[index + 1 : index + 3] == "//"):
+            return index
+    return None
+
+
 def split_program_argument(value: str) -> tuple[str, str]:
     """Split an option-bearing program argument into prefix and path candidate.
 
@@ -68,34 +88,38 @@ def split_program_argument(value: str) -> tuple[str, str]:
     if not isinstance(value, str) or not value:
         return "", value
 
-    if _URL_SCHEME_AT_START.match(value.strip()):
-        return "", value
-
-    equals_index = value.find("=")
+    prefix_parts: list[str] = []
+    candidate_start = 0
     url_match = _URL_SCHEME_ANYWHERE.search(value)
-    if equals_index >= 0 and (url_match is None or url_match.start() > equals_index) and not _has_program_path_syntax(value[:equals_index]):
-        prefix, candidate = value.split("=", 1)
-        nested_prefix, nested_candidate = split_program_argument(candidate)
-        return f"{prefix}={nested_prefix}", nested_candidate
+    url_start = url_match.start() if url_match else len(value)
 
-    if value.startswith("@"):
-        candidate = value[1:]
-        if _has_program_path_syntax(candidate) or _URL_SCHEME_AT_START.match(candidate.strip()):
-            nested_prefix, nested_candidate = split_program_argument(candidate)
-            return f"@{nested_prefix}", nested_candidate
+    while candidate_start < len(value):
+        candidate = value[candidate_start:]
+        if _URL_SCHEME_AT_START.match(candidate.strip()):
+            break
 
-    if _PROGRAM_ARGUMENT_DRIVE.match(value):
-        return "", value
-
-    for index, character in enumerate(value):
-        if character != ":" or index == 0 or (index == 1 and value[0].isalpha()) or value[index + 1 : index + 3] == "//":
+        equals_index = value.find("=", candidate_start, url_start)
+        if equals_index >= 0 and not _has_program_path_syntax(value[candidate_start:equals_index]):
+            prefix_parts.append(value[candidate_start : equals_index + 1])
+            candidate_start = equals_index + 1
             continue
-        candidate = value[index + 1 :]
-        if _has_program_path_syntax(candidate) or _FILE_URL_SCHEME.match(candidate.strip()):
-            nested_prefix, nested_candidate = split_program_argument(candidate)
-            return f"{value[: index + 1]}{nested_prefix}", nested_candidate
 
-    return "", value
+        if value[candidate_start] == "@":
+            prefix_parts.append("@")
+            candidate_start += 1
+            continue
+
+        if _PROGRAM_ARGUMENT_DRIVE.match(candidate):
+            break
+
+        colon_index = _find_colon_path_separator(value, candidate_start)
+        if colon_index is not None:
+            prefix_parts.append(value[candidate_start : colon_index + 1])
+            candidate_start = colon_index + 1
+            continue
+        break
+
+    return "".join(prefix_parts), value[candidate_start:]
 
 
 def program_argument_candidate(value: str) -> str:
@@ -109,8 +133,11 @@ def is_program_argument_path(value: str) -> bool:
     candidate_text = candidate.strip()
     if _FILE_URL_SCHEME.match(candidate_text):
         return True
-    if _URL_SCHEME_AT_START.match(candidate_text):
-        return False
+    url_match = _URL_SCHEME_ANYWHERE.search(candidate_text)
+    if url_match:
+        if _has_program_path_syntax(candidate_text[: url_match.start()]):
+            return True
+        return bool(_NETWORK_URL_PATH_SUFFIX.search(candidate_text[url_match.start() :]))
     return _has_program_path_syntax(candidate)
 
 
