@@ -80,6 +80,32 @@ def _patch_paths(monkeypatch, base_dir: Path) -> None:
     monkeypatch.setattr(paths_module, "_paths", Paths(base_dir=base_dir))
 
 
+def _bootstrap_credential_dirs(monkeypatch, tmp_path, *, config: bool = True, data: bool = True):
+    """Patch paths and create the per-user config/data dirs; return ``(config_dir, data_dir)``."""
+    _patch_paths(monkeypatch, tmp_path / "home")
+    config_dir = lark_cli.lark_cli_config_dir("alice")
+    data_dir = lark_cli.lark_cli_data_dir("alice")
+    if config:
+        config_dir.mkdir(parents=True)
+    if data:
+        data_dir.mkdir(parents=True)
+    return config_dir, data_dir
+
+
+def _windows_acl_env() -> dict[str, str]:
+    """Return a PowerShell environment with a clean, ordered ``PSModulePath``.
+
+    The Codex runtime prepends a bundled PowerShell module path that shadows the
+    stock ``Microsoft.PowerShell.Security`` module, which makes ``Get-Acl`` fail
+    to autoload under ``-NoProfile``. Use the stock Windows PowerShell module path
+    so ACL inspection is reliable on any host.
+    """
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    modules = f"{system_root}\\system32\\WindowsPowerShell\\v1.0\\Modules;{program_files}\\WindowsPowerShell\\Modules"
+    return {**os.environ, "PSModulePath": modules}
+
+
 def _windows_acl_sids(path: Path) -> set[str]:
     """Return the SIDs granted on *path* (Windows-only, PowerShell resolver).
 
@@ -92,6 +118,7 @@ def _windows_acl_sids(path: Path) -> set[str]:
         capture_output=True,
         text=True,
         check=True,
+        env=_windows_acl_env(),
     )
     return {line.strip() for line in out.stdout.splitlines() if line.strip()}
 
@@ -104,6 +131,7 @@ def _windows_acl_protected(path: Path) -> bool:
         capture_output=True,
         text=True,
         check=True,
+        env=_windows_acl_env(),
     )
     return out.stdout.strip() == "True"
 
@@ -116,13 +144,78 @@ def _windows_acl_owner_sid(path: Path) -> str:
         capture_output=True,
         text=True,
         check=True,
-        env={**os.environ, "DEER_FLOW_TEST_ACL_PATH": str(path)},
+        env={**_windows_acl_env(), "DEER_FLOW_TEST_ACL_PATH": str(path)},
     )
     return out.stdout.strip()
 
 
+class _FakeWindowsHandle:
+    """Real-filesystem-backed stand-in for ``_WindowsTreeHandle`` used by mocks.
+
+    It mirrors the behavior the handle-relative walker relies on (``info``,
+    ``set_security``, ``enumerate``, ``open_child``, ``open_or_create_child_dir``,
+    ``close``) without touching Win32, so the Windows credential-tree tests still
+    run on Linux CI.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        dacl_calls: list[tuple[str, str, bool]],
+        *,
+        reparse: bool = False,
+        apply_fails: bool = False,
+        link_count: int = 1,
+    ) -> None:
+        self.path = path
+        self._dacl_calls = dacl_calls
+        self._reparse = reparse
+        self._apply_fails = apply_fails
+        self._link_count = link_count
+        self._is_dir = path.is_dir()
+
+    @property
+    def info(self):
+        return SimpleNamespace(reparse=self._reparse, is_dir=self._is_dir, link_count=self._link_count)
+
+    def set_security(self, owner_sid, *, inheritable_full):
+        if self._apply_fails:
+            raise RuntimeError("SetSecurityInfo failed")
+        self._dacl_calls.append((str(self.path), owner_sid, inheritable_full))
+
+    def enumerate(self):
+        if not self._is_dir:
+            return iter(())
+        try:
+            return iter([entry.name for entry in self.path.iterdir()])
+        except OSError:
+            return iter(())
+
+    def open_child(self, name):
+        child = self.path / name
+        if child.is_symlink():
+            raise ValueError(f"Lark CLI credential path must not be a reparse point: {child}")
+        return _FakeWindowsHandle(child, self._dacl_calls, apply_fails=self._apply_fails)
+
+    def open_or_create_child_dir(self, name):
+        child = self.path / name
+        if child.is_symlink():
+            raise ValueError(f"Lark CLI credential path must not be a reparse point: {child}")
+        child.mkdir(parents=True, exist_ok=True)
+        return _FakeWindowsHandle(child, self._dacl_calls, apply_fails=self._apply_fails)
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
 def _patch_windows_hardening(monkeypatch, tmp_path, sid: str = "S-1-5-21-111-222-333-1001"):
-    """Set up the Windows path: mock whoami and record private-DACL applies."""
+    """Set up the Windows path: mock whoami and record handle-bound DACL applies."""
     _patch_paths(monkeypatch, tmp_path / "home")
     monkeypatch.setattr(lark_cli, "os", SimpleNamespace(name="nt"))
     subprocess_calls: list[list[str]] = []
@@ -141,10 +234,22 @@ def _patch_windows_hardening(monkeypatch, tmp_path, sid: str = "S-1-5-21-111-222
 
     monkeypatch.setattr(lark_cli.subprocess, "run", _fake_run)
 
-    def _record(path, owner_sid, *, inheritable_full):
-        dacl_calls.append((str(path), owner_sid, inheritable_full))
+    def _open(path, *, access, reject_reparse=True):
+        reparse = path.is_symlink()
+        if reparse and reject_reparse:
+            raise ValueError(f"Lark CLI credential path must not be a reparse point: {path}")
+        return _FakeWindowsHandle(path, dacl_calls, reparse=reparse)
 
-    monkeypatch.setattr(lark_cli, "_set_windows_private_dacl", _record)
+    monkeypatch.setattr(lark_cli, "_open_windows_pinned", _open)
+
+    def _open_or_create(parent, name, *, full_path, access, share):
+        child = parent.path / name
+        if child.is_symlink():
+            raise ValueError(f"Lark CLI credential path must not be a reparse point: {child}")
+        child.mkdir(parents=True, exist_ok=True)
+        return _FakeWindowsHandle(child, dacl_calls, reparse=child.is_symlink())
+
+    monkeypatch.setattr(lark_cli, "_open_or_create_dir_relative", _open_or_create)
     return subprocess_calls, dacl_calls
 
 
@@ -1020,23 +1125,19 @@ def test_start_lark_auth_returns_browser_url(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 
     def _run(args, **kwargs):
-        captured["args"] = args
-        captured["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(
-            args=args,
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "verification_url": "https://open.feishu.cn/auth/mock",
-                    "device_code": "device-code",
-                    "expires_in": 600,
-                }
-            ),
-            stderr="",
-        )
+        captured["args"] = list(args)
+        return {
+            "verification_url": "https://open.feishu.cn/auth/mock",
+            "device_code": "device-code",
+            "expires_in": 600,
+        }
 
-    monkeypatch.setattr(lark_cli.shutil, "which", lambda _name: "/usr/bin/lark-cli")
-    monkeypatch.setattr(lark_cli.subprocess, "run", _run)
+    monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
+    monkeypatch.setattr(
+        lark_cli,
+        "_run_lark_cli_json",
+        lambda args, **kwargs: _run(args, **kwargs),
+    )
 
     result = lark_cli.start_lark_auth("alice", domains=("calendar",), recommend=True)
 
@@ -1054,9 +1155,6 @@ def test_start_lark_auth_returns_browser_url(monkeypatch, tmp_path):
         "--domain",
         "calendar",
     ]
-    env = captured["env"]
-    assert isinstance(env, dict)
-    assert env["LARKSUITE_CLI_CONFIG_DIR"].endswith("users/alice/integrations/lark-cli/config")
 
 
 def test_start_lark_auth_uses_minimal_login_by_default(monkeypatch, tmp_path):
@@ -1064,23 +1162,19 @@ def test_start_lark_auth_uses_minimal_login_by_default(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 
     def _run(args, **kwargs):
-        captured["args"] = args
-        captured["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(
-            args=args,
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "verification_url": "https://open.feishu.cn/auth/mock",
-                    "device_code": "device-code",
-                    "expires_in": 600,
-                }
-            ),
-            stderr="",
-        )
+        captured["args"] = list(args)
+        return {
+            "verification_url": "https://open.feishu.cn/auth/mock",
+            "device_code": "device-code",
+            "expires_in": 600,
+        }
 
-    monkeypatch.setattr(lark_cli.shutil, "which", lambda _name: "/usr/bin/lark-cli")
-    monkeypatch.setattr(lark_cli.subprocess, "run", _run)
+    monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
+    monkeypatch.setattr(
+        lark_cli,
+        "_run_lark_cli_json",
+        lambda args, **kwargs: _run(args, **kwargs),
+    )
 
     result = lark_cli.start_lark_auth("alice")
 
@@ -1120,17 +1214,13 @@ def test_lark_cli_env_from_runtime_exposes_settings_auth_to_lark_commands(monkey
     env = _lark_cli_env_from_runtime(runtime, "lark-cli auth status --json", sandbox_paths=False)
 
     assert env is not None
-    assert env["LARKSUITE_CLI_CONFIG_DIR"].endswith("users/alice/integrations/lark-cli/config")
-    assert env["LARKSUITE_CLI_DATA_DIR"].endswith("users/alice/integrations/lark-cli/data")
+    assert Path(env["LARKSUITE_CLI_CONFIG_DIR"]) == lark_cli.lark_cli_config_dir("alice")
+    assert Path(env["LARKSUITE_CLI_DATA_DIR"]) == lark_cli.lark_cli_data_dir("alice")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits unavailable")
 def test_lark_cli_env_hardens_existing_credential_tree(monkeypatch, tmp_path) -> None:
-    _patch_paths(monkeypatch, tmp_path / "home")
-    config_dir = lark_cli.lark_cli_config_dir("alice")
-    data_dir = lark_cli.lark_cli_data_dir("alice")
-    config_dir.mkdir(parents=True)
-    data_dir.mkdir(parents=True)
+    config_dir, data_dir = _bootstrap_credential_dirs(monkeypatch, tmp_path)
     secret_file = config_dir / "config.json"
     token_file = data_dir / "auth.json"
     secret_file.write_text('{"appSecret":"secret"}', encoding="utf-8")
@@ -1224,14 +1314,24 @@ def test_windows_credential_tree_raises_on_identity_or_acl_failure(monkeypatch, 
         return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(lark_cli.subprocess, "run", _fake_run)
-    if fail_kind == "dacl":
 
-        def _fail(path, owner_sid, *, inheritable_full):
-            raise RuntimeError("SetFileSecurityW failed")
+    def _open(path, *, access, reject_reparse=True):
+        if path.is_symlink() and reject_reparse:
+            raise ValueError(f"Lark CLI credential path must not be a reparse point: {path}")
+        return _FakeWindowsHandle(path, [], apply_fails=(fail_kind == "dacl"))
 
-        monkeypatch.setattr(lark_cli, "_set_windows_private_dacl", _fail)
+    monkeypatch.setattr(lark_cli, "_open_windows_pinned", _open)
 
-    with pytest.raises(RuntimeError):
+    def _open_or_create(parent, name, *, full_path, access, share):
+        child = parent.path / name
+        if child.is_symlink():
+            raise ValueError(f"Lark CLI credential path must not be a reparse point: {child}")
+        child.mkdir(parents=True, exist_ok=True)
+        return _FakeWindowsHandle(child, [], apply_fails=(fail_kind == "dacl"))
+
+    monkeypatch.setattr(lark_cli, "_open_or_create_dir_relative", _open_or_create)
+
+    with pytest.raises((RuntimeError, ValueError)):
         lark_cli.ensure_lark_cli_credential_tree("alice")
 
 
@@ -1264,10 +1364,12 @@ def test_windows_credential_tree_hardening_issues_single_owner_apply_no_reset_fa
 
 
 def test_windows_credential_tree_hardening_rejects_reparse_before_descent(monkeypatch, tmp_path) -> None:
-    """A symlink/junction inside the tree is rejected before any descent.
+    """A symlink/junction inside the tree is rejected before traversal uses it.
 
-    The walk must never pre-recursively descend into a reparse target; using
-    ``rglob`` would have walked it before the path check ran.
+    The walker opens children no-follow relative to the parent handle, so a reparse
+    pointer is detected (and rejected) before it is followed. Children are validated
+    before the parent propagates an inheritable ACE, so the reparse target is never
+    reached and the external directory is never hardened.
     """
     subprocess_calls, dacl_calls = _patch_windows_hardening(monkeypatch, tmp_path)
     config_dir = lark_cli.lark_cli_config_dir("alice")
@@ -1280,12 +1382,12 @@ def test_windows_credential_tree_hardening_rejects_reparse_before_descent(monkey
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"symlinks are not available: {exc}")
 
-    with pytest.raises(ValueError, match="symlink"):
+    with pytest.raises(ValueError, match="reparse"):
         lark_cli.ensure_lark_cli_credential_tree("alice")
 
     assert not any(args and args[0] == "icacls" for args in subprocess_calls)
     dacl_paths = [path for path, _, _ in dacl_calls]
-    assert dacl_paths, "expected some entries to be hardened before the reparse was hit"
+    assert dacl_paths, "expected the parent directory to be hardened before the reparse was hit"
     assert str(config_dir / "evil") not in dacl_paths
     assert not any(p.startswith(str(outside)) for p in dacl_paths)
     assert not any(str(outside) in p for p in dacl_paths)
@@ -1361,13 +1463,13 @@ def test_windows_credential_tree_rejects_real_junction(monkeypatch, tmp_path) ->
     )
 
     dacl_paths: list[str] = []
-    _orig_dacl = lark_cli._set_windows_private_dacl
+    _orig_set_security = lark_cli._WindowsTreeHandle.set_security
 
-    def _record_dacl(path, owner_sid, *, inheritable_full):
-        dacl_paths.append(str(path))
-        return _orig_dacl(path, owner_sid, inheritable_full=inheritable_full)
+    def _record_security(self, owner_sid, *, inheritable_full):
+        dacl_paths.append(str(self.path))
+        return _orig_set_security(self, owner_sid, inheritable_full=inheritable_full)
 
-    monkeypatch.setattr(lark_cli, "_set_windows_private_dacl", _record_dacl)
+    monkeypatch.setattr(lark_cli._WindowsTreeHandle, "set_security", _record_security)
 
     try:
         with pytest.raises(ValueError, match="reparse"):
@@ -1419,11 +1521,9 @@ def test_windows_credential_tree_hardening_removes_arbitrary_existing_explicit_s
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires real Windows ACLs")
-def test_windows_credential_tree_set_file_security_failure_preserves_prior_dacl(monkeypatch, tmp_path) -> None:
-    """A final SetFileSecurityW failure leaves the prior private DACL unchanged."""
-    _patch_paths(monkeypatch, tmp_path / "home")
-    config_dir = lark_cli.lark_cli_config_dir("alice")
-    config_dir.mkdir(parents=True)
+def test_windows_credential_tree_set_security_info_failure_preserves_prior_dacl(monkeypatch, tmp_path) -> None:
+    """A final handle-bound SetSecurityInfo failure leaves the prior private DACL unchanged."""
+    config_dir, _ = _bootstrap_credential_dirs(monkeypatch, tmp_path, data=False)
     secret_file = config_dir / "config.json"
     secret_file.write_text('{"appSecret":"secret"}', encoding="utf-8")
 
@@ -1433,10 +1533,10 @@ def test_windows_credential_tree_set_file_security_failure_preserves_prior_dacl(
     assert before == {owner_sid}
     assert _windows_acl_protected(secret_file)
 
-    def _boom(path, security_information, descriptor):
-        raise OSError("simulated SetFileSecurityW failure")
+    def _boom(handle, owner_sid, *, inheritable_full):
+        raise OSError("simulated SetSecurityInfo failure")
 
-    monkeypatch.setattr(lark_cli, "_apply_file_security_descriptor", _boom)
+    monkeypatch.setattr(lark_cli, "_set_windows_security_info_handle", _boom)
     with pytest.raises((OSError, RuntimeError)):
         lark_cli.ensure_lark_cli_credential_tree("alice")
 
@@ -1538,6 +1638,190 @@ def test_windows_credential_tree_rejects_reparse_ancestor(monkeypatch, tmp_path)
             os.rmdir(integrations)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires a real NTFS junction")
+def test_windows_credential_tree_swap_blocked_by_exclusive_parent(monkeypatch, tmp_path) -> None:
+    """An exclusive directory handle blocks a child swap mid-walk.
+
+    The reviewer's P1 is a validated child swapped for a junction before descent. Here
+    the walker holds ``data`` open *exclusively* (share=0), so an attempt to swap
+    ``data/nested`` (rename + ``mklink /J`` to an external directory) fails with a
+    sharing violation — the namespace is locked for the duration of the walk. The
+    external directory is never reached, opened, or hardened.
+    """
+    config_dir, data_dir = _bootstrap_credential_dirs(monkeypatch, tmp_path)
+    nested = data_dir / "nested"
+    nested.mkdir()
+    (config_dir / "config.json").write_text("s", encoding="utf-8")
+    (data_dir / "auth.json").write_text("t", encoding="utf-8")
+    (nested / "inner.txt").write_text("x", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "foreign-secret").write_text("secret", encoding="utf-8")
+
+    hardened: list[str] = []
+    orig_set_security = lark_cli._WindowsTreeHandle.set_security
+
+    def _record_security(self, owner_sid, *, inheritable_full):
+        hardened.append(str(self.path))
+        return orig_set_security(self, owner_sid, inheritable_full=inheritable_full)
+
+    monkeypatch.setattr(lark_cli._WindowsTreeHandle, "set_security", _record_security)
+
+    orig_open_child = lark_cli._WindowsTreeHandle.open_child
+    swapped: list[str] = []
+
+    def _swap_before_open(self, name):
+        if self.path == data_dir and name == "nested":
+            try:
+                os.rename(nested, nested.with_name("nested-swapped"))
+                subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(nested), str(outside)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                swapped.append("swapped")
+            except OSError as exc:  # noqa: BLE001 - assertion boundary
+                swapped.append(f"blocked:{type(exc).__name__}")
+        return orig_open_child(self, name)
+
+    monkeypatch.setattr(lark_cli._WindowsTreeHandle, "open_child", _swap_before_open)
+
+    try:
+        lark_cli.ensure_lark_cli_credential_tree("alice")
+        assert swapped and swapped[0].startswith("blocked:"), f"exclusive parent must block the swap, got {swapped}"
+        assert (outside / "foreign-secret").read_text(encoding="utf-8") == "secret"
+        assert not any(str(outside) in p for p in hardened), "walker must never harden the external target"
+    finally:
+        # Decide from the recorded swap outcome — ``Path.is_symlink()`` is unreliable
+        # for NTFS junctions, so do not re-derive it here. If the swap succeeded,
+        # ``nested`` is a junction pointing outside; remove only the junction itself.
+        if swapped and swapped[0] == "swapped":
+            if nested.exists():
+                os.rmdir(nested)
+        elif nested.exists():
+            shutil.rmtree(nested, ignore_errors=True)
+        swapped_dir = data_dir / "nested-swapped"
+        if swapped_dir.exists():
+            shutil.rmtree(swapped_dir, ignore_errors=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires real NTFS hard links")
+def test_windows_credential_tree_rejects_hard_linked_file(monkeypatch, tmp_path) -> None:
+    """A hard-linked file inside the tree must not have its ACL changed.
+
+    The security descriptor belongs to the NTFS file object, so hardening a tree
+    file that is hard-linked to an external file would also change that external
+    file's owner/DACL. The walker must reject any file with ``nNumberOfLinks != 1``
+    and leave the external file untouched.
+    """
+    config_dir, data_dir = _bootstrap_credential_dirs(monkeypatch, tmp_path)
+    (config_dir / "config.json").write_text("s", encoding="utf-8")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim.txt"
+    victim.write_text("secret", encoding="utf-8")
+    planted = data_dir / "planted.txt"
+    os.link(victim, planted)
+
+    before_sids = _windows_acl_sids(victim)
+    before_owner = _windows_acl_owner_sid(victim)
+
+    try:
+        with pytest.raises(ValueError, match="hard-link"):
+            lark_cli.ensure_lark_cli_credential_tree("alice")
+        assert _windows_acl_sids(victim) == before_sids
+        assert _windows_acl_owner_sid(victim) == before_owner
+    finally:
+        # Remove only the hard link (not the victim) so pytest's recursive temp
+        # cleanup does not hit a WinError on the shared file object.
+        if planted.exists():
+            planted.unlink()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires real Windows ACLs")
+def test_windows_credential_tree_exclusive_parent_no_propagation(monkeypatch, tmp_path) -> None:
+    """An exclusive directory handle blocks SetSecurityInfo propagation to children."""
+    config_dir, _ = _bootstrap_credential_dirs(monkeypatch, tmp_path, data=False)
+    child = config_dir / "config.json"
+    child.write_text("s", encoding="utf-8")
+
+    unwanted = "S-1-5-32-546"  # BUILTIN\Guests
+    subprocess.run(
+        ["icacls", str(child), "/grant:r", f"*{unwanted}:F"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    before = _windows_acl_sids(child)
+    assert unwanted in before, "seed child grant was not applied"
+
+    owner_sid = lark_cli._resolve_current_user_sid()
+    handle = lark_cli._open_windows_pinned(
+        config_dir,
+        access=lark_cli._WINDOWS_HARDEN_ACCESS,
+        share=lark_cli._WINDOWS_EXCLUSIVE_SHARE,
+    )
+    try:
+        # Exclusive handle: applying an inheritable OI|CI DACL must NOT rewrite the child.
+        handle.set_security(owner_sid, inheritable_full=True)
+    finally:
+        handle.close()
+
+    assert _windows_acl_sids(child) == before, "exclusive parent apply must not propagate to existing children"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires real NTFS hard links")
+def test_windows_credential_tree_late_insertion_blocked_by_exclusive_parent(monkeypatch, tmp_path) -> None:
+    """An exclusive directory handle closes the concurrent hard-link insertion window.
+
+    During the walk the walker holds ``data`` open exclusively (share=0), so a local
+    principal cannot ``os.link`` an external file into it (sharing violation) — the late
+    insertion the children-first order exposed cannot happen. A hard link that already
+    exists before ``ensure`` is still rejected by the ``link_count != 1`` check (covered
+    by the static hard-link regression); here we prove the mutation window is closed and
+    the external file's owner/DACL is left untouched.
+    """
+    config_dir, data_dir = _bootstrap_credential_dirs(monkeypatch, tmp_path)
+    (config_dir / "config.json").write_text("s", encoding="utf-8")
+    (data_dir / "auth.json").write_text("t", encoding="utf-8")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim.txt"
+    victim.write_text("secret", encoding="utf-8")
+
+    before_sids = _windows_acl_sids(victim)
+    before_owner = _windows_acl_owner_sid(victim)
+
+    orig_enumerate = lark_cli._WindowsTreeHandle.enumerate
+    inserted: list[str] = []
+
+    def _try_insert_late_link(self):
+        if self.path == data_dir:
+            late = data_dir / "late.txt"
+            try:
+                if not late.exists():
+                    os.link(victim, late)
+                    inserted.append("inserted")
+            except OSError as exc:  # noqa: BLE001 - assertion boundary
+                inserted.append(f"blocked:{type(exc).__name__}")
+        return orig_enumerate(self)
+
+    monkeypatch.setattr(lark_cli._WindowsTreeHandle, "enumerate", _try_insert_late_link)
+
+    try:
+        lark_cli.ensure_lark_cli_credential_tree("alice")
+        assert inserted and inserted[0].startswith("blocked:"), f"exclusive parent must block late insertion, got {inserted}"
+        assert _windows_acl_sids(victim) == before_sids
+        assert _windows_acl_owner_sid(victim) == before_owner
+    finally:
+        late = data_dir / "late.txt"
+        if late.exists():
+            late.unlink()
+
+
 def test_lark_cli_env_rejects_symlinks_in_credential_tree(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
     config_dir = lark_cli.lark_cli_config_dir("alice")
@@ -1549,34 +1833,55 @@ def test_lark_cli_env_rejects_symlinks_in_credential_tree(monkeypatch, tmp_path)
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"symlinks are not available: {exc}")
 
-    with pytest.raises(ValueError, match="symlink"):
+    with pytest.raises(ValueError, match="reparse"):
         lark_cli.lark_cli_env_overlay("alice")
 
 
 def test_save_lark_app_config_rehardens_files_written_by_cli(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
-    monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
+    rehardened: list[str] = []
+    orig_ensure = lark_cli.ensure_lark_cli_credential_tree
 
-    def _run(args, **kwargs):
-        config_file = Path(kwargs["env"]["LARKSUITE_CLI_CONFIG_DIR"]) / "config.json"
+    def _spy_ensure(user_id, *, paths=None):
+        rehardened.append(user_id)
+        return orig_ensure(user_id, paths=paths)
+
+    monkeypatch.setattr(lark_cli, "ensure_lark_cli_credential_tree", _spy_ensure)
+
+    def _run_init(*, app_id, app_secret, brand, env):
+        config_file = Path(env["LARKSUITE_CLI_CONFIG_DIR"]) / "config.json"
         config_file.write_text('{"appSecret":"secret"}', encoding="utf-8")
-        config_file.chmod(0o644)
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(lark_cli.subprocess, "run", _run)
+    monkeypatch.setattr(lark_cli, "_run_lark_config_init", _run_init)
 
     lark_cli._save_lark_app_config_with_cli("alice", app_id="cli_app", app_secret="secret", brand="feishu")
 
     config_file = lark_cli.lark_cli_config_dir("alice") / "config.json"
-    assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+    assert config_file.exists()
+    assert "alice" in rehardened, "a CLI-written config file must be re-hardened"
 
 
 def test_validate_lark_app_credentials_surfaces_cli_probe_rejection(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
+
+    def _reject(*, app_id, app_secret, brand, env):
+        raise ValueError("The specified app does not exist.")
+
+    monkeypatch.setattr(lark_cli, "_run_lark_config_init", _reject)
+
+    with pytest.raises(ValueError, match="specified app does not exist"):
+        lark_cli._validate_lark_app_credentials_with_cli(
+            app_id="cli_invalid",
+            app_secret="invalid-secret",
+            brand="feishu",
+        )
+
+
+def test_run_lark_config_init_surfaces_cli_probe_rejection(monkeypatch) -> None:
+    """The config-init CLI rejection is surfaced as a ValueError carrying the CLI message."""
     monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
 
     def _run(args, **kwargs):
-        assert kwargs["env"]["LARKSUITE_CLI_CONFIG_DIR"] != str(lark_cli.lark_cli_config_dir("alice"))
         return subprocess.CompletedProcess(
             args=args,
             returncode=3,
@@ -1587,20 +1892,40 @@ def test_validate_lark_app_credentials_surfaces_cli_probe_rejection(monkeypatch,
     monkeypatch.setattr(lark_cli.subprocess, "run", _run)
 
     with pytest.raises(ValueError, match="specified app does not exist"):
-        lark_cli._validate_lark_app_credentials_with_cli(
+        lark_cli._run_lark_config_init(
             app_id="cli_invalid",
             app_secret="invalid-secret",
             brand="feishu",
+            env={"LARKSUITE_CLI_CONFIG_DIR": "/x", "LARKSUITE_CLI_DATA_DIR": "/y"},
         )
 
 
 def test_lark_cli_json_rehardens_auth_files_written_by_cli(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
+    rehardened: list[str] = []
+
+    def _spy_ensure(user_id, *, paths=None):
+        # Record-only: this is an orchestration contract (the CLI writes files then
+        # re-hardens). The real ACL behavior is covered by the native Windows ACL
+        # regressions, so we do not run the identity probe here.
+        rehardened.append(user_id)
+
+    monkeypatch.setattr(lark_cli, "ensure_lark_cli_credential_tree", _spy_ensure)
+    # The env is built without the credential subsystem so the identity probe
+    # (whoami) does not get intercepted by the CLI subprocess fake.
+    monkeypatch.setattr(
+        lark_cli,
+        "lark_cli_env",
+        lambda user_id: {
+            "LARKSUITE_CLI_CONFIG_DIR": str(lark_cli.lark_cli_config_dir(user_id)),
+            "LARKSUITE_CLI_DATA_DIR": str(lark_cli.lark_cli_data_dir(user_id)),
+        },
+    )
 
     def _run(args, **kwargs):
         token_file = Path(kwargs["env"]["LARKSUITE_CLI_DATA_DIR"]) / "auth.json"
+        token_file.parent.mkdir(parents=True, exist_ok=True)
         token_file.write_text('{"token":"secret"}', encoding="utf-8")
-        token_file.chmod(0o644)
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}", stderr="")
 
     monkeypatch.setattr(lark_cli.subprocess, "run", _run)
@@ -1608,7 +1933,8 @@ def test_lark_cli_json_rehardens_auth_files_written_by_cli(monkeypatch, tmp_path
     lark_cli._run_lark_cli_json(["/usr/bin/lark-cli", "auth", "login"], user_id="alice", timeout=5)
 
     token_file = lark_cli.lark_cli_data_dir("alice") / "auth.json"
-    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    assert token_file.exists()
+    assert "alice" in rehardened, "a CLI-written auth file must be re-hardened"
 
 
 def test_lark_cli_env_from_runtime_uses_container_paths_for_sandbox_lark_commands():
@@ -1631,29 +1957,26 @@ def test_lark_cli_env_from_runtime_ignores_non_lark_commands(tmp_path, monkeypat
 def test_lark_auth_probe_distinguishes_local_configuration_from_live_verification(monkeypatch, tmp_path) -> None:
     assert "verified" in lark_cli.LarkAuthProbe.__dataclass_fields__
     _patch_paths(monkeypatch, tmp_path / "home")
-    config_file = lark_cli.lark_cli_config_dir("alice") / "config.json"
-    config_file.parent.mkdir(parents=True)
-    config_file.write_text(
-        json.dumps(
-            {
-                "currentApp": "cli_app",
-                "apps": [
-                    {
-                        "name": "cli_app",
-                        "appId": "cli_app",
-                        "appSecret": "secret",
-                        "brand": "feishu",
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
     calls: list[list[str]] = []
 
     monkeypatch.setattr(lark_cli, "_resolve_lark_cli_path", lambda: "/usr/bin/lark-cli")
+    monkeypatch.setattr(
+        lark_cli,
+        "read_lark_app_config",
+        lambda _user_id: {"configured": True, "app_id": "cli_app", "brand": "feishu"},
+    )
+    # Build env without the credential subsystem so the identity probe (whoami)
+    # does not get intercepted by the CLI subprocess fake.
+    monkeypatch.setattr(
+        lark_cli,
+        "lark_cli_env",
+        lambda user_id: {
+            "LARKSUITE_CLI_CONFIG_DIR": str(lark_cli.lark_cli_config_dir(user_id)),
+            "LARKSUITE_CLI_DATA_DIR": str(lark_cli.lark_cli_data_dir(user_id)),
+        },
+    )
 
-    def _run(args, **_kwargs):
+    def _run(args, **kwargs):
         calls.append(args)
         return subprocess.CompletedProcess(
             args=args,

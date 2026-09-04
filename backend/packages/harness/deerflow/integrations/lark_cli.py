@@ -54,6 +54,7 @@ import posixpath
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -62,7 +63,7 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -303,38 +304,60 @@ def _lark_cli_credential_root(user_id: str) -> Path:
 
 
 def ensure_lark_cli_credential_tree(user_id: str, *, paths: Paths | None = None) -> None:
-    """Harden access to the user's secret-bearing Lark CLI credential tree.
+    """Harden the secret-bearing credential tree to owner-only.
 
-    The CLI writes plaintext app secrets and OAuth tokens beneath this tree.
-    Reject symlinks / reparse points before creating or changing modes so a
-    compromised tree cannot redirect an ACL change or subsequent CLI write
-    outside the user's integration directory.
+    Windows uses a handle-relative walker (:func:`_ensure_and_harden_windows_credential_tree`):
+    every descendant is opened/created relative to an already-open parent handle, so a pathname
+    swap cannot redirect validation, the ACL update, or traversal for the duration of that
+    hardening walk. This guarantee does not extend to a later pathname-based reopen by a
+    credential consumer after ``ensure`` returns. POSIX keeps the ``lstat()``-before-descent walk.
     """
     paths = paths or get_paths()
     root = paths.user_dir(user_id) / "integrations" / INTEGRATION_ID
-    _reject_credential_reparse_chain(paths.base_dir, root)
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for required in (root / "config", root / "config" / "locks", root / "data"):
-        _reject_credential_reparse(required)
-        required.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _apply_lark_cli_credential_tree_permissions(root)
-
-
-def _apply_lark_cli_credential_tree_permissions(root: Path) -> None:
-    """Restrict access on the secret-bearing Lark CLI tree per platform.
-
-    POSIX: directories ``0o700``, files ``0o600``.
-
-    Windows: build a protected owner-only security descriptor in memory and
-    apply it to each entry with a single Windows ACL update (``SetFileSecurityW``).
-    No intermediate parent-inherited DACL is installed, so an ACL failure leaves
-    the prior DACL unchanged. Identity or ACL failures are surfaced and never
-    silently ignored.
-    """
     if os.name == "nt":
-        _harden_windows_credential_tree(root)
+        _ensure_and_harden_windows_credential_tree(paths, root)
     else:
+        _reject_credential_reparse_chain(paths.base_dir, root)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for required in (root / "config", root / "config" / "locks", root / "data"):
+            _reject_credential_reparse(required)
+            required.mkdir(parents=True, exist_ok=True, mode=0o700)
         _harden_posix_credential_tree(root)
+
+
+def _ensure_and_harden_windows_credential_tree(paths: Paths, root: Path) -> None:
+    """Create + harden the credential tree with handle-relative traversal (Windows).
+
+    The trusted base is opened by name; every descendant is then opened/created
+    *relative* to an already-open parent handle (``RootDirectory``). The walker never
+    re-resolves a pathname, so a concurrent rename/replace of an ancestor or directory
+    cannot redirect validation, the ACL update, or traversal to a swapped object.
+    """
+    owner_sid = _resolve_current_user_sid()
+    pinned: list[_WindowsTreeHandle] = []
+    try:
+        chain = _credential_chain_paths(paths.base_dir, root)
+        # The trusted base is the storage root; create it if absent, then open it
+        # by name (it is deliberately allowed to be a reparse point).
+        chain[0].mkdir(parents=True, exist_ok=True)
+        base_handle = _open_windows_pinned(chain[0], access=_WINDOWS_PIN_ACCESS, reject_reparse=False)
+        pinned.append(base_handle)
+
+        # Pin the ancestor chain from the base down to the credential root.
+        parent = base_handle
+        for component in chain[1:]:
+            is_root = component == chain[-1]
+            access = _WINDOWS_HARDEN_ACCESS if is_root else _WINDOWS_PIN_ACCESS
+            share = _WINDOWS_EXCLUSIVE_SHARE if is_root else _WINDOWS_NORMAL_SHARE
+            parent = _open_or_create_dir_relative(parent, component.name, full_path=component, access=access, share=share)
+            pinned.append(parent)
+        root_handle = parent
+
+        # Handle-relative hardening walk.
+        _walk_and_harden_windows_handle(root, root_handle, owner_sid, root)
+    finally:
+        for handle in reversed(pinned):
+            handle.close()
 
 
 @contextmanager
@@ -360,22 +383,20 @@ def _harden_posix_credential_tree(root: Path) -> None:
     _walk_and_harden(root, _chmod)
 
 
-def _harden_windows_credential_tree(root: Path) -> None:
-    owner_sid = _resolve_current_user_sid()
-
-    def _grant(path: Path, kind: str) -> None:
-        _set_windows_private_dacl(path, owner_sid, inheritable_full=(kind == "dir"))
-
-    _walk_and_harden(root, _grant)
-
-
 def _walk_and_harden(root: Path, apply_: Callable[[Path, str], None]) -> None:
-    """Lstat-before-descent walk over *root* and each descendant.
+    """Lstat-before-descent walk over *root* and each descendant (POSIX).
 
-    Every discovered path is validated (symlink / reparse-point / unsupported
-    type rejected) *before* any descent, so a reparse point can never redirect
-    the walk outside the credential tree. We only ``iterdir()`` a path after it
-    is confirmed to be a real directory.
+    Every path is validated with ``lstat()`` (symlink / reparse-point / unsupported
+    type rejected) *before* applying permissions and descending, and we only
+    ``iterdir()`` a path after it is confirmed to be a real directory.
+
+    This is a best-effort static check, not a race-proof one: it does not pin the
+    object, so a concurrent local principal could still swap a checked directory
+    for a symlink between the ``lstat`` and a later permission apply / ``iterdir``.
+    Windows intentionally uses :func:`_walk_and_harden_windows_handle`, which keeps
+    validation, the ACL update, and traversal bound to the opened object (all descendant
+    opens are relative to an already-open parent handle), so it does not depend on the
+    pathname remaining stable.
     """
     pending: list[Path] = [root]
     while pending:
@@ -490,28 +511,150 @@ def _windows_private_security_information() -> int:
     return 0x00000001 | 0x00000004 | 0x80000000
 
 
-def _apply_file_security_descriptor(path: Path, security_information: int, descriptor: ctypes.c_void_p) -> None:
-    """Final Win32 ``SetFileSecurityW`` call (thin seam for failure regressions)."""
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    advapi32.SetFileSecurityW.restype = wintypes.BOOL
-    advapi32.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
-    if not advapi32.SetFileSecurityW(str(path), security_information, descriptor):
+# --- Handle-relative Windows credential-tree walker -------------------------
+#
+# The secret-bearing Lark CLI tree is hardened with *handle-relative* primitives.
+# A ``no-FILE_SHARE_DELETE`` handle is not a rename barrier on its own (``os.rename``
+# of a directory is authorized by the object's DELETE right or the parent's
+# DELETE_CHILD, and does not require re-opening the directory for DELETE). So the
+# walker never re-resolves a pathname at all: it opens the tree once, then
+# enumerates and opens/creates every child *relative* to an already-open parent
+# handle (``RootDirectory``), and inspects/hardens from the handle. A pathname
+# swap can therefore not redirect the walker's validation, ACL update, or traversal.
+
+_FILE_LIST_DIRECTORY = 0x0001  # == FILE_READ_DATA when the target is a file
+_FILE_READ_ATTRIBUTES = 0x0080
+_READ_CONTROL = 0x00020000
+_WRITE_DAC = 0x00040000
+_WRITE_OWNER = 0x00080000
+_SYNCHRONIZE = 0x00100000
+_FILE_SHARE_READ = 0x00000001
+_FILE_SHARE_WRITE = 0x00000002
+_WINDOWS_NORMAL_SHARE = _FILE_SHARE_READ | _FILE_SHARE_WRITE
+# An exclusive (share=0) directory handle makes ``SetSecurityInfo`` skip automatic
+# propagation of an inheritable ACE into existing children, so we can apply the final
+# owner-only OI|CI DACL to a directory *before* walking its (as-yet-unvalidated) children.
+_WINDOWS_EXCLUSIVE_SHARE = 0
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+# Ancestors are carried only to retain the opened object's identity so children can
+# be opened *relative* to them via ``RootDirectory``; they are never hardened, so a
+# read-only handle (attributes + synchronize) is enough.
+_WINDOWS_PIN_ACCESS = _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
+# The credential root and its descendants get ``SetSecurityInfo`` on the open
+# handle, so they additionally need read-control plus write-DAC / write-owner.
+# Native Windows requires READ_CONTROL for this particular SetSecurityInfo path
+# in addition to WRITE_DAC / WRITE_OWNER — verified empirically: omitting it
+# yields ERROR_ACCESS_DENIED (WinError 5). ``FILE_LIST_DIRECTORY`` is needed on
+# directory handles so ``GetFileInformationByHandleEx`` can enumerate them. We
+# deliberately do *not* request ``FILE_READ_EA``.
+_WINDOWS_HARDEN_ACCESS = _WINDOWS_PIN_ACCESS | _READ_CONTROL | _WRITE_DAC | _WRITE_OWNER | _FILE_LIST_DIRECTORY
+
+
+class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("dwFileAttributes", wintypes.DWORD),
+        ("ftCreationTime", wintypes.FILETIME),
+        ("ftLastAccessTime", wintypes.FILETIME),
+        ("ftLastWriteTime", wintypes.FILETIME),
+        ("dwVolumeSerialNumber", wintypes.DWORD),
+        ("nFileSizeHigh", wintypes.DWORD),
+        ("nFileSizeLow", wintypes.DWORD),
+        ("nNumberOfLinks", wintypes.DWORD),
+        ("nFileIndexHigh", wintypes.DWORD),
+        ("nFileIndexLow", wintypes.DWORD),
+    ]
+
+
+class _WindowsFileInfo:
+    """Attribute snapshot taken from an already-open handle."""
+
+    def __init__(self, attributes: int, link_count: int) -> None:
+        self.attributes = attributes
+        self.link_count = link_count
+
+    @property
+    def reparse(self) -> bool:
+        return bool(self.attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+    @property
+    def is_dir(self) -> bool:
+        return bool(self.attributes & stat.FILE_ATTRIBUTE_DIRECTORY)
+
+
+def _create_windows_handle_no_follow(
+    path: Path,
+    *,
+    access: int,
+    share: int = _WINDOWS_NORMAL_SHARE,
+) -> int:
+    """Open *path* by name, never following a reparse point.
+
+    ``FILE_FLAG_OPEN_REPARSE_POINT`` opens the reparse point itself rather than
+    following it; ``FILE_FLAG_BACKUP_SEMANTICS`` lets a directory be opened as a
+    handle. This is used only to open the trusted base; every descendant is opened
+    relative to an already-open parent handle, so the walker does not depend on the
+    pathname remaining stable.
+    """
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    handle = kernel32.CreateFileW(
+        str(path),
+        access,
+        share,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle is None or handle == _INVALID_HANDLE_VALUE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return handle
+
+
+def _close_windows_handle(handle: int) -> None:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    if not kernel32.CloseHandle(handle):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def _set_windows_private_dacl(path: Path, owner_sid: str, *, inheritable_full: bool) -> None:
-    """Build an owner+protected-DACL descriptor in memory and apply it once.
+def _windows_file_info_from_handle(handle: int) -> _WindowsFileInfo:
+    """Read attributes of an already-open handle (never follows the pathname)."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.GetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION),
+    ]
+    info = _BY_HANDLE_FILE_INFORMATION()
+    if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return _WindowsFileInfo(info.dwFileAttributes, info.nNumberOfLinks)
 
-    The descriptor is constructed fully in memory with
-    ``ConvertStringSecurityDescriptorToSecurityDescriptorW`` and applied in a
-    single ``SetFileSecurityW`` call with ``OWNER | DACL | PROTECTED_DACL``, so
-    ownership is transferred together with the DACL. No intermediate
-    parent-inherited DACL is installed; if the final call fails the prior owner
-    and DACL are unchanged.
+
+@contextmanager
+def _windows_private_security_parts(owner_sid: str, *, inheritable_full: bool) -> Iterator[tuple[ctypes.c_void_p, ctypes.c_void_p]]:
+    """Build an owner + protected owner-only descriptor and yield ``(owner, dacl)``.
+
+    *owner* and *dacl* point into the descriptor; the caller applies the security within
+    this context, which releases the descriptor on exit.
     """
     sddl = _windows_private_sddl(owner_sid, inheritable_full=inheritable_full)
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
         wintypes.LPCWSTR,
@@ -521,50 +664,8 @@ def _set_windows_private_dacl(path: Path, owner_sid: str, *, inheritable_full: b
     ]
     descriptor = ctypes.c_void_p()
     size = wintypes.DWORD()
-    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        sddl,
-        1,  # SDDL_REVISION_1
-        ctypes.byref(descriptor),
-        ctypes.byref(size),
-    ):
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), ctypes.byref(size)):
         raise ctypes.WinError(ctypes.get_last_error())
-
-    try:
-        _apply_file_security_descriptor(path, _windows_private_security_information(), descriptor)
-    finally:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.LocalFree.restype = ctypes.c_void_p
-        kernel32.LocalFree(descriptor)
-
-
-def _set_windows_private_inheritable_directory_dacl(path: Path, owner_sid: str) -> None:
-    """Make *path* an owner-only inheritable directory boundary (Windows).
-
-    Uses ``SetNamedSecurityInfoW`` with an ``O:<owner>D:P(A;OICI;FA;;;<owner>)``
-    descriptor so ownership is transferred and the OI|CI owner Full Access ACE is
-    inheritable by children created afterwards. Legal only on an empty directory;
-    see ``_establish_private_directory_boundary``.
-    """
-    sddl = _windows_private_sddl(owner_sid, inheritable_full=True)
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-
-    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
-    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        ctypes.POINTER(ctypes.c_void_p),
-        ctypes.POINTER(wintypes.DWORD),
-    ]
-    descriptor = ctypes.c_void_p()
-    size = wintypes.DWORD()
-    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        sddl,
-        1,
-        ctypes.byref(descriptor),
-        ctypes.byref(size),
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-
     try:
         dacl_present = wintypes.BOOL()
         dacl_defaulted = wintypes.BOOL()
@@ -576,12 +677,7 @@ def _set_windows_private_inheritable_directory_dacl(path: Path, owner_sid: str) 
             ctypes.POINTER(ctypes.c_void_p),
             ctypes.POINTER(wintypes.BOOL),
         ]
-        if not advapi32.GetSecurityDescriptorDacl(
-            descriptor,
-            ctypes.byref(dacl_present),
-            ctypes.byref(dacl),
-            ctypes.byref(dacl_defaulted),
-        ):
+        if not advapi32.GetSecurityDescriptorDacl(descriptor, ctypes.byref(dacl_present), ctypes.byref(dacl), ctypes.byref(dacl_defaulted)):
             raise ctypes.WinError(ctypes.get_last_error())
         if not dacl_present.value or not dacl.value:
             raise RuntimeError("private security descriptor has no DACL")
@@ -594,15 +690,393 @@ def _set_windows_private_inheritable_directory_dacl(path: Path, owner_sid: str) 
             ctypes.POINTER(ctypes.c_void_p),
             ctypes.POINTER(wintypes.BOOL),
         ]
-        if not advapi32.GetSecurityDescriptorOwner(
-            descriptor,
-            ctypes.byref(owner),
-            ctypes.byref(owner_defaulted),
-        ):
+        if not advapi32.GetSecurityDescriptorOwner(descriptor, ctypes.byref(owner), ctypes.byref(owner_defaulted)):
             raise ctypes.WinError(ctypes.get_last_error())
         if not owner.value:
             raise RuntimeError("private security descriptor has no owner")
+        yield owner, dacl
+    finally:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree(descriptor)
 
+
+def _set_windows_security_info_handle(handle: int, owner_sid: str, *, inheritable_full: bool) -> None:
+    """Apply an owner + protected owner-only DACL to an open object handle.
+
+    This is the handle variant of ``SetNamedSecurityInfoW``: it acts on the
+    already-open object, so the ownership/DACL update cannot be redirected by a
+    concurrent pathname replacement. No intermediate parent-inherited DACL is ever
+    written; if the call fails the prior owner and DACL are unchanged.
+    """
+    with _windows_private_security_parts(owner_sid, inheritable_full=inheritable_full) as (owner, dacl):
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi32.SetSecurityInfo.restype = wintypes.DWORD
+        advapi32.SetSecurityInfo.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        result = advapi32.SetSecurityInfo(
+            handle,
+            1,  # SE_FILE_OBJECT
+            _windows_private_security_information(),
+            owner,
+            None,
+            dacl,
+            None,
+        )
+        if result != 0:
+            raise ctypes.WinError(result)
+
+
+_FILE_DIRECTORY_FILE = 0x00000001
+_FILE_OPEN_REPARSE_POINT = 0x00200000
+_FILE_OPEN_FOR_BACKUP_INTENT = 0x00004000
+_FILE_OPEN_IF = 3
+_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+_OBJ_CASE_INSENSITIVE = 0x00000040
+_FILE_FULL_DIRECTORY_RESTART_INFO = 0x0F
+_FILE_FULL_DIRECTORY_INFO = 0x0E
+_ERROR_NO_MORE_FILES = 18
+
+
+class _UNICODE_STRING(ctypes.Structure):
+    _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", wintypes.LPWSTR)]
+
+
+class _OBJECT_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [
+        ("Length", wintypes.ULONG),
+        ("RootDirectory", wintypes.HANDLE),
+        ("ObjectName", ctypes.POINTER(_UNICODE_STRING)),
+        ("Attributes", wintypes.ULONG),
+        ("SecurityDescriptor", ctypes.c_void_p),
+        ("SecurityQualityOfService", ctypes.c_void_p),
+    ]
+
+
+class _IO_STATUS_BLOCK(ctypes.Structure):
+    _fields_ = [("Status", ctypes.c_long), ("Information", ctypes.c_void_p)]
+
+
+def _windows_unicode_string(name: str) -> tuple[_UNICODE_STRING, ctypes.Array]:
+    """Build a ``UNICODE_STRING`` over *name*, sized in bytes (UTF-16 code units).
+
+    ``create_unicode_buffer`` allocates for the UTF-16 representation, so non-BMP
+    characters (surrogate pairs) are sized correctly; ``Length`` excludes the
+    terminating NUL while ``MaximumLength`` includes it. The caller must keep the
+    returned buffer alive for the duration of the Win32 call.
+    """
+    buf = ctypes.create_unicode_buffer(name)
+    us = _UNICODE_STRING()
+    us.Buffer = ctypes.cast(buf, wintypes.LPWSTR)
+    us.Length = ctypes.sizeof(buf) - ctypes.sizeof(ctypes.c_wchar)
+    us.MaximumLength = ctypes.sizeof(buf)
+    return us, buf
+
+
+def _object_attributes(parent_handle: int, name: str) -> tuple[_OBJECT_ATTRIBUTES, ctypes.Array]:
+    """Build ``OBJECT_ATTRIBUTES`` for *name* relative to *parent_handle*."""
+    us, buf = _windows_unicode_string(name)
+    oa = _OBJECT_ATTRIBUTES()
+    oa.Length = ctypes.sizeof(_OBJECT_ATTRIBUTES)
+    oa.RootDirectory = parent_handle
+    oa.ObjectName = ctypes.pointer(us)
+    oa.Attributes = _OBJ_CASE_INSENSITIVE
+    return oa, buf
+
+
+def _nt_open_relative(
+    parent_handle: int,
+    name: str,
+    *,
+    access: int,
+    directory: bool,
+    share: int = _WINDOWS_NORMAL_SHARE,
+) -> int:
+    """Open *name* relative to *parent_handle*, no-follow (never follows a junction)."""
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    ntdll.NtOpenFile.restype = ctypes.c_long
+    ntdll.NtOpenFile.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(_OBJECT_ATTRIBUTES),
+        ctypes.POINTER(_IO_STATUS_BLOCK),
+        wintypes.ULONG,
+        wintypes.ULONG,
+    ]
+    oa, _buf = _object_attributes(parent_handle, name)
+    io = _IO_STATUS_BLOCK()
+    handle = wintypes.HANDLE()
+    options = _FILE_OPEN_REPARSE_POINT | _FILE_OPEN_FOR_BACKUP_INTENT | (_FILE_DIRECTORY_FILE if directory else 0)
+    status = ntdll.NtOpenFile(
+        ctypes.byref(handle),
+        access,
+        ctypes.byref(oa),
+        ctypes.byref(io),
+        share,
+        options,
+    )
+    if status != 0:
+        raise ctypes.WinError(_ntstatus_to_dos(status))
+    return handle.value
+
+
+def _nt_create_dir_relative(
+    parent_handle: int,
+    name: str,
+    *,
+    access: int,
+    share: int = _WINDOWS_NORMAL_SHARE,
+) -> int:
+    """Create *name* as a directory relative to *parent_handle* and open it."""
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    ntdll.NtCreateFile.restype = ctypes.c_long
+    ntdll.NtCreateFile.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(_OBJECT_ATTRIBUTES),
+        ctypes.POINTER(_IO_STATUS_BLOCK),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    ]
+    oa, _buf = _object_attributes(parent_handle, name)
+    io = _IO_STATUS_BLOCK()
+    handle = wintypes.HANDLE()
+    options = _FILE_DIRECTORY_FILE | _FILE_OPEN_REPARSE_POINT | _FILE_OPEN_FOR_BACKUP_INTENT
+    status = ntdll.NtCreateFile(
+        ctypes.byref(handle),
+        access,
+        ctypes.byref(oa),
+        ctypes.byref(io),
+        None,
+        _FILE_ATTRIBUTE_DIRECTORY,
+        share,
+        _FILE_OPEN_IF,
+        options,
+        None,
+        0,
+    )
+    if status != 0:
+        raise ctypes.WinError(_ntstatus_to_dos(status))
+    return handle.value
+
+
+def _ntstatus_to_dos(status: int) -> int:
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    ntdll.RtlNtStatusToDosError.restype = wintypes.ULONG
+    ntdll.RtlNtStatusToDosError.argtypes = [ctypes.c_long]
+    return ntdll.RtlNtStatusToDosError(status)
+
+
+def _enumerate_directory_handle(handle: int) -> Iterator[str]:
+    """Yield entry names directly from a directory handle (no pathname re-resolution)."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    kernel32.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    info_class = _FILE_FULL_DIRECTORY_RESTART_INFO
+    buffer = ctypes.create_string_buffer(65536)
+    while True:
+        ok = kernel32.GetFileInformationByHandleEx(handle, info_class, ctypes.byref(buffer), ctypes.sizeof(buffer))
+        if not ok:
+            err = ctypes.get_last_error()
+            if err == _ERROR_NO_MORE_FILES:
+                return
+            raise ctypes.WinError(err)
+        info_class = _FILE_FULL_DIRECTORY_INFO
+        data = buffer.raw
+        offset = 0
+        while True:
+            (next_offset,) = struct.unpack_from("<I", data, offset)
+            (name_len,) = struct.unpack_from("<I", data, offset + 60)
+            name = data[offset + 68 : offset + 68 + name_len].decode("utf-16-le")
+            if name not in (".", ".."):
+                yield name
+            if next_offset == 0:
+                break
+            offset += next_offset
+
+
+class _WindowsTreeHandle:
+    """A no-follow handle to one credential-tree object.
+
+    Attribute inspection, the security update, enumeration, and child open/create
+    all operate through this single handle. Children are opened/created *relative*
+    to this handle (``RootDirectory``) rather than by re-resolving a pathname, so
+    a pathname swap cannot redirect validation, the ACL update, or traversal.
+    """
+
+    def __init__(self, path: Path, handle: int, info: _WindowsFileInfo) -> None:
+        self.path = path
+        self._handle = handle
+        self.info = info
+
+    def set_security(self, owner_sid: str, *, inheritable_full: bool) -> None:
+        _set_windows_security_info_handle(self._handle, owner_sid, inheritable_full=inheritable_full)
+
+    def enumerate(self) -> Iterator[str]:
+        yield from _enumerate_directory_handle(self._handle)
+
+    def open_child(self, name: str) -> _WindowsTreeHandle:
+        handle = _nt_open_relative(
+            self._handle,
+            name,
+            access=_WINDOWS_HARDEN_ACCESS,
+            directory=False,
+            share=_WINDOWS_EXCLUSIVE_SHARE,
+        )
+        return _wrap_windows_handle(self.path / name, handle)
+
+    def open_or_create_child_dir(self, name: str) -> _WindowsTreeHandle:
+        """Open (or create) a child directory relative to this handle, exclusively."""
+        try:
+            handle = _nt_open_relative(
+                self._handle,
+                name,
+                access=_WINDOWS_HARDEN_ACCESS,
+                directory=True,
+                share=_WINDOWS_EXCLUSIVE_SHARE,
+            )
+        except FileNotFoundError:
+            handle = _nt_create_dir_relative(
+                self._handle,
+                name,
+                access=_WINDOWS_HARDEN_ACCESS,
+                share=_WINDOWS_EXCLUSIVE_SHARE,
+            )
+        return _wrap_windows_handle(self.path / name, handle)
+
+    def close(self) -> None:
+        _close_windows_handle(self._handle)
+
+    def __enter__(self) -> _WindowsTreeHandle:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
+def _wrap_windows_handle(
+    path: Path,
+    handle: int,
+    *,
+    reject_reparse: bool = True,
+    full_path: Path | None = None,
+) -> _WindowsTreeHandle:
+    """Read handle info, reject a reparse point, and wrap the handle (closing on error)."""
+    try:
+        info = _windows_file_info_from_handle(handle)
+        target = full_path or path
+        if reject_reparse and info.reparse:
+            raise ValueError(f"Lark CLI credential path must not be a reparse point: {target}")
+        return _WindowsTreeHandle(target, handle, info)
+    except BaseException:
+        _close_windows_handle(handle)
+        raise
+
+
+def _open_windows_pinned(
+    path: Path,
+    *,
+    access: int,
+    reject_reparse: bool = True,
+    share: int = _WINDOWS_NORMAL_SHARE,
+) -> _WindowsTreeHandle:
+    """Open *path* by name, no-follow and pin it (used only for the trusted base)."""
+    handle = _create_windows_handle_no_follow(path, access=access, share=share)
+    return _wrap_windows_handle(path, handle, reject_reparse=reject_reparse)
+
+
+def _open_or_create_dir_relative(
+    parent: _WindowsTreeHandle,
+    name: str,
+    *,
+    full_path: Path,
+    access: int,
+    share: int = _WINDOWS_NORMAL_SHARE,
+) -> _WindowsTreeHandle:
+    """Open a child directory relative to *parent*, creating it if absent."""
+    try:
+        handle = _nt_open_relative(parent._handle, name, access=access, directory=True, share=share)
+    except FileNotFoundError:
+        handle = _nt_create_dir_relative(parent._handle, name, access=access, share=share)
+    return _wrap_windows_handle(full_path, handle)
+
+
+def _required_credential_child_dirs(path: Path, root: Path) -> tuple[str, ...]:
+    """Return the required sub-directories to ensure beneath *path* before enumerating."""
+    if path == root:
+        return ("config", "data")
+    if path == root / "config":
+        return ("locks",)
+    return ()
+
+
+def _walk_and_harden_windows_handle(path: Path, handle: _WindowsTreeHandle, owner_sid: str, root: Path) -> None:
+    """Recursively validate + harden a credential-tree object using handle-relative traversal.
+
+    A file is only hardened if it has exactly one link: an NTFS hard link shares the
+    underlying file object, so changing its security descriptor would also change the
+    owner/DACL of every other hard-link path. Directories are opened exclusively (share=0):
+    ``SetSecurityInfo`` therefore does not propagate the final inheritable OI|CI ACE into
+    as-yet-unvalidated children, and the namespace is locked while it is enumerated (native
+    regressions verify concurrent child rename/replacement and hard-link insertion fail with
+    sharing violations). The directory is made owner-only before descendants are validated;
+    a descendant that is a reparse point or a hard-linked file is rejected before its security
+    descriptor is touched.
+    """
+    info = handle.info
+    if info.reparse:
+        raise ValueError(f"Lark CLI credential path must not be a reparse point: {path}")
+    if not info.is_dir:
+        if info.link_count != 1:
+            raise ValueError(f"Lark CLI credential file must not be hard-linked: {path}")
+        handle.set_security(owner_sid, inheritable_full=False)
+        return
+    # Exclusive directory handle: this apply does not propagate into existing children.
+    handle.set_security(owner_sid, inheritable_full=True)
+    for name in _required_credential_child_dirs(path, root):
+        with handle.open_or_create_child_dir(name):
+            pass
+    for name in handle.enumerate():
+        child = handle.open_child(name)
+        try:
+            _walk_and_harden_windows_handle(path / name, child, owner_sid, root)
+        finally:
+            child.close()
+
+
+def _credential_chain_paths(base_dir: Path, root: Path) -> list[Path]:
+    """Return the ancestor chain from *base_dir* down to and including *root*."""
+    chain = [base_dir]
+    current = base_dir
+    for part in root.relative_to(base_dir).parts:
+        current = current / part
+        chain.append(current)
+    return chain
+
+
+def _set_windows_private_inheritable_directory_dacl(path: Path, owner_sid: str) -> None:
+    """Make *path* an owner-only inheritable directory boundary (Windows).
+
+    Uses ``SetNamedSecurityInfoW`` with an ``O:<owner>D:P(A;OICI;FA;;;<owner>)``
+    descriptor so ownership is transferred and the OI|CI owner Full Access ACE is
+    inheritable by children created afterwards. Legal only on an empty directory;
+    see ``_establish_private_directory_boundary``.
+    """
+    with _windows_private_security_parts(owner_sid, inheritable_full=True) as (owner, dacl):
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
         advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
         advapi32.SetNamedSecurityInfoW.argtypes = [
             wintypes.LPCWSTR,
@@ -624,10 +1098,6 @@ def _set_windows_private_inheritable_directory_dacl(path: Path, owner_sid: str) 
         )
         if result != 0:
             raise ctypes.WinError(result)
-    finally:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.LocalFree.restype = ctypes.c_void_p
-        kernel32.LocalFree(descriptor)
 
 
 def _establish_private_directory_boundary(path: Path) -> None:
@@ -931,14 +1401,14 @@ def _lark_cli_managed_path() -> str | None:
 def lark_cli_env_overlay(user_id: str, *, sandbox_paths: bool = False, broker: bool = False) -> dict[str, str]:
     """Environment overlay for lark-cli using DeerFlow-managed credentials.
 
-    The directories are per-user so a local trusted-mode login cannot bleed
-    across accounts.
+    The directories are per-user so a local trusted-mode login cannot bleed across
+    accounts.
 
-    When ``broker`` is set (Pattern B, issue #4338), the sandbox talks to a
-    broker sidecar that owns the credentials, so the overlay carries only the
-    broker URL and the runtime PATH — never ``LARKSUITE_CLI_CONFIG_DIR`` /
-    ``DATA_DIR``. This keeps the plaintext app secret / OAuth tokens out of the
-    sandbox filesystem entirely. ``broker`` implies ``sandbox_paths``.
+    When ``broker`` is set (Pattern B, issue #4338), the sandbox talks to a broker
+    sidecar that owns the credentials, so the overlay carries only the broker URL
+    and the runtime PATH — never ``LARKSUITE_CLI_CONFIG_DIR`` / ``DATA_DIR``. This
+    keeps the plaintext app secret / OAuth tokens out of the sandbox filesystem
+    entirely. ``broker`` implies ``sandbox_paths``.
     """
     if broker:
         return {
@@ -1837,7 +2307,7 @@ def _clear_directory_contents(directory: Path) -> None:
 
 @contextmanager
 def _lark_credential_transaction(user_id: str, root: Path):
-    """Restore the active credential tree if a switch step fails."""
+    """Copy the active credential tree to a snapshot and restore on failure."""
     with _private_lark_temp_dir(prefix=".switching-lark-app-", dir=root.parent) as temp_root:
         snapshot = temp_root / "credentials"
         _mkdir_under_private_boundary(snapshot)
