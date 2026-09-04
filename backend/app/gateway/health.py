@@ -19,6 +19,9 @@ its resources from and is stored on ``app.state``; probing a hot-reloaded
 config instead could check a backend the running process is not using. A
 ``backend=memory`` deployment has nothing to probe and is always considered
 ready; a startup config that cannot be resolved fails closed as unreachable.
+Connection-opening probes are serialized behind a strict per-process gate: the
+route is public through the ``/health`` auth prefix, so unlimited concurrent
+requests must never translate into unlimited new PostgreSQL connections.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import asyncio
 import logging
 import pathlib
 import urllib.parse
+import weakref
 from typing import TYPE_CHECKING
 
 from sqlalchemy import text
@@ -54,6 +58,25 @@ _READINESS_DEADLINE_SECONDS = 3.0
 # ``app.state`` attribute under which :func:`app.gateway.deps.langgraph_runtime`
 # records the startup-bound checkpointer/Store config the probe targets.
 READINESS_CHECKPOINTER_CONFIG_ATTR = "checkpointer_config"
+
+# One gate per running event loop (one per worker process in production; one
+# per test loop in the suite). ``/health/ready`` is public and unauthenticated,
+# so a thundering herd of probes - or an attacker - must never be able to open
+# an unbounded number of new connections: every connection-opening probe below
+# is serialized through this gate, bounding in-flight probe connections to one
+# per process. Waiting requests are still shed by the endpoint-wide deadline.
+_PROBE_GATES: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
+def _probe_gate() -> asyncio.Lock:
+    """Return the serialization gate bound to the currently running loop."""
+    loop = asyncio.get_running_loop()
+    gate = _PROBE_GATES.get(loop)
+    if gate is None:
+        gate = asyncio.Lock()
+        _PROBE_GATES[loop] = gate
+    return gate
+
 
 # Result vocabulary for the database probe.
 DATABASE_OK = "ok"
@@ -196,19 +219,22 @@ async def _probe_checkpointer_backend(config: CheckpointerConfig) -> str:
     """Probe the LangGraph checkpointer/Store backend described by *config*.
 
     *config* is the startup-bound snapshot (see :func:`resolve_checkpointer_config`);
-    an in-process memory backend has nothing external to probe.
+    an in-process memory backend has nothing external to probe. Probes that
+    open a connection (sqlite file, postgres) are serialized so concurrent
+    unauthenticated requests cannot exhaust the database's connections.
     """
     if config.type == "memory":
         # In-process backend: there is nothing external to probe.
         return DATABASE_NOT_CONFIGURED
-    if config.type == "sqlite":
-        return await _probe_sqlite_backend(config.connection_string)
-    if config.type == "postgres":
+    if config.type not in ("sqlite", "postgres"):
+        logger.warning("Readiness probe: unknown checkpointer backend %r", config.type)
+        return DATABASE_UNREACHABLE
+    async with _probe_gate():
+        if config.type == "sqlite":
+            return await _probe_sqlite_backend(config.connection_string)
         if not config.connection_string:
             return DATABASE_UNREACHABLE
         return await _probe_postgres_backend(config.connection_string, config.postgres_schema)
-    logger.warning("Readiness probe: unknown checkpointer backend %r", config.type)
-    return DATABASE_UNREACHABLE
 
 
 async def readiness_payload(checkpointer_config: CheckpointerConfig | None = None) -> tuple[int, dict[str, str]]:

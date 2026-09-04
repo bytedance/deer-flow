@@ -177,6 +177,38 @@ async def test_readiness_payload_enforces_endpoint_deadline(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_concurrent_readiness_requests_do_not_open_concurrent_probe_connections(monkeypatch):
+    """Public /health/ready must serialize connection-opening probes.
+
+    An unauthenticated thundering herd must never translate into an unbounded
+    number of new database connections (e.g. past PostgreSQL
+    max_connections): at most one probe connection may be in flight at a time
+    per process.
+    """
+    active = 0
+    max_active = 0
+
+    async def _tracked_probe(conn_string: str | None) -> str:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await asyncio.sleep(0.05)
+            return DATABASE_OK
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(health_module, "_probe_sqlite_backend", _tracked_probe)
+    monkeypatch.setattr("app.gateway.health.get_engine", lambda: None)
+    config = CheckpointerConfig(type="sqlite", connection_string=":memory:")
+
+    results = await asyncio.gather(*(readiness_payload(config) for _ in range(8)))
+
+    assert [status_code for status_code, _ in results] == [200] * 8
+    assert max_active == 1
+
+
+@pytest.mark.anyio
 async def test_probe_checkpointer_memory_reports_not_configured():
     assert await _probe_checkpointer_backend(CheckpointerConfig(type="memory")) == DATABASE_NOT_CONFIGURED
 
