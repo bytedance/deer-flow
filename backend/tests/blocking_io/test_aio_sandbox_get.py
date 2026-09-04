@@ -73,13 +73,14 @@ def _make_provider(tmp_path: Path):
     """Build an ``AioSandboxProvider`` without ``__init__`` (no Docker, no threads)."""
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
     from deerflow.config.sandbox_config import SandboxOwnershipConfig
+    from deerflow.sandbox.acquire_serialization import AcquireSerializer
 
     provider = AioSandboxProvider.__new__(AioSandboxProvider)
     provider._lock = threading.Lock()
     provider._sandboxes = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
-    provider._thread_locks = {}
+    provider._acquire_serializer = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
     provider._last_activity = {}
     provider._warm_pool = {}
     provider._active_sandbox_identity = {}

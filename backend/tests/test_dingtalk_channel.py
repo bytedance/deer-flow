@@ -2296,12 +2296,13 @@ class TestReceiveFile:
 
         _run(go())
 
-    def test_write_does_not_follow_planted_symlink(self, tmp_path, monkeypatch):
-        """A symlink planted at the destination must not be written through.
+    def test_write_reserves_planted_symlink_name(self, tmp_path, monkeypatch):
+        """A symlink planted at the requested name must force a unique suffix.
 
         Upload dirs can be mounted into local sandboxes, so a sandbox process can
         leave a symlink at a future upload name; following it would let a
-        gateway-privileged write land outside the bucket.
+        gateway-privileged write land outside the bucket. The symlink name is
+        treated as occupied so the attachment still loads at the next suffix.
         """
 
         async def go():
@@ -2323,7 +2324,9 @@ class TestReceiveFile:
             out = await channel.receive_file(msg, "t1", user_id="default")
 
             assert not outside.exists()
-            assert "[failed to load image: image.png]" in out.text
+            assert (uploads / "image.png").is_symlink()
+            assert (uploads / "image_1.png").read_bytes() == b"PWNED"
+            assert out.text == f"{VIRTUAL_PATH_PREFIX}/uploads/image_1.png"
 
         _run(go())
 

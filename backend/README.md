@@ -61,7 +61,7 @@ Middlewares execute in strict order, each handling a specific concern:
 | 3 | **SandboxMiddleware** | Acquires sandbox environment for code execution |
 | 4 | **SummarizationMiddleware** | Reduces context when approaching token limits (optional) |
 | 5 | **TodoListMiddleware** | Tracks multi-step tasks in plan mode (optional) |
-| 6 | **TitleMiddleware** | Auto-generates conversation titles after first exchange |
+| 6 | **TitleMiddleware** | Auto-generates conversation titles from the original user request after first exchange; attachment-only messages fall back to `New Conversation` |
 | 7 | **MemoryMiddleware** | Queues conversations for async memory extraction |
 | 8 | **ViewImageMiddleware** | Injects image data for vision-capable models (conditional) |
 | 9 | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
@@ -278,6 +278,29 @@ backend/
 deployments run the Gateway embedded runtime; the file is kept for LangGraph
 tooling, Studio, or direct LangGraph Server compatibility.
 
+To start the optional standalone development server and open its Studio URL:
+
+```bash
+cd backend
+uv run langgraph dev --allow-blocking
+```
+
+Run it from `backend/` so the CLI discovers `langgraph.json`. The in-memory
+server is intended for development and testing, not production deployment. The
+flag permits DeerFlow's synchronous configuration and graph-factory setup
+during local Studio requests; it is not a production-server setting. Its local
+Studio authentication and registered graph discovery are handled automatically;
+no custom connection headers are required. Assistant ownership/provenance is
+stamped by the server, and normal assistant-version selection remains available.
+Before the locked local runtime loads its persisted development store, DeerFlow
+repairs legacy assistant rows and version history so older metadata cannot
+reactivate server-only privileges or be discarded by runtime startup cleanup.
+Run `uv sync` after dependency changes; this compatibility path requires the
+declared LangGraph runtime versions and warns when the persisted-store contract
+does not match its expectations.
+The same file-based custom-app loading path used by this command is covered by
+the backend regression suite.
+
 ---
 
 ## Configuration
@@ -467,8 +490,11 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-# Offline backend suite (live external-API tests are excluded)
+# Default offline backend suite (live external-API and blocking-I/O tests are excluded)
 make test
+
+# Strict blocking-I/O suite
+make test-blocking-io
 
 # Explicit real-API DeerFlowClient integration suite
 make test-live

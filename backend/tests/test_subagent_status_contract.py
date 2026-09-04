@@ -240,3 +240,115 @@ def test_make_subagent_additional_kwargs_rejects_unknown_stop_reason():
 
     with pytest.raises(ValueError, match="invalid subagent stop_reason"):
         make_subagent_additional_kwargs("completed", stop_reason="garbage")  # type: ignore[arg-type]
+
+
+class TestToolReceiptTransport:
+    """RFC #4651 PR2: receipts + verdict ride additional_kwargs additively."""
+
+    def _receipt(self, rid: str = "r1") -> dict:
+        return {
+            "id": rid,
+            "tool_call_id": f"tc-{rid}",
+            "tool_name": "write_file",
+            "status": "success",
+            "args_sha256": "a" * 16,
+            "output_sha256": "b" * 16,
+            "output_bytes": 10,
+            "created_at": "2026-08-24T00:00:00+00:00",
+        }
+
+    def _verdict(self) -> dict:
+        return {
+            "source": "receipt_citations",
+            "requirement": "cited_ids_in_execution_record",
+            "citation_resolved": True,
+            "cited": ["r1"],
+            "resolved": ["r1"],
+            "failed": [],
+            "unknown": [],
+            "no_citation_claims": False,
+        }
+
+    def test_round_trip_receipts_and_verdict(self):
+        kwargs = make_subagent_additional_kwargs(
+            "completed",
+            result="done [r1]",
+            tool_receipts=[self._receipt()],
+            receipt_verdict=self._verdict(),
+        )
+        assert kwargs["subagent_tool_receipts"] == [self._receipt()]
+        assert kwargs["subagent_receipt_verdict"] == self._verdict()
+
+        structured = read_subagent_result_metadata(kwargs)
+        assert structured is not None
+        assert structured["tool_receipts"] == [self._receipt()]
+        assert structured["receipt_verdict"] == self._verdict()
+
+    def test_malformed_receipts_dropped(self):
+        kwargs = make_subagent_additional_kwargs(
+            "completed",
+            result="done",
+            tool_receipts=[self._receipt(), {"broken": True}],
+        )
+        assert kwargs["subagent_tool_receipts"] == [self._receipt()]
+
+    def test_all_malformed_receipts_omit_key(self):
+        kwargs = make_subagent_additional_kwargs(
+            "completed",
+            result="done",
+            tool_receipts=[{"broken": True}],
+        )
+        assert "subagent_tool_receipts" not in kwargs
+
+    def test_malformed_verdict_dropped(self):
+        kwargs = make_subagent_additional_kwargs(
+            "completed",
+            result="done",
+            receipt_verdict={"citation_resolved": "yes"},
+        )
+        assert "subagent_receipt_verdict" not in kwargs
+
+    def test_old_payloads_read_clean(self):
+        kwargs = make_subagent_additional_kwargs("completed", result="done")
+        structured = read_subagent_result_metadata(kwargs)
+        assert structured is not None
+        assert "tool_receipts" not in structured
+        assert "receipt_verdict" not in structured
+
+    def _acceptance_verdict(self) -> dict:
+        return {
+            "source": "acceptance_checklist",
+            "requirement": "delegation_acceptance_criteria",
+            "leaves": [
+                {"criterion": "file:../outputs/r.md exists", "family": "file_exists", "checked": True, "holds": True, "detail": "exists, 5 bytes"},
+                {"criterion": "open ended", "family": "undecidable", "checked": False, "holds": False, "detail": "not deterministically checkable"},
+            ],
+            "unchecked": ["open ended"],
+            "all_hold": False,
+        }
+
+    def test_round_trip_acceptance_verdict(self):
+        kwargs = make_subagent_additional_kwargs(
+            "completed",
+            result="done",
+            acceptance_verdict=self._acceptance_verdict(),
+        )
+        assert kwargs["subagent_acceptance_verdict"] == self._acceptance_verdict()
+
+        structured = read_subagent_result_metadata(kwargs)
+        assert structured is not None
+        assert structured["acceptance_verdict"] == self._acceptance_verdict()
+
+    def test_malformed_acceptance_verdict_dropped(self):
+        kwargs = make_subagent_additional_kwargs(
+            "completed",
+            result="done",
+            acceptance_verdict={"all_hold": "yes"},
+        )
+        assert "subagent_acceptance_verdict" not in kwargs
+
+    def test_old_payloads_have_no_acceptance_verdict(self):
+        kwargs = make_subagent_additional_kwargs("completed", result="done")
+        structured = read_subagent_result_metadata(kwargs)
+        assert structured is not None
+        assert "acceptance_verdict" not in structured

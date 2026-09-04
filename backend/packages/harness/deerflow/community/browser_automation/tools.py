@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -32,7 +33,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import BROWSER_FRAMES_DIRNAME
 from deerflow.tools.types import Runtime
 
-from .session import BrowserSession, BrowserSessionManager, PageSnapshot, get_browser_session_manager
+from .session import BrowserSession, BrowserSessionManager, PageSnapshot, ScreenshotType, get_browser_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,16 @@ _OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 _BROWSER_FRAMES_DIRNAME = BROWSER_FRAMES_DIRNAME
 _FRAMES_VIRTUAL_PREFIX = f"{_OUTPUTS_VIRTUAL_PREFIX}/{_BROWSER_FRAMES_DIRNAME}"
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+@dataclass(frozen=True)
+class _ScreenshotEncoding:
+    image_type: ScreenshotType
+    suffix: str
+    quality: int | None = None
+
+
+_PROGRESS_SCREENSHOT_ENCODING = _ScreenshotEncoding(image_type="jpeg", suffix=".jpg", quality=80)
 
 
 def _get_tool_config(tool_name: str) -> dict:
@@ -167,7 +178,7 @@ def _tool_message(content: str, tool_call_id: str) -> Command:
 def _step_screenshot_name(action: str) -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
     safe = _SAFE_FILENAME_RE.sub("_", action).strip("._-") or "step"
-    return f"browser-{safe}-{stamp}.png"
+    return f"browser-{safe}-{stamp}{_PROGRESS_SCREENSHOT_ENCODING.suffix}"
 
 
 async def _capture_step_screenshot(runtime: Runtime, session: BrowserSession, action: str) -> str | None:
@@ -181,7 +192,11 @@ async def _capture_step_screenshot(runtime: Runtime, session: BrowserSession, ac
     if isinstance(outputs_path, str):
         return None
     try:
-        content = await session.screenshot_bytes(full_page=False)
+        content = await session.screenshot_bytes(
+            full_page=False,
+            image_type=_PROGRESS_SCREENSHOT_ENCODING.image_type,
+            quality=_PROGRESS_SCREENSHOT_ENCODING.quality,
+        )
         name = _step_screenshot_name(action)
         frames_dir = outputs_path / _BROWSER_FRAMES_DIRNAME
         final_name = await asyncio.to_thread(_write_screenshot, frames_dir, name, content)
@@ -244,7 +259,11 @@ async def navigate_and_capture(*, thread_id: str | None, url: str, outputs_path:
         snapshot = await session.navigate(url)
         screenshot_path: str | None = None
         try:
-            content = await session.screenshot_bytes(full_page=False)
+            content = await session.screenshot_bytes(
+                full_page=False,
+                image_type=_PROGRESS_SCREENSHOT_ENCODING.image_type,
+                quality=_PROGRESS_SCREENSHOT_ENCODING.quality,
+            )
             name = _step_screenshot_name("navigate")
             frames_dir = outputs_path / _BROWSER_FRAMES_DIRNAME
             final_name = await asyncio.to_thread(_write_screenshot, frames_dir, name, content)

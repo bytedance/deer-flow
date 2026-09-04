@@ -36,12 +36,14 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, override
 
+from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, strip_injected_user_message_id_suffix
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -61,9 +63,17 @@ _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
 _SUMMARY_MESSAGE_NAME = "summary"
-# Suffix the ID-swap gives the real user message; the reminder SystemMessage
-# takes the original id so ``add_messages`` can replace it in place.
-INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
+
+# ``INJECTED_USER_MESSAGE_ID_SUFFIX`` / ``strip_injected_user_message_id_suffix``
+# are defined in ``deerflow.utils.messages`` and re-exported here, where the
+# ID-swap they describe actually happens. Existing importers keep working.
+__all__ = [
+    "INJECTED_USER_MESSAGE_ID_SUFFIX",
+    "DynamicContextMiddleware",
+    "SubagentDateContextMiddleware",
+    "is_dynamic_context_reminder",
+    "strip_injected_user_message_id_suffix",
+]
 
 
 def _format_current_date() -> str:
@@ -78,20 +88,6 @@ def _format_current_date_reminder(current_date: str) -> str:
             "</system-reminder>",
         ]
     )
-
-
-def strip_injected_user_message_id_suffix(message_id: str | None) -> str | None:
-    """Return the id *message_id* had before the reminder ID-swap.
-
-    Replaying a persisted user turn must feed the graph the id the client
-    originally sent: a ``{id}__user`` message is skipped as an injection target,
-    so replaying one into a state that has no reminder yet silently drops the
-    date and memory block for that turn.
-    """
-
-    if isinstance(message_id, str) and message_id.endswith(INJECTED_USER_MESSAGE_ID_SUFFIX):
-        return message_id[: -len(INJECTED_USER_MESSAGE_ID_SUFFIX)] or message_id
-    return message_id
 
 
 def _extract_date(content: str) -> str | None:
@@ -203,6 +199,16 @@ class DynamicContextMiddleware(AgentMiddleware):
     session — its content never changes again, so the prefix cache can hit on every
     subsequent turn.
 
+    Fallback (missed earlier injection)
+    -----------------------------------
+    If an earlier turn ended without any reminder (e.g. the async ``abefore_agent``
+    degraded path skipped injection on a timeout), the first-injection branch runs
+    on a history that already holds several turns.  The reminder then attaches to
+    the **last** user message instead: the ID-swap's ``{id}__user`` copy is
+    appended by ``add_messages``, so attaching to an earlier message would move
+    that stale prompt ahead of the current question and the model would answer
+    the old prompt as the current turn.
+
     Midnight crossing
     -----------------
     If the conversation spans midnight, the current date differs from the date that
@@ -271,7 +277,11 @@ class DynamicContextMiddleware(AgentMiddleware):
         stable_id = original.id or str(uuid.uuid4())
         messages: list[SystemMessage | HumanMessage] = []
 
-        reminder_kwargs = {"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True}
+        reminder_kwargs = {
+            "hide_from_ui": True,
+            _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+            **provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "dynamic_context"),
+        }
         if reminder_date is not None:
             reminder_kwargs[_REMINDER_DATE_KEY] = reminder_date
         messages.append(
@@ -287,7 +297,11 @@ class DynamicContextMiddleware(AgentMiddleware):
                 HumanMessage(
                     content=memory_content,
                     id=f"{stable_id}__memory",
-                    additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                        **provenance_kwargs(ContentKind.MEMORY, "dynamic_context_memory"),
+                    },
                 )
             )
 
@@ -317,16 +331,26 @@ class DynamicContextMiddleware(AgentMiddleware):
 
         if last_date is None:
             # ── First turn: inject full reminder as a SystemMessage ─────
-            first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
-            if first_idx is None:
+            #
+            # Scan from the end so the reminder attaches to the LAST user
+            # injection target.  Normally that is also the only message.  But
+            # when an earlier turn ended without any reminder — e.g. the async
+            # ``abefore_agent`` degraded path skipped injection on a timeout —
+            # history already holds multiple turns and the ID-swap's
+            # ``{id}__user`` copy is APPENDED by ``add_messages``; choosing an
+            # earlier message here would move the old first user prompt to the
+            # tail, ahead of the latest question, and the model would answer
+            # the stale first message as if it were the current turn.
+            target_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
+            if target_idx is None:
                 return None
             date_reminder, memory_block = self._build_full_reminder(runtime)
             logger.info(
-                "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into first HumanMessage id=%r",
+                "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into last HumanMessage id=%r",
                 memory_block is not None,
-                messages[first_idx].id,
+                messages[target_idx].id,
             )
-            result_msgs = self._make_reminder_and_user_messages(messages[first_idx], date_reminder, memory_block, reminder_date=current_date)
+            result_msgs = self._make_reminder_and_user_messages(messages[target_idx], date_reminder, memory_block, reminder_date=current_date)
             return {"messages": result_msgs}
 
         if last_date == current_date:

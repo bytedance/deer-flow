@@ -11,7 +11,7 @@ dependencies = [
     # the contract version it implements, extensions declare ranges. A range
     # here would let pip resolve a newer contract package than this harness
     # implements, making newer extensions look supported at runtime.
-    "deerflow-extension-api==0.1.2",
+    "deerflow-extension-api==0.2.0",
     "dotenv>=0.9.9",
     "exa-py>=1.0.0",
     "httpx>=0.28.0",
@@ -28,7 +28,9 @@ dependencies = [
     "langgraph>=1.2.9,<1.3",
     "langgraph-api>=0.8.1",
     "langgraph-cli>=0.4.24",
-    "langgraph-runtime-inmem>=0.28.0",
+    # Standalone Studio's pre-runtime persistence repair is validated against
+    # the 0.30.0 store lifecycle and must not resolve an older implementation.
+    "langgraph-runtime-inmem>=0.30.0",
     "markdownify>=1.2.2",
     "markitdown[all,xlsx]>=0.0.1a2",
     "packaging>=24.2",
@@ -76,7 +78,12 @@ pymupdf = ["pymupdf4llm>=0.0.17"]
 boxlite = ["boxlite>=0.9.7"]
 # Tenki cloud sandbox provider (deerflow.community.tenki). Optional so a default
 # install stays free of the Tenki SDK; only pulled in when the provider is used.
-tenki = ["tenki-sandbox>=0.4.0"]
+# The distribution is ``tenki``; it still ships the ``tenki_sandbox`` module that
+# provider.py and sandbox.py import.
+tenki = ["tenki>=1.0.0"]
+# OpenSandbox remote sandbox provider (deerflow.community.opensandbox). The
+# sync SDK is loaded only when this provider is selected.
+opensandbox = ["opensandbox>=0.1.15,<0.2.0"]
 # Agent observability (Monocle). Optional so a default install stays free of the
 # OpenTelemetry stack; only pulled in when MONOCLE_TRACING is used.
 monocle = ["monocle_apptrace>=0.8.8"]

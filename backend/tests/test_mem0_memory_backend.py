@@ -77,6 +77,9 @@ class TestMem0Config:
             ("score_threshold", 1.5),
             ("max_injection_chars", 0),
             ("timeout_seconds", 0),
+            ("timeout_seconds", float("nan")),
+            ("timeout_seconds", float("inf")),
+            ("timeout_seconds", float("-inf")),
         ],
     )
     def test_invalid_values_rejected(self, key: str, value: object) -> None:
@@ -252,7 +255,7 @@ class TestMessageFiltering:
         assert filter_messages_for_memory([hidden, clarification]) == [clarification]
 
     def test_upload_only_human_drops_it_and_following_ai(self) -> None:
-        upload_only = HumanMessage(content="<uploaded_files>\nfile.pdf\n</uploaded_files>")
+        upload_only = HumanMessage(content="<current_uploads>\nfile.pdf\n</current_uploads>")
         ack = AIMessage(content="I see your file")
         followup = HumanMessage(content="what is in it?")
         assert filter_messages_for_memory([upload_only, ack, followup]) == [followup]
