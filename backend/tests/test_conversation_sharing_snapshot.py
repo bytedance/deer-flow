@@ -1487,3 +1487,41 @@ def test_unmatched_backtick_scan_stays_linear_on_growing_runs():
     # Every growing run is unmatched; the only real span is the trailing pair.
     assert [text[start:close] for start, close in spans] == ["`real`"]
     assert elapsed < 5.0
+
+
+def test_strip_invalid_html_openers_do_not_open_blocks_all_types():
+    """CommonMark opener sweep across every HTML block type: only a
+    well-formed opener may open a block. An invalid opener is ordinary
+    paragraph text — the fence behind it is a real code fence whose closer
+    ends the block, and the reasoning after that closer is stripped. A
+    valid opener consumes the first fence as HTML content, so the second
+    fence opens a real code fence and the reasoning inside it is preserved
+    (types 1-5 close on their own closer line; types 6-7 close on the
+    blank line)."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    # (label, opener line, block-close line ("" = blank line), valid?)
+    cases = (
+        ("type1", "<script>", "</script>", True),
+        ("type1-invalid", "<script=foo>", "</script>", False),
+        ("type2", "<!-- x", "-->", True),
+        ("type2-invalid", "<!-x", "-->", False),
+        ("type3", "<?php echo;", "?>", True),
+        ("type4", "<!DOCTYPE", ">", True),
+        ("type4-invalid", "<!foo", ">", False),
+        ("type5", "<![CDATA[x", "]]>", True),
+        ("type5-invalid", "<![cdata[x", "]]>", False),
+        ("type6", "<div>", "", True),
+        ("type6-invalid", "<div=x>", "", False),
+        ("type7", "<span>", "", True),
+        ("type7-invalid", "<span =foo>", "", False),
+    )
+    for label, opener, closer, valid in cases:
+        lines = [opener, "```", "code", closer if closer else "", "```", f"<think>secret-{label}</think> visible"]
+        out = strip("\n".join(lines))
+        if valid:
+            assert f"secret-{label}" in out, (label, out)
+        else:
+            assert f"secret-{label}" not in out, (label, out)

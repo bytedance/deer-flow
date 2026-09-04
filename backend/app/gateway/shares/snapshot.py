@@ -51,13 +51,18 @@ _BLOCKQUOTE_RE = re.compile(r"^ {0,3}>")
 _LIST_ITEM_RE = re.compile(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]")
 _THEMATIC_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 _SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
-_HTML_TYPE1_OPEN_RE = re.compile(r"^ {0,3}<(script|pre|style|textarea)\b", re.IGNORECASE)
+# CommonMark type-1 start: the tag name must be followed by a space, a
+# tab, `>`, or the end of the line — a word boundary lets `<script=foo`
+# through and opens a phantom block that swallows the real code fence.
+_HTML_TYPE1_OPEN_RE = re.compile(r"^ {0,3}<(script|pre|style|textarea)(?:[ \t]|>|$)", re.IGNORECASE)
 
 _HTML_TYPE2_OPEN_RE = re.compile(r"^ {0,3}<!--")
 _HTML_TYPE2_CLOSE = "-->"
 _HTML_TYPE3_OPEN_RE = re.compile(r"^ {0,3}<\?")
 _HTML_TYPE3_CLOSE = "?>"
-_HTML_TYPE4_OPEN_RE = re.compile(r"^ {0,3}<![A-Za-z]")
+# CommonMark type-4 declarations require an uppercase ASCII letter after
+# `<!`; a lowercase `<!foo` is ordinary text, not a declaration block.
+_HTML_TYPE4_OPEN_RE = re.compile(r"^ {0,3}<![A-Z]")
 _HTML_TYPE4_CLOSE = ">"
 # CommonMark type-6 block tags (spec'd list; the block ends at a blank line).
 _HTML_TYPE6_TAGS = (
