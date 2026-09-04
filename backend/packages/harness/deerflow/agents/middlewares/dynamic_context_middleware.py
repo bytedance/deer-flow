@@ -49,7 +49,7 @@ import uuid
 from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import TYPE_CHECKING, override
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
@@ -101,7 +101,11 @@ def _date_timezone() -> tzinfo | None:
         return None
     try:
         return ZoneInfo(raw)
-    except Exception:
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        # Only configuration-shaped failures degrade to server-local. A
+        # BlockingError-style guard (blocking-I/O regression suite) or any
+        # unrelated exception must propagate instead of being misread as an
+        # invalid timezone name.
         logger.warning("Invalid %s=%r; falling back to the server-local timezone", _DATE_TIMEZONE_ENV, raw)
         return None
 
@@ -124,7 +128,7 @@ def _server_local_timezone_name() -> str | None:
     if tz_env:
         try:
             return ZoneInfo(tz_env).key
-        except Exception:
+        except (ZoneInfoNotFoundError, ValueError, OSError):
             pass
     localtime = Path("/etc/localtime")
     try:
@@ -288,8 +292,24 @@ class SubagentDateContextMiddleware(AgentMiddleware):
         return self._inject()
 
     @override
-    async def abefore_agent(self, state, runtime: Runtime) -> dict:
-        return self._inject()
+    async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
+        # _inject() can resolve DEER_FLOW_DATE_TIMEZONE through ZoneInfo,
+        # which reads the OS zone database (or the tzdata wheel) on a cold
+        # cache. SubagentDateContextMiddleware runs on the async subagent path,
+        # where no assembly observer necessarily warmed that resolution first,
+        # so the injection is offloaded like DynamicContextMiddleware does (see
+        # #3402) to keep filesystem work off the event loop.
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._inject),
+                timeout=_INJECT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "SubagentDateContextMiddleware: date injection timed out (%.1fs); skipping for this run",
+                _INJECT_TIMEOUT_SECONDS,
+            )
+            return None
 
 
 class DynamicContextMiddleware(AgentMiddleware):
