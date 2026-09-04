@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from bisect import bisect_left
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any
 from urllib.parse import unquote
 
-from deerflow.utils.llm_text import strip_think_blocks
+from deerflow.config.agents_config import AGENT_NAME_PATTERN
+from deerflow.utils.thread_id import THREAD_ID_PATTERN
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,8 @@ _SNAPSHOT_MAX_RENDERED_BYTES = 2 * 1024 * 1024
 # would walk an unbounded history while the public-message count stays under
 # the share cap.
 _SNAPSHOT_MAX_SCANNED_ROWS = 50_000
-_MARKDOWN_LINK_RE = re.compile(r"!?\[(?P<label>[^\]]*)\]\((?P<target>[^)]+)\)")
+_THINK_OPEN_PREFIX_RE = re.compile(r"<think\b", re.IGNORECASE)
+_THINK_CLOSE_PREFIX_RE = re.compile(r"</think", re.IGNORECASE)
 # --- Block-structure classification for code protection ------------------
 # The think-strip may only preserve what the Markdown renderer will also
 # render as code, so code regions are recognized per CommonMark block
@@ -46,9 +49,13 @@ _MARKDOWN_LINK_RE = re.compile(r"!?\[(?P<label>[^\]]*)\]\((?P<target>[^)]+)\)")
 # not fences, and every block-interrupting line ends a paragraph (an
 # inline span can never reach across one).
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_HEADING_RE = re.compile(r"^ {0,3}#{1,6}[ \t]")
+_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
 _BLOCKQUOTE_RE = re.compile(r"^ {0,3}>")
+_QUOTE_DEPTH_MARKER_RE = re.compile(r" {0,3}>[ \t]?")
 _LIST_ITEM_RE = re.compile(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]")
+_CONTAINER_PADDING_RE = re.compile(r"[ \t]*")
+_CONTAINER_QUOTE_MARKER_RE = re.compile(r">[ \t]?")
+_CONTAINER_LIST_MARKER_RE = re.compile(r"(?:[-+*]|\d{1,9}[.)])[ \t]+")
 _THEMATIC_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 _SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 # CommonMark type-1 start: the tag name must be followed by a space, a
@@ -516,13 +523,95 @@ def _commonmark_inline_code_spans(text: str) -> list[tuple[int, int]]:
 def _quote_depth(content: str) -> int:
     """Number of leading blockquote markers (a line starting "> > " nests two)."""
     depth = 0
-    rest = content
+    offset = 0
     while True:
-        marker = re.match(r"^ {0,3}>[ \t]?", rest)
+        marker = _QUOTE_DEPTH_MARKER_RE.match(content, offset)
         if marker is None:
             return depth
         depth += 1
-        rest = rest[marker.end() :]
+        offset = marker.end()
+
+
+def _container_thematic_suffix_start(content: str) -> int | None:
+    """Start of a homogeneous three-marker suffix, computed in one pass."""
+    cursor = len(content)
+    while cursor > 0 and content[cursor - 1] in " \t":
+        cursor -= 1
+    if cursor == 0 or content[cursor - 1] not in "-*_":
+        return None
+    marker = content[cursor - 1]
+    count = 0
+    start = cursor
+    while cursor > 0:
+        while cursor > 0 and content[cursor - 1] in " \t":
+            cursor -= 1
+        if cursor == 0 or content[cursor - 1] != marker:
+            break
+        cursor -= 1
+        start = cursor
+        count += 1
+    return start if count >= 3 else None
+
+
+def _container_body(content: str) -> tuple[str, bool]:
+    """Peel quote/list markers and report whether a quote was present."""
+    offset = 0
+    saw_quote = False
+    while True:
+        padding = _CONTAINER_PADDING_RE.match(content, offset)
+        assert padding is not None
+        offset = padding.end()
+        marker = _CONTAINER_QUOTE_MARKER_RE.match(content, offset)
+        if marker is not None:
+            saw_quote = True
+        else:
+            marker = _CONTAINER_LIST_MARKER_RE.match(content, offset)
+        if marker is None:
+            return content[offset:], saw_quote
+        offset = marker.end()
+
+
+def _container_leaf_content(content: str) -> tuple[str, int, bool] | None:
+    """Return a leaf-block line nested in quote/list containers.
+
+    This parser is deliberately conservative after any quote/list has been
+    observed: arbitrary leading indentation may be item content indentation.
+    Misclassifying an indented code line as a boundary can only remove extra
+    text, while missing a real item heading lets an inline-code span bridge
+    distinct paragraphs and publish reasoning.
+    """
+    offset = 0
+    thematic_start = _container_thematic_suffix_start(content)
+    while True:
+        # Regex ``pos`` keeps one immutable source string.  Re-slicing the
+        # remaining suffix at every nested marker makes a valid 2 MiB share
+        # quadratic under an adversarial ``> > > ...`` line.
+        padding = _CONTAINER_PADDING_RE.match(content, offset)
+        assert padding is not None
+        offset = padding.end()
+        # Thematic syntax overlaps a bullet marker (``* * *``), so test it
+        # at every container depth before consuming another list marker.
+        if offset == thematic_start:
+            return content[offset:], offset, False
+        marker = _CONTAINER_QUOTE_MARKER_RE.match(content, offset)
+        if marker is None:
+            marker = _CONTAINER_LIST_MARKER_RE.match(content, offset)
+        if marker is None:
+            break
+        offset = marker.end()
+
+    body = content[offset:]
+    if _HEADING_RE.match(body) is not None:
+        return body, offset, True
+    if _THEMATIC_RE.match(body) is not None or _SETEXT_UNDERLINE_RE.match(body) is not None:
+        return body, offset, False
+    fence = _FENCE_OPEN_RE.match(body)
+    if fence is not None and not (fence.group(1)[0] == "`" and "`" in fence.group(2)):
+        return body, offset, False
+    html_kind, _tag, _blank_end, _closes_on_open = _html_open(body)
+    if html_kind is not None:
+        return body, offset, False
+    return None
 
 
 def _indent_columns(content: str) -> int:
@@ -637,6 +726,10 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
     html_kind: str | None = None
     html_tag: str | None = None
     html_blank_end = False
+    container_html_kind: str | None = None
+    container_html_tag: str | None = None
+    container_html_blank_end = False
+    container_html_requires_quote = False
     indented_start: int | None = None
     indented_end = 0
     # An indented code block may open only where no paragraph is open —
@@ -694,6 +787,22 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
                 html_kind = None
                 indented_eligible = True
             continue
+        if container_html_kind is not None:
+            container_body, has_quote = _container_body(content)
+            if container_html_requires_quote and not has_quote:
+                # A raw HTML block cannot lazily continue after its quote
+                # container ends; reconsider this line at document scope.
+                container_html_kind = None
+                indented_eligible = True
+            else:
+                if container_html_blank_end:
+                    if container_body.strip() == "":
+                        container_html_kind = None
+                        indented_eligible = True
+                elif _html_block_close(container_body, container_html_kind, container_html_tag):
+                    container_html_kind = None
+                    indented_eligible = True
+                continue
         if indented_start is not None:
             if content.strip() == "" or _indent_columns(content) >= 4:
                 indented_end = line_end
@@ -745,6 +854,27 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
             continue
         quote_match = _BLOCKQUOTE_RE.match(content) is not None
         list_match = (not quote_match) and _LIST_ITEM_RE.match(content) is not None
+        if quote_match or list_match or saw_quotelike:
+            container_leaf = _container_leaf_content(content)
+            if container_leaf is not None:
+                leaf_body, leaf_offset, preserve_inline = container_leaf
+                # A leaf block inside any quote/list container interrupts the
+                # item paragraph. Item indentation is intentionally parsed
+                # fail-closed because this sanitizer's leak-vs-loss contract
+                # already suppresses code-block protection in such messages.
+                saw_quotelike = True
+                flush_segment()
+                if preserve_inline:
+                    for begin, end in _commonmark_inline_code_spans(leaf_body):
+                        regions.append((start + leaf_offset + begin, start + leaf_offset + end))
+                kind, tag, ends_at_blank, closes_on_open = _html_open(leaf_body)
+                if kind is not None and not closes_on_open:
+                    container_html_kind = kind
+                    container_html_tag = tag
+                    container_html_blank_end = ends_at_blank
+                    _body, container_html_requires_quote = _container_body(content)
+                indented_eligible = True
+                continue
         if quote_match or list_match:
             # An empty quote line at any nesting depth is a blank line
             # inside the quote: it splits the quoted paragraph.
@@ -802,46 +932,69 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
     return regions
 
 
+def _find_think_open(text: str, start: int) -> tuple[int, int] | None:
+    """Find an opening think tag without retrying its suffix per candidate."""
+    prefix = _THINK_OPEN_PREFIX_RE.search(text, start)
+    if prefix is None:
+        return None
+    stop = text.find(">", prefix.end())
+    if stop < 0:
+        return None
+    return prefix.start(), stop + 1
+
+
+def _find_think_close(text: str, start: int) -> tuple[int, int] | None:
+    """Find a closing think tag while scanning intervening space once."""
+    cursor = start
+    while prefix := _THINK_CLOSE_PREFIX_RE.search(text, cursor):
+        stop = prefix.end()
+        while stop < len(text) and text[stop].isspace():
+            stop += 1
+        if stop < len(text) and text[stop] == ">":
+            return prefix.start(), stop + 1
+        cursor = stop
+    return None
+
+
 def _strip_think_blocks_outside_markdown_code(text: str) -> str:
     """Remove model reasoning while preserving literal tags in code examples."""
-    protected: list[str] = []
-    marker_prefix = "\x00deerflow-share-code-"
-    while marker_prefix in text:
-        marker_prefix += "_"
-
-    # `_code_regions` yields disjoint, non-nested regions, so each marker is
-    # spliced exactly once and the index-based restore below cannot collide
-    # (a region inside another region — the old corruption vector — cannot
-    # exist). A marker swallowed by a removed <think> block simply restores
-    # nothing: its code content was part of the removed reasoning.
-    without_code_parts: list[str] = []
+    # Build an equal-length classification shadow whose NULs cannot introduce
+    # ``<think>`` syntax. Exact source offsets then remain valid without any
+    # collision-prone sentinel selection or per-code-region restoration.
+    shadow_parts: list[str] = []
     cursor = 0
     for begin, end in _code_regions(text):
-        without_code_parts.append(text[cursor:begin])
-        marker = f"{marker_prefix}{len(protected)}\x00"
-        protected.append(text[begin:end])
-        without_code_parts.append(marker)
+        shadow_parts.append(text[cursor:begin])
+        shadow_parts.append("\x00" * (end - begin))
         cursor = end
-    without_code_parts.append(text[cursor:])
-    without_code = "".join(without_code_parts)
-    stripped = strip_think_blocks(without_code)
-    if not protected:
-        return stripped
-    # Single-pass rejoin: a per-region `stripped.replace(marker, code)` is
-    # quadratic (full-string scan per region — ~170s at the 2 MiB snapshot
-    # cap with ~131k regions, paid on every anonymous read).
-    marker_map = {f"{marker_prefix}{index}\x00": code for index, code in enumerate(protected)}
-    parts: list[str] = []
-    restore_cursor = 0
-    for marker_match in re.finditer(re.escape(marker_prefix) + r"\d+\x00", stripped):
-        parts.append(stripped[restore_cursor : marker_match.start()])
-        parts.append(marker_map.get(marker_match.group(0), marker_match.group(0)))
-        restore_cursor = marker_match.end()
-    parts.append(stripped[restore_cursor:])
-    return "".join(parts)
+    shadow_parts.append(text[cursor:])
+    shadow = "".join(shadow_parts)
+
+    kept_ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while opening := _find_think_open(shadow, cursor):
+        kept_ranges.append((cursor, opening[0]))
+        close = _find_think_close(shadow, opening[1])
+        if close is None:
+            cursor = len(text)
+            break
+        cursor = close[1]
+    else:
+        kept_ranges.append((cursor, len(text)))
+
+    original_output = "".join(text[begin:end] for begin, end in kept_ranges)
+    shadow_output = "".join(shadow[begin:end] for begin, end in kept_ranges)
+    trim_begin = len(shadow_output) - len(shadow_output.lstrip())
+    trim_end = len(shadow_output.rstrip())
+    return original_output[trim_begin:trim_end]
 
 
-def _collapse_separators_once(text: str) -> tuple[str, list[tuple[int, int]]]:
+def _collapse_separators_once(
+    text: str,
+    *,
+    decode_percent: bool = False,
+    decode_escapes: bool = True,
+) -> tuple[str, list[tuple[int, int]]]:
     """One normalization pass: returns the pass's output plus, per output
     character, the ``(first, last)`` input index it was produced from."""
     normalized: list[str] = []
@@ -850,7 +1003,19 @@ def _collapse_separators_once(text: str) -> tuple[str, list[tuple[int, int]]]:
     n = len(text)
     while i < n:
         char = text[i]
-        if char == "&":
+        if decode_percent and char == "%" and i + 2 < n:
+            try:
+                byte = int(text[i + 1 : i + 3], 16)
+            except ValueError:
+                byte = 0x100
+            # Workspace route syntax is ASCII.  Leaving non-ASCII bytes
+            # encoded avoids inventing an imprecise character-to-byte map.
+            if byte < 0x80:
+                normalized.append(chr(byte))
+                spans.append((i, i + 2))
+                i += 3
+                continue
+        if decode_escapes and char == "&":
             entity = _decode_entity(text, i)
             if entity is not None:
                 decoded, end = entity
@@ -862,7 +1027,7 @@ def _collapse_separators_once(text: str) -> tuple[str, list[tuple[int, int]]]:
             run_end = i
             while run_end < n and text[run_end] == "\\":
                 run_end += 1
-            unicode_escape = _UNICODE_ESCAPE_RE.match(text, run_end)
+            unicode_escape = _UNICODE_ESCAPE_RE.match(text, run_end) if decode_escapes else None
             decoded_escape = _decode_unicode_escape(unicode_escape.group(0)) if unicode_escape is not None else None
             if decoded_escape is not None:
                 # A decoded ``\u005c`` yields the backslash itself: a
@@ -906,7 +1071,12 @@ def _collapse_separators_once(text: str) -> tuple[str, list[tuple[int, int]]]:
     return "".join(normalized), spans
 
 
-def _remove_dot_segments_once(text: str, spans: list[tuple[int, int]]) -> tuple[str, list[tuple[int, int]]]:
+def _remove_dot_segments_once(
+    text: str,
+    spans: list[tuple[int, int]],
+    *,
+    encoded_dots: bool = True,
+) -> tuple[str, list[tuple[int, int]]]:
     """Resolve ``.``/``..``/``%2E`` segments away (RFC 3986 dot-segment
     removal — browser URL shortening and the nginx URI normalizer both do
     this, so ``/api/a/b/../../threads/…`` reaches the owner-scoped route).
@@ -939,10 +1109,12 @@ def _remove_dot_segments_once(text: str, spans: list[tuple[int, int]]) -> tuple[
             while j < n and text[j] not in "/?#" and not text[j].isspace():
                 j += 1
             segment = text[i + 1 : j].lower()
-            if segment in (".", "%2e"):
+            single_dots = (".", "%2e") if encoded_dots else (".",)
+            double_dots = ("..", "%2e%2e", ".%2e", "%2e.") if encoded_dots else ("..",)
+            if segment in single_dots:
                 i = j
                 continue
-            if segment in ("..", "%2e%2e", ".%2e", "%2e."):
+            if segment in double_dots:
                 while out and out[-1] != "/":
                     out.pop()
                     out_spans.pop()
@@ -994,6 +1166,50 @@ def _collapse_separators_with_offsets(text: str, *, resolve_dots: bool = True) -
         # The dot pass appends the collapsed spans it read, so one
         # indirection through ``spans`` reaches original bytes either way.
         spans = [(spans[first][0], spans[last][1]) for first, last in collapsed_spans]
+    return normalized, spans
+
+
+def _normalize_workspace_path_with_offsets(text: str, *, resolve_dots: bool) -> tuple[str, list[tuple[int, int]]]:
+    """Decode a workspace path while retaining exact source coordinates.
+
+    Unlike the generic reference shadow, workspace paths need percent
+    decoding *in* the mapped view so a canonical route end can be projected
+    back without swallowing adjacent public prose.  Percent, entity, and
+    unicode escapes share the same bounded fixpoint, allowing their supported
+    compositions while keeping work linear in the path length.
+    """
+    normalized = text
+    spans = [(index, index) for index in range(len(text))]
+    for _ in range(_COLLAPSE_MAX_PASSES):
+        collapsed, collapsed_spans = _collapse_separators_once(normalized, decode_percent=True)
+        if collapsed == normalized:
+            break
+        normalized = collapsed
+        spans = [(spans[first][0], spans[last][1]) for first, last in collapsed_spans]
+    # The last permitted decode can itself produce adjacent separators
+    # (``/%25252F`` -> ``//``) or a backslash (``/%255C`` -> ``/\\``).
+    # Canonicalize that structure to stability without decoding another
+    # escape layer.  Two passes suffice: the first turns every backslash
+    # into ``/`` and the second folds any newly adjacent slash run.
+    for _ in range(2):
+        collapsed, collapsed_spans = _collapse_separators_once(
+            normalized,
+            decode_escapes=False,
+        )
+        if collapsed == normalized:
+            break
+        normalized = collapsed
+        spans = [(spans[first][0], spans[last][1]) for first, last in collapsed_spans]
+    # URL resolution happens after decoding the path, not between encoding
+    # layers: resolving early makes a still-encoded ``.`` segment look like
+    # ordinary path data and lets a following ``..`` pop the wrong segment.
+    # Remaining ``%2E`` bytes are beyond the decode budget and stay literal.
+    if resolve_dots:
+        normalized, spans = _remove_dot_segments_once(
+            normalized,
+            spans,
+            encoded_dots=False,
+        )
     return normalized, spans
 
 
@@ -1061,6 +1277,19 @@ _REFERENCE_CUT_TERMINATORS = ",;:!?)\\]}\"'`*_~(|[<"
 _BOUNDARY_BLOCK_RE = re.compile(r"[\w.\-]\Z")
 _CORE_API_THREAD_REFERENCE_RE = re.compile(r"api/(?:langgraph/)?threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
 _CORE_MNT_USER_DATA_RE = re.compile(r"mnt/user-data(?![\w.\-])", re.IGNORECASE)
+_AGENT_NAME_ROUTE_SEGMENT = AGENT_NAME_PATTERN.pattern.removeprefix("^").removesuffix("$")
+_THREAD_ID_ROUTE_SEGMENT = THREAD_ID_PATTERN.removeprefix("^").removesuffix("$")
+_WORKSPACE_THREAD_ID_CHAR = r"[A-Za-z0-9_-]"
+_WORKSPACE_THREAD_PATTERN = (
+    rf"/workspace/(?:agents/(?>{_AGENT_NAME_ROUTE_SEGMENT})/)?chats/"
+    rf"(?!(?-i:new)(?!{_WORKSPACE_THREAD_ID_CHAR}))"
+    rf"(?P<thread_id>(?>{_THREAD_ID_ROUTE_SEGMENT}))_*"
+)
+_CORE_WORKSPACE_THREAD_RE = re.compile(_WORKSPACE_THREAD_PATTERN, re.IGNORECASE)
+_WORKSPACE_TEXT_TOKEN_RE = re.compile(r"[^\s<>\"]+")
+_WORKSPACE_HTTP_RE = re.compile(r"https?://", re.IGNORECASE)
+_WORKSPACE_LITERAL_HTTP_AUTHORITY_RE = re.compile(r"https?://[^/?#\s<>\"]+", re.IGNORECASE)
+_WORKSPACE_REFERENCE_TRAILING_PUNCTUATION = _REFERENCE_TRAILING_PUNCTUATION.replace("_", "")
 _API_THREAD_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/(?:langgraph/)?threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
 _MNT_USER_DATA_RE = re.compile(r"(?<![\w.\-])mnt/user-data(?![\w.\-])", re.IGNORECASE)
 
@@ -1083,7 +1312,119 @@ def _trim_reference_punctuation(value: str) -> str:
     return value.rstrip(_REFERENCE_TRAILING_PUNCTUATION)
 
 
-def _is_private_reference(value: str) -> bool:
+def _workspace_root_boundary_ok(value: str, start: int) -> bool:
+    """Whether ``value[start:]`` may begin a literal rooted route.
+
+    A rooted route can follow prose punctuation or an assignment (including
+    fullwidth punctuation), but not another path/identifier byte.  A local
+    drive prefix is the one colon form that is not a public root.
+    """
+    if start == 0:
+        return True
+    previous = value[start - 1]
+    if previous.isalnum() or previous in ".%-/\\":
+        return False
+    if previous != ":" or start < 2 or value[start - 2] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz":
+        return True
+    if start == 2:
+        return False
+    before_drive = value[start - 3]
+    return before_drive.isalnum() or before_drive in ".%-"
+
+
+def _workspace_route_boundary_ok(value: str, end: int) -> bool:
+    """Validate the byte following a canonical thread id/Markdown closer."""
+    if end == len(value):
+        return True
+    follower = value[end]
+    if follower.isspace() or follower in "/?#<>" or follower in _REFERENCE_TRAILING_PUNCTUATION:
+        return True
+    # Percent may encode a path continuation, while hyphen/underscore may
+    # continue an already-maximal id.  ``@`` is identifier-like in copied
+    # text despite Unicode classifying it as punctuation.
+    if follower in "%@-_":
+        return False
+    return unicodedata.category(follower).startswith("P")
+
+
+def _workspace_route_end(value: str, core_end: int) -> int:
+    """Include only a matched route's path/query/fragment tail."""
+    end = core_end
+    if end < len(value) and value[end] in "/?#":
+        while end < len(value) and not value[end].isspace() and value[end] not in '<>"':
+            end += 1
+    return end
+
+
+def _workspace_private_source_extent(path: str) -> tuple[int, bool] | None:
+    """Return ``(source_end, opaque_tail_reached_end)`` for ``path``.
+
+    Both resolved and as-written views are checked: dot cancellation may
+    reveal a route at the path root, but it must never erase a route already
+    present in the source.  The normalized match end is projected through
+    the source map so delimiters and entity spellings stay whole.  The flag
+    records that a matched path/query/fragment ran to the input boundary
+    before sentence punctuation was trimmed; callers use it to distinguish
+    an artificial candidate split from a real prose delimiter.
+    """
+    extents: list[tuple[int, bool]] = []
+    for resolve_dots in (True, False):
+        shadow, spans = _normalize_workspace_path_with_offsets(path, resolve_dots=resolve_dots)
+        match = _CORE_WORKSPACE_THREAD_RE.match(shadow)
+        if match is None or not _workspace_route_boundary_ok(shadow, match.end()):
+            continue
+        # Once the canonical id has consumed all 64 allowed characters, a
+        # following underscore is ambiguous: it may be invalid route data or
+        # a Markdown delimiter that is absent from the rendered route.  The
+        # anonymous-share boundary is intentionally fail-closed here.  Do not
+        # reconstruct the frontend's full Markdown parser just to distinguish
+        # those cases; redact the complete route-like run either way.
+        end = _workspace_route_end(shadow, match.end())
+        opaque_tail_reached_end = match.end() < len(shadow) and shadow[match.end()] in "/?#" and end == len(shadow)
+        while end > match.end() and shadow[end - 1] in _WORKSPACE_REFERENCE_TRAILING_PUNCTUATION:
+            end -= 1
+        if end:
+            extents.append((spans[end - 1][1] + 1, opaque_tail_reached_end))
+    if not extents:
+        return None
+    return max(end for end, _ in extents), any(reached for _, reached in extents)
+
+
+def _workspace_private_source_end(path: str) -> int | None:
+    """Return only the source end for callers without split boundaries."""
+    extent = _workspace_private_source_extent(path)
+    return extent[0] if extent is not None else None
+
+
+def _workspace_url_path_source_start(value: str) -> int | None:
+    """Locate a literal URL's path without confusing authority entities."""
+    parsed = value
+    source_spans: list[tuple[int, int]] | None = None
+    if _HTML_ENTITY_RE.search(value) is not None or "\\" in value:
+        parsed, source_spans = _collapse_separators_with_offsets(value, resolve_dots=False)
+    authority = _WORKSPACE_LITERAL_HTTP_AUTHORITY_RE.match(parsed)
+    if authority is None:
+        return None
+    if source_spans is None:
+        return authority.end()
+    if authority.end() >= len(source_spans):
+        return None
+    return source_spans[authority.end()][0]
+
+
+def _has_private_workspace_reference(value: str) -> bool:
+    """Classify one reference whose literal root or HTTP scheme is first."""
+    if _WORKSPACE_HTTP_RE.match(value) is not None:
+        path_start = _workspace_url_path_source_start(value)
+        if path_start is None:
+            return False
+        value = value[path_start:]
+    elif not value.startswith("/") or value.startswith("//"):
+        return False
+    return _workspace_private_source_end(value) is not None
+
+
+def _is_private_reference(value: str, *, include_workspace: bool = True) -> bool:
     """Dual-view, mirroring the dual shadow: the dot-resolved decode catches
     references that only reach the surface through ``.``/``..`` cancellation,
     and the as-written decode guarantees resolution can never erase a
@@ -1092,6 +1433,8 @@ def _is_private_reference(value: str) -> bool:
     owner-scoped route even though the resolved view popped the segment.
     Phrase hits use the lookbehind-free cores with the boundary judged in
     fed coordinates (see ``_boundary_ok``)."""
+    if include_workspace and _has_private_workspace_reference(value):
+        return True
     for resolve_dots in (True, False):
         fed = value
         for _ in range(3):
@@ -1215,7 +1558,7 @@ def _private_reference_segments(
         begin = start
         while begin < stop and value[begin] in _REFERENCE_CUT_TERMINATORS:
             begin += 1
-        if begin < stop and _is_private_reference(value[begin:stop]):
+        if begin < stop and _is_private_reference(value[begin:stop], include_workspace=False):
             segments.append((begin, stop))
 
     while pos < n:
@@ -1286,6 +1629,265 @@ def _neutralize_private_references(text: str) -> str:
     return text
 
 
+def _iter_workspace_source_tokens(text: str) -> Iterator[tuple[str, int]]:
+    """Split source tokens where renderer normalization creates whitespace."""
+    for match in _WORKSPACE_TEXT_TOKEN_RE.finditer(text):
+        value = match.group(0)
+        if "&" not in value and "\\" not in value:
+            yield value, match.start()
+            continue
+        shadow, spans = _collapse_separators_with_offsets(value, resolve_dots=False)
+        source_cursor = 0
+        for index, char in enumerate(shadow):
+            if not char.isspace():
+                continue
+            separator_begin, separator_end = spans[index]
+            if source_cursor < separator_begin:
+                yield value[source_cursor:separator_begin], match.start() + source_cursor
+            source_cursor = max(source_cursor, separator_end + 1)
+        if source_cursor < len(value):
+            yield value[source_cursor:], match.start() + source_cursor
+
+
+def _collect_workspace_edits(text: str, edits: list[tuple[int, int, str]]) -> None:
+    """Collect workspace cuts only from literal anchors in original text.
+
+    The generic sanitizer's resolved whole-message shadow is intentionally
+    not a truth source here: resolving a relative path can manufacture a
+    root, and resolving a complete URL can pop its authority. Literal routes
+    are split into independent anchored candidates, normalized path-locally,
+    and mapped back to exact source spans.  A later route in the same prose
+    token therefore cannot hide behind an earlier public path, and public
+    punctuation or text after a route is never swallowed by a fail-closed
+    whole-token replacement.
+    """
+
+    def http_boundary_ok(
+        value: str,
+        start: int,
+        boundary_shadow: str | None,
+        shadow_index: int | None,
+    ) -> bool:
+        candidate = boundary_shadow if boundary_shadow is not None and shadow_index is not None else value
+        index = shadow_index if boundary_shadow is not None and shadow_index is not None else start
+        if index == 0:
+            return True
+        previous = candidate[index - 1]
+        if previous == "_":
+            # An underscore run can open Markdown emphasis at the start of
+            # a token (or after punctuation), but inside a route id it is
+            # ordinary id data: ``id_https://`` is one route followed by a
+            # colon, not a second URL that may manufacture a split boundary.
+            run_start = index - 1
+            while run_start > 0 and candidate[run_start - 1] == "_":
+                run_start -= 1
+            if run_start == 0:
+                return True
+            previous = candidate[run_start - 1]
+        return re.match(r"[A-Za-z0-9+.-]", previous) is None
+
+    def standalone_separator(value: str, start: int) -> bool:
+        if start <= 0:
+            return True
+        previous = value[start - 1]
+        if previous in "@_":
+            return False
+        return previous.isspace() or previous in _WORKSPACE_REFERENCE_TRAILING_PUNCTUATION or unicodedata.category(previous).startswith("P")
+
+    def collect_bare_candidates(
+        value: str,
+        token_start: int,
+        stop: int,
+        opaque_markers: list[int],
+    ) -> int:
+        anchors: list[int] = []
+        opaque_tail = False
+        scanned_through = 0
+        marker_index = 0
+        boundary_index = 0
+        slash = value.find("/", 0, stop)
+        while slash >= 0:
+            while marker_index < len(opaque_markers) and opaque_markers[marker_index] < slash:
+                if anchors and opaque_markers[marker_index] >= scanned_through:
+                    opaque_tail = True
+                marker_index += 1
+            rendered_value = value
+            rendered_slash = slash
+            if boundary_shadow is not None and boundary_spans is not None:
+                while boundary_index < len(boundary_spans) and boundary_spans[boundary_index][1] < slash:
+                    boundary_index += 1
+                if boundary_index < len(boundary_spans) and boundary_spans[boundary_index][0] <= slash <= boundary_spans[boundary_index][1] and boundary_shadow[boundary_index] == "/":
+                    rendered_value = boundary_shadow
+                    rendered_slash = boundary_index
+            if not value.startswith("//", slash) and _workspace_root_boundary_ok(value, slash) and _workspace_root_boundary_ok(rendered_value, rendered_slash):
+                # Once a rooted candidate is active, only a prose/Markdown
+                # terminator in both the source and rendered views can begin
+                # another one.  Entity/unicode syntax ending in punctuation
+                # must not split route data (``chat&#115;/id``), while an
+                # encoded comma remains a real prose boundary.
+                if not anchors or (not opaque_tail and standalone_separator(value, slash) and standalone_separator(rendered_value, rendered_slash)):
+                    anchors.append(slash)
+                    opaque_tail = False
+            scanned_through = slash + 1
+            slash = value.find("/", slash + 1, stop)
+
+        claimed_until = 0
+        index = 0
+        while index < len(anchors):
+            anchor = anchors[index]
+            candidate_stop = anchors[index + 1] if index + 1 < len(anchors) else stop
+            extent = _workspace_private_source_extent(value[anchor:candidate_stop])
+            if extent is None:
+                index += 1
+                continue
+            source_end, opaque_tail_reached_end = extent
+            edit_end = anchor + source_end
+            if candidate_stop < len(value) and opaque_tail_reached_end:
+                complete_extent = _workspace_private_source_extent(value[anchor:])
+                if complete_extent is None:
+                    index += 1
+                    continue
+                edit_end = anchor + complete_extent[0]
+            elif candidate_stop < len(value) and edit_end == candidate_stop:
+                # The next anchor, not source syntax, supplied the apparent
+                # route boundary.  Reject it instead of rescanning every
+                # suffix (which is quadratic on concatenated URL prefixes).
+                index += 1
+                continue
+            edits.append(
+                (
+                    token_start + anchor,
+                    token_start + edit_end,
+                    _PRIVATE_REFERENCE_MARKER,
+                )
+            )
+            claimed_until = max(claimed_until, edit_end)
+            index += 1
+            while index < len(anchors) and anchors[index] < edit_end:
+                index += 1
+        return claimed_until
+
+    for value, token_start in _iter_workspace_source_tokens(text):
+        boundary_shadow: str | None = None
+        boundary_spans: list[tuple[int, int]] | None = None
+        if "&" in value or "\\" in value:
+            boundary_shadow, boundary_spans = _collapse_separators_with_offsets(value, resolve_dots=False)
+        if boundary_shadow is None or boundary_spans is None:
+            opaque_markers = [match.start() for match in re.finditer(r"[?#]", value)]
+        else:
+            opaque_markers = []
+            shadow_cursor = 0
+            while shadow_cursor < len(boundary_shadow):
+                if boundary_shadow[shadow_cursor] == "&":
+                    residual_entity = _HTML_ENTITY_RE.match(boundary_shadow, shadow_cursor)
+                    if residual_entity is not None:
+                        shadow_cursor = residual_entity.end()
+                        continue
+                if boundary_shadow[shadow_cursor] in "?#":
+                    opaque_markers.append(boundary_spans[shadow_cursor][0])
+                shadow_cursor += 1
+        url_anchors: list[int] = []
+        boundary_cursor = 0
+        for url_match in _WORKSPACE_HTTP_RE.finditer(value):
+            start = url_match.start()
+            shadow_index: int | None = None
+            if boundary_shadow is not None and boundary_spans is not None:
+                while boundary_cursor < len(boundary_spans) and boundary_spans[boundary_cursor][0] < start:
+                    boundary_cursor += 1
+                if boundary_cursor < len(boundary_spans) and boundary_spans[boundary_cursor][0] == start and boundary_cursor > 0:
+                    shadow_index = boundary_cursor
+            if http_boundary_ok(value, start, boundary_shadow, shadow_index):
+                url_anchors.append(start)
+
+        # A valid literal URL owns everything after its scheme until the
+        # next independently anchored scheme in this whitespace token.  Bare
+        # slash candidates are considered only in the prose prefix, never in
+        # a URL's nested path/query (``...?next=/workspace/...`` stays public).
+        prefix_stop = url_anchors[0] if url_anchors else len(value)
+        bare_claimed_until = collect_bare_candidates(value, token_start, prefix_stop, opaque_markers)
+
+        index = 0
+        while index < len(url_anchors) and url_anchors[index] < bare_claimed_until:
+            index += 1
+        while index < len(url_anchors):
+            anchor = url_anchors[index]
+            has_later_anchor = index + 1 < len(url_anchors)
+            candidate_stop = url_anchors[index + 1] if has_later_anchor else len(value)
+            candidate = value[anchor:candidate_stop]
+            path_start = _workspace_url_path_source_start(candidate)
+            if path_start is None:
+                index += 1
+                continue
+            extent = _workspace_private_source_extent(candidate[path_start:])
+            if extent is None:
+                index += 1
+                continue
+            source_end, opaque_tail_reached_end = extent
+
+            # A later literal scheme is an independent reference only when
+            # public structure ended the private route before it.  If the
+            # private path/query/fragment reaches this artificial split,
+            # reclassify against the complete token: a nested URL is still
+            # part of that opaque private tail and must not escape the cut.
+            # Rechecking also prevents the split itself from manufacturing
+            # a false route boundary (``.../idhttps://...``).
+            edit_end = anchor + path_start + source_end
+            if has_later_anchor and opaque_tail_reached_end:
+                complete = value[anchor:]
+                complete_path_start = _workspace_url_path_source_start(complete)
+                complete_extent = _workspace_private_source_extent(complete[complete_path_start:]) if complete_path_start is not None else None
+                if complete_extent is None:
+                    index += 1
+                    continue
+                path_start = complete_path_start
+                edit_end = anchor + path_start + complete_extent[0]
+            elif has_later_anchor and edit_end == candidate_stop:
+                index += 1
+                continue
+
+            edits.append(
+                (
+                    token_start + anchor + path_start,
+                    token_start + edit_end,
+                    _PRIVATE_REFERENCE_MARKER,
+                )
+            )
+            index += 1
+            while index < len(url_anchors) and url_anchors[index] < edit_end:
+                index += 1
+
+
+def _iter_markdown_link_spans(text: str) -> Iterator[tuple[int, int, int, int, int, int]]:
+    """Yield the narrow inline-link shapes supported by the sanitizer.
+
+    This intentionally matches the former regular expression rather than
+    implementing the full CommonMark link grammar. The explicit cursor makes
+    failed ``[`` candidates linear instead of retrying the rest of the input
+    from every opener.
+    """
+    cursor = 0
+    while True:
+        label_begin = text.find("[", cursor)
+        if label_begin < 0:
+            return
+        label_stop = text.find("]", label_begin + 1)
+        if label_stop < 0:
+            return
+        if label_stop + 1 >= len(text) or text[label_stop + 1] != "(":
+            cursor = label_stop + 1
+            continue
+        target_begin = label_stop + 2
+        target_stop = text.find(")", target_begin)
+        if target_stop < 0:
+            return
+        if target_stop == target_begin:
+            cursor = target_stop + 1
+            continue
+        begin = label_begin - 1 if label_begin > 0 and text[label_begin - 1] == "!" else label_begin
+        yield begin, target_stop + 1, label_begin + 1, label_stop, target_begin, target_stop
+        cursor = target_stop + 1
+
+
 def _collect_edits(text: str, normalized: str, spans: list[tuple[int, int]], edits: list[tuple[int, int, str]], *, conservative_gaps: bool = True) -> None:
     """Collect private-reference cuts for one shadow of ``text`` into
     ``edits`` (original-text coordinates). The conservative backstops
@@ -1297,16 +1899,36 @@ def _collect_edits(text: str, normalized: str, spans: list[tuple[int, int]], edi
     def original_span(start: int, end: int) -> tuple[int, int]:
         return spans[start][0], spans[end - 1][1] + 1
 
-    def replace_markdown(match: re.Match[str]) -> None:
-        target = match.group("target").strip()
+    overlap_starts: list[int] = []
+    overlap_prefix_max_stops: list[int] = []
+
+    def overlaps_existing_edit(begin: int, stop: int) -> bool:
+        """Query edits that predate the raw-match walk in O(log n)."""
+        index = bisect_left(overlap_starts, stop) - 1
+        return index >= 0 and overlap_prefix_max_stops[index] > begin
+
+    def replace_markdown(
+        begin_index: int,
+        stop_index: int,
+        label_begin_index: int,
+        label_stop_index: int,
+        target_begin_index: int,
+        target_stop_index: int,
+    ) -> None:
+        target = normalized[target_begin_index:target_stop_index].strip()
         # A Markdown destination may carry an optional quoted title. The path
         # is always the first whitespace-delimited token.
         destination = target.split(maxsplit=1)[0] if target else ""
-        destination_is_private = _is_private_reference(destination)
-        label_is_private = _is_private_reference(match.group("label"))
+        target_begin, target_stop = original_span(target_begin_index, target_stop_index)
+        original_target = text[target_begin:target_stop].strip()
+        original_destination = original_target.split(maxsplit=1)[0] if original_target else ""
+        label_begin, label_stop = original_span(label_begin_index, label_stop_index)
+        original_label = text[label_begin:label_stop]
+        destination_is_private = _is_private_reference(destination, include_workspace=False) or _is_private_reference(original_destination)
+        label_is_private = _is_private_reference(normalized[label_begin_index:label_stop_index], include_workspace=False) or _is_private_reference(original_label)
         if not destination_is_private and not label_is_private:
             return
-        begin, stop = original_span(match.start(), match.end())
+        begin, stop = original_span(begin_index, stop_index)
         if label_is_private:
             # The leak is the LABEL itself (round 7): publishing it next to
             # the marker would defeat the point — collapse the whole link.
@@ -1318,8 +1940,7 @@ def _collect_edits(text: str, normalized: str, spans: list[tuple[int, int]], edi
         # The label must come from the original bytes, not the normalized
         # shadow: a label containing backslashes would otherwise publish
         # its separator-normalized form (``C:/Users/bob`` for ``C:\Users\bob``).
-        label_begin, label_stop = original_span(match.start("label"), match.end("label"))
-        label = text[label_begin:label_stop].strip()
+        label = original_label.strip()
         edits.append((begin, stop, f"{label} {_PRIVATE_REFERENCE_MARKER}".strip()))
 
     def replace_raw(match: re.Match[str]) -> None:
@@ -1343,7 +1964,7 @@ def _collect_edits(text: str, normalized: str, spans: list[tuple[int, int]], edi
             offset=match.start(),
         )
         if not segments:
-            if not _is_private_reference(value):
+            if not _is_private_reference(value, include_workspace=False):
                 return
             end = _phrase_end(value, 0)
             kept = _trim_reference_punctuation(value[:end])
@@ -1355,7 +1976,7 @@ def _collect_edits(text: str, normalized: str, spans: list[tuple[int, int]], edi
                 # only cut a prefix that is itself private, never a public
                 # first item of a mixed token whose private content lives
                 # behind a terminator.
-                any(e_begin < stop and begin < e_stop for e_begin, e_stop, _ in edits) or not kept or not _is_private_reference(kept)
+                overlaps_existing_edit(begin, stop) or not kept or not _is_private_reference(kept, include_workspace=False)
             ):
                 return
             if kept:
@@ -1371,8 +1992,17 @@ def _collect_edits(text: str, normalized: str, spans: list[tuple[int, int]], edi
             begin, stop = original_span(match.start() + start, stop_index)
             edits.append((begin, stop, _PRIVATE_REFERENCE_MARKER))
 
-    for match in _MARKDOWN_LINK_RE.finditer(normalized):
-        replace_markdown(match)
+    for link_spans in _iter_markdown_link_spans(normalized):
+        replace_markdown(*link_spans)
+    if not conservative_gaps and edits:
+        # The second shadow only needs to test overlap against resolved-pass
+        # edits and Markdown edits already collected above. Raw regex matches
+        # in this pass are disjoint and preserve order through ``spans``.
+        max_stop = 0
+        for begin, stop, _ in sorted(edits, key=lambda edit: edit[0]):
+            overlap_starts.append(begin)
+            max_stop = max(max_stop, stop)
+            overlap_prefix_max_stops.append(max_stop)
     for match in _REFERENCE_RE.finditer(normalized):
         replace_raw(match)
 
@@ -1389,6 +2019,7 @@ def _neutralize_private_references_once(text: str) -> str:
     backstops, so its segments can never swallow public heads the resolved
     view already cut precisely."""
     edits: list[tuple[int, int, str]] = []
+    _collect_workspace_edits(text, edits)
     for normalized, spans, conservative_gaps in (
         (*_collapse_separators_with_offsets(text), True),
         (*_collapse_separators_with_offsets(text, resolve_dots=False), False),

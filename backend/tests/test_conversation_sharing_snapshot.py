@@ -539,6 +539,338 @@ def test_neutralize_langgraph_route_alias():
     assert neutralize("langgraph/threads/t1/u without the api anchor") == "langgraph/threads/t1/u without the api anchor"
 
 
+def test_neutralize_frontend_workspace_thread_routes():
+    """Only canonical, rooted thread routes emitted by ``pathOfThread``
+    expose a source thread id and belong to the public omission boundary."""
+    neutralize = _neutralize_private_references
+
+    assert neutralize("see /workspace/chats/thread-secret now") == "see [private artifact omitted] now"
+    assert neutralize("open /workspace/agents/research-bot/chats/thread_SECRET") == "open [private artifact omitted]"
+    assert neutralize("/workspace/chats/id?token=SECRET") == "[private artifact omitted]"
+    assert neutralize("/workspace/chats/id,public-tail") == "[private artifact omitted],public-tail"
+    assert neutralize("https://deer.example/workspace/chats/thread-secret") == "https://deer.example[private artifact omitted]"
+    assert neutralize("[open](/workspace/chats/thread-secret)") == "open [private artifact omitted]"
+
+    thread_64 = "a" * 63 + "_"
+    assert neutralize(f"/workspace/chats/{thread_64}") == "[private artifact omitted]"
+    assert neutralize(f"/workspace/chats/{thread_64}x") == f"/workspace/chats/{thread_64}x"
+    assert neutralize("/workspace/chats/new") == "/workspace/chats/new"
+    assert neutralize("/workspace/chats/NEW") == "[private artifact omitted]"
+    assert neutralize("public/workspace/chats/thread-secret") == "public/workspace/chats/thread-secret"
+    assert neutralize("C:/workspace/chats/thread-secret") == "C:/workspace/chats/thread-secret"
+    assert neutralize("//workspace/chats/thread-secret") == "//workspace/chats/thread-secret"
+
+
+def test_neutralize_workspace_routes_respect_source_boundaries():
+    neutralize = _neutralize_private_references
+
+    assert neutralize("__/workspace/chats/thread-secret__") == "__[private artifact omitted]"
+    assert neutralize("see:/workspace/chats/thread-secret") == "see:[private artifact omitted]"
+    assert neutralize("route=/workspace/chats/thread-secret") == "route=[private artifact omitted]"
+    assert neutralize("链接：/workspace/chats/thread-secret") == "链接：[private artifact omitted]"
+    assert neutralize("链接：/workspace/chats/thread-secret，稍后") == ("链接：[private artifact omitted]，稍后")
+    assert neutralize("打开 /workspace/chats/id。结束") == "打开 [private artifact omitted]。结束"
+    assert neutralize("（/workspace/chats/id）") == "（[private artifact omitted]）"
+    assert neutralize("/workspace/chats/id；然后") == "[private artifact omitted]；然后"
+    assert neutralize("/workspace/chats/id！然后") == "[private artifact omitted]！然后"
+    assert neutralize("/workspace/chats/id？然后") == "[private artifact omitted]？然后"
+    assert neutralize("docs/file,/workspace/chats/id") == "docs/file,[private artifact omitted]"
+    assert neutralize("docs/file；/workspace/chats/id") == "docs/file；[private artifact omitted]"
+    assert neutralize("docs/file=/workspace/chats/id") == "docs/file=[private artifact omitted]"
+    assert neutralize("foo/bar:/workspace/chats/id") == "foo/bar:[private artifact omitted]"
+    assert neutralize("docs/file,/%77orkspace/chats/id") == "docs/file,[private artifact omitted]"
+    assert neutralize("C:/file,/%77orkspace/chats/id") == "C:/file,[private artifact omitted]"
+    assert neutralize("/work%73pace/chats/id,public") == "[private artifact omitted],public"
+    assert neutralize("/public,/work%73pace/chats/id") == "/public,[private artifact omitted]"
+    assert neutralize("链接：/worksp%61ce/chats/id，稍后") == "链接：[private artifact omitted]，稍后"
+    assert neutralize("https://h/worksp%61ce/chats/id，稍后") == "https://h[private artifact omitted]，稍后"
+    assert neutralize("https://a/x,https://b/%77orkspace/chats/i") == "https://a/x,https://b[private artifact omitted]"
+    assert neutralize("https://b/%77orkspace/chats/i?next=https://a/SECRET") == ("https://b[private artifact omitted]")
+    assert neutralize("https://b/workspace/chats/i?next=,https://a/SECRET") == ("https://b[private artifact omitted]")
+    assert neutralize("https://b/workspace/chats/i#next=https://a/SECRET") == ("https://b[private artifact omitted]")
+    assert neutralize("https://b/workspace/chats/i/next/https://a/SECRET") == ("https://b[private artifact omitted]")
+    assert neutralize("https://b/workspace/chats/i,https://a/public") == ("https://b[private artifact omitted],https://a/public")
+    assert neutralize("/workspace/chats/i?next=https://a/SECRET") == "[private artifact omitted]"
+    assert neutralize("/workspace/chats/i?next=,https://a/SECRET") == "[private artifact omitted]"
+    assert neutralize("/work%73pace/chats/i#next=https://a/SECRET") == "[private artifact omitted]"
+    assert neutralize("/workspace/chats/i/next/https://a/SECRET") == "[private artifact omitted]"
+    assert neutralize("/workspace/chats/i,https://a/public") == "[private artifact omitted],https://a/public"
+    assert neutralize("/workspace/chats/ihttps://a/SECRET") == "[private artifact omitted]://a/SECRET"
+    assert neutralize("/workspace/chats/id_https://a/SECRET") == "[private artifact omitted]://a/SECRET"
+    assert neutralize("/workspace/chats/&#105;https://a/SECRET") == "[private artifact omitted]://a/SECRET"
+    assert neutralize("/workspace/chats/id&#95;https://a/SECRET") == "[private artifact omitted]://a/SECRET"
+    assert neutralize(r"/workspace/chats/\u{69}https://a/SECRET") == "[private artifact omitted]://a/SECRET"
+    assert neutralize(r"/workspace/chats/id\u{5f}https://a/SECRET") == "[private artifact omitted]://a/SECRET"
+    assert neutralize("https://h/workspace/chats/&#105;https://a/SECRET") == ("https://h[private artifact omitted]://a/SECRET")
+    assert neutralize("https://h/workspace/chats/id_https://a/SECRET") == ("https://h[private artifact omitted]://a/SECRET")
+    assert neutralize("/workspace/chats/i&#44;https://a/public") == ("[private artifact omitted]&#44;https://a/public")
+    assert neutralize("/worksp%61ce/chats/id&#44;") == "[private artifact omitted]&#44;"
+    assert neutralize("/workspace/chats/a，/workspace/chats/b，/workspace/chats/c") == ("[private artifact omitted]，[private artifact omitted]，[private artifact omitted]")
+    assert neutralize("<a href=/workspace/chats/thread-secret>open</a>") == ("<a href=[private artifact omitted]>open</a>")
+    assert neutralize("_https://deer.example/workspace/chats/thread-secret_") == ("_https://deer.example[private artifact omitted]")
+    assert neutralize(f"_open /workspace/chats/{'a' * 64}_") == "_open [private artifact omitted]"
+    assert neutralize(f"__/workspace/chats/{'a' * 64}__") == "__[private artifact omitted]"
+    assert neutralize("_/workspace/chats/new_") == "_[private artifact omitted]"
+    assert neutralize("https://[2001:db8::1]:2026/workspace/chats/thread-secret") == ("https://[2001:db8::1]:2026[private artifact omitted]")
+    assert neutralize("https://user_name@deer.example/workspace/chats/thread-secret") == ("https://user_name@deer.example[private artifact omitted]")
+    assert neutralize("https://deer.example/x/../workspace/chats/thread-secret") == ("https://deer.example[private artifact omitted]")
+    assert neutralize("https://deer.example/x/./../workspace/chats/thread-secret") == ("https://deer.example[private artifact omitted]")
+    assert neutralize("https://deer.example/%2E%2E/workspace/chats/thread-secret") == ("https://deer.example[private artifact omitted]")
+    assert neutralize("https://h/a/%252E/../workspace/chats/i") == "https://h[private artifact omitted]"
+    assert neutralize("https://h/a/%25252E/../workspace/chats/i") == "https://h[private artifact omitted]"
+    assert neutralize("/a/%252E/../workspace/chats/i") == "[private artifact omitted]"
+    assert neutralize("/a/%25252E/../workspace/chats/i") == "[private artifact omitted]"
+    assert neutralize("/worksp%61ce/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("/%57orkspace/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("/work%53pace/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("/work&percnt;73pace/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("/work%26percnt;73pace/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("https://deer.example/%57orkspace/chats/thread-secret") == ("https://deer.example[private artifact omitted]")
+    encoded_authority = "https://u" + "&amp;" * 8 + "@deer.example"
+    assert neutralize(f"{encoded_authority}/worksp%61ce/chats/thread-secret") == (f"{encoded_authority}[private artifact omitted]")
+    assert neutralize(r"https://user\u005fname@deer.example/worksp%61ce/chats/thread-secret") == (r"https://user\u005fname@deer.example[private artifact omitted]")
+    encoded_ipv6 = "https://[2001&#58;db8&#58;&#58;1]:2026"
+    assert neutralize(f"{encoded_ipv6}/worksp%61ce/chats/thread-secret") == (f"{encoded_ipv6}[private artifact omitted]")
+    assert neutralize(f"{encoded_ipv6}/workspace/chats/thread-secret") == (f"{encoded_ipv6}[private artifact omitted]")
+    assert neutralize("/%25%35%37orkspace/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("/w%25%36%66rkspace/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("/work%25%35%33pace/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("/%25252Fworkspace/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("/%255Cworkspace/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("/%25255Cworkspace/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("/&amp;amp;sol;workspace/chats/thread-secret") == "[private artifact omitted]"
+    assert neutralize("https://deer.example/%25252Fworkspace/chats/thread-secret") == ("https://deer.example[private artifact omitted]")
+    assert neutralize("https://deer.example/%255Cworkspace/chats/thread-secret") == ("https://deer.example[private artifact omitted]")
+    assert neutralize("https://deer.example/%25255Cworkspace/chats/thread-secret") == ("https://deer.example[private artifact omitted]")
+    assert neutralize("https://deer.example/&amp;amp;sol;workspace/chats/thread-secret") == ("https://deer.example[private artifact omitted]")
+    assert neutralize("/workspace/chats/thread%5Fsecret") == "[private artifact omitted]"
+    assert neutralize("/x%2F..%2Fworkspace%2Fchats%2Fthread-secret") == "[private artifact omitted]"
+    assert neutralize("/workspace/chat&#115;/id") == "[private artifact omitted]"
+    assert neutralize("/workspace/agents/agen&#116;/chats/id") == "[private artifact omitted]"
+    assert neutralize("/workspace/chats/i&#100;/tail") == "[private artifact omitted]"
+    assert neutralize(r"/workspace/chat\u{73}/id") == "[private artifact omitted]"
+    assert neutralize("foo&#44;/workspace/chats/id") == "foo&#44;[private artifact omitted]"
+    assert neutralize("/public&Tab;/workspace/chats/id") == "/public&Tab;[private artifact omitted]"
+    assert neutralize("/public&NewLine;/workspace/chats/id") == "/public&NewLine;[private artifact omitted]"
+    assert neutralize("/public&#32;/workspace/chats/id") == "/public&#32;[private artifact omitted]"
+    assert neutralize("https://public.example&Tab;/workspace/chats/id") == ("https://public.example&Tab;[private artifact omitted]")
+    assert neutralize("https://public.example&#32;/workspace/chats/id") == ("https://public.example&#32;[private artifact omitted]")
+    assert neutralize("https://public.example&NewLine;/workspace/agents/bot/chats/id") == ("https://public.example&NewLine;[private artifact omitted]")
+    # At the 64-character route boundary, trailing underscores are
+    # deliberately fail-closed. They may be invalid identifier bytes or
+    # Markdown delimiters absent from the rendered route; anonymous sharing
+    # never tries to reconstruct that distinction.
+    overlong_thread_id = "a" * 64 + "_"
+    assert neutralize(f"/workspace/chats/{overlong_thread_id}") == "[private artifact omitted]"
+    assert neutralize(f"/workspace/agents/bot/chats/{overlong_thread_id}?") == "[private artifact omitted]?"
+    assert neutralize(f"https://deer.example/workspace/chats/{overlong_thread_id}#") == ("https://deer.example[private artifact omitted]")
+    for encoded_underscore in ("%5F", "&#95;", r"\u005f"):
+        value = f"/workspace/chats/{'a' * 64}{encoded_underscore}"
+        assert neutralize(value) == "[private artifact omitted]"
+    for suffix in ("a", "-", "_x", "__x"):
+        value = f"/workspace/chats/{'a' * 64}{suffix}"
+        assert neutralize(value) == value
+    escaped_tail = rf"_x /workspace/chats/{'a' * 64}\_"
+    assert neutralize(escaped_tail) == "_x [private artifact omitted]"
+
+    # Encoded data cannot manufacture a source root or scheme. Those forms
+    # are not emitted by pathOfThread; keeping the source anchor literal also
+    # prevents public protocol-relative, UNC, and mid-word lookalikes.
+    for public_value in (
+        "%2Fworkspace%2Fchats%2Fthread-secret",
+        "https%3A%2F%2Fdeer.example%2Fworkspace%2Fchats%2Fthread-secret",
+        "//workspace/chats/thread-secret",
+        "[x](//workspace/chats/thread-secret)",
+        "https://deer.example/public/workspace/chats/thread-secret",
+        "foohttps://deer.example/workspace/chats/thread-secret",
+        "docs/../workspace/chats/thread-secret",
+        "docs/../%77orkspace/chats/thread-secret",
+        "docs/../workspace%2Fchats%2Fthread-secret",
+        "x/../%2Fworkspace%2Fchats%2Fthread-secret",
+        "/%2525252Fworkspace/chats/thread-secret",
+        "/%2525255Cworkspace/chats/thread-secret",
+        "/a/%2525252E/../workspace/chats/thread-secret",
+        "/&amp;amp;amp;sol;workspace/chats/thread-secret",
+        r"\\server\workspace\chats\thread-secret",
+        "https://deer.example/../public/workspace/chats/thread-secret",
+        "https://deer.example/public=/workspace/chats/thread-secret",
+        "https://deer.example/public;/workspace/chats/thread-secret",
+        "https://deer.example/public?next=/workspace/chats/thread-secret",
+        "/workspace/chats/id=tail",
+        "/workspace/chats/id@tail",
+        "/workspace/chats/id前",
+        "foo&#115;/workspace/chats/id",
+    ):
+        assert neutralize(public_value) == public_value
+
+
+def test_neutralize_joined_workspace_routes_scale_linearly():
+    """A long list of independent routes must remain a linear scan."""
+    from time import perf_counter
+
+    attack = ",".join(["/workspace/chats/id"] * 2_048)
+    started = perf_counter()
+    result = _neutralize_private_references(attack)
+    elapsed = perf_counter() - started
+
+    assert result == ",".join(["[private artifact omitted]"] * 2_048)
+    assert elapsed < 2.0, f"workspace prefix scan took {elapsed:.2f}s"
+
+
+@pytest.mark.parametrize(
+    "document",
+    (
+        "{route}",
+        "[_x][r] >_) {route}\n\n[r]: /u",
+        "[_x][] >_) {route}\n\n[_x]: /u",
+        "[_x] >_) {route}\n\n[_x]: /u",
+        "[_x](\u00a0) >_) {route}",
+        "[_x](/a (a(b))) >_) {route}",
+        '[_x](/a " >_) >_) {route}\n\nb")',
+        "_open\n{route}",
+        "`{route}`",
+        "```\n{route}\n```",
+        "<span>{route}</span>",
+        "<https://deer.example{route}>",
+    ),
+)
+def test_max_length_workspace_route_with_raw_underscore_is_fail_closed(document):
+    """Markdown ambiguity must never publish a canonical 64-byte id."""
+    route = "/workspace/chats/" + "a" * 64 + "_"
+    value = document.format(route=route)
+
+    assert _neutralize_private_references(value) == value.replace(
+        route,
+        "[private artifact omitted]",
+    )
+
+
+@pytest.mark.parametrize(
+    ("template", "public_prefix"),
+    (
+        ("/workspace/chats/{id}", ""),
+        ("/workspace/agents/bot/chats/{id}", ""),
+        ("https://deer.example/workspace/chats/{id}", "https://deer.example"),
+    ),
+)
+@pytest.mark.parametrize("tail", ("_", "__", "%5F", "&#95;", r"\u005f", r"\_"))
+def test_max_length_workspace_route_fail_closed_across_surfaces_and_encodings(
+    template,
+    public_prefix,
+    tail,
+):
+    value = template.format(id="a" * 64 + tail)
+
+    assert _neutralize_private_references(value) == public_prefix + "[private artifact omitted]"
+
+
+def test_max_length_workspace_route_does_not_trigger_nested_markdown_scan():
+    """A route-boundary decision must remain linear in unrelated prose."""
+    from time import perf_counter
+
+    nesting = 380_000  # 1.9 MiB, just below the rendered-share limit
+    prefix = "[" * nesting + "x" + "](u)" * nesting + " "
+    route = "/workspace/chats/" + "a" * 64 + "_"
+    started = perf_counter()
+    result = _neutralize_private_references(prefix + route)
+    elapsed = perf_counter() - started
+
+    assert result == prefix + "[private artifact omitted]"
+    assert elapsed < 5.0, f"workspace boundary scan took {elapsed:.2f}s"
+
+
+def test_workspace_url_candidate_splits_do_not_rescan_every_suffix(monkeypatch):
+    """An artificial next-scheme boundary must be rejected in place.
+
+    Reclassifying the complete remaining token for every candidate makes a
+    valid 2 MiB share quadratic on concatenated 64-byte route-id prefixes.
+    """
+    from app.gateway.shares import snapshot as snapshot_module
+
+    original = snapshot_module._workspace_private_source_extent
+    total_input_bytes = 0
+
+    def counted(value, *args, **kwargs):
+        nonlocal total_input_bytes
+        total_input_bytes += len(value)
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(snapshot_module, "_workspace_private_source_extent", counted)
+    piece = "https://h/workspace/chats/" + "a" * 64 + "_"
+    attack = piece * 256 + "x"
+
+    assert _neutralize_private_references(attack) == attack
+    assert total_input_bytes <= len(attack) * 2
+
+
+def test_workspace_encoded_glue_lists_are_collected_in_one_pass():
+    """Entity syntax ``#`` is not a fragment marker in the boundary view."""
+    from app.gateway.shares.snapshot import _collect_workspace_edits
+
+    expected_item = "[private artifact omitted]://a/SECRET"
+    for glue in ("&#105;", "&amp;#105;"):
+        item = f"/workspace/chats/{glue}https://a/SECRET"
+        for count in (4, 256):
+            value = ",".join([item] * count)
+            edits = []
+            _collect_workspace_edits(value, edits)
+
+            assert len(edits) == count
+            assert _neutralize_private_references(value) == ",".join([expected_item] * count)
+
+
+def test_workspace_percent_fallback_requires_a_literal_source_anchor(monkeypatch):
+    """A percent sign in ordinary public text must not enter the encoded
+    workspace classifier or allocate another set of token maps."""
+
+    def unexpected_classifier(_value):
+        raise AssertionError("workspace fallback should not run")
+
+    monkeypatch.setattr(
+        "app.gateway.shares.snapshot._has_private_workspace_reference",
+        unexpected_classifier,
+    )
+    value = "ordinary-public-text%not-an-escape"
+    assert _neutralize_private_references(value) == value
+
+
+def test_workspace_route_matching_does_not_regress_existing_api_segments():
+    neutralize = _neutralize_private_references
+
+    assert neutralize("api/threads/t1,public") == "[private artifact omitted],public"
+    assert neutralize("api/threads/t1;/mnt/user-data") == "[private artifact omitted];[private artifact omitted]"
+
+
+async def test_workspace_thread_routes_are_redacted_at_create_and_read_boundaries():
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(1, {"type": "ai", "content": "open /workspace/chats/thread-secret?token=SECRET"})], False
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert snapshot["messages"][0]["content"] == "open [private artifact omitted]"
+    stored = {"version": 1, "messages": [{"id": "old", "role": "assistant", "content": "/workspace/agents/research/chats/thread-secret"}]}
+    assert resanitize_share_snapshot(stored)["messages"][0]["content"] == "[private artifact omitted]"
+    assert sanitize_share_title("Conversation /workspace/chats/thread-secret") == "Conversation [private artifact omitted]"
+
+
+async def test_backslash_workspace_route_is_redacted_at_every_share_boundary():
+    private_route = "/workspace/chats/" + "a" * 64 + r"\_"
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(1, {"type": "ai", "content": private_route})], False
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot, _ = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert snapshot["messages"][0]["content"] == "[private artifact omitted]"
+    stored = {"version": 1, "messages": [{"id": "old", "role": "assistant", "content": private_route}]}
+    assert resanitize_share_snapshot(stored)["messages"][0]["content"] == "[private artifact omitted]"
+    assert sanitize_share_title(private_route) == "[private artifact omitted]"
+
+
 def test_resanitize_rebuilds_the_strict_public_dto():
     """The public read boundary reconstructs the allowlisted DTO rather
     than spreading stored fields: an older, malformed, or sanitizer-defect
@@ -1343,6 +1675,185 @@ def test_strip_preserves_code_in_heading_and_selfclosed_script_fence():
     fence_after_selfclosed = strip("<script>x</script>\n```\n<think>in-code</think>\n```\n")
     assert "in-code" in fence_after_selfclosed
     assert "in-heading" in strip("# `x<think>in-heading</think>x`")
+
+
+def test_empty_atx_heading_interrupts_inline_code_before_reasoning():
+    """An empty ATX heading is a block boundary under CommonMark 4.2."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    out = strip("visible `\n###\n<think>secret-after-empty-heading</think> ` tail")
+    assert "secret-after-empty-heading" not in out
+    assert "visible" in out and "tail" in out
+
+    quoted = strip("> visible `\n> ###\n> <think>secret-after-quoted-heading</think> ` tail")
+    assert "secret-after-quoted-heading" not in quoted
+    assert "visible" in quoted and "tail" in quoted
+
+    nested = strip("> > visible `\n> > ###\n> > <think>secret-after-nested-heading</think> ` tail")
+    assert "secret-after-nested-heading" not in nested
+    assert "visible" in nested and "tail" in nested
+    assert "quoted-code" in strip("> # `x<think>quoted-code</think>x`")
+
+    ordered = strip("10. visible `\n    ###\n    <think>secret-after-ordered-heading</think> ` tail")
+    assert "secret-after-ordered-heading" not in ordered
+    assert "visible" in ordered and "tail" in ordered
+
+    mixed = strip("- visible `\n  > ###\n  > <think>secret-after-mixed-heading</think> ` tail")
+    assert "secret-after-mixed-heading" not in mixed
+    assert "list-code" in strip("- # `x<think>list-code</think>x`")
+
+
+def test_container_leaf_blocks_interrupt_inline_code_before_reasoning():
+    """Every container leaf-block boundary splits its surrounding paragraphs."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    attacks = {
+        "thematic": "> visible `\n> ***\n> <think>secret-thematic</think> ` tail",
+        "setext": "> visible `\n> ===\n> <think>secret-setext</think> ` tail",
+        "fence": "> visible `\n> ```\n> <think>secret-fence</think> ` tail",
+        "html": "> visible `\n> <div>\n> <think>secret-html</think> ` tail",
+        "ordered thematic": "10. visible `\n    ***\n    <think>secret-ordered-thematic</think> ` tail",
+    }
+
+    for name, attack in attacks.items():
+        output = strip(attack)
+        assert f"secret-{name.replace(' ', '-')}" not in output, (name, output)
+
+
+def test_container_html_blocks_keep_stripping_until_their_real_end():
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    output = strip("> <div>\n> `<think>secret-html-body</think>`\n>\n")
+    assert "secret-html-body" not in output
+
+
+def test_container_list_marker_scan_is_linear_when_no_leaf_matches():
+    from time import perf_counter
+
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    payload = "- " * 16_384 + "x"
+    started = perf_counter()
+    output = strip(payload)
+    elapsed = perf_counter() - started
+
+    assert output == payload
+    assert elapsed < 2.0, f"container list scan took {elapsed:.2f}s"
+
+
+def test_container_heading_scan_is_linear_at_snapshot_scale():
+    """Nested container markers must not copy the remaining suffix per level."""
+    from time import perf_counter
+
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    payload = "> " * 512_000 + "###\n<think>secret-deep-heading</think>"
+    started = perf_counter()
+    output = strip(payload)
+    elapsed = perf_counter() - started
+
+    assert "secret-deep-heading" not in output
+    assert elapsed < 2.0, f"container heading scan took {elapsed:.2f}s"
+
+
+def test_quote_depth_scan_is_linear_at_snapshot_scale():
+    """Ordinary deeply nested quote lines share the same linear bound."""
+    from time import perf_counter
+
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    payload = "> " * 512_000 + "plain\n<think>secret-deep-quote</think>"
+    started = perf_counter()
+    output = strip(payload)
+    elapsed = perf_counter() - started
+
+    assert "secret-deep-quote" not in output
+    assert elapsed < 2.0, f"quote-depth scan took {elapsed:.2f}s"
+
+
+def test_code_marker_selection_is_linear_on_prefix_collisions():
+    from time import perf_counter
+
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    public_prefix = "\0deerflow-share-code-" + "_" * 65_536
+    started = perf_counter()
+    output = strip(public_prefix + "\n<think>secret-marker-collision</think>")
+    elapsed = perf_counter() - started
+
+    assert output == public_prefix
+    assert elapsed < 1.0, f"marker collision scan took {elapsed:.2f}s"
+
+
+def test_failed_markdown_link_candidates_are_scanned_linearly():
+    from time import perf_counter
+
+    payload = "[" * 32_768
+    started = perf_counter()
+    output = _neutralize_private_references(payload)
+    elapsed = perf_counter() - started
+
+    assert output == payload
+    assert elapsed < 2.0, f"failed Markdown link scan took {elapsed:.2f}s"
+
+
+def test_unclosed_think_tags_are_stripped_linearly():
+    from time import perf_counter
+
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    payload = "<think>" * 16_384
+    started = perf_counter()
+    output = strip(payload)
+    elapsed = perf_counter() - started
+
+    assert output == ""
+    assert elapsed < 2.0, f"unclosed think scan took {elapsed:.2f}s"
+
+
+def test_malformed_think_open_candidates_are_scanned_linearly():
+    from time import perf_counter
+
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    payload = "<think" * 32_768
+    started = perf_counter()
+    output = strip(payload)
+    elapsed = perf_counter() - started
+
+    assert output == payload
+    assert elapsed < 2.0, f"malformed think scan took {elapsed:.2f}s"
+
+
+def test_many_encoded_private_routes_are_neutralized_linearly():
+    from time import perf_counter
+
+    payload = " ".join(["%2Fapi%2Fthreads%2Ft"] * 16_384)
+    started = perf_counter()
+    output = _neutralize_private_references(payload)
+    elapsed = perf_counter() - started
+
+    assert output.count("[private artifact omitted]") == 16_384
+    assert "%2Fapi" not in output
+    assert elapsed < 2.0, f"encoded route scan took {elapsed:.2f}s"
 
 
 def test_strip_preserves_indented_code_blocks():

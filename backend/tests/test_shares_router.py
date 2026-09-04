@@ -650,6 +650,7 @@ def test_bundled_topologies_wire_trusted_proxies():
     # pods (sandbox pods must not reach the ClusterIP directly).
     assert "kind: NetworkPolicy" in policy
     assert "app.kubernetes.io/component: gateway" in policy
+    assert 'namespace: {{ include "deer-flow.namespace" . }}' in policy
     for component in ("nginx", "frontend", "provisioner"):
         assert f"app.kubernetes.io/component: {component}" in policy
     assert "port: 8001" in policy

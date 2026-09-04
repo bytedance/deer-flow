@@ -29,30 +29,33 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   only bare strings and explicit `text` / `output_text` blocks; reasoning,
   thinking, and tool-call blocks are ignored, and inline assistant `<think>`
   sections are stripped outside Markdown code examples — code recognition
-  is block-structure-aware per CommonMark (fence opener/closer rules,
-  raw-HTML blocks of all seven types, indented code blocks, quote/list
-  lazy paragraphs) and, once any list or quote line appears in a message,
-  document-level fence/indented protection is deliberately suppressed
-  (item indents are not modeled; over-stripping item-scoped code is the
-  accepted trade-off against reasoning leaks). Owner-only
-  `/mnt/user-data` and thread-route references — any
-  `/api/threads/{id}` route, bare or with a `<segment>` subpath, not just
-  artifacts/uploads, with or without a leading separator (the bundled nginx
-  rewrites `/api/langgraph/*` to `/api/*`, so the `/api/langgraph/threads/…`
-  alias classifies like the native route); the id ends at a
-  path/query/fragment/whitespace/end boundary, and the mount name ends the
-  same way (a public sibling like `/mnt/user-database` is a different name
-  and stays) — are replaced with a
-  public omission marker in both messages and
-  titles (at create time and again on public read). Classification runs on a
-  separator-normalized shadow of the text that also decodes percent-encoding,
-  JSON `\/` escapes, HTML character references, and `\uXXXX` unicode escapes,
-  including their compositions (an entity-encoded percent introducer, nested
-  ampersand entities, an escaped `\u005c\u002f` pair) via a bounded fixpoint
-  pass, while the original bytes are what get replaced — public content is
-  emitted unchanged, and the cut stops at the first structural terminator so
-  public prose after a reference survives — no run/thread/user
-  identifiers, tool arguments, or debug data. The scan pages arrive
+  is block-aware per CommonMark (fences, all seven raw-HTML block types,
+  indented code, ATX headings including empty forms inside quote/list
+  containers, and lazy paragraphs). Once a list or quote appears,
+  document-level fence/indent protection is suppressed: item indentation is
+  not modeled, so possible code is over-stripped rather than reasoning leaked.
+  Owner-only references are replaced in messages and titles, both at create
+  and public-read time. They cover `/mnt/user-data`; every `/api/threads/{id}`
+  route and subpath (plus nginx's `/api/langgraph/threads/…` alias); and rooted
+  `/workspace/chats/{id}` or `/workspace/agents/{agent}/chats/{id}` routes,
+  including copied HTTP(S) URLs. Classification uses a bounded normalized
+  shadow for percent, JSON slash, HTML-entity, and Unicode escapes while cuts
+  retain exact source coordinates. Workspace routes require a literal root or
+  literal HTTP(S) scheme/authority; encoded anchors, protocol-relative/UNC,
+  relative-dot, and Windows-drive forms stay public. Only canonical agent and
+  thread-id grammars match; lowercase `/new` stays public, and identifier
+  suffixes cannot validate a prefix. Thread ids are capped at 64 characters;
+  if that canonical prefix is followed by a terminal underscore run at an
+  otherwise valid route boundary, the public-share boundary redacts the
+  complete route-like run without trying to reconstruct frontend Markdown
+  delimiter semantics. This intentionally over-redacts a narrow class of
+  invalid 65+ character lookalikes, including normalized percent-, entity-,
+  and Unicode-escaped underscore spellings, because confidentiality takes
+  precedence over lossless transcript fidelity. Backslashes keep their URL
+  path-separator meaning rather than being treated as Markdown escapes. An
+  accepted route consumes its path/query/fragment but
+  preserves a URL authority and structural prose delimiters — no
+  run/thread/user ids, tool arguments, or debug data. The scan pages arrive
   newest-page-first with each page internally ascending; the builder flips the
   page order only. Rows are sanitized per page, so the 2000 cap counts
   **public messages**, not raw rows (tool output never consumes budget). At

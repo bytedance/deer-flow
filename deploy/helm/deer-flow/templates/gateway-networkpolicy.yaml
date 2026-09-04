@@ -3,6 +3,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: gateway-ingress
+  namespace: {{ include "deer-flow.namespace" . }}
   labels:
     {{- include "deer-flow.labels" . | nindent 4 }}
     app.kubernetes.io/component: gateway
