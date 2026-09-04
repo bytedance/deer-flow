@@ -8,6 +8,7 @@ import {
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
   getGoalObjectiveCounter,
+  getSelectableSkills,
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
@@ -459,5 +460,36 @@ describe("findSuggestionTemplatePlaceholder", () => {
 
   it("returns null when no placeholder is present", () => {
     expect(findSuggestionTemplatePlaceholder("no placeholder here")).toBeNull();
+  });
+});
+
+describe("getSelectableSkills", () => {
+  it("keeps enabled skills and drops disabled ones", () => {
+    const skills = [makeSkill("data-analysis"), makeSkill("pdf", false)];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "data-analysis",
+    ]);
+  });
+
+  it("excludes reserved slash names that shadow skills", () => {
+    const reserved = [...RESERVED_SLASH_SKILL_NAMES][0] ?? "goal";
+    const skills = [makeSkill(reserved), makeSkill("data-analysis")];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "data-analysis",
+    ]);
+  });
+
+  it("returns an empty list for empty input", () => {
+    expect(getSelectableSkills([])).toEqual([]);
+  });
+
+  it("excludes composer builtin command names that shadow skills", () => {
+    // `goal` is double-covered by the reserved set, but `compact` is a pure
+    // composer builtin: a skill with that name would submit as the compact
+    // command instead of the skill, so the picker must not offer it.
+    const skills = [makeSkill("compact"), makeSkill("data-analysis")];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "data-analysis",
+    ]);
   });
 });
