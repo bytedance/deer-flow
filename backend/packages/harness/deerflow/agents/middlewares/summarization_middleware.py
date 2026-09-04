@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, override, runtime_checkable
 
@@ -18,6 +19,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
+from deerflow.config.summarization_config import DEFAULT_KEEP
 from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
 from deerflow.utils.messages import is_real_user_message
@@ -799,6 +801,73 @@ def _build_summary_anchor(candidate_names: list[str | None], app_config: Any) ->
     return None, None
 
 
+def _anchor_profile_max_input_tokens(model: Any) -> int | None:
+    """Pre-construction mirror of the parent's ``_get_profile_limits`` validation.
+
+    Same rules the parent will apply moments later: ``model.profile`` must be a
+    ``Mapping`` carrying an ``int`` ``max_input_tokens``. Anything else counts as
+    "no usable profile".
+    """
+    profile = getattr(model, "profile", None)
+    if not isinstance(profile, Mapping):
+        return None
+    max_input_tokens = profile.get("max_input_tokens")
+    return max_input_tokens if isinstance(max_input_tokens, int) else None
+
+
+def _drop_unusable_fraction_clauses(
+    anchor_model: Any,
+    trigger: Any,
+    keep: tuple[str, int | float],
+) -> tuple[Any, tuple[str, int | float], bool]:
+    """Drop fraction clauses the anchor model cannot resolve (no usable profile).
+
+    LangChain's parent constructor raises ``ValueError`` for a fraction clause when
+    ``profile["max_input_tokens"]`` is unavailable, which on a third-party
+    OpenAI-compatible model without a declared ``context_window`` would otherwise
+    fail the whole agent build (#3103). Fraction trigger clauses are dropped
+    (absolute clauses survive), and a fraction ``keep`` falls back to the messages
+    default.
+
+    Returns ``(trigger, keep, has_usable_trigger)``; ``has_usable_trigger`` is
+    ``False`` only when trigger clauses were configured and every one of them was
+    a dropped fraction clause. A ``trigger`` that was ``None`` to begin with passes
+    through unchanged with ``has_usable_trigger=True``, preserving the long-standing
+    "enabled but never auto-triggers" configuration.
+    """
+    clauses = list(trigger) if isinstance(trigger, list) else ([] if trigger is None else [trigger])
+    has_fraction_trigger = any(isinstance(clause, tuple) and clause[0] == "fraction" for clause in clauses)
+    keep_is_fraction = isinstance(keep, tuple) and keep[0] == "fraction"
+    if not (has_fraction_trigger or keep_is_fraction):
+        return trigger, keep, True
+    if _anchor_profile_max_input_tokens(anchor_model) is not None:
+        return trigger, keep, True
+
+    kept = [clause for clause in clauses if not (isinstance(clause, tuple) and clause[0] == "fraction")]
+    dropped = [clause for clause in clauses if isinstance(clause, tuple) and clause[0] == "fraction"]
+    if dropped:
+        logger.warning(
+            "Dropped summarization fraction trigger clause(s) %s: the summary model exposes no context window to resolve them against. Declare `context_window` on the model in config.yaml, or use absolute token/message thresholds.",
+            dropped,
+        )
+    new_keep = keep
+    if keep_is_fraction:
+        # The shared constant keeps this fallback identical to SummarizationConfig's
+        # documented default keep.
+        new_keep = DEFAULT_KEEP
+        logger.warning(
+            "Summarization keep %s is unusable without a model context window; falling back to %s. Declare `context_window` on the model in config.yaml to use fraction retention.",
+            keep,
+            new_keep,
+        )
+    if not kept:
+        # No trigger clause survived, but only treat that as "nothing usable" when
+        # clauses were configured at all: a trigger of None keeps constructing the
+        # never-firing middleware, exactly as it does outside this degradation path.
+        return None, new_keep, not clauses
+    return (kept if isinstance(trigger, list) else kept[0]), new_keep, True
+
+
 def create_summarization_middleware(
     *,
     app_config: Any | None = None,
@@ -858,10 +927,32 @@ def create_summarization_middleware(
         logger.warning("Summarization is enabled but no summary model could be constructed; compaction is unavailable for this build")
         return None
 
+    # LangChain's SummarizationMiddleware raises ValueError at construction when a
+    # fraction clause is configured but the anchor exposes no usable profile
+    # (``profile["max_input_tokens"]``) — the default for any third-party
+    # OpenAI-compatible model whose ``context_window`` was not declared in
+    # config.yaml (#3103: `trigger: fraction` used to fail the whole agent build).
+    # Degrade instead: drop the unusable fraction clauses (absolute ones survive)
+    # and fall the keep policy back to its messages default. When every configured
+    # trigger clause is dropped, construction continues with ``trigger=None`` —
+    # the never-firing shape — so manual compaction (``/compact``, which runs with
+    # ``force=True`` and never consults trigger clauses) keeps working for a
+    # profile-less model instead of reporting "compaction is disabled". The factory
+    # attaches a profile from a declared ``context_window``, so this path is
+    # reached only when the model's capacity is genuinely unknown.
+    trigger, keep_tuple, has_usable_trigger = _drop_unusable_fraction_clauses(anchor_model, trigger, keep or config.keep.to_tuple())
+    if not has_usable_trigger:
+        logger.warning(
+            "Every configured summarization trigger is fraction-based but anchor model %r "
+            "exposes no context window (no `context_window` on the model in config.yaml, no provider profile); "
+            "auto-compaction will not fire for this build. Declare `context_window` on the model to enable fraction "
+            "triggers. Manual compaction (/compact) remains available.",
+            anchor_name,
+        )
     kwargs: dict[str, Any] = {
         "model": anchor_model,
         "trigger": trigger,
-        "keep": keep or config.keep.to_tuple(),
+        "keep": keep_tuple,
     }
     if config.trim_tokens_to_summarize is not None:
         kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize

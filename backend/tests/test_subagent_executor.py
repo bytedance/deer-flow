@@ -535,6 +535,63 @@ class TestAgentConstruction:
         assert isinstance(messages[1], HumanMessage)
 
     @pytest.mark.anyio
+    async def test_build_initial_state_seeds_current_upload_snapshot(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A delegated graph receives the parent's current-run upload boundary."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        parent_uploads = [
+            {
+                "filename": "fresh.pdf",
+                "size": 128,
+                "path": "/mnt/user-data/uploads/fresh.pdf",
+                "extension": ".pdf",
+                "outline": [{"line": 1, "title": "Summary"}],
+            }
+        ]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            uploaded_files=parent_uploads,
+        )
+
+        parent_uploads[0]["filename"] = "mutated-after-dispatch.pdf"
+        parent_uploads[0]["outline"][0]["title"] = "Mutated"
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+
+        assert state["uploaded_files"] == [
+            {
+                "filename": "fresh.pdf",
+                "size": 128,
+                "path": "/mnt/user-data/uploads/fresh.pdf",
+                "extension": ".pdf",
+                "outline": [{"line": 1, "title": "Summary"}],
+            }
+        ]
+        assert state["uploaded_files"] is not parent_uploads
+        assert state["uploaded_files"][0] is not parent_uploads[0]
+
+        empty_executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            uploaded_files=[],
+        )
+        empty_state, _final_tools, _deferred_setup = await empty_executor._build_initial_state("Find earlier uploads")
+        assert "uploaded_files" in empty_state
+        assert empty_state["uploaded_files"] == []
+
+    @pytest.mark.anyio
     async def test_build_initial_state_no_system_prompt_with_skills(
         self,
         classes,
@@ -2381,7 +2438,9 @@ class TestThreadSafety:
 
         class BlockingDateTime:
             @staticmethod
-            def now():
+            def now(tz=None):
+                # Signature mirrors datetime.now's optional tz argument: the
+                # production writer stamps UTC via datetime.now(UTC).
                 now_entered.set()
                 release_now.wait(timeout=5)
                 return completed_at
@@ -4876,3 +4935,27 @@ class TestBashExecutionHarvest:
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.bash_executions is None
+
+
+def test_timestamp_writers_stamp_utc_aware_datetimes(classes):
+    """Terminal transitions must stamp UTC-aware datetimes, not naive local wall-clock values."""
+    SubagentResult = classes["SubagentResult"]
+    SubagentStatus = classes["SubagentStatus"]
+
+    result = SubagentResult(task_id="tz-check", trace_id="trace-1", status=SubagentStatus.PENDING)
+    assert result.try_set_terminal(SubagentStatus.COMPLETED, result="done")
+
+    assert result.completed_at is not None
+    assert result.completed_at.tzinfo is not None
+    assert result.completed_at.utcoffset() is not None
+    assert result.completed_at.utcoffset().total_seconds() == 0.0
+
+
+def test_utcnow_helper_returns_utc_aware_datetime(classes):
+    """The shared timestamp writer must never depend on the host wall clock."""
+    executor_module = sys.modules["deerflow.subagents.executor"]
+
+    now = executor_module._utcnow()
+    assert now.tzinfo is not None
+    assert now.utcoffset() is not None
+    assert now.utcoffset().total_seconds() == 0.0
