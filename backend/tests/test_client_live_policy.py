@@ -85,9 +85,9 @@ def _assert_collection_skipped(result: subprocess.CompletedProcess[str], reason:
     assert all(node_id not in output for node_id in REPRESENTATIVE_LIVE_NODE_IDS)
 
 
-def _dry_run_make_target(target: str) -> str:
+def _dry_run_make_target(target: str, *extra: str) -> str:
     result = subprocess.run(
-        ["make", "-n", target],
+        ["make", "-n", target, *extra],
         cwd=BACKEND_ROOT,
         capture_output=True,
         text=True,
@@ -129,6 +129,7 @@ def test_make_targets_keep_default_tests_offline_and_support_live_opt_in() -> No
     live_command = _dry_run_make_target("test-live")
 
     assert 'pytest -m "not live"' in default_command
+    assert "--ignore=tests/blocking_io" in default_command
     assert "tests/" in default_command
     assert LIVE_OPT_IN not in default_command
 
@@ -157,5 +158,53 @@ def test_documentation_matches_live_test_commands() -> None:
 def test_default_ci_workflow_does_not_opt_in_to_live_tests() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "backend-unit-tests.yml").read_text(encoding="utf-8")
 
-    assert "make test" in workflow
+    # Assert the exact sharded caller, not the substring `make test` (which
+    # `make test-shard` also contains). Otherwise a regression that re-points the
+    # workflow at live tests could slip through as a vacuous substring check.
+    assert "make test-shard" in workflow
     assert LIVE_OPT_IN not in workflow
+
+
+def test_ci_unit_test_workflow_runs_duration_aware_shards() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "backend-unit-tests.yml").read_text(encoding="utf-8")
+
+    assert "shard: [1, 2, 3, 4]" in workflow
+    assert "make test-shard SPLITS=4" in workflow
+    assert "GROUP=${{ matrix.shard }}" in workflow
+
+    # The sharded command must select the offline suite and balance the shards by
+    # real wall-clock cost (duration-aware), not fall back to an even split.
+    command = _dry_run_make_target("test-shard", "SPLITS=4", "GROUP=2")
+
+    assert "--splits 4" in command
+    assert "--group 2" in command
+    assert 'pytest -m "not live"' in command
+    assert "--ignore=tests/blocking_io" in command
+    assert "--splitting-algorithm least_duration" in command
+    assert "--durations-path=.test_durations" in command
+
+    # The repo must ship a duration baseline. Without it pytest-split silently
+    # degrades to an even (count-based) split, so this is a fail-closed contract.
+    assert (BACKEND_ROOT / ".test_durations").exists()
+
+    # The full-suite entry point stays offline-only.
+    full_command = _dry_run_make_target("test")
+    assert 'pytest -m "not live"' in full_command
+    assert "--ignore=tests/blocking_io" in full_command
+    assert LIVE_OPT_IN not in full_command
+
+
+def test_duration_baseline_target_replaces_stale_entries() -> None:
+    command = _dry_run_make_target("test-shard-durations")
+
+    assert "--store-durations" in command
+    assert "--clean-durations" in command
+    assert "--durations-path=.test_durations" in command
+
+
+def test_blocking_io_ci_workflow_owns_dedicated_suite() -> None:
+    command = _dry_run_make_target("test-blocking-io")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "backend-blocking-io-tests.yml").read_text(encoding="utf-8")
+
+    assert "pytest tests/blocking_io" in command
+    assert "make test-blocking-io" in workflow

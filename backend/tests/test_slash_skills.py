@@ -508,7 +508,7 @@ def test_skill_activation_middleware_uses_original_user_content_when_uploads_are
 
     middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
     original = HumanMessage(
-        content="<uploaded_files>\n- report.pdf\n</uploaded_files>\n\n/data-analysis 分析这个文档",
+        content="<current_uploads>\n- report.pdf\n</current_uploads>\n\n/data-analysis 分析这个文档",
         id="msg-1",
         additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "/data-analysis 分析这个文档"},
     )

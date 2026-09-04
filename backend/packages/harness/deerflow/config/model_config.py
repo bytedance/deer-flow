@@ -37,9 +37,11 @@ class ModelConfig(BaseModel):
         gt=0,
         description=(
             "Positive total context window size in tokens (prompt + completion). Used to compute the real-time "
-            "context usage percentage displayed in the chat UI. Distinct from `max_tokens`, which is the "
-            "per-call output cap passed to the provider. Leave unset if unknown; the UI will hide the "
-            "percentage."
+            "context usage percentage displayed in the chat UI, and attached to the model's langchain profile "
+            "(`max_input_tokens`) so fraction-based summarization triggers can resolve their thresholds for "
+            "third-party OpenAI-compatible models that carry no built-in profile. Distinct from `max_tokens`, "
+            "which is the per-call output cap passed to the provider. Leave unset if unknown; the UI will hide "
+            "the percentage and fraction summarization clauses will degrade with a warning."
         ),
     )
     stream_chunk_timeout: float | None = Field(

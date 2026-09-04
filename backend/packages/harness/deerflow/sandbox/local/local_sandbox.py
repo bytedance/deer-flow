@@ -1,4 +1,5 @@
 import errno
+import locale
 import logging
 import ntpath
 import os
@@ -15,7 +16,7 @@ from typing import NamedTuple
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
-from deerflow.sandbox.path_patterns import build_output_mask_pattern
+from deerflow.sandbox.path_patterns import replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 
@@ -34,8 +35,16 @@ _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
 class _BoundedPipeCapture:
     """Drain a subprocess pipe while keeping only bounded output in memory."""
 
-    def __init__(self, *, limit_bytes: int = _COMMAND_CAPTURE_LIMIT_BYTES) -> None:
+    def __init__(
+        self,
+        *,
+        limit_bytes: int = _COMMAND_CAPTURE_LIMIT_BYTES,
+        encoding: str = "utf-8",
+        normalize_newlines: bool = False,
+    ) -> None:
         self._limit_bytes = limit_bytes
+        self._encoding = encoding
+        self._normalize_newlines = normalize_newlines
         self._chunks: list[bytes] = []
         self._kept_bytes = 0
         self._total_bytes = 0
@@ -58,7 +67,11 @@ class _BoundedPipeCapture:
             total_bytes = self._total_bytes
             kept_bytes = self._kept_bytes
 
-        output = data.decode("utf-8", errors="replace")
+        output = data.decode(self._encoding, errors="replace")
+        if self._normalize_newlines:
+            # Match ``subprocess.run(..., text=True)``: text streams use universal
+            # newlines, translating both CRLF and bare CR to LF.
+            output = output.replace("\r\n", "\n").replace("\r", "\n")
         if truncated:
             notice = f"\n... [output truncated after {kept_bytes} of {total_bytes} bytes; remaining output discarded] ..."
             output += notice
@@ -80,6 +93,10 @@ class ResolvedPath(NamedTuple):
 
 
 class LocalSandbox(Sandbox):
+    #: Every call is a fresh ``subprocess.run([shell, "-c", ...])`` process —
+    #: no shell state survives into the next command.
+    persistent_shell_sessions = False
+
     @staticmethod
     def _shell_name(shell: str) -> str:
         """Return the executable name for a shell path or command."""
@@ -155,14 +172,6 @@ class LocalSandbox(Sandbox):
         )
 
     @staticmethod
-    def _coerce_process_output(value: str | bytes | None) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, bytes):
-            return value.decode("utf-8", errors="replace")
-        return value
-
-    @staticmethod
     def _drain_pipe(fd: int, capture: _BoundedPipeCapture) -> None:
         try:
             while chunk := os.read(fd, 8192):
@@ -177,8 +186,14 @@ class LocalSandbox(Sandbox):
                 pass
 
     @staticmethod
-    def _start_pipe_drain(fd: int, name: str) -> tuple[_BoundedPipeCapture, threading.Thread]:
-        capture = _BoundedPipeCapture()
+    def _start_pipe_drain(
+        fd: int,
+        name: str,
+        *,
+        encoding: str = "utf-8",
+        normalize_newlines: bool = False,
+    ) -> tuple[_BoundedPipeCapture, threading.Thread]:
+        capture = _BoundedPipeCapture(encoding=encoding, normalize_newlines=normalize_newlines)
         thread = threading.Thread(target=LocalSandbox._drain_pipe, args=(fd, capture), name=name, daemon=True)
         thread.start()
         return capture, thread
@@ -213,9 +228,9 @@ class LocalSandbox(Sandbox):
         self._agent_written_paths: set[str] = set()
 
     # ``path_mappings`` is set once in ``__init__`` and never mutated, so the
-    # sorted views and compiled path-rewrite patterns below are stable for the
-    # sandbox's lifetime. Caching them avoids re-sorting and re-compiling these
-    # regexes on every bash/read_file/write_file call (the agent's hot path).
+    # sorted views and resolved roots below are stable for the sandbox's
+    # lifetime. Caching them avoids repeated filesystem resolution and sorting
+    # on every bash/read_file/write_file call (the agent's hot path).
 
     @cached_property
     def _command_pattern(self) -> re.Pattern[str] | None:
@@ -238,30 +253,9 @@ class LocalSandbox(Sandbox):
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
-    def _reverse_output_patterns(self) -> list[re.Pattern[str]]:
-        """Compiled matchers for local paths in command output (longest local path first)."""
-        # The rule — segment boundary plus path tail — is owned by
-        # ``deerflow.sandbox.path_patterns`` and shared with
-        # ``sandbox.tools._compiled_mask_patterns``, the other site that rewrites host
-        # paths back to virtual ones. Its rationale (why the boundary class is
-        # text-oriented rather than shell-oriented like ``_command_pattern``, why ``$``
-        # is load-bearing) lives with the owner rather than in a second copy here, which
-        # is what let the two drift before (#4035 added the boundary here and missed
-        # that site; #4053 added it there).
-        #
-        # What is specific to this site: without the boundary the regex yields the bare
-        # root, which then *equals* the mount root and so satisfies
-        # ``_reverse_resolve_path``'s own ``+ "/"`` guard — the sibling is rewritten to a
-        # container path that forward resolution refuses to map back. And bases stay
-        # separator-*sensitive*: they come from ``Path.resolve()`` and already carry the
-        # platform's separator, so relaxing them would widen what this masks.
-        return [build_output_mask_pattern(self._resolved_local_paths[m]) for m in self._mappings_by_local_specificity]
-
-    @cached_property
     def _resolved_local_paths(self) -> dict[PathMapping, str]:
-        """Filesystem-resolved local root per mapping. ``Path.resolve()`` hits the
-        disk, and the mounted directories don't move, so resolve once and reuse."""
-        return {m: str(Path(m.local_path).resolve()) for m in self.path_mappings}
+        """Filesystem-resolved local root per mapping, computed once."""
+        return {m: os.path.realpath(m.local_path) for m in self.path_mappings}
 
     @cached_property
     def _mappings_by_container_specificity(self) -> list[PathMapping]:
@@ -280,7 +274,7 @@ class LocalSandbox(Sandbox):
         mapping (i.e. the one whose local_path is the longest prefix of the
         resolved path), similar to how ``_resolve_path`` handles container paths.
         """
-        resolved = str(Path(resolved_path).resolve())
+        resolved = os.path.realpath(resolved_path)
 
         best_mapping: PathMapping | None = None
         best_prefix_len = -1
@@ -331,15 +325,16 @@ class LocalSandbox(Sandbox):
             return ResolvedPath(path_str, None)
 
         mapping, relative = mapping_match
-        local_root = Path(self._resolved_local_paths[mapping])
-        resolved_path = (local_root / relative).resolve() if relative else local_root
-
+        local_root = self._resolved_local_paths[mapping]
+        resolved_path = os.path.realpath(os.path.join(local_root, relative)) if relative else local_root
         try:
-            resolved_path.relative_to(local_root)
-        except ValueError as exc:
-            raise PermissionError(errno.EACCES, "Access denied: path escapes mounted directory", path_str) from exc
+            inside_root = os.path.normcase(os.path.commonpath([local_root, resolved_path])) == os.path.normcase(local_root)
+        except ValueError:
+            inside_root = False
+        if not inside_root:
+            raise PermissionError(errno.EACCES, "Access denied: path escapes mounted directory", path_str)
 
-        return ResolvedPath(str(resolved_path), mapping)
+        return ResolvedPath(resolved_path, mapping)
 
     def _resolve_path(self, path: str) -> str:
         return self._resolve_path_with_mapping(path).path
@@ -358,7 +353,7 @@ class LocalSandbox(Sandbox):
             Container path if mapping exists, otherwise original path
         """
         normalized_path = path.replace("\\", "/")
-        path_str = str(Path(normalized_path).resolve())
+        path_str = os.path.realpath(normalized_path)
 
         # Try each mapping (longest local path first for more specific matches)
         for mapping in self._mappings_by_local_specificity:
@@ -393,16 +388,16 @@ class LocalSandbox(Sandbox):
         Returns:
             Output with local paths resolved to container paths
         """
-        # Patterns are compiled once per sandbox (longest local path first for
-        # correct prefix matching) and reused across calls.
+        # Scan directly instead of compiling one regex per thread root. Python's
+        # global regex caches outlive an evicted LocalSandbox and otherwise keep
+        # high-cardinality thread paths resident.
         result = output
-        for pattern in self._reverse_output_patterns:
-
-            def replace_match(match: re.Match) -> str:
-                matched_path = match.group(0)
-                return self._reverse_resolve_path(matched_path)
-
-            result = pattern.sub(replace_match, result)
+        for mapping in self._mappings_by_local_specificity:
+            result = replace_output_path_matches(
+                result,
+                self._resolved_local_paths[mapping],
+                self._reverse_resolve_path,
+            )
 
         return result
 
@@ -522,21 +517,7 @@ class LocalSandbox(Sandbox):
                             "MSYS2_ARG_CONV_EXCL": exclusions,
                         }
 
-            try:
-                result = subprocess.run(
-                    args,
-                    shell=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    env=sandbox_env,
-                )
-                stdout, stderr, returncode = result.stdout, result.stderr, result.returncode
-            except subprocess.TimeoutExpired as exc:
-                timed_out = True
-                stdout = self._coerce_process_output(exc.stdout if exc.stdout is not None else exc.output)
-                stderr = self._coerce_process_output(exc.stderr)
-                returncode = 0
+            stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
         else:
             args = [shell, "-c", resolved_command]
             stdout, stderr, returncode, timed_out = self._run_posix_command(args, timeout, sandbox_env)
@@ -547,12 +528,114 @@ class LocalSandbox(Sandbox):
         if timed_out:
             notice = self._format_timeout_notice(timeout)
             output += f"\n{notice}" if output else notice
+            # A timeout is a failed execution: mark it authoritatively (the
+            # coreutils ``timeout`` convention) so exit-status evidence
+            # consumers cannot read partial output as success.
+            output += "\nExit Code: 124"
         elif returncode != 0:
             output += f"\nExit Code: {returncode}"
 
         final_output = output if output else "(no output)"
         # Reverse resolve local paths back to container paths in output
         return self._reverse_resolve_paths_in_output(final_output)
+
+    @staticmethod
+    def _run_windows_command(
+        args: list[str],
+        timeout: float,
+        env: dict[str, str] | None = None,
+    ) -> tuple[str, str, int, bool]:
+        """Run a Windows command with bounded capture and process-tree timeout."""
+        timed_out = False
+        stdout_read_fd, stdout_write_fd = os.pipe()
+        stderr_read_fd, stderr_write_fd = os.pipe()
+        try:
+            process = subprocess.Popen(
+                args,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_write_fd,
+                stderr=stderr_write_fd,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                env=env,
+            )
+        except Exception:
+            for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    # Preserve the original Popen failure; fd cleanup is best-effort.
+                    pass
+            raise
+        finally:
+            for fd in (stdout_write_fd, stderr_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    # The write fd may already be closed by the exception cleanup above.
+                    pass
+
+        encoding = locale.getpreferredencoding(False)
+        stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(
+            stdout_read_fd,
+            "deerflow-bash-stdout-drain",
+            encoding=encoding,
+            normalize_newlines=True,
+        )
+        stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(
+            stderr_read_fd,
+            "deerflow-bash-stderr-drain",
+            encoding=encoding,
+            normalize_newlines=True,
+        )
+
+        try:
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                LocalSandbox._terminate_windows_process_tree(process)
+            returncode = process.returncode if process.returncode is not None else 0
+        finally:
+            join_timeout = 10 if timed_out else _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
+            for thread in (stdout_thread, stderr_thread):
+                thread.join(timeout=join_timeout)
+                if thread.is_alive():
+                    logger.debug("Subprocess output drain thread still active after command returned")
+
+        return stdout_capture.read(), stderr_capture.read(), returncode, timed_out
+
+    @staticmethod
+    def _terminate_windows_process_tree(process: subprocess.Popen) -> None:
+        """Terminate a Windows shell and all descendants, then reap it."""
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        taskkill = ntpath.join(system_root, "System32", "taskkill.exe")
+        try:
+            result = subprocess.run(
+                [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode != 0 and process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    logger.debug("Windows process %s exited before fallback kill", process.pid)
+        except (OSError, subprocess.TimeoutExpired):
+            logger.debug("Failed to terminate Windows process tree for pid %s", process.pid, exc_info=True)
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    logger.debug("Windows process %s exited before fallback kill", process.pid)
+
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            logger.warning("Process tree for pid %s did not exit after taskkill", process.pid)
 
     @staticmethod
     def _run_posix_command(
@@ -691,7 +774,7 @@ class LocalSandbox(Sandbox):
                 if "/" not in child_rel and mapping.container_path.rstrip("/") not in existing_dirs:
                     # Verify the host path exists so we don't add phantom entries
                     try:
-                        if Path(mapping.local_path).resolve().is_dir():
+                        if os.path.isdir(os.path.realpath(mapping.local_path)):
                             result.append(f"{mapping.container_path}/")
                     except OSError:
                         pass
