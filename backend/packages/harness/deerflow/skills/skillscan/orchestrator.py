@@ -70,6 +70,12 @@ _SPECS = [
     RuleSpec("python-shell-exec", "CRITICAL", "Python shell execution primitive is used in a skill file.", "Use subprocess with a fixed argument list and shell=False, or remove shell execution."),
     RuleSpec("python-sensitive-exfil", "CRITICAL", "Python code reads a sensitive path and uses an outbound network sink in the same file.", "Remove the sensitive read or network sink, and keep credential access outside skills."),
     RuleSpec("python-env-dump-exfil", "CRITICAL", "Python code reads the process environment in bulk and uses an outbound network sink in the same file.", "Avoid bulk environment reads and never send environment data over the network."),
+    RuleSpec(
+        "python-client-exfil-heuristic",
+        "HIGH",
+        "Python code reads sensitive data and calls an HTTP client method that the blocking client-handle signal cannot attribute to a client.",
+        "Confirm the client call does not send sensitive data; provable instance-client exfiltration is blocked outright.",
+    ),
     RuleSpec("python-reverse-shell", "CRITICAL", "Python code matches a reverse-shell shape.", "Remove reverse-shell behavior from the skill."),
     RuleSpec("python-dynamic-import", "HIGH", "Python dynamically imports a non-literal module.", "Use explicit imports or a constrained allowlist."),
     RuleSpec("python-subprocess", "HIGH", "Python invokes subprocess without shell=True.", "Review subprocess usage and keep arguments fixed and minimal."),
@@ -420,6 +426,8 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_for_node("python-sensitive-path-read", rel_path, sensitive_node, "sensitive path read"))
     if has_env_dump and has_network_sink:
         findings.append(_finding_for_node("python-env-dump-exfil", rel_path, env_node or network_node, "environment dump + network sink"))
+    if (has_sensitive_read or has_env_dump) and not has_network_sink:
+        findings.extend(_scan_python_client_heuristic(rel_path, tree, aliases, has_sensitive_read=has_sensitive_read, has_env_dump=has_env_dump))
     return findings
 
 
@@ -780,12 +788,18 @@ _PYTHON_CLIENT_SPECS = {
 _PYTHON_CLIENT_CONSTRUCTORS = frozenset(_PYTHON_CLIENT_SPECS)
 _PYTHON_CLIENT_SINK_METHODS = frozenset().union(*(spec.methods for spec in _PYTHON_CLIENT_SPECS.values()))
 _PYTHON_CLIENT_ANALYSIS_BUDGET = 100_000
+# The heuristic pass below copies no scope state, so its limit is a plain node cap rather than the
+# charge-per-copy budget above. Kept independent so tuning one signal cannot silently move the other.
+_PYTHON_CLIENT_HEURISTIC_BUDGET = 50_000
 _PYTHON_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 _PYTHON_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 _PYTHON_MATCH_CAPTURE_NODES = (ast.MatchAs, ast.MatchStar, ast.MatchMapping)
 # Statements whose parts do not all run, or run an unknown number of times. Their bodies are
 # analyzed from a copy and every name they bind is dropped afterwards.
 _PYTHON_BRANCHING_NODES = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.Match)
+# PEP 695 type syntax is evaluated lazily -- an alias value or a type-parameter bound never runs on
+# import -- so both client passes skip it rather than report egress that cannot happen.
+_PYTHON_LAZILY_EVALUATED_NODES = (ast.TypeAlias, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)
 
 
 @dataclass
@@ -1219,6 +1233,79 @@ def _call_is_client_handle_sink(node: ast.Call, handles: dict[str, str]) -> bool
         return False
     constructor = handles.get(func.value.id)
     return bool(constructor and func.attr in _PYTHON_CLIENT_SPECS[constructor].methods)
+
+
+# Non-blocking counterpart to the chain above. Issue #4296 records what that chain gives up: a name a
+# compound statement both calls and rebinds, a construction inside a branch, a walrus, and every
+# handle reached by a value rather than by a name. Staying silent there is only defensible while the
+# signal hard-blocks, because an ambiguous case costs a blocked benign skill. A warning can take the
+# opposite trade, so this pass takes it and reports the same shape at `HIGH`.
+#
+# The model is deliberately coarse -- a proven client constructor is called somewhere in the file,
+# and a method that constructor supports is called on some receiver. That is the shape PR #4265
+# measured against its precise version over 46,624 files, where both flagged exactly the same files;
+# spending path- and exception-aware machinery on the warning channel would buy the same result for
+# the cost that review already rejected once. Dropping the *name* requirement is what makes a
+# rebind, a branch, a walrus, an attribute hop, a container item, a factory return, and a
+# cross-scope flow stop mattering. The price is that an unrelated `.get(...)` in a file that also
+# builds a client and reads sensitive data matches too -- paid in a finding routed to the LLM
+# scanner for adjudication, never in a blocked install. That is the evaluation the #4265 review
+# asked for before any wider model is allowed to produce `CRITICAL` findings.
+#
+# Three syntactic anchors survive: the constructor must be spelled as a call through a proven
+# import, the sink must be spelled `<expr>.method(...)`, and the sink's receiver must not itself be
+# a proven import path. A locally aliased constructor (`Ctor = requests.Session`) and a detached or
+# dynamic sink (`send = s.post`, `getattr(s, "post")`) stay outside both signals, and lazily
+# evaluated PEP 695 type syntax is skipped for the same reason the blocking walker skips it.
+#
+# The pass is iterative and node-budgeted, so an adversarial tree costs neither recursion nor branch
+# copies, and it runs only on files that already show an exfil payload and no proven sink -- its
+# cost is bounded by that gate as much as by the budget.
+
+
+def _scan_python_client_heuristic(rel_path: str, tree: ast.AST, aliases: dict[str, str], *, has_sensitive_read: bool, has_env_dump: bool) -> list[SecurityFinding]:
+    """Warn where the blocking client-handle chain gives up but the file still shows the exfil shape."""
+    try:
+        sink = _find_client_handle_heuristic_sink(tree, aliases, rel_path)
+    except RecursionError:
+        # Same contract as the blocking signal: an adversarially deep tree drops this best-effort
+        # finding and leaves every deterministic finding for the file in place.
+        logger.warning("SkillScan client-handle heuristic analysis hit recursion limit for %s", rel_path)
+        return []
+    if sink is None:
+        return []
+    payload = " + ".join(part for part, present in (("sensitive read", has_sensitive_read), ("environment dump", has_env_dump)) if present)
+    return [_finding_for_node("python-client-exfil-heuristic", rel_path, sink, f"{payload} + unproven client egress")]
+
+
+def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], rel_path: str) -> ast.AST | None:
+    """Return the first supported client method call in a file that also constructs such a client."""
+    remaining = _PYTHON_CLIENT_HEURISTIC_BUDGET
+    constructors: set[str] = set()
+    sinks: list[tuple[str, ast.AST]] = []
+    stack: list[ast.AST] = [tree]
+    while stack:
+        if remaining <= 0:
+            # Report from the deterministic prefix already walked rather than scan an unbounded
+            # tree; under-reporting is the documented cost of every budget in this analyzer.
+            logger.warning("SkillScan client-handle heuristic analysis exhausted work budget for %s", rel_path)
+            break
+        remaining -= 1
+        node = stack.pop()
+        if isinstance(node, ast.Call):
+            # A call spelled entirely as a proven import path (`requests.Session`, `environ.get`)
+            # names a module attribute rather than a value constructed at runtime, so it can be the
+            # constructor half of the pair but never the instance-method half.
+            imported = _python_import_name(node.func, aliases)
+            if imported in _PYTHON_CLIENT_CONSTRUCTORS:
+                constructors.add(imported)
+            elif not imported and isinstance(node.func, ast.Attribute) and node.func.attr in _PYTHON_CLIENT_SINK_METHODS:
+                sinks.append((node.func.attr, node))
+        # Reversed so the stack yields children in source order and the reported sink is the first
+        # one in the file, not an artifact of the traversal.
+        stack.extend(child for child in reversed(list(ast.iter_child_nodes(node))) if not isinstance(child, _PYTHON_LAZILY_EVALUATED_NODES))
+    supported = {method for constructor in constructors for method in _PYTHON_CLIENT_SPECS[constructor].methods}
+    return next((node for method, node in sinks if method in supported), None)
 
 
 def _yaml_load_uses_safe_loader(node: ast.Call) -> bool:
