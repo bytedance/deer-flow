@@ -312,6 +312,116 @@ test("proceeds to join when the run is still active", async () => {
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
 });
 
+test("requests incremental modes for initial and rejoined chat streams", async () => {
+  const sessionStorage = makeSessionStorage();
+  let initialStreamBody: Record<string, unknown> | undefined;
+  let joinedStreamModes: unknown;
+  const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+    const requestUrl = new URL(url.toString());
+    if (requestUrl.pathname.endsWith("/threads/thread-modes/runs/stream")) {
+      if (typeof init?.body !== "string") {
+        throw new Error("Expected a JSON request body for the initial stream");
+      }
+      initialStreamBody = JSON.parse(init.body);
+      return makeSSEResponse("event: end\ndata: null\n\n", {
+        "Content-Location": "/threads/thread-modes/runs/run-modes",
+      });
+    }
+    if (requestUrl.pathname.endsWith("/runs/run-modes")) {
+      return new Response(JSON.stringify({ status: "running" }), {
+        status: 200,
+      });
+    }
+    if (requestUrl.pathname.endsWith("/runs/run-modes/stream")) {
+      joinedStreamModes = JSON.parse(
+        requestUrl.searchParams.get("stream_mode") ?? "null",
+      );
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  for await (const _entry of getAPIClient(true).runs.stream(
+    "thread-modes",
+    "lead_agent",
+    { streamMode: ["values"] },
+  )) {
+    // Drain the initial stream so its lazy request is issued.
+    void _entry;
+  }
+  for await (const _entry of getAPIClient(true).runs.joinStream(
+    "thread-modes",
+    "run-modes",
+    { streamMode: ["values"] },
+  )) {
+    // Drain the rejoined stream so its lazy request is issued.
+    void _entry;
+  }
+
+  const incrementalModes = ["messages-tuple", "updates", "custom"];
+  expect(initialStreamBody?.stream_mode).toEqual(incrementalModes);
+  expect(joinedStreamModes).toEqual(incrementalModes);
+});
+
+test("passes AbortSignals through initial and directly-signalled join streams", async () => {
+  const sessionStorage = makeSessionStorage();
+  const initialController = new AbortController();
+  const joinController = new AbortController();
+  let initialSignal: AbortSignal | null | undefined;
+  let joinSignal: AbortSignal | null | undefined;
+  const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+    const requestUrl = new URL(url.toString());
+    if (requestUrl.pathname.endsWith("/threads/thread-signal/runs/stream")) {
+      initialSignal = init?.signal;
+      return makeSSEResponse("event: end\ndata: null\n\n", {
+        "Content-Location": "/threads/thread-signal/runs/run-signal",
+      });
+    }
+    if (requestUrl.pathname.endsWith("/runs/run-signal")) {
+      return new Response(JSON.stringify({ status: "running" }), {
+        status: 200,
+      });
+    }
+    if (requestUrl.pathname.endsWith("/runs/run-signal/stream")) {
+      joinSignal = init?.signal;
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  for await (const _entry of getAPIClient(true).runs.stream(
+    "thread-signal",
+    "lead_agent",
+    { signal: initialController.signal },
+  )) {
+    void _entry;
+  }
+  for await (const _entry of getAPIClient(true).runs.joinStream(
+    "thread-signal",
+    "run-signal",
+    joinController.signal,
+  )) {
+    void _entry;
+  }
+
+  expect(initialSignal).toBe(initialController.signal);
+  expect(joinSignal).toBe(joinController.signal);
+});
+
 test("recovers a join stream gap from durable state and resumes after the retained tail", async () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "run-1");

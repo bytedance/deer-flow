@@ -639,8 +639,15 @@ def test_install_runtime_context_removes_caller_sandbox_execution_identities():
     assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in config["context"]
 
 
+@pytest.mark.parametrize(
+    ("stream_modes", "emit_values"),
+    [
+        (["messages-tuple", "values"], True),
+        (["messages-tuple", "updates", "custom"], False),
+    ],
+)
 @pytest.mark.anyio
-async def test_run_agent_batches_incremental_file_args_and_keeps_complete_values():
+async def test_run_agent_batches_incremental_file_args_and_keeps_complete_values(stream_modes: list[str], emit_values: bool):
     run_manager = RunManager()
     record = await run_manager.create("thread-file-stream")
     bridge = SimpleNamespace(
@@ -696,7 +703,10 @@ async def test_run_agent_batches_incremental_file_args_and_keeps_complete_values
                     {},
                 ),
             )
-            yield ("values", {"messages": [complete_message]})
+            if emit_values:
+                yield ("values", {"messages": [complete_message]})
+            else:
+                yield ("updates", {"agent": {}})
 
     await run_agent(
         bridge,
@@ -706,14 +716,15 @@ async def test_run_agent_batches_incremental_file_args_and_keeps_complete_values
         agent_factory=lambda **_kwargs: DummyAgent(),
         graph_input={},
         config={},
-        stream_modes=["messages-tuple", "values"],
+        stream_modes=stream_modes,
     )
 
     message_events = [call.args for call in bridge.publish.await_args_list if call.args[1] == "messages"]
     assert len(message_events) == 1
     assert message_events[0][2][0]["tool_calls"][0]["args"]["content"] == "Hello world"
-    values_events = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "values"]
-    assert any(event["messages"][0]["tool_calls"][0]["args"]["content"] == "Hello world" for event in values_events)
+    if emit_values:
+        values_events = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "values"]
+        assert any(event["messages"][0]["tool_calls"][0]["args"]["content"] == "Hello world" for event in values_events)
 
 
 @pytest.mark.parametrize(
