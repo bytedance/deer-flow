@@ -94,6 +94,121 @@ test("user can create a scheduled task from the page", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("duplicate fills the create form without creating a task", async ({
+  page,
+}) => {
+  let createRequests = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/api/scheduled-tasks")
+    ) {
+      createRequests += 1;
+    }
+  });
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: [
+      {
+        id: "task-copy-source",
+        thread_id: "thread-copy-source",
+        context_mode: "reuse_thread",
+        title: "Daily summary",
+        prompt: "Summarize this conversation",
+        schedule_type: "cron",
+        schedule_spec: { cron: "0 18 * * *" },
+        timezone: "UTC",
+        status: "enabled",
+        next_run_at: "2026-08-28T18:00:00Z",
+        last_run_at: null,
+        last_run_id: null,
+        last_thread_id: null,
+        last_error: null,
+        run_count: 0,
+        created_at: "2026-08-01T00:00:00Z",
+        updated_at: "2026-08-01T00:00:00Z",
+      },
+    ],
+  });
+
+  await page.goto("/workspace/scheduled-tasks");
+  await page
+    .getByTestId("scheduled-task-detail")
+    .getByRole("button", { name: "Duplicate" })
+    .click();
+
+  const createForm = page.getByTestId("scheduled-task-create-form");
+  await expect(createForm.getByPlaceholder("Task title")).toHaveValue(
+    "Daily summary (Copy)",
+  );
+  await expect(createForm.getByPlaceholder("Prompt")).toHaveValue(
+    "Summarize this conversation",
+  );
+  await expect(createForm.getByPlaceholder("Thread ID")).toHaveValue(
+    "thread-copy-source",
+  );
+  await expect(createForm.getByTestId("schedule-preview")).toHaveText(
+    "Every day at 18:00 (UTC)",
+  );
+  await expect(createForm.getByPlaceholder("Task title")).toBeFocused();
+  expect(createRequests).toBe(0);
+});
+
+test("reuse-thread tasks explain their context and busy-thread queue behavior", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: [
+      {
+        id: "task-reuse",
+        thread_id: "thread-1",
+        context_mode: "reuse_thread",
+        title: "Conversation summary",
+        prompt: "Summarize this conversation",
+        schedule_type: "cron",
+        schedule_spec: { cron: "0 18 * * *" },
+        timezone: "UTC",
+        status: "enabled",
+        next_run_at: "2026-07-02T18:00:00+00:00",
+        last_run_at: null,
+        last_run_id: null,
+        last_error: null,
+        run_count: 0,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      },
+    ],
+  });
+
+  await page.goto("/workspace/scheduled-tasks");
+
+  const detailNotice = page
+    .getByTestId("scheduled-task-detail")
+    .getByRole("alert");
+  await expect(detailNotice).toContainText(
+    "Uses this thread's conversation history",
+  );
+  await expect(detailNotice).toContainText(
+    "queues this occurrence and starts it when the thread is available",
+  );
+
+  const createForm = page.getByTestId("scheduled-task-create-form");
+  await expect(createForm.getByRole("alert")).toHaveCount(0);
+  await createForm.getByRole("button", { name: "Reuse thread" }).click();
+
+  const createNotice = createForm.getByRole("alert");
+  await expect(createNotice).toContainText(
+    "Uses this thread's conversation history",
+  );
+  await expect(createNotice).toContainText(
+    "It fails if the configured queue wait limit is exceeded",
+  );
+
+  await createForm.getByRole("button", { name: "Fresh thread" }).click();
+  await expect(createForm.getByRole("alert")).toHaveCount(0);
+});
+
 test("user can pause a scheduled task from the detail pane", async ({
   page,
 }) => {

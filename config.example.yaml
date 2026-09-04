@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 34
+config_version: 39
 
 # ============================================================================
 # Logging
@@ -23,8 +23,10 @@ config_version: 34
 # Log level for deerflow modules (debug/info/warning/error)
 log_level: info
 
-# Request trace correlation for Gateway logs, HTTP response headers, and
-# Langfuse metadata. Disabled by default to preserve existing HTTP/log output.
+# Trace ids are always issued and always returned in the `X-Trace-Id` response
+# header; this block controls log output only — whether records carry a
+# `trace_id` field, and in which format. Off by default because enabling it
+# changes the log format. Restart required (see reload_boundary.py).
 logging:
   enhance:
     enabled: false
@@ -100,8 +102,12 @@ max_recursion_limit: 1000
 # Two token fields look similar but mean different things:
 # - `max_tokens` is the per-call OUTPUT cap passed to the provider.
 # - `context_window` is a positive integer for the total context capacity
-#   (prompt + completion) and drives the real-time "% context used" indicator
-#   in the chat UI.
+#   (prompt + completion). It drives the real-time "% context used" indicator
+#   in the chat UI and feeds the model's langchain profile, which fraction-based
+#   summarization triggers (`summarization.trigger: [{type: fraction, ...}]`)
+#   resolve their thresholds from. Third-party OpenAI-compatible models carry no
+#   built-in profile, so without `context_window` a fraction trigger degrades
+#   (dropped with a warning) instead of crashing the agent build.
 # Leave `context_window` unset if the provider limit is unknown; the percentage
 # will not render. Verify configured values against the provider's model docs.
 #
@@ -184,6 +190,40 @@ models:
   #     extra_body:
   #       thinking:
   #         type: disabled
+
+  # Example: Z.AI GLM-5.3-Flash (required-thinking workaround)
+  #
+  # GLM-5.3-Flash cannot disable thinking and only accepts low/high/max effort.
+  # DeerFlow's current generic UI may request disabled thinking or emit
+  # minimal/medium, so this profile keeps thinking enabled unconditionally and
+  # suppresses generic effort forwarding. Keep the thinking block in the base
+  # extra_body: moving it to when_thinking_enabled would let background calls
+  # synthesize the invalid thinking.type=disabled + reasoning_effort=minimal pair.
+  # clear_thinking=true is intentional for this compatibility workaround: it
+  # avoids requiring exact historical reasoning replay after summarization.
+  #
+  # - name: glm-5.3-flash
+  #   display_name: GLM-5.3-Flash
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: glm-5.3-flash
+  #   api_base: https://api.z.ai/api/paas/v4
+  #   api_key: $ZAI_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   temperature: 1.0
+  #   top_p: 0.95
+  #   max_tokens: 131072
+  #   context_window: 1000000
+  #   supports_thinking: true
+  #   supports_reasoning_effort: false
+  #   supports_vision: true
+  #   stream_usage: false
+  #   extra_body:
+  #     thinking:
+  #       type: enabled
+  #       clear_thinking: true
+  #     tool_stream: true
+
   # Example: OpenAI model
   # - name: gpt-4
   #   display_name: GPT-4
@@ -669,6 +709,7 @@ tool_groups:
   - name: file:write
   - name: bash
   - name: browser
+  - name: knowledge
 
 # ============================================================================
 # Tools Configuration
@@ -676,6 +717,30 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
+  # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
+  # `datasets` is optional. Omit it to list every tenant-visible dataset at
+  # search time; an explicit `datasets: []` is invalid. Empty datasets are
+  # skipped; searchable datasets are grouped by
+  # embedding model and retrieved with at most four groups in parallel. Group
+  # ranks are interleaved under the global `page_size` limit; scores are omitted
+  # when multiple groups are searched because they are not comparable.
+  # Configure stable IDs only to restrict scope. IDs and catalog listing never
+  # reach the model.
+  # - name: knowledge_search
+  #   group: knowledge
+  #   use: deerflow.community.ragflow.tools:knowledge_search_tool
+  #   base_url: http://localhost:9380  # Docker: use a backend-reachable URL
+  #   api_key: $RAGFLOW_API_KEY
+  #   datasets:  # Optional operator-controlled allowlist
+  #     - 0123456789abcdef0123456789abcdef  # Replace with a RAGFlow dataset ID
+  #   timeout: 30
+  #   page_size: 8
+  #   similarity_threshold: 0.2
+  #   vector_similarity_weight: 0.3
+  #   top_k: 256
+  #   max_chars_per_chunk: 800
+  #   max_total_chars: 8000
+
   # Web search tool (uses DuckDuckGo, no API key required)
   - name: web_search
     group: web
@@ -705,6 +770,18 @@ tools:
   #   max_results: 5   # capped at 10 by the Serper provider
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
+  # Web search tool (uses Serply - Google Search API, requires SERPLY_API_KEY)
+  # Serply returns live Google results and covers Google News and Google Scholar
+  # with the same key. Sign up at https://serply.io (docs: https://serply.io/docs)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.serply.tools:web_search_tool
+  #   max_results: 5                 # Serply accepts 1-100 per request
+  #   # vertical: search             # search (default), news, or scholar
+  #   # gl: us                       # Optional country code for the results
+  #   # hl: en                       # Optional interface language
+  #   # api_key: $SERPLY_API_KEY     # Optional if the env var is set
+
   # Web search tool (uses Brave Search API, requires BRAVE_SEARCH_API_KEY)
   # Brave Search returns results from an independent index. Sign up at
   # https://brave.com/search/api/ to get a key. Unlike the DuckDuckGo
@@ -728,6 +805,18 @@ tools:
   #   use: deerflow.community.infoquest.tools:web_search_tool
   #   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
   #   search_time_range: 10
+
+  # Web search tool (uses Tencent Cloud Web Search API, requires a service API key)
+  # Create a service API key in the Tencent Cloud WSA console, then set
+  # TENCENTCLOUD_WSA_APIKEY in the Gateway environment. Do not use Tencent Cloud
+  # SecretId/SecretKey for this provider.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.tencent_wsa.tools:web_search_tool
+  #   max_results: 5                 # 1-50; values above 10 request Tencent's Cnt option
+  #                                    # (requires a Tencent plan that supports Cnt)
+  #   # mode: 0                      # Optional: 0=web, 1=VR, 2=mixed
+  #   # api_key: $TENCENTCLOUD_WSA_APIKEY  # Optional explicit env-var reference
 
   # Web search tool (uses Exa, requires EXA_API_KEY)
   # - name: web_search
@@ -1399,8 +1488,10 @@ sandbox:
 #   # api_key: $TENKI_API_KEY        # falls back to TENKI_API_KEY / TENKI_AUTH_TOKEN env var
 #   # base_url: https://tenki.cloud  # optional; SDK default when omitted
 #   # image: my-base-image           # optional; Tenki account default base image when omitted
-#   # project_id: proj_...           # optional; auto-selected if the account has exactly one
 #   # workspace_id: ws_...           # optional; auto-selected if the account has exactly one
+#   # Migration: sandbox.project_id is gone — Tenki 1.x removed projects, so scope
+#   # is the workspace alone. Set workspace_id if the account has more than one.
+#   # A leftover project_id is ignored and logs a warning at startup.
 #   # cpu_cores: 2                   # optional per-sandbox vCPUs
 #   # memory_mb: 2048                # optional per-sandbox memory
 #   # replicas: 3                    # active + warm microVM cap per gateway process
@@ -1411,11 +1502,40 @@ sandbox:
 #   # environment:                   # injected into every command (and as create-time env)
 #   #   PYTHONUNBUFFERED: "1"
 
+# Option 6: OpenSandbox remote Sandbox
+# Runs each sandbox through an OpenSandbox server. Released sandboxes stay in an
+# in-process warm pool and are reclaimed only by the same user/thread. Requires
+# the optional SDK: pip install "deerflow-harness[opensandbox]".
+# sandbox:
+#   use: deerflow.community.opensandbox:OpenSandboxProvider
+#   image: python:3.11
+#   # api_key: $OPEN_SANDBOX_API_KEY  # optional when the SDK env var is set
+#   # domain: localhost:8080          # optional; OPEN_SANDBOX_DOMAIN fallback
+#   # protocol: http                  # localhost only; use https for remote domains
+#   # request_timeout: 30             # management API request timeout seconds
+#   # ready_timeout: 30               # create/readiness timeout seconds
+#   # use_server_proxy: false         # proxy execd/file traffic through server
+#   # sandbox_timeout: 14400          # remote lifetime seconds; 0 = explicit cleanup
+#   # bash_command_timeout: 600       # default remote command timeout seconds
+#   # replicas: 3                     # active + warm cap per gateway process
+#   # idle_timeout: 600               # warm seconds before destroy; 0 disables
+#   # environment:                    # create-time and per-command defaults
+#   #   PYTHONUNBUFFERED: "1"
+
 # ============================================================================
 # Subagents Configuration
 # ============================================================================
 # Configure timeouts for subagent execution
 # Subagents are background workers delegated tasks by the lead agent
+
+# Process-wide execution capacity. These fields are restart-required and are
+# shared by ordinary `task` calls and durable batches. Waiting work is async;
+# queued subagents do not occupy a scheduler thread.
+subagent_runtime:
+  max_running: 3
+  max_queued: 64
+  admission_policy: queue       # queue or reject when all slots are occupied
+  queue_timeout_seconds: 300
 
 # subagents:
 #   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
@@ -1488,6 +1608,40 @@ sandbox:
 #   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
 #   # The model name must match a name defined in the `models:` section above.
 
+# Durable native-subagent batches. Disabled by default because enabling it can
+# materially increase model usage and requires database.backend sqlite/postgres.
+# The three limits are intentionally separate:
+# - total: all persisted items in one batch
+# - live: pending work admitted as queued/running at one time
+# - running: items from one batch allowed to hold real execution slots
+subagent_batches:
+  enabled: false
+  poll_interval_seconds: 1
+  lease_seconds: 120
+  max_items_per_batch: 5000
+  default_max_live_items: 100
+  max_live_items_per_batch: 1000
+  default_max_running_items: 3
+  max_running_items_per_batch: 64
+  max_attempts: 3
+  max_result_chars: 100000
+  result_preview_max_chars: 2000
+
+# ============================================================================
+# Tool Result Verification
+# ============================================================================
+# Deterministic receipts are stamped onto tool results and injected into the
+# model context so final reports can cite executed actions. Disable them only
+# if the extra provenance context is not wanted. The selective judge settings
+# are reserved for acceptance-criteria review and remain off by default.
+verification:
+  receipts_enabled: true
+  # Lead-chain ledger rendering: 'delegation_only' renders only while
+  # processing subagent results (subagent chains always render).
+  receipts_render_mode: "delegation_only"
+  judge_enabled: false
+  judge_model_name: null
+
 # ============================================================================
 # ACP Agents Configuration
 # ============================================================================
@@ -1540,6 +1694,10 @@ skills:
 
   # Path where skills are mounted in the sandbox container
   # This is used by the agent to access skills in both local and Docker sandbox
+  # AIO/provisioner and E2B modes require a canonical absolute non-root path
+  # that does not overlap reserved platform mounts. Providers snapshot this
+  # path for identity, mounts, metadata, and synchronization, so restart the
+  # Gateway after changing it.
   # Default: /mnt/skills
   container_path: /mnt/skills
 
@@ -1606,7 +1764,14 @@ summarization:
     # Uncomment to also trigger when message count reaches 50
     # - type: messages
     #   value: 50
-    # Uncomment to trigger when 80% of model's max input tokens is reached
+    # Uncomment to trigger when 80% of model's max input tokens is reached.
+    # The percentage resolves from the SUMMARY model's declared `context_window`
+    # (summarization.model_name when set, else the run's own model): declare it
+    # on that models entry — third-party OpenAI-compatible models carry no
+    # built-in profile. Without it the fraction clause is dropped with a warning
+    # and any remaining absolute clauses keep working. If a separate summary
+    # model with a larger window is configured, prefer absolute `tokens`
+    # thresholds sized for the run model instead.
     # - type: fraction
     #   value: 0.8
 
@@ -2057,18 +2222,20 @@ run_events:
 # ============================================================================
 # Agent Storage Configuration
 # ============================================================================
-# Where custom agent DEFINITIONS (config.yaml + SOUL.md) are stored. This is
-# separate from `database` (run/thread/event data) and from agent memory.
+# Where custom agent DEFINITIONS (config.yaml + SOUL.md) and deployment-level
+# managed subagent definitions are stored. This is separate from `database`
+# (run/thread/event data) and from agent memory.
 # Restart-required (the backend is captured at Gateway lifespan startup).
 #
-# backend: file  -- Per-user files under {base_dir}/users/{uid}/agents/ (default).
-#                   Single-node only: an agent created on one node is invisible
-#                   to other nodes without a shared mount.
-# backend: db    -- A row per agent in the shared SQL persistence layer, so every
-#                   node sees the same agents. Requires database.backend to be
+# backend: file  -- Custom Agents use per-user files; managed subagents use one
+#                   JSON file each under {base_dir}/managed-subagents/ (default).
+#                   Node-local without a shared mount.
+# backend: db    -- Both definition types use the shared SQL persistence layer,
+#                   so every node sees them. Requires database.backend to be
 #                   'sqlite' or 'postgres' (rejected at startup on 'memory').
 #
-# Switching an existing install to 'db'? Import the on-disk agents once with:
+# Switching an existing install to 'db'? Import the on-disk Custom Agents and
+# managed subagents once with:
 #     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
 # The source files are left in place, so reverting to 'file' is a clean rollback.
 #
@@ -2081,7 +2248,12 @@ agent_storage:
 # Scheduled Tasks Configuration
 # ============================================================================
 # Background scheduler for one-time and recurring (cron) agent runs.
-# All fields are restart-required (captured at Gateway lifespan startup).
+# Poller fields (enabled, multi_instance, poll_interval_seconds, lease_seconds,
+# max_concurrent_runs, min_once_delay_seconds) are restart-required.
+# recursion_limit is read at dispatch and applies to the next scheduled run
+# without a Gateway restart. The default (1000) matches the web UI's
+# interactive budget so scheduled and interactive runs behave identically out
+# of the box. Values above max_recursion_limit are clamped.
 #
 # The scheduler is single-instance by default. Set multi_instance: true only
 # when every Gateway instance shares Postgres, run ownership heartbeats, and
@@ -2089,17 +2261,22 @@ agent_storage:
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller
+#   multi_instance: false        # Opt into lease-aware recovery across Gateway instances
 #   poll_interval_seconds: 5     # How often to scan for due tasks
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
-#   max_concurrent_runs: 3       # Global cap on active scheduled runs/reservations across multi-instance Pods
+#   max_concurrent_runs: 3       # Global cap on launching/running scheduled runs across multi-instance Pods
+#   queue_timeout_seconds: 3600  # Maximum durable queue wait before an occurrence fails
 #   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
+#   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
+  recursion_limit: 1000
 
 # ============================================================================
 # Long-running MCP Tasks Configuration
@@ -2172,14 +2349,20 @@ run_ownership:
 #
 # stream_bridge:
 #   type: memory                 # single-process only
-#   queue_maxsize: 256           # data events retained per run. A reconnect
+#   queue_maxsize: 256           # data events retained per run (min: 1). A reconnect
 #                                # older than this window receives SSE `gap`.
+#   heartbeat_interval_seconds: 15  # idle interval (max: 86400) between
+#                                   # heartbeats sent to SSE, wait, and internal
+#                                   # stream consumers.
 #
 # stream_bridge:
 #   type: redis                  # recommended for Docker / multi-worker gateway
 #   redis_url: redis://redis:6379/0
-#   queue_maxsize: 256           # data events retained per run (Redis MAXLEN).
+#   queue_maxsize: 256           # data events retained per run (Redis MAXLEN, min: 1).
 #                                # Older valid cursors receive SSE `gap`.
+#   heartbeat_interval_seconds: 15  # idle interval (max: 86400) between
+#                                   # heartbeats sent to SSE, wait, and internal
+#                                   # stream consumers.
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
 #                                # to disable. This is not a run timeout.
@@ -2188,8 +2371,8 @@ run_ownership:
 #                                # before deleting the stream key.
 #   max_connections: 100         # optional pool ceiling. Each live SSE client
 #                                # holds one connection blocked in XREAD ... BLOCK
-#                                # for up to heartbeat_interval (15s), so hundreds
-#                                # of concurrent clients open hundreds of
+#                                # for up to the configured heartbeat interval, so
+#                                # hundreds of concurrent clients open hundreds of
 #                                # connections. Unset = redis-py default (unbounded).
 #
 # NOTE: the redis bridge is fail-hard in v1. Redis.from_url is lazy, so a down
@@ -2437,14 +2620,21 @@ run_ownership:
 #           tools: {allow: "*"}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
+#           sandbox: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
+#           sandbox: {allow: "*"}
 #         guest:
-#           tools: {allow: ["web_search", "read_file"]}
+#           # web-only role: sandbox-dependent tools (read_file, bash, glob,
+#           # grep, write_file, ...) are omitted — with sandbox:execute denied
+#           # they could only ever return the deny error, so allow just the
+#           # non-sandbox tools.
+#           tools: {allow: ["web_search"]}
 #           routes: {allow: ["threads:read", "runs:read"]}
 #           models: {allow: ["gpt-4o-mini"]}
+#           sandbox: {allow: false}  # deny sandbox execution
 authorization:
   enabled: false
 
@@ -2543,6 +2733,19 @@ authorization:
 # auth:
 #   local:
 #     allow_registration: false
+#     # Login throttling per client IP (in-process, per worker). Raise
+#     # max_login_attempts when many users share one egress IP (corporate
+#     # proxy / NAT) so shared-IP lockouts don't block the whole office;
+#     # lower it for a stricter posture (minimum 2 — one failed attempt must
+#     # never lock an IP, or a single typo would block the shared egress).
+#     # Defaults preserve the historical hardcoded policy (5 failures /
+#     # 5 minutes). Live-read per login, so a config reload applies without
+#     # a Gateway restart: lowering lockout_seconds releases an active lock
+#     # early and tightening max_login_attempts keeps already-counted
+#     # failures; a raised lockout_seconds extends a still-active lock but
+#     # never resurrects one that already expired.
+#     # max_login_attempts: 5
+#     # lockout_seconds: 300
 #
 #   oidc:
 #     enabled: true
@@ -2619,5 +2822,15 @@ authorization:
 #     enabled: true                       # false skips import and registration
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
+#     table_prefix: example_ext_          # optional: table-name prefix this extension
+#                                         # owns under its own MetaData/migration chain.
+#                                         # Keeps `alembic revision --autogenerate`, run
+#                                         # directly against a live database, from seeing
+#                                         # those tables and proposing to drop them.
+#                                         # (`make migrate-rev` diffs a throwaway SQLite
+#                                         # built from the migration chain, so it never
+#                                         # sees them in the first place.)
+#                                         # Rejected at startup if empty, or if it would
+#                                         # also match a host-owned table name.
 #     config:
 #       label: example                    # extension-private values, if any

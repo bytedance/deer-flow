@@ -36,7 +36,7 @@ _TOTAL_LIMIT_STOP_MSG = (
 
 
 def _clamp_subagent_limit(value: int) -> int:
-    """Clamp subagent limit to valid range [1, 4]."""
+    """Clamp subagent limit to the hard safety range [1, 64]."""
     return clamp_subagent_concurrency(value)
 
 
@@ -104,7 +104,8 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
 
     Args:
         max_concurrent: Maximum number of concurrent subagent calls allowed.
-            Defaults to MAX_CONCURRENT_SUBAGENTS (3). Clamped to [1, 4].
+            Defaults to MAX_CONCURRENT_SUBAGENTS (3). Callers pass the value
+            already clamped to the configured process execution capacity.
         max_total: Maximum number of subagent calls allowed across the run.
             Defaults to 6. Clamped to [1, 50].
     """
@@ -113,6 +114,12 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
         super().__init__()
         self.max_concurrent = _clamp_subagent_limit(max_concurrent)
         self.max_total = _clamp_total_subagent_limit(max_total)
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {
+            "max_concurrent": self.max_concurrent,
+            "max_total": self.max_total,
+        }
 
     def _truncate_task_calls(self, state: AgentState, runtime: Runtime | None = None) -> dict | None:
         messages = state.get("messages", [])

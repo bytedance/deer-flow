@@ -807,6 +807,7 @@ version = "2.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "bcrypt" },
+    { name = "deerflow-extension-api" },
     { name = "deerflow-harness" },
     { name = "dingtalk-stream" },
     { name = "e2b-code-interpreter" },
@@ -858,6 +859,7 @@ dev = [
     { name = "prompt-toolkit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-split" },
     { name = "redis" },
     { name = "ruff" },
     { name = "textual" },
@@ -867,6 +869,7 @@ dev = [
 requires-dist = [
     { name = "bcrypt", specifier = ">=4.0.0" },
     { name = "coincurve", marker = "extra == 'buzz'", specifier = ">=20.0.0" },
+    { name = "deerflow-extension-api", editable = "packages/extension-api" },
     { name = "deerflow-harness", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["browser"], marker = "extra == 'browser'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["memory-zh"], marker = "extra == 'memory-zh'", editable = "packages/harness" },
@@ -902,6 +905,7 @@ dev = [
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "pytest-split", specifier = ">=0.11.0" },
     { name = "redis", specifier = ">=5.0.0" },
     { name = "ruff", specifier = ">=0.14.11" },
     { name = "textual", specifier = ">=0.80" },
@@ -910,7 +914,7 @@ extensions = []
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.1.2"
+version = "0.2.0"
 source = { editable = "packages/extension-api" }
 
 [[package]]
@@ -974,6 +978,9 @@ monocle = [
 ollama = [
     { name = "langchain-ollama" },
 ]
+opensandbox = [
+    { name = "opensandbox" },
+]
 postgres = [
     { name = "asyncpg" },
     { name = "langgraph-checkpoint-postgres" },
@@ -987,7 +994,7 @@ redis = [
     { name = "redis" },
 ]
 tenki = [
-    { name = "tenki-sandbox" },
+    { name = "tenki" },
 ]
 tui = [
     { name = "textual" },
@@ -1032,6 +1039,7 @@ requires-dist = [
     { name = "markdownify", specifier = ">=1.2.2" },
     { name = "markitdown", extras = ["all", "xlsx"], specifier = ">=0.0.1a2" },
     { name = "monocle-apptrace", marker = "extra == 'monocle'", specifier = ">=0.8.8" },
+    { name = "opensandbox", marker = "extra == 'opensandbox'", specifier = ">=0.1.15,<0.2.0" },
     { name = "packaging", specifier = ">=24.2" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.40" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.3.3" },
@@ -1043,11 +1051,11 @@ requires-dist = [
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
     { name = "tavily-python", specifier = ">=0.7.17" },
-    { name = "tenki-sandbox", marker = "extra == 'tenki'", specifier = ">=0.4.0" },
+    { name = "tenki", marker = "extra == 'tenki'", specifier = ">=1.0.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.80" },
     { name = "tiktoken", specifier = ">=0.8.0" },
 ]
-provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "monocle", "browser", "memory-zh"]
+provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "monocle", "browser", "memory-zh"]
 
 [[package]]
 name = "defusedxml"
@@ -2999,6 +3007,21 @@ wheels = [
 ]
 
 [[package]]
+name = "opensandbox"
+version = "0.1.15"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/21/654a3d69815b09690e926d553f3f4a178640d1206000a1b49f5e22c8eb68/opensandbox-0.1.15.tar.gz", hash = "sha256:017abc9b399b88da51bf077d6fb94ee89b1783e601495e85ba85fed478fed1b0", size = 228729, upload-time = "2026-07-24T09:36:29.988Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d5/5c/ab87ea696531210790feb8f575471036fccba29dedaff201736f15bbb3a7/opensandbox-0.1.15-py3-none-any.whl", hash = "sha256:992b01490551f4d8e3f99caa25e34cb9d1690f0c5027eeebab912738291957d1", size = 538522, upload-time = "2026-07-24T09:36:28.277Z" },
+]
+
+[[package]]
 name = "opentelemetry-api"
 version = "1.41.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3948,6 +3971,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-split"
+version = "0.11.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2f/16/8af4c5f2ceb3640bb1f78dfdf5c184556b10dfe9369feaaad7ff1c13f329/pytest_split-0.11.0.tar.gz", hash = "sha256:8ebdb29cc72cc962e8eb1ec07db1eeb98ab25e215ed8e3216f6b9fc7ce0ec2b5", size = 13421, upload-time = "2026-02-03T09:14:31.469Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ae/a1/d4423657caaa8be9b31e491592b49cebdcfd434d3e74512ce71f6ec39905/pytest_split-0.11.0-py3-none-any.whl", hash = "sha256:899d7c0f5730da91e2daf283860eb73b503259cb416851a65599368849c7f382", size = 11911, upload-time = "2026-02-03T09:14:33.708Z" },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -4519,8 +4554,8 @@ name = "standard-aifc"
 version = "3.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
-    { name = "standard-chunk", marker = "python_full_version >= '3.13'" },
+    { name = "audioop-lts" },
+    { name = "standard-chunk" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c4/53/6050dc3dde1671eb3db592c13b55a8005e5040131f7509cef0215212cb84/standard_aifc-3.13.0.tar.gz", hash = "sha256:64e249c7cb4b3daf2fdba4e95721f811bde8bdfc43ad9f936589b7bb2fae2e43", size = 15240, upload-time = "2024-10-30T16:01:31.772Z" }
 wheels = [
@@ -4603,17 +4638,17 @@ wheels = [
 ]
 
 [[package]]
-name = "tenki-sandbox"
-version = "0.4.0"
+name = "tenki"
+version = "1.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
     { name = "protobuf" },
     { name = "websocket-client" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8d/58/f6527c63b2e4c94fd00a48ba4bd93ef52de22dbc72e247110949a17511f6/tenki_sandbox-0.4.0.tar.gz", hash = "sha256:2836e6e7100dfc81715b4d93ecfe80e3f055867498cb9f34be921a02969bb15f", size = 179392, upload-time = "2026-07-17T22:18:09.869Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/68/d9/1669b9ffe9b729a854985918ec84f39abf1ba032764a00bd105459e7e97d/tenki-1.0.2.tar.gz", hash = "sha256:131947e54758674f814a66699d3b65518adc9f093a62ea6dddbd4394cbc771c4", size = 240024, upload-time = "2026-08-27T19:40:32.85Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/f7/3c02da98793dc0e56230c520064d7d233c6e0edab13b410c031e1cfe7fd9/tenki_sandbox-0.4.0-py3-none-any.whl", hash = "sha256:76d5ece2e1607b43705587d86277e983ef43601a86993077e379be8033a40b3e", size = 155246, upload-time = "2026-07-17T22:18:08.383Z" },
+    { url = "https://files.pythonhosted.org/packages/98/ef/06486b129744c3f7293f9b1f1ea60055104db4d4ad03483c6857c57c0bbb/tenki-1.0.2-py3-none-any.whl", hash = "sha256:6259651ed243e071e88d789fa86a7c570954ec5f0372a40bcccc2d4b9ae2e342", size = 164788, upload-time = "2026-08-27T19:40:30.915Z" },
 ]
 
 [[package]]

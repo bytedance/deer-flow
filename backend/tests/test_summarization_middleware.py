@@ -7,16 +7,20 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.constants import TAG_NOSTREAM
+from pydantic import ValidationError
 
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, DynamicContextMiddleware, is_dynamic_context_reminder
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent, SummaryGenerationError, create_summarization_middleware
 from deerflow.agents.thread_state import ThreadState
+from deerflow.config.app_config import AppConfig
 from deerflow.config.memory_config import MemoryConfig
-from deerflow.config.summarization_config import SummarizationConfig
+from deerflow.config.model_config import ModelConfig
+from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.summarization_config import ContextSize, SummarizationConfig
 
 
 def _messages() -> list:
@@ -426,14 +430,12 @@ def test_memory_flush_hook_passes_runtime_user_id(monkeypatch: pytest.MonkeyPatc
     assert manager.add_nowait.call_args.kwargs["user_id"] == "alice"
 
 
-def test_id_swap_user_peer_is_preserved_across_summarization() -> None:
-    """__user (untagged) must be rescued alongside its tagged ID-swap peers.
+def test_stale_user_peer_is_compressed_not_rescued() -> None:
+    """A stale untagged ``__user`` peer is no longer rescued — only the latest user message is.
 
-    The ID-swap triplet from _make_reminder_and_user_messages is:
-    [SystemMessage(id=X, reminder=True), HumanMessage(id=X__memory, reminder=True),
-     HumanMessage(id=X__user)] — only the first two are tagged. Without peer
-    rescue, __user stays in to_summarize and is compressed into prose, orphaning
-    the tagged messages and losing the user question from direct model context.
+    A historical ``__user`` peer now compresses like any other history; only tagged
+    reminders (date SystemMessage + ``__memory``) and the latest real user message
+    are rescued.
     """
     captured: list[SummarizationEvent] = []
     middleware = _middleware(before_summarization=[captured.append])
@@ -470,28 +472,30 @@ def test_id_swap_user_peer_is_preserved_across_summarization() -> None:
     )
 
     assert len(captured) == 1
-    # The __user message should NOT be in messages_to_summarize
+    # The __user peer is no longer the current request (user-2 is) — it compresses.
     summarized_contents = [m.content for m in captured[0].messages_to_summarize]
-    assert "What is the weather in Tokyo?" not in summarized_contents
+    assert "What is the weather in Tokyo?" in summarized_contents
 
-    # All three triplet members should be in preserved_messages
+    # tagged reminder + memory survive, but the __user peer is no longer rescued.
     preserved_ids = [m.id for m in captured[0].preserved_messages]
     assert stable_id in preserved_ids
     assert f"{stable_id}__memory" in preserved_ids
-    assert f"{stable_id}__user" in preserved_ids
+    assert f"{stable_id}__user" not in preserved_ids
+    # The latest user message (user-2) survives.
+    assert any(m.content == "user-2" for m in captured[0].preserved_messages)
 
-    # The emitted state includes all three triplet members
+    # The emitted state likewise no longer contains the stale __user peer.
     emitted = result["messages"]
     assert isinstance(emitted[0], RemoveMessage)
     # Find the triplet members in the emitted messages
     emitted_ids = [m.id for m in emitted[1:]]  # Skip RemoveMessage
     assert stable_id in emitted_ids
     assert f"{stable_id}__memory" in emitted_ids
-    assert f"{stable_id}__user" in emitted_ids
+    assert f"{stable_id}__user" not in emitted_ids
 
 
-def test_id_swap_user_peer_preserved_without_memory() -> None:
-    """When there's no __memory in the triplet, __user is still rescued."""
+def test_stale_user_peer_compressed_without_memory() -> None:
+    """Without ``__memory``, the stale ``__user`` peer still compresses; only the reminder survives."""
     captured: list[SummarizationEvent] = []
     middleware = _middleware(before_summarization=[captured.append])
 
@@ -521,11 +525,11 @@ def test_id_swap_user_peer_preserved_without_memory() -> None:
 
     assert len(captured) == 1
     summarized_contents = [m.content for m in captured[0].messages_to_summarize]
-    assert "How are you?" not in summarized_contents
+    assert "How are you?" in summarized_contents
 
     preserved_ids = [m.id for m in captured[0].preserved_messages]
     assert stable_id in preserved_ids
-    assert f"{stable_id}__user" in preserved_ids
+    assert f"{stable_id}__user" not in preserved_ids
 
 
 def test_non_reminder_messages_with_double_underscore_id_not_rescued() -> None:
@@ -558,15 +562,11 @@ def test_non_reminder_messages_with_double_underscore_id_not_rescued() -> None:
     assert "standalone-reminder" in preserved_ids
 
 
-def test_multiple_id_swap_triplets_preserve_chronological_order() -> None:
-    """When multiple ID-swap triplets sit in one summarization window, rescued
-    messages must retain their original chronological order — not be scrambled
-    by separating tagged reminders from untagged peers.
+def test_multiple_id_swap_triplets_preserve_tagged_order() -> None:
+    """Multiple ID-swap triplets in one window: tagged reminders keep chronological order, user peers compress.
 
-    Regression: the previous reminders+peers concatenation rescued as
-    [Sys(base1), Sys(base2), Mem(base1), Mem(base2), User(base1), User(base2)],
-    detaching each user question from its AI answer. The single-pass partition
-    preserves [Sys(base1), Mem(base1), User(base1), Sys(base2), Mem(base2), User(base2)].
+    Peer rescue is gone: only tagged reminders (date SystemMessage + ``__memory``)
+    survive, while untagged ``__user`` peers compress with history.
     """
     captured: list[SummarizationEvent] = []
     middleware = _middleware(before_summarization=[captured.append])
@@ -619,18 +619,22 @@ def test_multiple_id_swap_triplets_preserve_chronological_order() -> None:
     )
 
     assert len(captured) == 1
-    # Rescued messages must appear in their original chronological order:
-    # each triplet stays contiguous, not re-grouped by role.
+    # tagged reminders + memory keep chronological order (base1 before base2),
+    # but untagged user peers are no longer rescued — they fall into to_summarize.
     preserved = captured[0].preserved_messages
-    rescued_ids = [m.id for m in preserved if m.id and (is_dynamic_context_reminder(m) or m.id in (f"{base1}__user", f"{base2}__user"))]
+    rescued_ids = [m.id for m in preserved if is_dynamic_context_reminder(m)]
     assert rescued_ids == [
         base1,
         f"{base1}__memory",
-        f"{base1}__user",
         base2,
         f"{base2}__memory",
-        f"{base2}__user",
     ]
+    preserved_ids = [m.id for m in preserved]
+    assert f"{base1}__user" not in preserved_ids
+    assert f"{base2}__user" not in preserved_ids
+    summarized_contents = [m.content for m in captured[0].messages_to_summarize]
+    assert "What is the weather?" in summarized_contents
+    assert "How are you?" in summarized_contents
 
 
 def test_factory_attaches_memory_flush_hook_by_default(monkeypatch):
@@ -1077,11 +1081,11 @@ def test_before_summarization_hook_not_fired_when_summary_fails(monkeypatch: pyt
     assert captured == []
 
 
-def _factory_app_config(model_names, *, summary_model_name=None):
+def _factory_app_config(model_names, *, summary_model_name=None, summarization_kwargs=None):
     """AppConfig-shaped stub for the factory: summarization enabled + ordered models."""
     models = [SimpleNamespace(name=name) for name in model_names]
     return SimpleNamespace(
-        summarization=SummarizationConfig(enabled=True, model_name=summary_model_name),
+        summarization=SummarizationConfig(enabled=True, model_name=summary_model_name, **(summarization_kwargs or {})),
         memory=MemoryConfig(enabled=False),
         models=models,
         get_model_config=lambda name: next((model for model in models if model.name == name), None),
@@ -1139,6 +1143,184 @@ def test_factory_configured_constructor_failure_falls_back_to_run_model(monkeypa
     result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
     assert result is not None
     assert result.summary_text == "from-run-model"
+
+
+def _profileless_anchor_stub() -> MagicMock:
+    """Anchor stub whose ``.profile`` is unusable (not a Mapping), like any
+    third-party OpenAI-compatible client constructed without a profile."""
+    model = MagicMock()
+    model.with_config.return_value = model
+    model.invoke.return_value = SimpleNamespace(text="summary")
+    model.ainvoke = AsyncMock(return_value=SimpleNamespace(text="summary"))
+    return model
+
+
+def test_factory_fraction_only_trigger_degrades_to_manual_compaction_only(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    """#3103 mechanism (b): a fraction trigger whose anchor exposes no usable profile
+    must not raise out of ``create_summarization_middleware`` (which used to fail the
+    whole agent build). With no absolute clause to keep, the middleware still
+    constructs as never-firing so manual compaction (/compact, force=True, never
+    consults trigger clauses) keeps working; the warning names the config fix."""
+    fake_model = _profileless_anchor_stub()
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
+    cfg = _factory_app_config(("models0",), summarization_kwargs={"trigger": ContextSize(type="fraction", value=0.8)})
+
+    with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.summarization_middleware"):
+        middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0", keep=("messages", 2))
+
+    assert middleware is not None  # degraded, not raised — and not disabled either
+    assert "context_window" in caplog.text  # the warning names the fix
+    assert "Manual compaction" in caplog.text  # and says manual /compact still works
+    result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
+    assert result is not None  # forced compaction never consults trigger clauses
+    assert result.summary_text == "summary"
+
+
+def test_factory_drops_only_fraction_clauses_and_keeps_absolute_ones(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    """Mixed [fraction, messages] triggers degrade to the messages clause alone:
+    construction succeeds and message-count compaction still fires."""
+    fake_model = _profileless_anchor_stub()
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
+    cfg = _factory_app_config(
+        ("models0",),
+        summarization_kwargs={"trigger": [ContextSize(type="fraction", value=0.8), ContextSize(type="messages", value=3)]},
+    )
+
+    with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.summarization_middleware"):
+        middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0", keep=("messages", 2))
+
+    assert middleware is not None  # the absolute clause kept the middleware alive
+    assert "context_window" in caplog.text
+    result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
+    assert result is not None
+    assert result.summary_text == "summary"
+
+
+def test_factory_keep_fraction_falls_back_to_messages_default(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A fraction ``keep`` against a profile-less anchor falls back to the
+    messages default instead of failing construction."""
+    fake_model = _profileless_anchor_stub()
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
+    cfg = _factory_app_config(
+        ("models0",),
+        summarization_kwargs={"trigger": ContextSize(type="messages", value=3), "keep": ContextSize(type="fraction", value=0.3)},
+    )
+
+    with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.summarization_middleware"):
+        middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0")
+
+    assert middleware is not None
+    assert middleware.keep == ("messages", 20)  # SummarizationConfig's documented default
+
+
+def test_factory_null_trigger_with_fraction_keep_still_constructs(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    """``trigger: null`` + fraction ``keep``: the long-standing "enabled but never
+    auto-triggers" setup must keep constructing — with the keep degraded to the
+    messages default — rather than disabling compaction. On main this exact config
+    crashes the agent build (fraction keep needs a profile)."""
+    fake_model = _profileless_anchor_stub()
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
+    cfg = _factory_app_config(("models0",), summarization_kwargs={"keep": ContextSize(type="fraction", value=0.3)})
+
+    with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.summarization_middleware"):
+        middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0")
+
+    assert middleware is not None  # never-firing but constructed, same as any trigger: null setup
+    assert middleware.keep == ("messages", 20)
+    assert "context_window" in caplog.text
+
+
+def test_factory_fraction_trigger_survives_when_anchor_has_profile(monkeypatch) -> None:
+    """With a usable profile on the anchor (the factory attaches one from
+    ``context_window``), the fraction clause is kept as configured — construction
+    succeeding is itself the regression pin (#3103: it used to raise)."""
+    model = _StaticChatModel(profile={"max_input_tokens": 65536})
+    assert model.profile == {"max_input_tokens": 65536}
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: model)
+    cfg = _factory_app_config(("models0",), summarization_kwargs={"trigger": ContextSize(type="fraction", value=0.8)})
+
+    middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0", keep=("messages", 2))
+
+    assert middleware is not None
+    result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
+    assert result is not None
+    assert result.summary_text == "ok"
+
+
+def test_context_size_rejects_percent_style_fraction_value() -> None:
+    """A fraction written percent-style (80 instead of 0.8) would resolve to
+    int(capacity * 80) — a threshold the context can never reach, so the trigger
+    silently never fires. Config load is the failure point, not a dead trigger."""
+    with pytest.raises(ValidationError, match="fraction ContextSize value must be in"):
+        ContextSize(type="fraction", value=80)
+
+
+def test_context_size_rejects_non_positive_absolute_values() -> None:
+    with pytest.raises(ValidationError, match="tokens ContextSize value must be positive"):
+        ContextSize(type="tokens", value=0)
+    with pytest.raises(ValidationError, match="messages ContextSize value must be positive"):
+        ContextSize(type="messages", value=-5)
+
+
+def test_context_size_rejects_non_finite_values() -> None:
+    """YAML .nan / .inf pass pydantic's float parsing but never describe a usable
+    threshold (``count >= nan`` is always False, and ``nan <= 0`` is False so the
+    positivity check alone would not catch them) — they must fail at config load."""
+    with pytest.raises(ValidationError, match="ContextSize value must be finite"):
+        ContextSize(type="tokens", value=float("nan"))
+    with pytest.raises(ValidationError, match="ContextSize value must be finite"):
+        ContextSize(type="fraction", value=float("inf"))
+
+
+def test_context_size_rejects_fractional_message_counts() -> None:
+    """``messages`` values slice the message list at compaction time
+    (``messages[-keep:]``) — a float raises ``TypeError: list indices must be
+    integers or slices, not float`` mid-compaction, so config load must reject
+    it first. Even an integral float (``20.0``) is a float index to a slice."""
+    with pytest.raises(ValidationError, match="messages ContextSize value must be a whole number"):
+        ContextSize(type="messages", value=1.5)
+    with pytest.raises(ValidationError, match="messages ContextSize value must be a whole number"):
+        ContextSize(type="messages", value=20.0)
+
+
+def test_context_size_accepts_boundary_values() -> None:
+    assert ContextSize(type="fraction", value=1).to_tuple() == ("fraction", 1)
+    assert ContextSize(type="fraction", value=0.8).to_tuple() == ("fraction", 0.8)
+    assert ContextSize(type="messages", value=20).to_tuple() == ("messages", 20)
+
+
+def test_factory_wiring_context_window_to_fraction_trigger_end_to_end() -> None:
+    """Pins the two halves of the fix together without monkeypatching
+    ``create_chat_model``: a ``context_window``-declared model gets a profile from
+    the real model factory, the fraction clause survives
+    ``_drop_unusable_fraction_clauses``, and the middleware constructs with the
+    trigger intact. The middleware-side tests stub the factory and the
+    factory-side tests stop at captured kwargs — this is the automated pin of the
+    shipped contract (the manual E2E in the PR body was the only wiring proof)."""
+    model = ModelConfig(
+        name="gw-64k",
+        display_name="gw-64k",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="some-64k-model",
+        base_url="https://third-party-gateway.example.com/v1",
+        api_key="sk-test",
+        supports_thinking=False,
+        supports_reasoning_effort=False,
+        supports_vision=False,
+        context_window=65_536,
+    )
+    cfg = AppConfig(
+        models=[model],
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        summarization=SummarizationConfig(enabled=True, trigger=ContextSize(type="fraction", value=0.8)),
+        memory=MemoryConfig(enabled=False),
+    )
+
+    middleware = create_summarization_middleware(app_config=cfg, run_model_name="gw-64k")
+
+    assert middleware is not None  # on main this raises: no profile without the factory translation
+    assert middleware.model.profile == {"max_input_tokens": 65_536}
 
 
 class _RaisingTextResponse:
@@ -1206,3 +1388,95 @@ async def test_text_extraction_failure_falls_back_to_run_model_async(monkeypatch
     assert built == ["run-model"]
     assert result is not None
     assert result["summary_text"] == "from-run-model"
+
+
+def test_current_request_survives_and_stale_peer_compresses() -> None:
+    """Regression: with a stale peer and a current request in one window, the current request survives and the stale peer compresses.
+
+    Mirrors the production incident: a first-turn request is ID-swapped into
+    reminder(X) + X__user (stale), while a later turn's request is a plain
+    HumanMessage. On summarization the stale X__user must NOT be rescued into
+    preserved, the current request must stay preserved, and messages_to_summarize
+    must be non-empty (guards the no-op regression).
+    """
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append], keep=("messages", 10))
+
+    stable_id = "60fe6f08-83cf-48d6-a2e6-2042830011d6"
+    reminder = SystemMessage(
+        content="<system-reminder>\n<current_date>2026-08-18, Tuesday</current_date>\n</system-reminder>",
+        id=stable_id,
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True, "reminder_date": "2026-08-18, Tuesday"},
+    )
+    old_user = HumanMessage(
+        content="definition request for metric A",
+        id=f"{stable_id}__user",
+    )
+    new_user = HumanMessage(
+        content="single-metric analysis for metric B",
+        id="c75368cd-d46e-4f22-8202-29a06e4929a3",
+    )
+
+    messages = [
+        reminder,
+        old_user,
+        new_user,
+        AIMessage(content="run2 ai", id="ai-1", tool_calls=[{"id": "tc-1", "name": "queryMetrics", "args": {}}]),
+        ToolMessage(content="{}", tool_call_id="tc-1", id="tool-1"),
+        AIMessage(content="run2 ai2", id="ai-2"),
+        ToolMessage(content="{}", tool_call_id="tc-2", id="tool-2"),
+        ToolMessage(content="{}", tool_call_id="tc-3", id="tool-3"),
+        ToolMessage(content="{}", tool_call_id="tc-4", id="tool-4"),
+        AIMessage(content="run2 ai3", id="ai-3"),
+        ToolMessage(content="{}", tool_call_id="tc-5", id="tool-5"),
+        AIMessage(content="run2 ai4", id="ai-4"),
+        ToolMessage(content="{}", tool_call_id="tc-6", id="tool-6"),
+        ToolMessage(content="{}", tool_call_id="tc-7", id="tool-7"),
+    ]
+
+    middleware.before_model({"messages": messages}, _runtime())
+
+    assert len(captured) == 1
+    ev = captured[0]
+    preserved_ids = [m.id for m in ev.preserved_messages]
+    # The current request survives.
+    assert new_user.id in preserved_ids
+    # The stale peer no longer escapes compression — it lands in to_summarize.
+    assert old_user.id not in preserved_ids
+    summarized_contents = [m.content for m in ev.messages_to_summarize]
+    assert any("metric A" in c for c in summarized_contents)
+    # Compression is non-empty (guards the no-op regression).
+    assert len(ev.messages_to_summarize) > 0
+
+
+def test_first_turn_long_analysis_preserves_current_request() -> None:
+    """First-turn long analysis: the current request (X__user peer) stays preserved even outside the keep window, and early AI/Tool turns still compress."""
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append], keep=("messages", 10))
+
+    stable_id = "ctx-001"
+    reminder = SystemMessage(
+        content="<system-reminder>\n<current_date>2026-05-08, Friday</current_date>\n</system-reminder>",
+        id=stable_id,
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
+    user = HumanMessage(content="first-turn long request", id=f"{stable_id}__user")
+
+    messages = [reminder, user]
+    for k in range(1, 13):
+        messages.append(AIMessage(content=f"ai{k}", id=f"ai{k}", tool_calls=[{"id": f"tc{k}", "name": "t", "args": {}}]))
+        messages.append(ToolMessage(content=f"r{k}", tool_call_id=f"tc{k}", id=f"tool{k}"))
+
+    middleware.before_model({"messages": messages}, _runtime())
+
+    assert len(captured) == 1
+    ev = captured[0]
+    preserved_ids = [m.id for m in ev.preserved_messages]
+    # The current request (the only real user message) survives.
+    assert user.id in preserved_ids
+    # The tagged reminder survives.
+    assert stable_id in preserved_ids
+    # Early AI/Tool turns still compress — non-empty.
+    summarized_ids = [m.id for m in ev.messages_to_summarize]
+    assert len(summarized_ids) > 0
+    assert "ai1" in summarized_ids

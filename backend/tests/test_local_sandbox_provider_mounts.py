@@ -565,6 +565,21 @@ class TestMultipleMounts:
 
 
 class TestLocalSandboxProviderMounts:
+    def test_skill_isolation_capability_fails_closed_when_host_bash_is_enabled(self):
+        provider = LocalSandboxProvider.__new__(LocalSandboxProvider)
+
+        with patch(
+            "deerflow.sandbox.local.local_sandbox_provider.is_host_bash_allowed",
+            return_value=False,
+        ):
+            assert provider.supports_agent_skill_isolation is True
+
+        with patch(
+            "deerflow.sandbox.local.local_sandbox_provider.is_host_bash_allowed",
+            return_value=True,
+        ):
+            assert provider.supports_agent_skill_isolation is False
+
     def test_thread_mappings_mount_per_user_integration_projections(self, tmp_path):
         from deerflow.config.paths import Paths
 

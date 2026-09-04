@@ -1,8 +1,10 @@
 "use client";
 
+import { CopyIcon, TriangleAlertIcon } from "lucide-react";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -43,6 +45,22 @@ import type {
 import { cn } from "@/lib/utils";
 
 const NONE = "—";
+
+function ReuseThreadNotice({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <Alert className="border-amber-500/50 bg-amber-500/10">
+      <TriangleAlertIcon className="text-amber-600 dark:text-amber-400" />
+      <AlertTitle>{title}</AlertTitle>
+      <AlertDescription>{description}</AlertDescription>
+    </Alert>
+  );
+}
 
 function formatTimestamp(value: string | null, locale: string): string {
   if (!value) {
@@ -100,6 +118,8 @@ export default function ScheduledTasksPage() {
     timezone: "UTC",
   });
   const [createNonce, setCreateNonce] = useState(0);
+  const createFormRef = useRef<HTMLDivElement>(null);
+  const createTitleRef = useRef<HTMLInputElement>(null);
   const filteredData = (data ?? []).filter((task) => {
     const statusPass = statusFilter === "all" || task.status === statusFilter;
     const typePass = typeFilter === "all" || task.schedule_type === typeFilter;
@@ -144,6 +164,24 @@ export default function ScheduledTasksPage() {
     setCreateSchedule(recipe.schedule);
     setContextMode("fresh_thread_per_run");
     setCreateNonce((n) => n + 1);
+  };
+  const duplicateTask = (task: ScheduledTask) => {
+    setTitle(`${task.title}${st.actions.duplicateTitleSuffix}`);
+    setPrompt(task.prompt);
+    setContextMode(task.context_mode);
+    setTargetThreadId(task.thread_id ?? "");
+    setCreateSchedule({
+      schedule_type: task.schedule_type,
+      schedule_spec: { ...task.schedule_spec },
+      timezone: task.timezone,
+    });
+    setFormError(null);
+    setCreateNonce((nonce) => nonce + 1);
+    createFormRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+    createTitleRef.current?.focus();
   };
 
   useEffect(() => {
@@ -194,6 +232,7 @@ export default function ScheduledTasksPage() {
         <div className="mx-auto flex w-full max-w-(--container-width-md) flex-col gap-4 p-6">
           <h1 className="text-2xl font-semibold">{t.sidebar.scheduledTasks}</h1>
           <div
+            ref={createFormRef}
             className="grid gap-2 rounded-lg border p-4"
             data-testid="scheduled-task-create-form"
           >
@@ -236,13 +275,20 @@ export default function ScheduledTasksPage() {
               </Button>
             </div>
             {contextMode === "reuse_thread" && (
-              <Input
-                value={targetThreadId}
-                onChange={(event) => setTargetThreadId(event.target.value)}
-                placeholder={st.context.threadIdPlaceholder}
-              />
+              <>
+                <Input
+                  value={targetThreadId}
+                  onChange={(event) => setTargetThreadId(event.target.value)}
+                  placeholder={st.context.threadIdPlaceholder}
+                />
+                <ReuseThreadNotice
+                  title={st.context.reuseNoticeTitle}
+                  description={st.context.reuseNoticeDescription}
+                />
+              </>
             )}
             <Input
+              ref={createTitleRef}
               value={title}
               onChange={(event) => setTitle(event.target.value)}
               placeholder={st.create.taskTitle}
@@ -440,6 +486,12 @@ export default function ScheduledTasksPage() {
                       ? `${st.detail.thread}: ${selectedTask.thread_id ?? NONE}`
                       : `${st.detail.lastThread}: ${selectedTask.last_thread_id ?? NONE}`}
                   </div>
+                  {selectedTask.context_mode === "reuse_thread" && (
+                    <ReuseThreadNotice
+                      title={st.context.reuseNoticeTitle}
+                      description={st.context.reuseNoticeDescription}
+                    />
+                  )}
                   <div className="text-muted-foreground text-sm">
                     {st.detail.schedule}:{" "}
                     {scheduleTypeLabel(selectedTask.schedule_type)}
@@ -515,6 +567,14 @@ export default function ScheduledTasksPage() {
                       onClick={() => triggerTask.mutate(selectedTask.id)}
                     >
                       {st.actions.trigger}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => duplicateTask(selectedTask)}
+                    >
+                      <CopyIcon />
+                      {st.actions.duplicate}
                     </Button>
                     <Button
                       variant="destructive"

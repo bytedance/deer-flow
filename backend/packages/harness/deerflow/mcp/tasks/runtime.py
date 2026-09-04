@@ -21,6 +21,23 @@ class McpTaskSubmitter(Protocol):
         now: Any | None = None,
     ) -> dict: ...
 
+    async def list_tasks(
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        limit: int = 50,
+        active_only: bool = False,
+    ) -> list[dict[str, Any]]: ...
+
+    async def cancel_matching_task(
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        task: str | None = None,
+    ) -> dict[str, Any]: ...
+
 
 _submitter: McpTaskSubmitter | None = None
 _TaskServerConfigSnapshot = tuple[dict[str, dict[str, Any]], Any]
@@ -66,6 +83,11 @@ def set_mcp_task_submitter(submitter: McpTaskSubmitter | None) -> None:
     """Install or clear the Gateway-owned submit boundary for this process."""
     global _submitter
     _submitter = submitter
+
+
+def is_mcp_task_runtime_available() -> bool:
+    """Return whether the Gateway-owned durable task runtime is installed."""
+    return _submitter is not None
 
 
 def get_mcp_task_submitter() -> McpTaskSubmitter:

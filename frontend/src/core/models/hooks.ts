@@ -1,14 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
 
+import { UnauthorizedError } from "@/core/api/errors";
+
 import { loadModels } from "./api";
 
 export const MODELS_QUERY_KEY = ["models"] as const;
 
 export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: MODELS_QUERY_KEY,
     queryFn: () => loadModels(),
     enabled,
+    // Surface persistent gateway failures promptly while retaining one retry
+    // for transient startup or network errors.
+    retry: (failureCount, queryError) =>
+      !(queryError instanceof UnauthorizedError) && failureCount < 1,
     refetchOnWindowFocus: false,
     // Model config changes rarely and every subtask card mounts its own
     // observer of this query; without a staleTime each newly-mounted card would
@@ -21,6 +27,7 @@ export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
     models: data?.models ?? [],
     tokenUsageEnabled: data?.token_usage.enabled ?? false,
     isLoading,
+    isFetching,
     error,
     refetch,
   };

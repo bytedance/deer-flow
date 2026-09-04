@@ -42,6 +42,13 @@ class ThreadDataState(TypedDict):
     outputs_path: NotRequired[str | None]
 
 
+class BackgroundTaskState(TypedDict):
+    task_id: str
+    task_name: str
+    status: str
+    updated_at: str
+
+
 class ViewedImageData(TypedDict):
     """Metadata for a viewed image file.
 
@@ -170,6 +177,12 @@ class DelegationEntry(TypedDict):
     # turn_capped / loop_capped. The status stays completed/failed; this field
     # is the additive signal that distinguishes a capped run from a clean one.
     stop_reason: NotRequired[str]
+    # RFC #4651 PR2: parent-side citation-check verdict (advisory execution
+    # evidence), stamped at task write-back; absent on legacy history.
+    receipt_verdict: NotRequired[dict]
+    # RFC #4651 PR4: deterministic acceptance-checklist verdict, same
+    # provenance as receipt_verdict.
+    acceptance_verdict: NotRequired[dict]
     created_at: str
 
 
@@ -274,6 +287,7 @@ class ThreadState(AgentState):
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]
+    background_tasks: NotRequired[list[BackgroundTaskState]]
 
 
 def _normalize_messages(value: Any) -> list[AnyMessage]:
