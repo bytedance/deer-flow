@@ -427,7 +427,10 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
     if has_env_dump and has_network_sink:
         findings.append(_finding_for_node("python-env-dump-exfil", rel_path, env_node or network_node, "environment dump + network sink"))
     if (has_sensitive_read or has_env_dump) and not has_network_sink:
-        findings.extend(_scan_python_client_heuristic(rel_path, tree, aliases, has_sensitive_read=has_sensitive_read, has_env_dump=has_env_dump))
+        # A cheap prefilter only: these flags come from the unrestricted walk above, so they are a
+        # superset of what the heuristic accepts. It recomputes both under its own lazy-node
+        # exclusion, because a payload the runtime never evaluates must not satisfy the rule.
+        findings.extend(_scan_python_client_heuristic(rel_path, tree, aliases))
     return findings
 
 
@@ -1253,36 +1256,51 @@ def _call_is_client_handle_sink(node: ast.Call, handles: dict[str, str]) -> bool
 # asked for before any wider model is allowed to produce `CRITICAL` findings.
 #
 # Three syntactic anchors survive: the constructor must be spelled as a call through a proven
-# import, the sink must be spelled `<expr>.method(...)`, and the sink's receiver must not itself be
-# a proven import path. A locally aliased constructor (`Ctor = requests.Session`) and a detached or
-# dynamic sink (`send = s.post`, `getattr(s, "post")`) stay outside both signals, and lazily
-# evaluated PEP 695 type syntax is skipped for the same reason the blocking walker skips it.
+# import, the sink must be spelled `<expr>.method(...)`, and the sink's receiver must not be a
+# *never-rebound* import alias -- an import proves the receiver is a module only while that alias
+# still holds one, so a name the file rebinds stays a candidate. A locally aliased constructor
+# (`Ctor = requests.Session`) and a detached or dynamic sink (`send = s.post`, `getattr(s, "post")`)
+# stay outside both signals. Lazily evaluated PEP 695 type syntax is skipped for the same reason the
+# blocking walker skips it, and the payload half is recomputed under that same exclusion so a value
+# the runtime never evaluates cannot satisfy the rule.
 #
 # The pass is iterative and node-budgeted, so an adversarial tree costs neither recursion nor branch
 # copies, and it runs only on files that already show an exfil payload and no proven sink -- its
 # cost is bounded by that gate as much as by the budget.
 
 
-def _scan_python_client_heuristic(rel_path: str, tree: ast.AST, aliases: dict[str, str], *, has_sensitive_read: bool, has_env_dump: bool) -> list[SecurityFinding]:
+@dataclass(frozen=True)
+class _ClientHeuristicHit:
+    """One heuristic sink, plus the exfil payload flags recomputed without lazily evaluated code."""
+
+    sink: ast.AST
+    sensitive_read: bool
+    env_dump: bool
+
+
+def _scan_python_client_heuristic(rel_path: str, tree: ast.AST, aliases: dict[str, str]) -> list[SecurityFinding]:
     """Warn where the blocking client-handle chain gives up but the file still shows the exfil shape."""
     try:
-        sink = _find_client_handle_heuristic_sink(tree, aliases, rel_path)
+        hit = _find_client_handle_heuristic_sink(tree, aliases, rel_path)
     except RecursionError:
         # Same contract as the blocking signal: an adversarially deep tree drops this best-effort
         # finding and leaves every deterministic finding for the file in place.
         logger.warning("SkillScan client-handle heuristic analysis hit recursion limit for %s", rel_path)
         return []
-    if sink is None:
+    if hit is None or not (hit.sensitive_read or hit.env_dump):
         return []
-    payload = " + ".join(part for part, present in (("sensitive read", has_sensitive_read), ("environment dump", has_env_dump)) if present)
-    return [_finding_for_node("python-client-exfil-heuristic", rel_path, sink, f"{payload} + unproven client egress")]
+    payload = " + ".join(part for part, present in (("sensitive read", hit.sensitive_read), ("environment dump", hit.env_dump)) if present)
+    return [_finding_for_node("python-client-exfil-heuristic", rel_path, hit.sink, f"{payload} + unproven client egress")]
 
 
-def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], rel_path: str) -> ast.AST | None:
+def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], rel_path: str) -> _ClientHeuristicHit | None:
     """Return the first supported client method call in a file that also constructs such a client."""
     remaining = _PYTHON_CLIENT_HEURISTIC_BUDGET
     constructors: set[str] = set()
-    sinks: list[tuple[str, ast.AST]] = []
+    candidates: list[tuple[str, str, str, ast.AST]] = []
+    rebound: set[str] = set()
+    sensitive_read = False
+    env_dump = False
     stack: list[ast.AST] = [tree]
     while stack:
         if remaining <= 0:
@@ -1295,17 +1313,55 @@ def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], r
         if isinstance(node, ast.Call):
             # A call spelled entirely as a proven import path (`requests.Session`, `environ.get`)
             # names a module attribute rather than a value constructed at runtime, so it can be the
-            # constructor half of the pair but never the instance-method half.
+            # constructor half of the pair but never the instance half.
             imported = _python_import_name(node.func, aliases)
             if imported in _PYTHON_CLIENT_CONSTRUCTORS:
                 constructors.add(imported)
-            elif not imported and isinstance(node.func, ast.Attribute) and node.func.attr in _PYTHON_CLIENT_SINK_METHODS:
-                sinks.append((node.func.attr, node))
-        # Reversed so the stack yields children in source order and the reported sink is the first
-        # one in the file, not an artifact of the traversal.
-        stack.extend(child for child in reversed(list(ast.iter_child_nodes(node))) if not isinstance(child, _PYTHON_LAZILY_EVALUATED_NODES))
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in _PYTHON_CLIENT_SINK_METHODS:
+                candidates.append((node.func.attr, _attribute_root_name(node.func), imported, node))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _SENSITIVE_PATH_RE.search(node.value):
+            sensitive_read = True
+        elif isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, aliases) == "os.environ":
+            env_dump = True
+        rebound.update(_heuristic_bound_names(node))
+        for child in reversed(list(ast.iter_child_nodes(node))):
+            if isinstance(child, _PYTHON_LAZILY_EVALUATED_NODES):
+                # Skipped for sinks and payloads alike, but a `type X = ...` still binds X, and that
+                # binding is what stops X from being treated as a stable import path below.
+                rebound.update(_heuristic_bound_names(child))
+                continue
+            stack.append(child)
     supported = {method for constructor in constructors for method in _PYTHON_CLIENT_SPECS[constructor].methods}
-    return next((node for method, node in sinks if method in supported), None)
+    for method, root, imported, node in candidates:
+        # An import path is only evidence that the receiver is a module while that alias still holds
+        # it. `_collect_python_aliases` never invalidates an import, so a name the file rebinds --
+        # `from pathlib import Path as session` then `session = requests.Session()` -- has to stay a
+        # candidate, or the anchor would swallow the very rebind cases this rule exists to cover.
+        if method in supported and (not imported or root in rebound):
+            return _ClientHeuristicHit(sink=node, sensitive_read=sensitive_read, env_dump=env_dump)
+    return None
+
+
+def _heuristic_bound_names(node: ast.AST) -> tuple[str, ...]:
+    """Names this node binds by anything other than an import, coarsely and without scope analysis."""
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        return (node.id,)
+    if isinstance(node, ast.arg):
+        return (node.arg,)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.TypeAlias)):
+        name = node.name
+        return (name.id,) if isinstance(name, ast.Name) else (name,)
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        return (node.name,)
+    if isinstance(node, _PYTHON_MATCH_CAPTURE_NODES):
+        return tuple(_match_capture_names(node))
+    return ()
+
+
+def _attribute_root_name(node: ast.AST) -> str:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else ""
 
 
 def _yaml_load_uses_safe_loader(node: ast.Call) -> bool:
