@@ -9,6 +9,7 @@ import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -1576,12 +1577,13 @@ class RunManager:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
                 current = self._runs.get(existing.run_id)
                 if current is None:
-                    # Only re-index ACTIVE records. Terminal histories stay
-                    # store-only: the Gateway returns immediately for an
-                    # idempotent reuse, so no worker finalization will ever
-                    # schedule cleanup for the re-hydrated record — indexing
-                    # a terminal record here would retain it for the process
-                    # lifetime (the #5009 leak, one stable-key retry at a time).
+                    # Only re-index active records owned by this worker. A
+                    # foreign active record has no local task to finalize or
+                    # evict it, while terminal histories have no worker task at
+                    # all. Both must stay store-only: the Gateway returns
+                    # immediately for an idempotent reuse, so indexing either
+                    # would retain it for the process lifetime (the #5009 leak,
+                    # one stable-key retry at a time).
                     if existing.status in (RunStatus.pending, RunStatus.running) and existing.owner_worker_id == self._worker_id:
                         self._runs[existing.run_id] = existing
                         self._index_run_locked(existing)
@@ -1925,7 +1927,7 @@ class RunManager:
         """
         if self._store is None:
             return None
-        task = asyncio.create_task(self.cleanup(run_id, delay=delay))
+        task = asyncio.create_task(self.cleanup(run_id, delay=delay), context=Context())
         self._cleanup_tasks.add(task)
         task.add_done_callback(self._cleanup_task_done)
         return task

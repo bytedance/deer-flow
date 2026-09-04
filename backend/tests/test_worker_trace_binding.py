@@ -63,6 +63,9 @@ class _FakeRunManager:
     async def cleanup(self, *_args, **_kwargs) -> None:
         return None
 
+    def schedule_cleanup(self, *_args, **_kwargs) -> None:
+        return None
+
 
 class _FakeBridge:
     async def publish(self, _run_id, event, payload) -> None:

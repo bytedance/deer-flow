@@ -1632,14 +1632,11 @@ async def run_agent(
                 # Durable finalization and terminal publication may depend on
                 # external backends, but local housekeeping must always run.
                 _create_contextless_task(bridge.cleanup(run_id, delay=60))
-                # Preserve the existing five-minute grace period for local
-                # join/status paths, then release the terminal record, completed
-                # task, and request payload. Durable run history remains available
-                # through RunStore.
-                _create_contextless_task(run_manager.cleanup(run_id))
-                # Schedule terminal-record eviction from the outer cleanup path so
-                # a failure in any earlier finalization step (including
-                # ``publish_end``) cannot strand the in-memory record.
+                # Schedule one manager-tracked eviction from the outer cleanup
+                # path so a failure in any earlier finalization step (including
+                # ``publish_end``) cannot strand the in-memory record. The
+                # scheduler preserves the five-minute local join/status grace
+                # period and keeps store-backed history available afterwards.
                 run_manager.schedule_cleanup(run_id)
                 _schedule_terminal_cycle_collection()
 

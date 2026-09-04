@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import sqlite3
+from contextvars import ContextVar
 from typing import Any
 
 import pytest
@@ -688,7 +689,7 @@ async def test_schedule_cleanup_without_store_retains_record(manager: RunManager
 
 @pytest.mark.anyio
 async def test_schedule_cleanup_with_store_evicts_and_prunes_thread_index(manager_with_store: RunManager):
-    """With a durable store, terminal records are evicted after the delay.
+    """With a backing store, terminal records are evicted after the delay.
 
     Both registries must be pruned in lockstep, and history must remain
     readable through the store fallback afterwards.
@@ -708,6 +709,32 @@ async def test_schedule_cleanup_with_store_evicts_and_prunes_thread_index(manage
     assert hydrated is not None
     assert hydrated.status == RunStatus.success
     assert hydrated.store_only is True
+
+
+@pytest.mark.anyio
+async def test_schedule_cleanup_does_not_inherit_request_context(manager_with_store: RunManager, monkeypatch: pytest.MonkeyPatch):
+    """Cleanup tasks must not retain request-scoped context variables."""
+    mgr = manager_with_store
+    record = await mgr.create("thread-1")
+    await mgr.set_status(record.run_id, RunStatus.success)
+    request_marker: ContextVar[str | None] = ContextVar("request_marker", default=None)
+    observed_markers: list[str | None] = []
+    original_cleanup = mgr.cleanup
+
+    async def observe_cleanup(run_id: str, *, delay: float = 300) -> None:
+        observed_markers.append(request_marker.get())
+        await original_cleanup(run_id, delay=delay)
+
+    monkeypatch.setattr(mgr, "cleanup", observe_cleanup)
+    token = request_marker.set("request-value")
+    try:
+        task = mgr.schedule_cleanup(record.run_id, delay=0)
+        assert task is not None
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        request_marker.reset(token)
+
+    assert observed_markers == [None]
 
 
 @pytest.mark.anyio

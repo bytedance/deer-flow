@@ -37,7 +37,8 @@ class _SpyRunManager:
     """Run manager stub that records ``schedule_cleanup`` invocations."""
 
     def __init__(self) -> None:
-        self.cleanup_calls: list[tuple[str, dict]] = []
+        self.direct_cleanup_calls: list[tuple[str, dict]] = []
+        self.scheduled_cleanup_calls: list[tuple[str, dict]] = []
 
     async def try_start(self, _run_id: str) -> RunStartOutcome:
         return RunStartOutcome.started
@@ -64,11 +65,12 @@ class _SpyRunManager:
     async def update_run_completion(self, *_args, **_kwargs) -> None:
         return None
 
-    async def cleanup(self, *_args, **_kwargs) -> None:
+    async def cleanup(self, run_id: str, **kwargs) -> None:
+        self.direct_cleanup_calls.append((run_id, kwargs))
         return None
 
     def schedule_cleanup(self, run_id: str, **kwargs):
-        self.cleanup_calls.append((run_id, kwargs))
+        self.scheduled_cleanup_calls.append((run_id, kwargs))
         return None
 
 
@@ -111,9 +113,11 @@ async def test_run_agent_finalization_schedules_eviction():
         graph_input={"messages": []},
         config={"configurable": {"thread_id": "thread-finalize"}},
     )
+    await asyncio.sleep(0)
 
-    scheduled_ids = [run_id for run_id, _kwargs in run_manager.cleanup_calls]
-    assert scheduled_ids == ["run-finalize"], f"run_agent finalization must schedule eviction for the run exactly once; got {run_manager.cleanup_calls!r}"
+    scheduled_ids = [run_id for run_id, _kwargs in run_manager.scheduled_cleanup_calls]
+    assert scheduled_ids == ["run-finalize"], f"run_agent finalization must schedule eviction for the run exactly once; got {run_manager.scheduled_cleanup_calls!r}"
+    assert run_manager.direct_cleanup_calls == []
 
 
 @pytest.mark.asyncio
@@ -140,6 +144,8 @@ async def test_run_agent_finalization_schedules_eviction_when_publish_end_fails(
             graph_input={"messages": []},
             config={"configurable": {"thread_id": "thread-finalize"}},
         )
+    await asyncio.sleep(0)
 
-    scheduled_ids = [run_id for run_id, _kwargs in run_manager.cleanup_calls]
+    scheduled_ids = [run_id for run_id, _kwargs in run_manager.scheduled_cleanup_calls]
     assert scheduled_ids == ["run-publish-end-fails"]
+    assert run_manager.direct_cleanup_calls == []
