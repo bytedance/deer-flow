@@ -692,6 +692,22 @@ inside the client. This prevents an inherited proxy from returning a misleading
 502 for a healthy local sandbox. Externally hosted sandbox FQDNs and public IPs
 continue to use the normal environment proxy configuration.
 
+### AIO shell-session capacity
+
+Each concurrently running native subagent uses one persistent AIO shell session.
+The semver AIO images from `1.9.3` through `1.11.0` default
+`MAX_SHELL_SESSIONS` to 10 and evict the oldest idle session when an eleventh is
+created. If `subagent_runtime.max_running` is greater than nine, DeerFlow sets
+the container limit to `max_running + 1`; the extra slot leaves room for the lead
+agent's shell. This applies to both locally created containers and provisioner
+Pods. Lower concurrency keeps the image's own default unchanged.
+
+You may set `sandbox.environment.MAX_SHELL_SESSIONS` explicitly. It must be a
+positive integer at least as large as `subagent_runtime.max_running + 1`, or the
+provider fails at startup with the conflicting values. The setting is applied
+when a sandbox is created, so destroy and recreate an existing warm container or
+Pod after changing it.
+
 ### Building a Custom AIO Sandbox Image
 
 `AioSandboxProvider` talks to the sandbox container through the `agent-sandbox` SDK. The Dockerfile for the default `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` image is not part of this repository; DeerFlow treats that image as an upstream AIO sandbox runtime.

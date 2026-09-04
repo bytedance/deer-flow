@@ -387,6 +387,98 @@ class TestScopedShellSessions:
         sandbox.release_command_scope("subagent-a")
         assert cleaned_ids == created_ids
 
+    def test_missing_scoped_session_is_recreated_and_reused(self, sandbox):
+        """A server-side session loss must not pin the scope to a stale id."""
+        from agent_sandbox.core.api_error import ApiError
+
+        created_ids: list[str] = []
+        exec_ids: list[str] = []
+
+        def create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def exec_command(command, **kwargs):
+            exec_ids.append(kwargs["id"])
+            if len(exec_ids) == 1:
+                raise ApiError(
+                    headers={"server": "nginx/1.18.0 (Ubuntu)"},
+                    status_code=404,
+                    body={"success": False, "message": "Session not found", "data": None, "hint": None},
+                )
+            return SimpleNamespace(data=SimpleNamespace(output="ok", exit_code=0))
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.exec_command = exec_command
+
+        assert sandbox.execute_command_in_scope("first", scope_id="subagent-a") == "ok"
+        assert len(created_ids) == 2
+        assert exec_ids == created_ids
+
+        assert sandbox.execute_command_in_scope("second", scope_id="subagent-a") == "ok"
+        assert exec_ids[-1] == created_ids[1]
+
+    def test_missing_scoped_session_recovery_is_bounded(self, sandbox):
+        """A missing replacement session is reported after one recovery attempt."""
+        from agent_sandbox.core.api_error import ApiError
+
+        created_ids: list[str] = []
+        exec_ids: list[str] = []
+        cleaned_ids: list[str] = []
+
+        def create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def exec_command(command, **kwargs):
+            exec_ids.append(kwargs["id"])
+            raise ApiError(
+                headers={"server": "nginx/1.18.0 (Ubuntu)"},
+                status_code=404,
+                body={"success": False, "message": "Session not found", "data": None},
+            )
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.exec_command = exec_command
+        sandbox._client.shell.cleanup_session = lambda session_id, **kwargs: cleaned_ids.append(session_id)
+
+        result = sandbox.execute_command_in_scope("first", scope_id="subagent-a")
+
+        assert result.startswith("Error:")
+        assert len(created_ids) == 2
+        assert exec_ids == created_ids
+        assert cleaned_ids == [created_ids[1]]
+        assert sandbox._scoped_shell_sessions["subagent-a"].session_id is None
+
+    def test_other_scoped_404_does_not_rotate_session(self, sandbox):
+        """Only the structured missing-session response is recoverable."""
+        from agent_sandbox.core.api_error import ApiError
+
+        created_ids: list[str] = []
+        exec_ids: list[str] = []
+
+        def create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def exec_command(command, **kwargs):
+            exec_ids.append(kwargs["id"])
+            raise ApiError(
+                headers={"server": "nginx/1.18.0 (Ubuntu)"},
+                status_code=404,
+                body={"success": False, "message": "Not Found", "data": None},
+            )
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.exec_command = exec_command
+
+        result = sandbox.execute_command_in_scope("first", scope_id="subagent-a")
+
+        assert result.startswith("Error:")
+        assert len(created_ids) == 1
+        assert exec_ids == created_ids
+        assert sandbox._scoped_shell_sessions["subagent-a"].session_id == created_ids[0]
+
     def test_queued_command_cannot_restart_session_after_scope_release(self, sandbox):
         created_ids: list[str] = []
         executed_commands: list[str] = []

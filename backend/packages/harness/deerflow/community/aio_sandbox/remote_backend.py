@@ -141,7 +141,12 @@ class RemoteSandboxBackend(SandboxBackend):
           provisioner_api_key: $PROVISIONER_API_KEY
     """
 
-    def __init__(self, provisioner_url: str, api_key: str = ""):
+    def __init__(
+        self,
+        provisioner_url: str,
+        api_key: str = "",
+        max_shell_sessions: int | None = None,
+    ):
         """Initialize with the provisioner service URL and optional API key.
 
         Args:
@@ -149,9 +154,12 @@ class RemoteSandboxBackend(SandboxBackend):
                              (e.g., ``http://provisioner:8002``).
             api_key: Value sent as ``X-API-Key`` header on every request.
                      Leave empty to send no authentication header.
+            max_shell_sessions: Optional AIO shell-session capacity forwarded
+                                to each provisioned sandbox Pod.
         """
         self._provisioner_url = provisioner_url.rstrip("/")
         self._api_key = api_key
+        self._max_shell_sessions = max_shell_sessions
 
     @property
     def provisioner_url(self) -> str:
@@ -274,6 +282,8 @@ class RemoteSandboxBackend(SandboxBackend):
             "provision_lark_cli_runtime": provision_lark_cli_runtime,
             "provision_lark_cli_broker": provision_lark_cli_broker,
         }
+        if self._max_shell_sessions is not None:
+            payload["max_shell_sessions"] = self._max_shell_sessions
         provisioner_extra_mounts = _provisioner_extra_mounts_payload(
             extra_mounts,
             skills_container_path=normalized_skills_container_path,

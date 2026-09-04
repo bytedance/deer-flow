@@ -70,6 +70,11 @@ DEFAULT_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in
 DEFAULT_PORT = 8080
 DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
 IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
+# The supported semver AIO images currently default to ten shell sessions.
+# Leave lower-concurrency deployments on the image default; only override it
+# when DeerFlow's configured execution capacity cannot fit.
+_AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
+_SHELL_SESSION_HEADROOM = 1
 
 
 class SandboxBeingDestroyedError(RuntimeError):
@@ -250,7 +255,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if provisioner_url:
             logger.info(f"Using remote sandbox backend with provisioner at {provisioner_url}")
             api_key = self._config.get("provisioner_api_key", "")
-            return RemoteSandboxBackend(provisioner_url=provisioner_url, api_key=api_key)
+            return RemoteSandboxBackend(
+                provisioner_url=provisioner_url,
+                api_key=api_key,
+                max_shell_sessions=self._config.get("max_shell_sessions"),
+            )
 
         logger.info("Using local container sandbox backend")
         return LocalContainerBackend(
@@ -278,6 +287,22 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if not isinstance(configured_skills_path, str):
             configured_skills_path = DEFAULT_SKILLS_CONTAINER_PATH
 
+        environment = self._resolve_env_vars(sandbox_config.environment or {})
+        max_running_subagents = int(getattr(getattr(config, "subagent_runtime", None), "max_running", 3))
+        required_shell_sessions = max_running_subagents + _SHELL_SESSION_HEADROOM
+        configured_shell_sessions = environment.get("MAX_SHELL_SESSIONS")
+        if configured_shell_sessions is None:
+            max_shell_sessions = required_shell_sessions if required_shell_sessions > _AIO_DEFAULT_MAX_SHELL_SESSIONS else None
+            if max_shell_sessions is not None:
+                environment["MAX_SHELL_SESSIONS"] = str(max_shell_sessions)
+        else:
+            try:
+                max_shell_sessions = int(configured_shell_sessions)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("sandbox.environment.MAX_SHELL_SESSIONS must be a positive integer") from exc
+            if max_shell_sessions < required_shell_sessions:
+                raise ValueError(f"sandbox.environment.MAX_SHELL_SESSIONS must be at least subagent_runtime.max_running + {_SHELL_SESSION_HEADROOM} ({required_shell_sessions} for the current configuration)")
+
         return {
             "image": sandbox_config.image or DEFAULT_IMAGE,
             "port": sandbox_config.port or DEFAULT_PORT,
@@ -286,7 +311,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
             "thread_data_mounts": getattr(sandbox_config, "thread_data_mounts", None),
-            "environment": self._resolve_env_vars(sandbox_config.environment or {}),
+            "environment": environment,
+            "max_shell_sessions": max_shell_sessions,
             "ownership": getattr(sandbox_config, "ownership", None),
             # A redis stream bridge means the deployment is multi-instance, which
             # is what the ownership store must default to. Read the same source

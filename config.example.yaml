@@ -1382,7 +1382,12 @@ sandbox:
 #
 #   # Optional: Environment variables to inject into the sandbox container
 #   # Values starting with $ will be resolved from host environment variables
+#   # AIO semver images default MAX_SHELL_SESSIONS to 10. DeerFlow leaves that
+#   # image default unchanged while subagent_runtime.max_running + 1 fits, and
+#   # otherwise injects the required value for local and provisioner sandboxes.
+#   # An explicit value is allowed but must be at least max_running + 1.
 #   # environment:
+#   #   MAX_SHELL_SESSIONS: "13"  # Example for subagent_runtime.max_running: 12
 #   #   NODE_ENV: production
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
