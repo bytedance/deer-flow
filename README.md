@@ -1174,6 +1174,32 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
 
+#### ZCode Integration
+
+The `zcode-to-deerflow` skill brings the same DeerFlow access to [ZCode](https://zcode.z.ai) sessions: delegate research questions from a ZCode task, relay answers and artifact links back, and reuse threads across turns.
+
+**Install the skill**:
+
+```bash
+npx skills add https://github.com/bytedance/deer-flow --skill zcode-to-deerflow
+# or copy/symlink skills/public/zcode-to-deerflow into your project's .agents/skills/
+```
+
+See [`skills/public/zcode-to-deerflow/SKILL.md`](skills/public/zcode-to-deerflow/SKILL.md) for the workflow (skill-dir resolution, background-and-poll for long runs, thread reuse).
+
+#### DeepSeek Harness (dsh) Integration
+
+The `dsh-to-deerflow` skill lets a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) agent call DeerFlow through its `bash` tool — including a nohup-and-poll pattern for multi-minute research runs that exceed a single bash tool budget.
+
+**Install the skill** (into the dsh task workspace, before launching the run):
+
+```bash
+cd <task-workdir> && mkdir -p .agents/skills
+cp -r <deer-flow-checkout>/skills/public/dsh-to-deerflow .agents/skills/
+```
+
+See [`skills/public/dsh-to-deerflow/SKILL.md`](skills/public/dsh-to-deerflow/SKILL.md) for the full workflow.
+
 ### Session Goals
 
 Use `/goal <completion condition>` to attach one active completion condition to the current thread. The goal is thread-scoped state, not a skill activation, so it stays active across turns until DeerFlow determines it has been satisfied or you clear it.

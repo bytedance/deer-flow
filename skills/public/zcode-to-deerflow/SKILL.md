@@ -1,16 +1,18 @@
 ---
-name: claude-to-deerflow
-description: "Interact with DeerFlow AI agent platform via its HTTP API. Use this skill when the user wants to send messages or questions to DeerFlow for research/analysis, start a DeerFlow conversation thread, check DeerFlow status or health, list available models/skills/agents in DeerFlow, manage DeerFlow memory, upload files to DeerFlow threads, or delegate complex research tasks to DeerFlow. Also use when the user mentions deerflow, deer flow, or wants to run a deep research task that DeerFlow can handle."
+name: zcode-to-deerflow
+description: "Interact with DeerFlow AI agent platform via its HTTP API from a ZCode session. Use this skill when the user wants to send messages or questions to DeerFlow for research/analysis, start a DeerFlow conversation thread, check DeerFlow status or health, list available models/skills/agents in DeerFlow, manage DeerFlow memory, upload files to DeerFlow threads, or delegate complex research tasks to DeerFlow while working in ZCode. Also use when the user mentions deerflow or deer flow. Use only from a ZCode session; inside a DeepSeek Harness (dsh) run use dsh-to-deerflow instead."
 ---
 
-# DeerFlow Skill
+# DeerFlow Skill (ZCode host)
 
-Communicate with a running DeerFlow instance via its HTTP API. DeerFlow is an AI agent platform
-built on LangGraph that orchestrates sub-agents for research, code execution, web browsing, and more.
+Communicate with a running DeerFlow instance via its HTTP API from inside a ZCode session.
+DeerFlow is an AI agent platform built on LangGraph that orchestrates sub-agents for research,
+code execution, web browsing, and more. ZCode is a terminal coding agent: drive DeerFlow through
+its Bash tool with `curl` or with the helper scripts shipped in this skill.
 
 ## Architecture
 
-DeerFlow exposes two API surfaces behind an Nginx reverse proxy:
+DeerFlow exposes two URL prefixes on one gateway service behind an Nginx reverse proxy:
 
 | Service        | Direct Port | Via Proxy                        | Purpose                          |
 |----------------|-------------|----------------------------------|----------------------------------|
@@ -36,11 +38,69 @@ DEERFLOW_GATEWAY_URL="${DEERFLOW_GATEWAY_URL:-$DEERFLOW_URL}"
 DEERFLOW_LANGGRAPH_URL="${DEERFLOW_LANGGRAPH_URL:-$DEERFLOW_URL/api/langgraph}"
 ```
 
+**Authentication prerequisite**: a default DeerFlow deployment requires authentication. Either start
+DeerFlow with `DEER_FLOW_AUTH_DISABLED=1` (local no-auth mode), or export
+`DEERFLOW_COOKIE="access_token=<jwt>"` (or a full `Cookie:` header value) — both scripts forward it
+to every request. The scripts require `curl` and `python3` on `PATH`.
+
+## ZCode Workflow
+
+### 1. Locate this skill
+
+The skill is discovered from the standard skill locations. Resolve the scripts path to whichever
+copy exists first:
+
+```bash
+SKILL_DIR=""
+for d in "$(git rev-parse --show-toplevel 2>/dev/null)/.agents/skills/zcode-to-deerflow" \
+         ".agents/skills/zcode-to-deerflow" \
+         "$HOME/.agents/skills/zcode-to-deerflow"; do
+  [ -f "$d/scripts/chat.sh" ] && SKILL_DIR="$d" && break
+done
+[ -n "$SKILL_DIR" ] || { echo "zcode-to-deerflow skill dir not found" >&2; exit 1; }
+```
+
+### 2. Check health first
+
+```bash
+bash "$SKILL_DIR/scripts/status.sh" health
+```
+
+If unreachable, tell the user DeerFlow is not running and suggest starting it
+(`cd <deerflow-dir> && make dev`, or `make docker-start` for the Docker setup).
+
+### 3. Ask DeerFlow
+
+```bash
+bash "$SKILL_DIR/scripts/chat.sh" "Your question here"
+```
+
+The script prints the final AI response to stdout and `Thread: <thread_id>` to stderr (echoed again as `Thread ID:` when the run finishes).
+The response may also end with `Created File: <url>` artifact links (DeerFlow-generated files) —
+relay both the text and the artifact URLs to the user.
+
+### 4. Handle long research runs
+
+Deep research in pro/ultra mode can take minutes. Run the chat script in the background and poll,
+instead of blocking the session:
+
+```bash
+nohup bash "$SKILL_DIR/scripts/chat.sh" "Research question" \
+  > deerflow-out.txt 2> deerflow-err.txt &
+# poll: cat deerflow-out.txt ; the run is done when the file holds the final answer
+```
+
+### 5. Continue a conversation
+
+Reuse the `thread_id` printed by a previous run:
+
+```bash
+bash "$SKILL_DIR/scripts/chat.sh" "Follow-up question" "<thread_id>"
+```
+
 ## Available Operations
 
 ### 1. Health Check
-
-Verify DeerFlow is running:
 
 ```bash
 curl -s "$DEERFLOW_GATEWAY_URL/health"
@@ -89,28 +149,27 @@ curl -s -N -X POST "$DEERFLOW_LANGGRAPH_URL/threads/<thread_id>/runs/stream" \
   }'
 ```
 
-The response is an SSE stream. Each event has the format:
+The response is an SSE stream. Each event has the format
 ```
 event: <event_type>
 data: <json_data>
 ```
 
-Key event types:
+Key event types (the request parameter is named `messages-tuple`, but the SSE event it produces is named `messages`):
 - `metadata` — run metadata including `run_id`
 - `values` — full state snapshot with `messages` array
-- `messages` — incremental message updates (AI text chunks, tool calls, tool results; produced when the `messages-tuple` stream mode is requested)
+- `messages` — incremental message updates (AI text chunks, tool calls, tool results)
 - `end` — stream is complete
 
 **Context modes** (set via `context`):
 - Flash mode: `thinking_enabled: false, is_plan_mode: false, subagent_enabled: false`
-- Standard mode: `thinking_enabled: true, is_plan_mode: false, subagent_enabled: false`
+- Standard mode (shown as "thinking" in the web UI): `thinking_enabled: true, is_plan_mode: false, subagent_enabled: false`
 - Pro mode: `thinking_enabled: true, is_plan_mode: true, subagent_enabled: false`
 - Ultra mode: `thinking_enabled: true, is_plan_mode: true, subagent_enabled: true`
 
 ### 3. Continue a Conversation
 
-To send follow-up messages, reuse the same `thread_id` from step 2 and POST another run
-with the new message.
+Reuse the same `thread_id` from step 2 and POST another run with the new message.
 
 ### 4. List Models
 
@@ -118,7 +177,7 @@ with the new message.
 curl -s "$DEERFLOW_GATEWAY_URL/api/models"
 ```
 
-Returns: `{"models": [{"name": "...", "provider": "...", ...}, ...]}`
+Returns: `{"models": [{"name": "...", "model": "...", "display_name": "...", ...}, ...]}`
 
 ### 5. List Skills
 
@@ -133,13 +192,13 @@ Returns: `{"skills": [{"name": "...", "enabled": true, ...}, ...]}`
 ```bash
 curl -s -X PUT "$DEERFLOW_GATEWAY_URL/api/skills/<skill_name>" \
   -H "Content-Type: application/json" \
-  -d '{"enabled": true}'
+  -d '{"enabled": true}'   # requires an admin user
 ```
 
 ### 7. List Agents
 
 ```bash
-curl -s "$DEERFLOW_GATEWAY_URL/api/agents"
+curl -s "$DEERFLOW_GATEWAY_URL/api/agents"   # needs agents_api.enabled=true (403 by default)
 ```
 
 Returns: `{"agents": [{"name": "...", ...}, ...]}`
@@ -159,7 +218,8 @@ curl -s -X POST "$DEERFLOW_GATEWAY_URL/api/threads/<thread_id>/uploads" \
   -F "files=@/path/to/file.pdf"
 ```
 
-Supports PDF, PPTX, XLSX, DOCX — automatically converts to Markdown.
+Supports PDF, PPTX, XLSX, DOCX (plus legacy PPT/XLS/DOC). Markdown conversion happens only when
+the server-side `uploads.auto_convert_documents` option is enabled (off by default).
 
 ### 10. List Uploaded Files
 
@@ -178,28 +238,24 @@ curl -s -X POST "$DEERFLOW_LANGGRAPH_URL/threads/<thread_id>/history" \
 ### 12. List Threads
 
 ```bash
+# ordered pinned-first, then most recently updated; sorting parameters are not supported
 curl -s -X POST "$DEERFLOW_LANGGRAPH_URL/threads/search" \
   -H "Content-Type: application/json" \
   -d '{"limit": 20}'
 ```
 
-## Usage Script
+## Status Helper
 
-For sending messages and collecting the full response, use the helper script:
+`scripts/status.sh` wraps the read-only operations:
 
 ```bash
-bash /path/to/skills/claude-to-deerflow/scripts/chat.sh "Your question here"
+bash "$SKILL_DIR/scripts/status.sh" health|models|skills|agents|threads|memory|thread <id>
 ```
-
-See `scripts/chat.sh` for the implementation. The script:
-1. Checks health
-2. Creates a thread
-3. Streams the run and collects the final AI response
-4. Prints the result
 
 ## Parsing SSE Output
 
-The stream returns SSE events. To extract the final AI response from a `values` event:
+The chat script already handles this. For manual curl streams, to extract the final AI response
+from a `values` event:
 - Look for the last `event: values` block
 - Parse its `data` JSON
 - The `messages` array contains all messages; the last one with `type: "ai"` is the response
@@ -207,8 +263,9 @@ The stream returns SSE events. To extract the final AI response from a `values` 
 
 ## Error Handling
 
-- If health check fails, DeerFlow is not running. Inform the user they need to start it.
-- If the stream returns an error event, extract and display the error message.
+- If health check fails, DeerFlow is not running. Tell the user to start it (`make dev` or
+  `make docker-start`) and stop instead of retrying blindly.
+- If the stream returns an error event, extract and surface the error message verbatim.
 - Common issues: port not open, services still starting up, config errors.
 
 ## Tips
@@ -217,3 +274,5 @@ The stream returns SSE events. To extract the final AI response from a `values` 
 - For research tasks, use pro or ultra mode (enables planning and sub-agents).
 - You can upload files first, then reference them in your message.
 - Thread IDs persist — you can return to a conversation later.
+- Prefer the helper scripts over hand-rolled curl: they resolve env vars, parse SSE,
+  and extract artifacts consistently.
