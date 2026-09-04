@@ -18,6 +18,7 @@ from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.session_cookie_state import SESSION_COOKIE_ISSUED_STATE_ATTR, SESSION_COOKIE_MAX_AGE_STATE_ATTR, SESSION_COOKIE_SECURE_STATE_ATTR, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth_disabled import is_auth_disabled
 from app.gateway.request_path import get_request_route_path
+from deerflow.trace_context import TRACE_ID_HEADER
 
 CSRF_COOKIE_NAME = "csrf_token"
 CSRF_HEADER_NAME = "X-CSRF-Token"
@@ -130,7 +131,11 @@ def get_configured_cors_origins() -> set[str]:
 # CORS-safelisted set is visible to JS by default, and the created run's id
 # travels in `Content-Location` — the LangGraph SDK resolves run metadata from
 # it, so withholding it leaves such a client unable to learn its own run id.
-CORS_EXPOSED_HEADERS: tuple[str, ...] = ("Content-Location",)
+# `X-Trace-Id` is listed for the same reason: TraceMiddleware puts it on every
+# response as the correlation id to quote in a bug report, and unexposed it is
+# readable on same-origin nginx deployments but invisible to exactly the
+# split-origin clients that cannot see the Gateway's logs either.
+CORS_EXPOSED_HEADERS: tuple[str, ...] = ("Content-Location", TRACE_ID_HEADER)
 
 
 def _first_header_value(value: str | None) -> str | None:
@@ -222,7 +227,15 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Cross-site auth request denied."},
             )
 
-        if should_check_csrf(request) and not _is_auth:
+        if should_check_csrf(request) and not _is_auth and request.headers.get("authorization") is None:
+            # Bearer-authenticated requests (PAT, #4849) are exempt from the
+            # cookie double-submit check only — the cross-site origin check on
+            # auth endpoints above still runs for every request. Safety rests
+            # on AuthMiddleware's strict Bearer precedence: an invalid Bearer
+            # header is a 401 there, so a cross-site attacker cannot ride a
+            # victim's cookie by padding a garbage Authorization header, and a
+            # cross-site request carrying a custom Authorization header at all
+            # requires a CORS preflight the attacker cannot obtain.
             cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
             header_token = request.headers.get(CSRF_HEADER_NAME)
 

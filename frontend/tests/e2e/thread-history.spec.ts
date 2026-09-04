@@ -94,6 +94,52 @@ test.describe("Thread history", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
+  test("shows the conversation outline only at the long-chat threshold", async ({
+    page,
+  }) => {
+    const turns = (count: number, prefix: string) =>
+      Array.from({ length: count }, (_, turn) => [
+        {
+          type: "human",
+          id: `${prefix}-human-${turn}`,
+          content: `${prefix} question ${turn}`,
+        },
+        {
+          type: "ai",
+          id: `${prefix}-ai-${turn}`,
+          content: `${prefix} answer ${turn}`,
+        },
+      ]).flat();
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Four turns",
+          messages: turns(4, "Short"),
+        },
+        {
+          thread_id: MOCK_THREAD_ID_2,
+          title: "Five turns",
+          messages: turns(5, "Long"),
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("Short answer 3")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId("conversation-outline-trigger")).toBeHidden();
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID_2}`);
+    await expect(page.getByText("Long answer 4")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(
+      page.getByTestId("conversation-outline-trigger"),
+    ).toBeVisible();
+  });
+
   test("keeps a thousand-turn history DOM bounded while preserving navigation", async ({
     page,
   }) => {
@@ -126,20 +172,47 @@ test.describe("Thread history", () => {
     });
 
     const conversation = page.getByRole("log");
-    const scroller = conversation.locator(":scope > div").first();
     await expect
       .poll(() => conversation.locator("[data-index]").count())
       .toBeLessThan(60);
 
-    await scroller.dispatchEvent("wheel", { deltaY: -1_000 });
-    await scroller.evaluate((element) => {
-      element.scrollTop = 0;
-      element.dispatchEvent(new Event("scroll"));
+    const outlineTrigger = page.getByTestId("conversation-outline-trigger");
+    await expect(outlineTrigger).toBeVisible();
+    await outlineTrigger.click();
+    const outlineMenu = page.getByTestId("conversation-outline-menu");
+    await outlineMenu
+      .getByText("Long history question 0", { exact: true })
+      .click();
+
+    const targetQuestion = conversation.getByText("Long history question 0", {
+      exact: true,
     });
-    await expect(page.getByText("Long history question 0")).toBeVisible({
-      timeout: 15_000,
+    const targetAnswer = conversation.getByText("Long history answer 0", {
+      exact: true,
     });
+    await expect(targetQuestion).toBeVisible({ timeout: 15_000 });
+    await expect
+      .poll(async () => {
+        const questionBox = await targetQuestion.boundingBox();
+        const conversationBox = await conversation.boundingBox();
+        if (!questionBox || !conversationBox) {
+          return Number.POSITIVE_INFINITY;
+        }
+        return questionBox.y - conversationBox.y;
+      })
+      .toBeLessThan(200);
+    const questionBox = await targetQuestion.boundingBox();
+    const answerBox = await targetAnswer.boundingBox();
+    expect(questionBox).not.toBeNull();
+    expect(answerBox).not.toBeNull();
+    expect(questionBox!.y).toBeLessThan(answerBox!.y);
     expect(await conversation.locator("[data-index]").count()).toBeLessThan(60);
+
+    await expect(
+      outlineMenu
+        .getByText("Long history question 0", { exact: true })
+        .locator(".."),
+    ).toHaveAttribute("aria-current", "location");
   });
 
   test("keeps rendered messages ordered when the latest history page advances", async ({

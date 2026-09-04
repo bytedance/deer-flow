@@ -1,7 +1,7 @@
 """at most one admin row: cross-process TOCTOU backstop for /initialize.
 
-Revision ID: 0013_admin_role_unique_index
-Revises: 0012_mcp_task_results
+Revision ID: 0019_admin_role_unique_index
+Revises: 0018_oauth_identity_pg_partial
 Create Date: 2026-08-04
 """
 
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0013_admin_role_unique_index"
-down_revision: str | Sequence[str] | None = "0012_mcp_task_results"
+revision: str = "0019_admin_role_unique_index"
+down_revision: str | Sequence[str] | None = "0018_oauth_identity_pg_partial"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

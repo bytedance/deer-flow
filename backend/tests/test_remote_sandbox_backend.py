@@ -34,6 +34,31 @@ class _StubResponse:
         return self._payload
 
 
+@pytest.mark.parametrize(
+    "container_path",
+    [
+        "/",
+        "relative-skills",
+        "//custom-skills",
+        "/custom//skills",
+        "/custom/../skills",
+        "/mnt",
+        "/mnt/user-data/skills",
+        "/mnt/acp-workspace/skills",
+        "/mnt/integrations/lark-cli/skills",
+    ],
+)
+def test_skills_container_path_rejects_unsafe_or_noncanonical_roots(
+    container_path,
+):
+    with pytest.raises(ValueError):
+        remote_backend_mod._normalize_skills_container_path(container_path)
+
+
+def test_skills_container_path_accepts_isolated_custom_root():
+    assert remote_backend_mod._normalize_skills_container_path("/custom-skills") == "/custom-skills"
+
+
 def test_list_running_delegates_to_provisioner_list(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
     sandbox_info = SandboxInfo(sandbox_id="test-id", sandbox_url="http://localhost:8080")
@@ -165,11 +190,21 @@ def test_create_delegates_to_provisioner_create(monkeypatch, expected_user_id):
     backend = RemoteSandboxBackend("http://provisioner:8002")
     expected = SandboxInfo(sandbox_id="abc123", sandbox_url="http://k3s:31001")
 
-    def mock_create(thread_id: str, sandbox_id: str, extra_mounts=None, *, user_id=None, provision_lark_cli_runtime=False, provision_lark_cli_broker=False):
+    def mock_create(
+        thread_id: str,
+        sandbox_id: str,
+        extra_mounts=None,
+        *,
+        user_id=None,
+        skills_container_path="/mnt/skills",
+        provision_lark_cli_runtime=False,
+        provision_lark_cli_broker=False,
+    ):
         assert thread_id == "thread-1"
         assert sandbox_id == "abc123"
         assert extra_mounts == [("/host", "/container", False)]
         assert user_id == expected_user_id
+        assert skills_container_path == "/mnt/skills"
         assert provision_lark_cli_runtime is True
         assert provision_lark_cli_broker is False
         return expected
@@ -197,6 +232,7 @@ def test_provisioner_create_returns_sandbox_info(monkeypatch):
             "thread_id": "thread-1",
             "user_id": "test-user-autouse",
             "include_legacy_skills": True,
+            "skills_container_path": "/mnt/skills",
             "provision_lark_cli_runtime": False,
             "provision_lark_cli_broker": False,
         }
@@ -245,6 +281,48 @@ def test_provisioner_create_forwards_supported_extra_mounts(monkeypatch):
         ],
         user_id="alice",
     )
+
+
+def test_provisioner_create_forwards_custom_skills_root_and_all_policy_mounts(
+    monkeypatch,
+):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(
+        remote_backend_mod,
+        "user_should_see_legacy_skills",
+        lambda user_id: False,
+    )
+    captured: dict = {}
+
+    def mock_post(url: str, json: dict, timeout: int, headers=None):
+        captured.update(json)
+        return _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://k3s:31001",
+            }
+        )
+
+    monkeypatch.setattr(requests, "post", mock_post)
+    categories = ("public", "custom", "legacy", "integrations")
+
+    backend._provisioner_create(
+        "thread-1",
+        "abc123",
+        extra_mounts=[
+            (
+                f"/state/users/alice/threads/thread-1/skills_view/{category}",
+                f"/custom-skills/{category}",
+                True,
+            )
+            for category in categories
+        ],
+        user_id="alice",
+        skills_container_path="/custom-skills",
+    )
+
+    assert captured["skills_container_path"] == "/custom-skills"
+    assert {mount["container_path"] for mount in captured["extra_mounts"]} == {f"/custom-skills/{category}" for category in categories}
 
 
 def test_provisioner_create_strips_runtime_mount_when_init_container_enabled(monkeypatch):
@@ -318,6 +396,7 @@ def test_provisioner_create_accepts_anonymous_thread_id(monkeypatch):
             "thread_id": None,
             "user_id": "test-user-autouse",
             "include_legacy_skills": False,
+            "skills_container_path": "/mnt/skills",
             "provision_lark_cli_runtime": False,
             "provision_lark_cli_broker": False,
         }

@@ -1,9 +1,9 @@
-"""Regression anchor: updating MCP config must not block the event loop.
+"""Regression anchor: reading or updating MCP config must not block the event loop.
 
-The PUT and PATCH handlers resolve the extensions config path, probe its
-existence, read raw JSON, atomically write it, and reload it — all blocking
-filesystem IO. They offload the whole read-modify-write via
-``asyncio.to_thread``; if either regresses back onto the event loop, the strict
+The GET handler resolves the extensions config path and reads raw JSON. PUT
+and PATCH also atomically write and reload it. All of that is blocking
+filesystem IO, so the handlers offload the read or whole read-modify-write via
+``asyncio.to_thread``. If one regresses back onto the event loop, the strict
 Blockbuster gate raises ``BlockingError`` and this test fails.
 
 The admin check is patched to a no-op so the anchor exercises the handler's own
@@ -26,11 +26,33 @@ from app.gateway.routers.mcp import (
     McpConfigUpdateRequest,
     McpServerConfigResponse,
     McpServerStateUpdateRequest,
+    get_mcp_configuration,
     update_mcp_configuration,
     update_mcp_server_state,
 )
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_get_mcp_configuration_does_not_block_or_expand_placeholders(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "extensions_config.json"
+    placeholder = "$CODEX_PR_5022_BLOCKING_TOKEN"
+    await asyncio.to_thread(
+        config_path.write_text,
+        '{"mcpServers":{"stdio":{"type":"stdio","command":"npx","args":["--token","' + placeholder + '"]}},"skills":{}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("CODEX_PR_5022_BLOCKING_TOKEN", "must-not-reach-the-editor")
+
+    async def _noop_admin(_request, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
+
+    response = await get_mcp_configuration(request=None)
+
+    assert response.mcp_servers["stdio"].args == ["--token", placeholder]
 
 
 async def test_update_mcp_configuration_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
