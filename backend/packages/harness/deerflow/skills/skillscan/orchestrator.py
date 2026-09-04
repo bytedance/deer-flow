@@ -662,11 +662,18 @@ def _is_outbound_url(value: str) -> bool:
 
 
 def _collect_python_aliases(tree: ast.AST) -> dict[str, str]:
+    """File-global import map keyed by the name each import statement actually binds.
+
+    `import http.client` binds `http`, not `http.client`, and no identifier can spell a dotted key,
+    so the entry has to sit under the bound root -- exactly as `_bind_client_import` records it --
+    for `_python_import_name` to prove a dotted constructor such as `http.client.HTTPSConnection`.
+    """
     aliases: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                aliases[alias.asname or alias.name] = alias.name
+                name = alias.asname or alias.name.split(".")[0]
+                aliases[name] = alias.name if alias.asname else name
         elif isinstance(node, ast.ImportFrom) and node.module:
             for alias in node.names:
                 aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"

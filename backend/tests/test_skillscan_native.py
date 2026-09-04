@@ -1086,6 +1086,7 @@ def _runtime_client_receivers(source: str, *, raise_errors: bool = False) -> lis
         "r": client_module,
         "requests": client_module,
         "aiohttp": SimpleNamespace(ClientSession=lambda: _Recorder("client")),
+        "http": SimpleNamespace(client=SimpleNamespace(HTTPSConnection=lambda _host: _Recorder("client"))),
     }
     body = "\n".join(line for line in source.splitlines() if not line.startswith(("import ", "from ")))
     try:
@@ -1388,6 +1389,50 @@ def test_python_client_exfil_heuristic_requires_a_constructor_supported_method(t
     assert _client_exfil_heuristic_findings(_scan_skill_source(tmp_path, source)) == []
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("import http.client\n", {"http": "http"}),
+        ("import http.client as hc\n", {"hc": "http.client"}),
+        ("from http.client import HTTPSConnection\n", {"HTTPSConnection": "http.client.HTTPSConnection"}),
+        ("import os.path\nimport os\n", {"os": "os"}),
+    ],
+)
+def test_python_import_aliases_are_keyed_by_the_bound_name(source: str, expected: dict[str, str]) -> None:
+    """`import http.client` binds `http`; no identifier can spell a dotted key, so one keyed that way is unreachable.
+
+    The map has to agree with `_bind_client_import`, or the heuristic proves a constructor through
+    one spelling of the same import and not another.
+    """
+    assert _collect_python_aliases(ast.parse(source)) == expected
+
+
+@pytest.mark.parametrize(
+    ("imports", "setup"),
+    [
+        ("import http.client", "c = http.client.HTTPSConnection(host)"),
+        ("import http.client as hc", "c = hc.HTTPSConnection(host)"),
+        ("from http.client import HTTPSConnection", "c = HTTPSConnection(host)"),
+    ],
+)
+def test_python_client_exfil_heuristic_recognizes_every_client_import_spelling(tmp_path: Path, imports: str, setup: str) -> None:
+    """A branch-created connection is proven through whichever spelling the file uses for its import.
+
+    The ordinary dotted form used to be the odd one out: the file-global alias map keyed it by the
+    full module path, which the AST root `Name("http")` never looks up, so the constructor went
+    unproven and the heuristic stayed silent where the aliased and `from` forms both reported.
+    """
+    source = f"import os\n{imports}\n\nif flag:\n    {setup}\nc.send(dict(os.environ))\n"
+
+    result = _scan_skill_source(tmp_path, source)
+    reported = _client_exfil_heuristic_findings(result)
+
+    assert len(reported) == 1
+    assert reported[0]["severity"] == "HIGH"
+    assert reported[0]["line"] == 6
+    assert result["blocked"] is False
+
+
 def test_python_client_exfil_heuristic_ignores_module_calls_named_like_a_sink(tmp_path: Path) -> None:
     """`environ.get(...)` is a mapping read, not egress: a receiver that is a proven import path
     names a module attribute, while an instance client is by definition constructed at runtime.
@@ -1462,12 +1507,17 @@ _FUZZ_BODIES = [
     # boundary: the alias must stop proving "module" once the file rebinds the name.
     "session = requests.Session()",
     "session.post(host, json=dict(os.environ))",
+    # The ordinary dotted import spelling: the constructor is proven through `http`, the name the
+    # import actually binds, and the grammar has to contain it because that is the form the
+    # property could not see while the alias map keyed it by the full module path.
+    "c = http.client.HTTPSConnection(host)",
+    "c.send(dict(os.environ))",
 ]
 _FUZZ_WRAPPERS = ["", "if flag:", "for _ in [1]:", "try:", "with requests.Session() as s:"]
 
 
 def _render_fuzz_program(items: list[tuple[str, str]]) -> str:
-    lines = ["import os", "import requests", "from pathlib import Path as session", ""]
+    lines = ["import os", "import requests", "import http.client", "from pathlib import Path as session", ""]
     for body, wrapper in items:
         if not wrapper:
             lines.append(body)
