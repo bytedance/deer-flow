@@ -190,6 +190,82 @@ def test_docker_desktop_detection_uses_daemon_operating_system(monkeypatch, oper
     assert backend._docker_server_is_desktop() is expected
 
 
+def test_darwin_open_keeps_docker_to_reconcile_restricted_sandbox(monkeypatch):
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        if cmd[:2] == ["docker", "ps"]:
+            return SimpleNamespace(stdout="sandbox-transition\n", stderr="", returncode=0)
+        if cmd == ["container", "--version"]:
+            return SimpleNamespace(stdout="container 0.7.0\n", stderr="", returncode=0)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+        network_config={"mode": "open"},
+    )
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda _names, **_kwargs: {
+            "sandbox-transition": _ContainerInspection(
+                1.0,
+                None,
+                {
+                    "deerflow.role": "sandbox",
+                    "deerflow.sandbox_id": "transition",
+                    "deerflow.network_mode": "allowlist",
+                },
+                "sandbox:latest",
+                frozenset({"deer-flow-sandbox-net-old"}),
+            )
+        },
+    )
+
+    infos = backend.list_running()
+
+    assert backend.runtime == "docker"
+    assert [info.sandbox_id for info in infos] == ["transition"]
+    assert infos[0].requires_replacement is True
+    assert ["container", "--version"] in commands
+    assert any("label=deerflow.role=sandbox" in command for command in commands)
+
+
+def test_darwin_open_uses_apple_container_without_managed_docker_sandboxes(monkeypatch):
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        if cmd == ["container", "--version"]:
+            return SimpleNamespace(stdout="container 0.7.0\n", stderr="", returncode=0)
+        if cmd[:2] == ["docker", "ps"]:
+            return SimpleNamespace(stdout="other-sandbox-collision\n", stderr="", returncode=0)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+        network_config={"mode": "open"},
+    )
+
+    assert backend.runtime == "container"
+    assert any("label=deerflow.role=sandbox" in command for command in commands)
+
+
 def _restricted_backend() -> LocalContainerBackend:
     backend = LocalContainerBackend(
         image="sandbox:latest",
@@ -1554,6 +1630,21 @@ def test_open_mode_replacement_destroy_removes_restricted_sidecar_and_networks(m
 
     assert stopped == ["sandbox-old-restricted"]
     assert cleaned == [("old-restricted", False)]
+
+
+def test_deny_pending_network_policy_events_uses_atomic_proxy_command(monkeypatch):
+    backend = _restricted_backend()
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(stdout="17\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert backend.deny_pending_network_policy_events("existing") is True
+    proxy_name, _ = backend._resource_names("existing")
+    assert commands == [["docker", "exec", proxy_name, "python", "/tmp/deerflow-network-proxy.py", "deny-pending"]]
 
 
 def test_is_container_running_false_on_apple_container_not_found(monkeypatch):

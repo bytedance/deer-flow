@@ -323,6 +323,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return []
         return self._backend.consume_network_policy_events(sandbox_id)
 
+    def deny_pending_network_policy_events(self, sandbox_id: str) -> bool:
+        if not isinstance(self._backend, LocalContainerBackend):
+            return True
+        return self._backend.deny_pending_network_policy_events(sandbox_id)
+
     def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
         if not isinstance(self._backend, LocalContainerBackend):
             return False

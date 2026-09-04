@@ -66,14 +66,25 @@ class _NetworkPolicyProvider(_SyncProvider):
         super().__init__()
         self.events: list[dict[str, object]] = []
         self.decisions: list[tuple[str, str, str]] = []
+        self.consume_calls: list[str] = []
+        self.deny_pending_calls: list[str] = []
 
     def sandbox_network_mode(self) -> str:
         return "allowlist"
 
     def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
-        del sandbox_id
+        self.consume_calls.append(sandbox_id)
         events, self.events = self.events, []
         return events
+
+    def deny_pending_network_policy_events(self, sandbox_id: str) -> bool:
+        self.deny_pending_calls.append(sandbox_id)
+        for event in self.events:
+            request_id = event.get("request_id")
+            if isinstance(request_id, str):
+                self.decisions.append((sandbox_id, request_id, "deny"))
+        self.events = []
+        return True
 
     def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
         self.decisions.append((sandbox_id, request_id, decision))
@@ -704,6 +715,8 @@ def test_sync_noninteractive_network_denial_is_recorded_without_prompt(context_k
 
     assert result is original
     assert provider.decisions == [("existing", "req-1", "deny")]
+    assert provider.deny_pending_calls == ["existing"]
+    assert provider.consume_calls == []
 
 
 @pytest.mark.anyio
@@ -727,6 +740,8 @@ async def test_async_noninteractive_network_denial_is_recorded_without_prompt(co
 
     assert result is original
     assert provider.decisions == [("existing", "req-1", "deny")]
+    assert provider.deny_pending_calls == ["existing"]
+    assert provider.consume_calls == []
 
 
 def test_subagent_network_denial_fails_closed_without_prompt() -> None:
@@ -745,6 +760,8 @@ def test_subagent_network_denial_fails_closed_without_prompt() -> None:
     assert result is original
     assert provider.events == []
     assert provider.decisions == [("existing", "req-1", "deny")]
+    assert provider.deny_pending_calls == ["existing"]
+    assert provider.consume_calls == []
 
 
 @pytest.mark.anyio
@@ -768,6 +785,28 @@ async def test_async_subagent_network_denial_fails_closed_without_prompt() -> No
     assert result is original
     assert provider.events == []
     assert provider.decisions == [("existing", "req-1", "deny")]
+    assert provider.deny_pending_calls == ["existing"]
+    assert provider.consume_calls == []
+
+
+def test_noninteractive_network_denial_atomically_drains_more_than_sixteen_hosts() -> None:
+    provider = _NetworkPolicyProvider()
+    provider.events = [{"request_id": f"req-{index}", "host": f"host-{index}.example", "port": 443, "method": "CONNECT"} for index in range(17)]
+    state: dict = {"sandbox": {"sandbox_id": "existing"}}
+    request = _make_tool_call_request(state)
+    request.runtime.context["non_interactive"] = True
+    original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
+    set_sandbox_provider(provider)
+    try:
+        result = SandboxMiddleware().wrap_tool_call(request, lambda _request: original)
+    finally:
+        reset_sandbox_provider()
+
+    assert result is original
+    assert provider.events == []
+    assert len(provider.decisions) == 17
+    assert provider.deny_pending_calls == ["existing"]
+    assert provider.consume_calls == []
 
 
 def test_wrap_tool_call_passthrough_when_handler_did_not_initialize_sandbox() -> None:

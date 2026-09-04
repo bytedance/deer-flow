@@ -568,13 +568,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return result
         if provider.sandbox_network_mode() != "allowlist":
             return result
-        events = await provider.consume_network_policy_events_async(sandbox_id)
         if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
-            for event in events:
-                request_id = event.get("request_id")
-                if isinstance(request_id, str):
-                    await provider.decide_network_policy_request_async(sandbox_id, request_id, "deny")
+            if not await provider.deny_pending_network_policy_events_async(sandbox_id):
+                logger.warning("Failed to drain sandbox network policy events for non-interactive sandbox %s", sandbox_id)
             return result
+        events = await provider.consume_network_policy_events_async(sandbox_id)
         return self._network_approval_result(request, result, sandbox_id, events)
 
     def _maybe_request_network_approval(
@@ -591,13 +589,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return result
         if provider.sandbox_network_mode() != "allowlist":
             return result
-        events = provider.consume_network_policy_events(sandbox_id)
         if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
-            for event in events:
-                request_id = event.get("request_id")
-                if isinstance(request_id, str):
-                    provider.decide_network_policy_request(sandbox_id, request_id, "deny")
+            if not provider.deny_pending_network_policy_events(sandbox_id):
+                logger.warning("Failed to drain sandbox network policy events for non-interactive sandbox %s", sandbox_id)
             return result
+        events = provider.consume_network_policy_events(sandbox_id)
         return self._network_approval_result(request, result, sandbox_id, events)
 
     def _network_approval_result(

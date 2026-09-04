@@ -163,17 +163,26 @@ def pending_events() -> list[dict[str, object]]:
         # and subagent/non-interactive paths must drain events without prompting.
         # Claim the oldest unsurfaced event atomically, independent of age.
         db.execute("BEGIN IMMEDIATE")
-        rows = db.execute(
-            "SELECT request_id, host, port, method, created_at FROM events WHERE surfaced = 0 AND decision IS NULL ORDER BY created_at LIMIT 16",
-        ).fetchall()
-        if rows:
-            db.execute("UPDATE events SET surfaced = 1 WHERE request_id = ?", (rows[0][0],))
+        row = db.execute(
+            "SELECT request_id, host, port, method, created_at FROM events WHERE surfaced = 0 AND decision IS NULL ORDER BY created_at LIMIT 1",
+        ).fetchone()
+        if row is not None:
+            db.execute("UPDATE events SET surfaced = 1 WHERE request_id = ?", (row[0],))
             # One Human Input card makes one destination decision. Close any
             # sibling denials from the same tool call so a later retry records
             # a fresh event instead of leaving an invisible surfaced request.
-            db.executemany("UPDATE events SET decision = 'superseded' WHERE request_id = ?", ((row[0],) for row in rows[1:]))
-            rows = rows[:1]
-    return [{"request_id": row[0], "host": row[1], "port": row[2], "method": row[3], "created_at": row[4]} for row in rows]
+            db.execute("UPDATE events SET decision = 'superseded' WHERE surfaced = 0 AND decision IS NULL")
+    if row is None:
+        return []
+    return [{"request_id": row[0], "host": row[1], "port": row[2], "method": row[3], "created_at": row[4]}]
+
+
+def deny_pending_events() -> int:
+    """Atomically deny every event that has not been surfaced to a user."""
+    with _connect_db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        result = db.execute("UPDATE events SET surfaced = 1, decision = 'deny' WHERE surfaced = 0 AND decision IS NULL")
+        return max(result.rowcount, 0)
 
 
 def decide(request_id: str, decision: str, ttl: int) -> bool:
@@ -620,6 +629,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("serve")
     subparsers.add_parser("pending")
+    subparsers.add_parser("deny-pending")
     decide_parser = subparsers.add_parser("decide")
     decide_parser.add_argument("request_id")
     decide_parser.add_argument("decision", choices=("deny", "allow_temporary", "allow_sandbox"))
@@ -630,6 +640,9 @@ def main() -> int:
         return 0
     if args.command == "pending":
         print(json.dumps(pending_events(), separators=(",", ":")))
+        return 0
+    if args.command == "deny-pending":
+        print(deny_pending_events())
         return 0
     if args.command == "decide":
         return 0 if decide(args.request_id, args.decision, args.ttl) else 2

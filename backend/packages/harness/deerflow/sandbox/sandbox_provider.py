@@ -114,6 +114,14 @@ class SandboxProvider(ABC):
     async def consume_network_policy_events_async(self, sandbox_id: str) -> list[dict[str, object]]:
         return await asyncio.to_thread(self.consume_network_policy_events, sandbox_id)
 
+    def deny_pending_network_policy_events(self, sandbox_id: str) -> bool:
+        """Atomically deny all unsurfaced trusted-proxy events for a sandbox."""
+        del sandbox_id
+        return False
+
+    async def deny_pending_network_policy_events_async(self, sandbox_id: str) -> bool:
+        return await asyncio.to_thread(self.deny_pending_network_policy_events, sandbox_id)
+
     def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
         """Apply a user decision to one trusted-proxy event."""
         del sandbox_id, request_id, decision

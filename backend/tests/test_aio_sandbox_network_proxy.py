@@ -85,6 +85,37 @@ def test_pending_events_surface_only_one_destination_per_approval(tmp_path, monk
     assert [event["request_id"] for event in network_proxy.pending_events()] == [fresh]
 
 
+def test_pending_events_supersede_every_sibling_without_a_batch_limit(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    request_ids = [network_proxy.record_denial(f"host-{index}.example", 443, "CONNECT") for index in range(17)]
+
+    assert [event["request_id"] for event in network_proxy.pending_events()] == [request_ids[0]]
+    assert network_proxy.pending_events() == []
+
+
+def test_deny_pending_events_atomically_denies_every_unsurfaced_event(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    for index in range(17):
+        network_proxy.record_denial(f"host-{index}.example", 443, "CONNECT")
+
+    assert network_proxy.deny_pending_events() == 17
+    assert network_proxy.pending_events() == []
+
+    with network_proxy._connect_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM events WHERE decision = 'deny'").fetchone() == (17,)
+
+
+def test_deny_pending_events_preserves_an_already_surfaced_user_decision(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    surfaced = network_proxy.record_denial("interactive.example", 443, "CONNECT")
+    assert [event["request_id"] for event in network_proxy.pending_events()] == [surfaced]
+    unsurfaced = network_proxy.record_denial("scheduled.example", 443, "CONNECT")
+
+    assert network_proxy.deny_pending_events() == 1
+    assert network_proxy.decide(surfaced, "allow_temporary", ttl=60)
+    assert network_proxy.decide(unsurfaced, "deny", ttl=60)
+
+
 def test_pending_events_claims_old_unsurfaced_denial_on_retry(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
     now = [100.0]

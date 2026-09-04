@@ -1333,7 +1333,8 @@ sandbox:
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
-# On macOS: Automatically prefers Apple Container if available, falls back to Docker
+# On macOS: Prefers Apple Container when available, but keeps Docker while this
+# sandbox prefix still has managed Docker containers to reconcile after a mode change
 # On other platforms: Uses Docker
 # Uncomment to use:
 # sandbox:

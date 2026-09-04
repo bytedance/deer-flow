@@ -769,7 +769,7 @@ A custom image that is already fully initialized as a non-root user and needs no
 | `DEER_FLOW_SANDBOX_CONTAINER_USER` | unset (image default) | Passed through as `--user` (e.g. `1000:1000`). The default AIO image's user is upstream-controlled, so DeerFlow does not force one; set this only if you know your image's runtime user. |
 | `DEER_FLOW_SANDBOX_NETWORK` | unset (daemon default network) | Legacy `open`-mode escape hatch passed through as `--network`. Prefer `sandbox.network` for managed isolation. `host`, `container:<name>`, and `none` are rejected at startup. Restricted modes ignore this variable and use their own per-sandbox internal network. |
 
-These hardening flags are Docker-only; Apple Container (`container` runtime) keeps its previous, unhardened invocation and therefore supports only `network.mode: open`.
+These hardening flags are Docker-only; Apple Container (`container` runtime) keeps its previous, unhardened invocation and therefore supports only `network.mode: open`. On macOS, an `open` Gateway normally prefers Apple Container, but it keeps using Docker while the configured sandbox prefix has managed Docker sandboxes so startup reconciliation can safely replace resources left by a restricted-mode deployment before the runtime changes.
 
 Sandbox control-plane HTTP calls to loopback/private IPs, single-label cluster
 hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`

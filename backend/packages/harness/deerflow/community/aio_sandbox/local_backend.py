@@ -750,6 +750,38 @@ class LocalContainerBackend(SandboxBackend):
             operating_system = raw
         return isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
 
+    def _docker_has_managed_sandboxes(self) -> bool:
+        """Keep using Docker while this prefix still has managed sandboxes.
+
+        Restricted networking is Docker-only. On macOS, switching its config
+        back to ``open`` must not make Apple Container hide the Docker
+        resources that startup reconciliation needs to replace. The role
+        label excludes fixed-name proxy sidecars even when a custom sandbox
+        prefix overlaps their names.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "ps",
+                    "--filter",
+                    f"name={self._container_prefix}-",
+                    "--filter",
+                    "label=deerflow.role=sandbox",
+                    "--format",
+                    "{{.Names}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return False
+        if result.returncode != 0:
+            return False
+        prefix = self._container_prefix + "-"
+        return any(name.strip().startswith(prefix) for name in result.stdout.splitlines())
+
     def _detect_runtime(self) -> str:
         """Detect which container runtime to use.
 
@@ -769,6 +801,9 @@ class LocalContainerBackend(SandboxBackend):
                     timeout=5,
                 )
                 logger.info(f"Detected Apple Container: {result.stdout.strip()}")
+                if self._docker_has_managed_sandboxes():
+                    logger.info("Keeping Docker runtime so managed sandboxes remain visible to startup reconciliation")
+                    return "docker"
                 return "container"
             except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 logger.info("Apple Container not available, falling back to Docker")
@@ -1426,6 +1461,22 @@ class LocalContainerBackend(SandboxBackend):
             logger.warning("Sandbox network proxy returned invalid policy events for %s", sandbox_id)
             return []
         return [event for event in payload if isinstance(event, dict)] if isinstance(payload, list) else []
+
+    def deny_pending_network_policy_events(self, sandbox_id: str) -> bool:
+        """Atomically deny every unsurfaced proxy event for one sandbox."""
+        if self._network_mode != "allowlist" or self._network_config.get("approval", "prompt") != "prompt":
+            return True
+        proxy_name, _ = self._resource_names(sandbox_id)
+        result = subprocess.run(
+            ["docker", "exec", proxy_name, "python", _NETWORK_PROXY_CONTAINER_SCRIPT, "deny-pending"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            logger.warning("Failed to deny pending sandbox network policy events for %s: %s", sandbox_id, result.stderr.strip())
+            return False
+        return True
 
     def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
         if self._network_mode != "allowlist" or decision not in {"deny", "allow_temporary", "allow_sandbox"}:
