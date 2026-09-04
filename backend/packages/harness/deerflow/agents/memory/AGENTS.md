@@ -242,12 +242,14 @@ It also rejects non-positive character budgets during construction.
 One block keeps the SHA-256 of its exact UTF-8 content, including the wrapper.
 Multiple blocks hash a JSON array of their contents in model-request order,
 using `ensure_ascii=False` and compact separators `(',', ':')`.
-With turn recall enabled, record after request assembly, including cache hits and empty recall;
-a run that never reaches a model call records no memory event.
+With turn recall enabled, `RunJournal.on_chat_model_start` records the actual lead-model
+messages, including cache hits and empty recall with baseline memory. A wrapper's
+early reply or pre-model error records nothing; failure after model start still records.
 Baseline-only runs retain before-agent recording: new blocks come from the middleware
 update, and reused blocks must predate the run. At model-call time, require the
 dynamic-context marker and a memory ID; Gateway strips caller-forged markers.
 Baseline text stays checkpointed; turn text stays request-local. Neither is copied into events.
+Shared reminder markers live in `utils/messages.py`; the journal must not import middleware.
 
 `prompt.py::_count_tokens` controls the injection budget.
 Default `tiktoken` mode loads and caches its encoding lazily.

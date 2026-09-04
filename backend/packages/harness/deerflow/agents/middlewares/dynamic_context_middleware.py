@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import re
 import uuid
@@ -49,8 +48,15 @@ from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_K
 from deerflow.runtime.secret_context import DYNAMIC_MEMORY_CONTEXT_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.utils.messages import (
+    DYNAMIC_CONTEXT_REMINDER_KEY as _DYNAMIC_CONTEXT_REMINDER_KEY,
+)
+from deerflow.utils.messages import (
+    DYNAMIC_TURN_MEMORY_KEY as _TURN_MEMORY_MESSAGE_KEY,
+)
+from deerflow.utils.messages import (
     INJECTED_USER_MESSAGE_ID_SUFFIX,
     get_original_user_content_text,
+    is_dynamic_context_reminder,
     strip_injected_user_message_id_suffix,
 )
 
@@ -66,13 +72,11 @@ logger = logging.getLogger(__name__)
 _INJECT_TIMEOUT_SECONDS = 5.0
 
 _DATE_RE = re.compile(r"<current_date>([^<]+)</current_date>")
-_DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # Authoritative injected date, carried in additional_kwargs of the date
 # SystemMessage. Detection reads this instead of regex-parsing message content,
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
 _SUMMARY_MESSAGE_NAME = "summary"
-_TURN_MEMORY_MESSAGE_KEY = "dynamic_turn_memory"
 
 # ``INJECTED_USER_MESSAGE_ID_SUFFIX`` / ``strip_injected_user_message_id_suffix``
 # are defined in ``deerflow.utils.messages`` and re-exported here, where the
@@ -104,14 +108,6 @@ def _extract_date(content: str) -> str | None:
     """Return the first <current_date> value found in *content*, or None."""
     m = _DATE_RE.search(content)
     return m.group(1) if m else None
-
-
-def is_dynamic_context_reminder(message: object) -> bool:
-    """Return whether *message* is a hidden dynamic-context reminder."""
-    # DEPRECATED: HumanMessage reminders only exist in pre-PR checkpoints.
-    # Once all active checkpoints are migrated, the HumanMessage branch can be
-    # removed and this function can check SystemMessage exclusively.
-    return isinstance(message, (HumanMessage, SystemMessage)) and bool(message.additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY))
 
 
 def _last_injected_date(messages: list) -> str | None:
@@ -542,7 +538,6 @@ class DynamicContextMiddleware(AgentMiddleware):
             memory_context = self._load_turn_memory(request, query)
             self._store_turn_memory(context, cache_key, memory_context)
             prepared = self._inject_turn_memory(request, target_index, user_message, memory_context)
-        self._record_request_memory(prepared)
         return handler(prepared)
 
     @override
@@ -557,40 +552,7 @@ class DynamicContextMiddleware(AgentMiddleware):
             memory_context = await self._aload_turn_memory(request, query)
             self._store_turn_memory(context, cache_key, memory_context)
             prepared = self._inject_turn_memory(request, target_index, user_message, memory_context)
-        self._record_request_memory(prepared)
         return await handler(prepared)
-
-    def _record_request_memory(self, request: ModelRequest) -> None:
-        """Record baseline and turn memory in request order, once per run.
-
-        Baseline-only runs retain their before_agent audit. With turn recall on,
-        wait until request assembly so that baseline cannot win the journal's
-        first-write-wins slot before turn memory exists. Gateway input handling
-        strips caller-supplied reminder markers; an ID suffix alone is not proof.
-        """
-        if not self._turn_recall_enabled():
-            return
-        context = self._turn_cache(request)
-        journal = context.get("__run_journal") if context is not None else None
-        if journal is None:
-            return
-        blocks = [
-            message.content
-            for message in request.messages
-            if isinstance(message, HumanMessage)
-            and is_dynamic_context_reminder(message)
-            and isinstance(message.content, str)
-            and (str(message.id or "").endswith("__memory") or (str(message.id or "").endswith("__turn_memory") and message.additional_kwargs.get(_TURN_MEMORY_MESSAGE_KEY)))
-        ]
-        if not blocks:
-            return
-        try:
-            # Keep the historical identity for one block; JSON framing makes
-            # multiple blocks unambiguous without persisting their contents.
-            content = blocks[0] if len(blocks) == 1 else json.dumps(blocks, ensure_ascii=False, separators=(",", ":"))
-            journal.record_memory_context(content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest())
-        except Exception:
-            logger.debug("Failed to record effective request memory context", exc_info=True)
 
     @staticmethod
     def _effective_memory_message(state, update: dict | None, runtime: Runtime) -> HumanMessage | None:

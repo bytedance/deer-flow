@@ -520,12 +520,6 @@ def build_middlewares(
         runtime_middleware_kwargs["deferred_setup"] = deferred_setup
     middlewares = build_lead_runtime_middlewares(**runtime_middleware_kwargs)
 
-    # Always inject current date (and optionally memory) as <system-reminder> into the
-    # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
-    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
-
-    middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
-
     # Deterministically load a full SKILL.md when the user starts the turn with
     # /skill-name. This keeps the base system prompt metadata-only while giving
     # explicit user activation priority over model-side relevance guessing.
@@ -540,6 +534,13 @@ def build_middlewares(
             slash_source_owner_token=slash_source_owner_token,
         )
     )
+
+    # Reject invalid slash activations before query-aware recall. On success,
+    # recall goes after the skill body, directly before the current user input.
+    # Date/baseline injection still runs in before_agent and keeps the prompt static.
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+
+    middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
 
     # Enabled skills are only discoverable metadata. Apply allowed-tools at
     # runtime after explicit slash activation or an actual skill-file load.

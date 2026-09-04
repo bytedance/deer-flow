@@ -150,9 +150,11 @@ Token and cost summaries are not reconstructed by reading event rows.
 `RunJournal` accumulates usage while callbacks fire, and the worker writes the
 aggregates to `RunRow`.
 
-With turn recall enabled, memory identity is recorded at model-request assembly,
-after baseline and turn blocks are available, including cache hits and empty
-recall. Runs stopped before a model call do not claim memory use. Baseline-only
+With turn recall enabled, memory identity is recorded by `on_chat_model_start`
+from the actual lead-model messages, including cache hits and empty turn recall
+when baseline memory remains. A downstream middleware reply or failure before
+model invocation records nothing; a model call that starts and then fails still
+records the memory it received. Baseline-only
 mode retains before-agent recording. The journal keeps the first effective
 identity per run; it is not an audit of every subsequent model call.
 

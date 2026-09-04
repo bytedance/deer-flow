@@ -99,7 +99,7 @@ LLM-powered persistent context retention across conversations:
 - **Debounced updates**: Batches updates to minimize LLM calls (configurable wait time)
 - **System prompt injection**: Top facts + context injected into agent prompts
 - **Turn recall on regenerate**: Recall uses the replay checkpoint to recognize the repeated user input, even when its message ID also exists in the abandoned answer's history. The existing rollback and delegation boundaries stay unchanged.
-- **Run-level memory identity**: `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory` returns one SHA-256 identity for the effective hidden memory: the exact content for one block, or a compact JSON array of baseline/turn block contents in model-request order for multiple blocks. No memory text is copied into the event store. With turn recall enabled, recording waits for the first model request with memory; runs stopped before that boundary do not claim memory use. Baseline-only recording is unchanged.
+- **Run-level memory identity**: `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory` returns one SHA-256 identity for the effective hidden memory: the exact content for one block, or a compact JSON array of baseline/turn block contents in model-request order for multiple blocks. No memory text is copied into the event store. With turn recall enabled, recording waits for the actual model-start callback; a middleware reply or failure before model invocation does not claim memory use. Invalid slash skills are rejected before turn recall. Baseline-only recording is unchanged.
 - **Storage**: JSON file with mtime-based cache invalidation
 
 ### Tool Ecosystem

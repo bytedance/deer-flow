@@ -166,7 +166,10 @@ boundary; peers separate memory scopes within that user.
 ## Retry and failure behavior
 
 - `read: fail_open` logs retrieval failures and returns no injected OpenViking
-  memory. `read: raise` propagates the retrieval failure to its DeerFlow caller.
+  memory. `read: raise` raises from the backend, but DeerFlow's shared context
+  loader currently suppresses it during automatic injection (both baseline and
+  turn recall). Do not rely on it to stop the turn yet; the fix is tracked in
+  [#4726](https://github.com/bytedance/deer-flow/pull/4726).
 - `write: log_and_drop` logs capture failures without failing an already
   generated answer. `write: raise` propagates them.
 - DeerFlow stores only hashes and counters in a bounded local capture cursor
