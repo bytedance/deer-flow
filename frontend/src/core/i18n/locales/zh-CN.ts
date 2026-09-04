@@ -295,6 +295,43 @@ export const zhCN: Translations = {
     agents: "智能体",
     scheduledTasks: "定时任务",
     agentsDisabledTooltip: "功能未启用",
+    connectedApps: "已连接应用",
+  },
+
+  // 连接器
+  connectorPage: {
+    title: "连接器",
+    subtitleConnected: (count: number) =>
+      `已连接 ${count} 个应用 — 你的智能体可以直接使用它们。`,
+    subtitleEmpty: "连接你的第三方应用，让 AI 智能体可以操作它们。",
+    consoleAction: "控制台",
+    searchPlaceholder: "按名称、分类或服务搜索…",
+    statusAll: "全部",
+    statusConnected: "已连接",
+    statusDisconnected: "未连接",
+    connectOAuth: "通过 OAuth 连接",
+    connectApiKey: "通过 API Key 连接",
+    connect: "连接",
+    disconnect: "断开",
+    noResults: "没有匹配的应用。",
+    noProvidersAvailable: "暂无可用应用，请稍后再试。",
+    apiKeyDialogTitle: (name: string) => `连接 ${name}`,
+    apiKeyDialogDescription: (service: string) =>
+      `粘贴 ${service} 的 API Key，将安全加密存储。`,
+    apiKeyPlaceholder: "sk-…",
+    cancel: "取消",
+    loading: "正在加载…",
+    errorTitle: "无法加载连接器",
+    errorDescription: "服务暂时不可用，请稍后再试。",
+    errorAction: "打开控制台",
+    oauthToast: "在打开的窗口中完成授权，然后刷新此页面。",
+    connectedViaOAuth: "通过 OAuth 连接",
+    connected: "已连接",
+    connectedToast: (name: string) => `已连接到 ${name}`,
+    unknownFieldsHint:
+      "此提供商未提供凭据配置表单。连接创建后，可从提供商后台管理凭据。",
+    connectFailed: "连接失败",
+    clearFilter: "✕ 清除",
   },
 
   backgroundTasks: {
