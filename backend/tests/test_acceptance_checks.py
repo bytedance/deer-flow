@@ -24,6 +24,12 @@ THREAD_DATA = {
     "outputs_path": "/ws/thread/user-data/outputs",
 }
 
+WINDOWS_THREAD_DATA = {
+    "workspace_path": "D:/WS",
+    "uploads_path": "D:/WS/uploads",
+    "outputs_path": "D:/WS/outputs",
+}
+
 
 def _reader(files: dict[str, str]):
     def read(_runtime, path: str) -> str:
@@ -1215,6 +1221,44 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["checked"] is False
 
+    def test_cmd_hash_argument_is_unprovable_before_comment_stripping(self):
+        """``cmd.exe`` passes ``#`` as an ordinary argument, while POSIX
+        parsing treats it as the start of a comment and can hide a following
+        exclusion from the acceptance matcher."""
+        executions = [_bash_execution("pytest tests/security tests/unit # --ignore tests/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_cmd_caret_escape_is_unprovable_before_posix_tokenization(self):
+        """``cmd.exe`` removes ``^`` escaping before invoking the runner, so
+        the literal token seen by the matcher may hide an exclusion alias."""
+        executions = [_bash_execution("pytest tests/security tests/unit --ignore tests^/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "pytest tests/security tests/unit {--ignore,tests/security}",
+            'pytest tests/security tests/unit @("--ignore","tests/security")',
+            'pytest tests/security tests/unit ("--ignore","tests/security")',
+            'pytest tests/security tests/unit @("--ignore=tests/security")',
+            'pytest tests/security tests/unit ("--ignore=tests/security")',
+            "pytest tests/security tests/unit @pytestArgs",
+            "pytest tests/security tests/unit --ignore ~/repo/tests/security",
+            "pytest tests/security tests/unit --ignore !TARGET!",
+        ),
+    )
+    def test_shell_expansion_syntax_is_unprovable_before_tokenization(self, command):
+        """Bash brace/tilde expansion and PowerShell splatting/arrays can
+        inject or rewrite runner arguments before the process is launched."""
+        executions = [_bash_execution(command, output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], thread_data=WINDOWS_THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
     @pytest.mark.parametrize("target", ("%TEMP%", "%USERPROFILE%/fake"))
     def test_cd_with_cmd_environment_expansion_is_unprovable(self, target):
         executions = [_bash_execution(f"cd {target} && pytest tests/", output_tail="3 passed")]
@@ -1304,6 +1348,7 @@ class TestTestsPassedLeaf:
             "cd && pytest tests/",  # bare cd goes HOME
             "cd - && pytest tests/",  # prints OLDPWD
             "cd backend/../../x && pytest tests/",  # lexical walk-out
+            "cd linked/../safe && pytest tests/",  # ``..`` can cross a directory symlink
             "cd /mnt/user-data/../etc && pytest tests/",  # normalized escape
             "cd /ws/thread/user-data/workspace2 && pytest tests/",  # sibling of an allowed root
         ),
@@ -1663,6 +1708,183 @@ class TestTestsPassedLeaf:
         leaf = verdict["leaves"][0]
         assert leaf["checked"] is False
         assert leaf["detail"] == "matching segment cannot be proven to have executed"
+
+    def test_windows_case_alias_of_target_that_is_excluded_is_unprovable(self):
+        """Windows drive paths are case-insensitive for overlap purposes, so
+        a differently-cased exclusion can still remove the required target."""
+        executions = [_bash_execution("pytest D:/WS/tests/security D:/WS/tests/unit --ignore d:/ws/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest D:/WS/tests/security"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["detail"] == "matching segment cannot be proven to have executed"
+
+    def test_windows_case_alias_exclusion_nested_under_target_is_unprovable(self):
+        executions = [_bash_execution("pytest D:/WS/tests --ignore d:/ws/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest D:/WS/tests"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_unrelated_windows_exclusion_keeps_matching(self):
+        target = "D:/WS/tests/security"
+        executions = [_bash_execution(f"pytest {target} D:/WS/tests/unit --ignore d:/ws/tests/slow", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], thread_data=WINDOWS_THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_windows_drive_root_exclusion_overlap_is_unprovable(self):
+        executions = [_bash_execution("pytest D:/ D:/WS/tests/unit --ignore d:/ws/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest D:/"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    @pytest.mark.parametrize(
+        ("criterion_target", "ignored_target"),
+        (
+            ("D:/WS/tests/./security", "d:/ws/tests/security"),
+            ("D:/WS/tests/security", "d:/ws/tests/./security"),
+            ("D:/WS/tests//security", "d:/ws/tests/security"),
+        ),
+    )
+    def test_windows_lexical_alias_exclusion_is_unprovable(self, criterion_target, ignored_target):
+        executions = [_bash_execution(f"pytest {criterion_target} D:/WS/tests/unit --ignore {ignored_target}", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {criterion_target}"], thread_data=WINDOWS_THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_windows_relative_case_alias_exclusion_is_unprovable(self):
+        executions = [_bash_execution("pytest tests/security tests/unit --ignore TESTS/SECURITY", output_tail="12 passed")]
+        verdict = check_acceptance_criteria(
+            ["tests_passed:pytest tests/security"],
+            thread_data=WINDOWS_THREAD_DATA,
+            bash_executions=executions,
+        )
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_windows_rooted_path_case_alias_exclusion_is_unprovable(self):
+        target = "/Tests/Security"
+        executions = [_bash_execution(f"pytest {target} /Tests/Unit --ignore /tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], thread_data=WINDOWS_THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_windows_thread_rejects_shell_ambiguous_virtual_cd_target(self):
+        command = "cd /mnt/user-data/workspace && pytest tests/"
+        executions = [_bash_execution(command, output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:{command}"], thread_data=WINDOWS_THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_unc_cd_target_uses_windows_case_rules(self):
+        thread_data = {
+            "workspace_path": "//SERVER/Share/Workspace",
+            "uploads_path": "//SERVER/Share/Workspace/uploads",
+            "outputs_path": "//SERVER/Share/Workspace/outputs",
+        }
+        command = "cd //server/share/workspace && pytest tests/"
+        executions = [_bash_execution(command, output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:{command}"], thread_data=thread_data, bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    @pytest.mark.parametrize("ignored", ("D:tests/security", "C:WS/tests/security"))
+    def test_drive_relative_exclusion_fails_closed(self, ignored):
+        target = "D:/WS/tests/security"
+        executions = [_bash_execution(f"pytest {target} D:/WS/tests/unit --ignore {ignored}", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], thread_data=WINDOWS_THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_drive_relative_case_alias_uses_windows_semantics_without_thread_context(self):
+        target = "D:tests/security"
+        executions = [_bash_execution(f"pytest {target} D:tests/unit --ignore d:TESTS/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_drive_relative_and_plain_relative_exclusion_fail_closed_without_thread_context(self):
+        executions = [_bash_execution("pytest tests/security tests/unit --ignore D:tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_drive_relative_and_plain_relative_exclusion_fail_closed_in_windows_context(self):
+        executions = [_bash_execution("pytest tests/security tests/unit --ignore D:tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria(
+            ["tests_passed:pytest tests/security"],
+            thread_data=WINDOWS_THREAD_DATA,
+            bash_executions=executions,
+        )
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    @pytest.mark.parametrize(
+        ("thread_data", "target", "ignored"),
+        (
+            (WINDOWS_THREAD_DATA, "tests/security", "D:/WS/tests/security"),
+            (WINDOWS_THREAD_DATA, "/mnt/user-data/workspace/tests/security", "D:/WS/tests/security"),
+            (THREAD_DATA, "tests/security", "/ws/thread/user-data/workspace/tests/security"),
+        ),
+    )
+    def test_mixed_path_forms_in_exclusion_fail_closed(self, thread_data, target, ignored):
+        executions = [_bash_execution(f"pytest {target} tests/unit --ignore {ignored}", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], thread_data=thread_data, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_unc_case_alias_exclusion_is_unprovable(self):
+        target = "//SERVER/Share/tests/security"
+        executions = [_bash_execution(f"pytest {target} //SERVER/Share/tests/unit --ignore //server/share/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    @pytest.mark.parametrize("criterion_target", ("tests/./security", "tests//security"))
+    def test_posix_lexical_alias_exclusion_is_unprovable(self, criterion_target):
+        executions = [_bash_execution(f"pytest {criterion_target} tests/unit --ignore tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {criterion_target}"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_windows_trailing_dot_alias_exclusion_is_unprovable(self):
+        target = "D:/WS/tests/security."
+        executions = [_bash_execution(f"pytest {target} D:/WS/tests/unit --ignore d:/ws/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], thread_data=WINDOWS_THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_parent_traversal_in_consumed_target_with_exclusion_is_unprovable(self):
+        executions = [_bash_execution("pytest tests/../security tests/unit --ignore security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/../security"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_posix_relative_case_aliases_remain_distinct(self):
+        executions = [_bash_execution("pytest tests/security tests/unit --ignore TESTS/SECURITY", output_tail="12 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_windows_nodeid_case_remains_distinct(self):
+        target = "D:/WS/tests/x.py::TestA"
+        executions = [_bash_execution(f"pytest {target} D:/WS/tests/y.py --deselect d:/ws/tests/X.PY::testa", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], thread_data=WINDOWS_THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    @pytest.mark.parametrize(
+        ("criterion_target", "ignored_target"),
+        (
+            ("/opt/WS/tests/security", "/opt/ws/tests/security"),
+            ("D:/WS/Straße/tests/security", "d:/ws/STRASSE/tests/security"),
+        ),
+    )
+    def test_distinct_case_sensitive_exclusion_paths_do_not_overlap(self, criterion_target, ignored_target):
+        executions = [_bash_execution(f"pytest {criterion_target} tests/unit --ignore {ignored_target}", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {criterion_target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
 
     def test_unrelated_exclusion_does_not_block_the_match(self):
         executions = [_bash_execution("pytest tests/security tests/unit --ignore tests/slow", output_tail="12 passed")]
