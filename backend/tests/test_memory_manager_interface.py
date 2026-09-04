@@ -79,6 +79,7 @@ def test_minimal_backend_onboards_via_factory_with_only_add_get_context():
         manager.get_memory(user_id="u")
     with pytest.raises(NotImplementedError):
         manager.clear_memory(user_id="u")
+    assert manager.cancel_by_agent("x", user_id="u") == 0
     with pytest.raises(NotImplementedError):
         manager.import_memory({}, user_id="u")
     with pytest.raises(NotImplementedError):

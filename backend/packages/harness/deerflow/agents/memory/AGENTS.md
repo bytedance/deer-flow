@@ -1,112 +1,258 @@
-### Memory System (`packages/harness/deerflow/agents/memory/`)
+### Memory System
 
-**Components**:
-- `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication, optimistic revision checks, and repository change sets
-- `queue.py` - Debounced update queue (per-thread deduplication, configurable wait time); captures `user_id` at enqueue time so it survives the `threading.Timer` boundary
-- `prompt.py` - Prompt templates for memory updates
-- `storage.py` - File repository with one user-global summary JSON, agent-owned single-fact Markdown, target-only journaled changes, strict fact validation, shared-user plus per-fact optimistic revisions, lock-protected migration, deep-copy caching, and a RetrievalPort adapter boundary
-- `retrieval.py` - Built-in scope-aware SQLite FTS5/BM25 adapter; it stores only rebuildable derived data and can be disabled with an empty `retrieval_adapter`. Chinese jieba tokenization is optional via the backend `memory-zh` extra; without it the adapter uses SQLite unicode tokenization and the substring fallback. A corrupt persistent derived database is deleted and recreated once before falling back to substring retrieval. The Gateway closes the derived SQLite connection after its shutdown flush; reads and writes remain serialized by the adapter lock, with connection pooling deferred as a performance follow-up.
-- `tools.py` - Tool-driven memory mode (`memory_search`, `memory_add`, `memory_update`, `memory_delete`) using the same storage/update primitives
+This directory owns memory capture, storage, retrieval, prompt injection, and model-driven memory tools.
 
-**Per-User Isolation**:
-- Memory is stored per-user at `{base_dir}/users/{user_id}/memory.json`
-- Per-agent facts at `{base_dir}/users/{user_id}/agents/{agent_name}/facts/{sha256-prefix}/{fact-id}.md`, where the prefix is the first two hexadecimal characters of `SHA-256(fact_id)`; there is no per-agent `memory.json`
-- Custom agent definitions (`SOUL.md` + `config.yaml`) are also per-user at `{base_dir}/users/{user_id}/agents/{agent_name}/`. The legacy shared layout `{base_dir}/agents/{agent_name}/` remains read-only fallback for unmigrated installations
-- Middleware mode captures `user_id` via `resolve_runtime_user_id(runtime)` at enqueue time; tool mode resolves `user_id` and `agent_name` from `ToolRuntime.context` via the same helper so both Gateway and standalone LangGraph Server runs stay scoped to the authenticated user and active custom agent
-- The `/api/memory*` endpoints resolve the owner through `_resolve_memory_user_id(request)`: trusted internal callers (IM channel workers carrying the `X-DeerFlow-Owner-User-Id` header, e.g. a bound `/memory` command) act for the connection owner; browser/API callers fall back to `get_effective_user_id()`. The header is only honored after `AuthMiddleware` validated the internal token, mirroring `get_trusted_internal_owner_user_id` used by the threads router
-- In no-auth mode, `user_id` defaults to `"default"` (constant `DEFAULT_USER_ID`)
-- Absolute `storage_path` in config opts out of per-user isolation
-- **Migration**: Run `PYTHONPATH=. python scripts/migrate_user_isolation.py` to move legacy `memory.json`, `threads/`, and `agents/` into per-user layout. Supports `--dry-run` (preview changes) and `--user-id USER_ID` (assign unowned legacy data to a user, defaults to `default`).
+#### Main components
 
-**Data Structure**:
-- **User Context**: `workContext`, `personalContext`, `topOfMind` (1-3 sentence summaries)
-- **History**: `recentMonths`, `earlierContext`, `longTermBackground`
-- **Global JSON**: `{base_dir}/users/{user_id}/memory.json` stores only `version`, shared revision/time, `user`, and `history`; it never stores facts or a fact index
-- **Facts**: Schema-v2 Markdown documents under `agents/{agent_name}/facts/{sha256-prefix}/{fact-id}.md`; YAML front matter contains structure and the body contains the atomic fact
-- **Default agent compatibility**: DeerMem resolves an omitted `agent_name` to the reserved `__default__` fact bucket at the manager boundary. The sentinel is accepted only by DeerMem storage and is outside the custom-agent name grammar, so a real custom `lead-agent` remains isolated. Public agent identifiers are case-insensitive and canonicalized to lowercase before storage
-- **Compatibility view**: direct global storage reads return `facts: []`, while DeerMem Manager/API reads select the explicit agent or reserved default and return its facts, so existing Settings and embedded-client schemas remain stable. Markdown keeps structured `source` metadata internally; the manager projects it to the historical string field before returning a public document
-- **Incremental result contract**: `FileMemoryStorage.apply_changes()` returns `complete: false` plus `upsertedFacts`/`deletedFactIds`; it never presents a partial cache as a complete memory document. Public compatibility callers explicitly reload a fresh complete view only where their response contract requires it, including after successful disjoint-create rebases
-- **Repository**: `get/list/upsert/delete_fact`, `apply_changes`, summary operations, migration, index lifecycle/status, and scoped search. `apply_changes` and direct fact CRUD touch only target Markdown files; direct fact CRUD accepts separate expected user-memory and fact revisions. Supplied summary child keys merge over their persisted section, while import normalizes complete replacement sections first. Whole-document `load/save` remains for compatibility but validates the complete `facts` list and diffs it before persistence. An unscoped manager clear first migrates facts from unread legacy agent JSON without adopting potentially conflicting summaries, then removes the global summaries and every agent's canonical facts while preserving agent configuration; an explicit agent clear removes only that bucket's facts and preserves the shared summaries
+- `manager.py` defines the backend-neutral `MemoryManager` contract.
+- `agents/middlewares/memory_middleware.py` queues filtered conversations for passive capture.
+- `summarization_hook.py` connects memory work to the summarization lifecycle.
+- `tools.py` provides `memory_search`, `memory_add`, `memory_update`, and `memory_delete`.
+- `backends/deermem/` contains the default local backend.
+- `backends/mem0/`, `backends/openviking/`, and `backends/honcho/` contain optional adapters.
 
-**Workflow**:
-- `memory.mode: middleware` (default) keeps the passive path: `MemoryMiddleware` filters messages (user inputs + final AI responses), captures `user_id` via `resolve_runtime_user_id(runtime)`, queues conversation with the captured `user_id`, and the debounced background thread invokes the LLM to extract context updates and facts using the stored `user_id`. `DynamicContextMiddleware` passes the same resolved identity to the memory read path. Both ordinary and bootstrap custom-agent construction pass `agent_name` into the middleware factory, keeping setup facts in the custom agent's bucket instead of `__default__`. On standalone Agent Server runs, server-owned auth identity is also resolved during lead-agent construction, normalized through `make_safe_user_id` for DeerFlow storage, and explicitly reused for custom-agent config/SOUL, user skills, skill policy, and prompt assembly; ordinary client `user_id` values cannot override `langgraph_auth_user_id`. On the embedded Gateway path, `inject_authenticated_user_context` removes client-supplied `langgraph_auth_user` / `langgraph_auth_user_id` from both RunnableConfig sections before graph construction, so those reserved fields cannot impersonate Agent Server auth.
-- The optional `openviking` backend under
-  `packages/harness/deerflow/agents/memory/backends/openviking/` is a
-  remote-only adapter built on the maintained `langchain-openviking` package.
-  Select it with
-  `memory.manager_class: openviking` and keep `memory.mode: middleware`. It
-  uses one OpenViking USER API key bound to the configured DeerFlow
-  `owner_user_id`; another DeerFlow user is rejected before remote access.
-  DeerFlow owns the existing recall/capture timing, fixed injection query and
-  full-transcript suffix cursor. `langchain-openviking` owns SDK transport,
-  message conversion, tool-call preservation, batching, partial-write progress
-  and Session commits. One DeerFlow thread maps to one stable OpenViking
-  Session, with the default or named agent represented as its actor peer.
-  Bounded hash-only cursors live below `{storage_path}/openviking/sessions/`;
-  session locks are weakly cached, async entrypoints offload synchronous SDK
-  and file IO, and graceful shutdown drains active operations before closing
-  the recorder-owned client. The recorder receives an explicit empty
-  `extra_headers` mapping so `ovcli.conf` cannot add arbitrary transport
-  headers. Do not reintroduce a backend-local HTTP client,
-  explicitly configured trusted identity headers, root-key data access, or
-  imports of the OpenViking embedded runtime. Multi-user provisioning,
-  query-aware refresh policy and new lifecycle scheduling are separate changes,
-  not part of this backend.
-- The optional `honcho` backend under `packages/harness/deerflow/agents/memory/backends/honcho/` is a remote-only HTTP adapter for user-model memory (RFC #1898's user-dimension option). Select with `memory.manager_class: honcho`, keep `memory.mode: middleware` (tool mode also supported — it implements `search`). It writes filtered turns as Honcho messages (no local LLM calls; Honcho's deriver builds representations server-side), resolves one workspace per `user_id` (`workspace_overrides` else `workspace_prefix + collision-resistant sanitized id`; missing user fails closed to no memory), offloads sync HTTP in its `a*` overrides via `asyncio.to_thread`, and tool mode retains passive writes via MemoryMiddleware, mirroring mem0. `failure_policy.read: fail_closed` rethrows recall failures; default is log-and-empty.
-- Honcho configuration objects reject non-finite or non-positive timeout values and non-positive character budgets during construction, including direct dataclass construction, before an HTTP client can use them.
-- `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
-- Both modes share `FileMemoryStorage`, per-user/per-agent isolation, manual CRUD primitives, and the updater backend. Injection is mode-aware: middleware mode injects global `user`/`history` summaries plus the selected agent's facts, while tool mode injects only the global summaries and leaves every agent fact behind `memory_search` to avoid duplicating automatically injected and retrieval-returned context. `memory.injection_enabled: false` suppresses the complete block in either mode.
-- Middleware extraction classifies proposed facts with extraction-only `scope`/`durability`/`authority` labels. `_apply_updates` accepts only `user` + `durable` + `descriptive` new/consolidated facts, accepts only wholly user-scoped summary prose with `authority=descriptive`, and rejects missing labels per item without aborting unrelated updates. Contradiction removals use object entries with `id`, `scope`, `reason`, and optional zero-based `replacementFactIndex`; task/project removals fail closed, and a paired removal runs only when the referenced replacement survives the scope/confidence gates, deduplication, and max-fact trim under another fact ID. The labels are not persisted, so no storage migration is required. Staleness removals retain their independent candidate/cap guardrails, while tool-mode CRUD remains outside this extraction gate. Custom `memory.backend_config.prompts_dir` templates (including per-agent overrides) must carry the same classification fields; an un-migrated template makes the fail-closed gate reject every extraction-driven write, observable only through `rejected_by_scope_gate` and the >60% fact-rejection warning.
-- Capacity eviction is centralized in `deermem/core/eviction.py` for automatic extraction, manual/tool fact creation, and import. `confidence` remains the default policy. Opt-in `hybrid-v1` uses bounded 0.65 confidence + 0.25 explicit-confirmation freshness + 0.10 query-access heat, with configurable half-lives and a bounded minimum correction reserve. Confirmation/access metadata is collected only when hybrid-v1 or shadow mode is active. The existing update LLM may return `factsToReinforce`, but `_apply_updates` updates `lastConfirmedAt`/`confirmationCount` only when deterministic message processing also detected `reinforcement`; a valid `lastConfirmedAt` also resets the staleness-review clock. That deterministic gate is batch-level: it matches a human message among the last six filtered messages in the current extraction batch, while the LLM-provided ID supplies fact binding without an independent signal-to-fact correspondence check. Duplicate extraction, prompt injection, and search alone never confirm. Only facts actually returned by `DeerMem.search()` increment the decaying usage sidecar; `get_context()` never does, and confidence-only capacity selection does not read the usage sidecar. Sidecars live under the agent `.metadata/` directory so usage does not mutate canonical Markdown timestamps/revisions. Capacity audits are bounded and metadata-only, are written only after canonical persistence succeeds, and user delete/clear removes matching usage/audit data. Shadow mode computes hybrid disagreement while continuing to execute confidence-only.
-- Middleware mode queue debounces (30s default), batches updates, and commits global summaries plus the selected/default agent's fact delta through a user-level lock, optimistic user-memory revisions, per-fact revisions, and a recoverable target-file journal. Only explicitly marked point operations may rebase a stale shared revision, and only while every addressed fact still satisfies its original absent/revision precondition. Snapshot-derived clear/trim/consolidation operations instead reload the complete document and recompute their intent on a manifest conflict, with a bounded retry. Typed manifest/fact conflict subclasses keep that decision independent of exception text, and same-ID creates and stale same-fact writes fail. Scope-lock objects are weakly cached so inactive users do not grow a process-lifetime map. Cache validation does not scale with the fact-file count: its token combines the shared JSON's `(mtime_ns, size, revision)`, so the persisted revision invalidates stale caches even when a coarse-mtime filesystem reports identical metadata for same-size writes; direct out-of-band Markdown edits require `reload()`. Atomic replacement also syncs the parent directory on POSIX so the rename is durable. DeerMem translates private storage conflict/corruption exceptions to the backend-neutral MemoryManager contract; the Gateway maps them to HTTP 409 and a stable HTTP 500 response respectively. A normal default-manager read automatically migrates legacy facts from the global JSON into `__default__`; it also adopts the earlier implicit `lead-agent` fact bucket only when that directory has no custom-agent `config.yaml`, and rejects unexpected files instead of deleting them. The v1-to-v2 migration is one-way for the running application: operators must stop DeerFlow and snapshot the configured storage root before upgrade. Before any destructive v2 write, every migrated JSON source is durably retained as `{manifest_filename}.v1.bak`; a missing-write or mismatched existing backup aborts without modifying v1 data. Legacy per-agent JSON is deleted only after its non-empty summaries are safely adopted or confirmed identical; summary conflicts keep the source file and fail loudly.
-- **Proactive Markdown migration CLI**: from `backend/`, run `PYTHONPATH=. python scripts/migrate_memory_markdown.py --all-users --dry-run` to audit and omit `--dry-run` to migrate before serving traffic. Use repeated `--user-id` values when selecting exact original identities, especially standalone raw IDs containing `@` or other characters that are normalized in directory names; `--storage-path` selects a non-default DeerMem root. The CLI reuses `FileMemoryStorage.migrate`, is idempotent, continues across per-user failures, and exits non-zero if any user fails. It is optional because the first normal read still performs the same migration automatically.
-- `retrieval_adapter` owns indexing and retrieval. `fts5` is the DeerMem default and uses a persistent derived SQLite index under `.retrieval/`; an empty value disables the adapter and selects `substring_fallback`. File storage sends upsert/remove notifications for normal writes and both explicit and lazy migrations after releasing durable storage locks, then delegates search. Gateway startup schedules `DeerMem.warm_retrieval()` as a background full rebuild so readiness is not delayed, while a first search lazily rebuilds its exact scope until warm-up completes. Individual malformed facts are logged and skipped without triggering repeated full scans; only a fatal adapter rebuild failure keeps lazy retry enabled. During shutdown, the Gateway waits at most one second for this derived rebuild and leaves the full configured timeout to the canonical memory flush; if the rebuild is still active, its adapter remains open until process exit. Adapter failures mark the scope dirty and fall back to canonical substring search until rebuilding succeeds. `FileMemoryStorage` owns and closes the adapter so higher layers do not reach into private storage state.
-- Staleness pass (same LLM invocation as the regular updater, no extra API call): when `staleness_review_enabled` is `true` and at least `staleness_min_candidates` aged facts exist, `_select_stale_candidates` selects facts older than their individual review window (`expected_valid_days`, or the global `staleness_age_days` fallback) that are not in `staleness_protected_categories` (default: `correction`), surfaces them in the prompt with a `valid:Nd` annotation, and the LLM judges each as KEEP, REMOVE, or EXTEND. REMOVE entries go in `staleFactsToRemove`; EXTEND entries go in `staleFactsToExtend` with an `extend_by_days` value, which sets the fact's `expected_valid_days` to `min(days_since_created + extend_by_days, staleness_max_extension_days)`. The LLM assigns `expected_valid_days` when creating a fact; it is clamped at write time to `staleness_age_days × staleness_max_lifetime_multiplier` (creation cap). `_apply_updates` enforces the guardrail unconditionally at apply time: it intersects both the removal and extension sets with `_select_stale_candidates` output before applying the per-cycle cap (`staleness_max_removals_per_cycle`), so protected and non-aged facts can never be targeted regardless of model behavior or the feature flag setting. Facts the LLM proposed for removal are excluded from extension even if the per-cycle cap prevented their actual deletion that cycle. Extensions use an absolute ceiling (`staleness_max_extension_days`) rather than the creation multiplier so a deliberate review decision can advance the window beyond the initial cap while preventing `timedelta` overflow from a malformed `extend_by_days`.
-- Consolidation pass (same LLM invocation as the regular updater, no extra API call): when `consolidation_enabled` is `true` and at least one category holds `consolidation_min_facts` or more facts, `_select_consolidation_candidates` identifies fragmented categories and surfaces at most `consolidation_max_groups_per_cycle` of them (largest first) in the prompt. The LLM decides which groups to merge and proposes a synthesised fact per group. `_apply_updates` enforces guardrails: source IDs must exist and must not overlap across groups, group size is capped at `consolidation_max_sources`, the merged fact's confidence cannot exceed the source maximum, and facts below `fact_confidence_threshold` are not written. The merged fact carries the newest source's `createdAt` (so the staleness clock reflects the underlying information, not synthesis time) and inherits `expected_valid_days` set so the merged fact is re-reviewed at the earliest source review deadline (`min(createdAt + effective_lifetime)` across sources, where a source's effective lifetime is its `expected_valid_days` or the global `staleness_age_days` fallback for legacy facts without one - so a legacy source's default window is not swallowed by a long-lived sibling), relative to the merged `createdAt`, clamped to a minimal positive window if a source is already past its deadline, then capped at the creation-time `staleness_max_lifetime_multiplier`; this keeps a volatile or legacy sub-detail from inheriting a stable source's long window and escaping staleness review for years, while a merge of uniformly stable sources does not re-enter review prematurely.
-- Next interaction injects selected facts + context into `<memory>` tags in the system prompt when `injection_enabled` is true.
+`cancel_by_agent` cancels only pending debounce contexts in one user scope.
+`user_id=None` selects only the legacy no-user root.
+`agent_name=None` selects all agent buckets in that user scope.
+It does not interrupt a context after `_process_queue` removes it from `_items`.
+Broader cancellation must iterate known user scopes.
 
-**Run-level memory identity**:
-- Every Gateway run with an effective hidden memory block hashes the exact `HumanMessage.content`, including the `<memory>` wrapper, and records one `context:memory` event through its run-scoped `RunJournal`. Later runs and checkpoint-based branches reuse the frozen message without reloading memory; goal continuations are deduplicated to one event per run.
-- A first-run block is trusted only when it comes from `DynamicContextMiddleware`'s current update. A reused block must have existed in the checkpoint before the run, and the Gateway strips dynamic-context markers from untrusted input so a caller cannot forge the identity event by reusing a known message ID.
-- The production consumer is the existing debug/audit endpoint `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory`. Event content has exactly one field, `content_sha256`, which operators use to compare the effective memory identity across runs. The full memory text stays in checkpoint state and is not duplicated into `run_events`.
+Focused updater tests live in `backend/tests/test_memory_updater.py`.
+Backend-specific tests use `backend/tests/test_<backend>_memory_backend.py`.
 
-**Token counting** (`packages/harness/deerflow/agents/memory/prompt.py`):
-- `_count_tokens` budgets the injection. In default `tiktoken` mode, the encoding is loaded lazily and cached.
-- Failed tiktoken loads are cached with a timestamp. During the fixed cooldown (`_TIKTOKEN_RETRY_COOLDOWN_S`, 600s), callers fall back to char estimation immediately instead of re-triggering the blocking BPE download; after the cooldown, transient outages can self-heal without a restart.
-- In-flight loads are cached as a LOADING sentinel so concurrent callers fall back instead of spawning more blocking threads.
-- Set `memory.token_counting: char` to skip tiktoken entirely and use the network-free CJK-aware char estimate.
+#### Identity and isolation
 
-Focused regression coverage for the updater lives in `backend/tests/test_memory_updater.py`.
+Resolve users with `resolve_runtime_user_id(runtime)` in middleware and tools.
+This keeps Gateway and standalone LangGraph runs in the same user scope.
 
-**Configuration** (`config.yaml` → `memory`):
-- `enabled` / `injection_enabled` - Master switches
-- `mode` - Operation mode: `middleware` (default passive background extraction) or `tool` (experimental model-driven memory tools). Modes are mutually exclusive.
-- `storage_path` - DeerMem storage root; one global summary JSON lives under each user and Markdown facts remain under agent buckets
-- `storage_class` - `file` or a dotted `MemoryStorage` class; invalid persistent backends fail fast
-- `strict_user_scope` - Require `user_id` for all storage access (default `false` for no-auth/legacy compatibility)
-- `manifest_filename` - User-global summary JSON filename (kept for configuration compatibility)
-- `file_lock_timeout_seconds` - Scope-lock wait; Markdown facts and the recovery journal are required storage invariants rather than configurable modes
-- `retrieval_adapter` - `fts5` by default, empty to disable, or a dotted factory receiving `DeerMemConfig` and returning a retrieval-port implementation
-- `debounce_seconds` - Wait time before processing (default: 30)
-- `shutdown_flush_timeout_seconds` - Hard budget (seconds) reserved for draining the memory backend's pending-update buffer on Gateway graceful shutdown (default: 30; 1–300). Each pending item does one LLM call, so large IM batches may need more. The Gateway lifespan calls `MemoryManager.shutdown_flush(timeout)` after channels/scheduler stop and after waiting at most one additional second for the derived retrieval warm-up; the backend short-circuits on an idle buffer, so the host calls it unconditionally (no pending/processing gate). The retrieval wait does not reduce this canonical flush budget. The combined shutdown hooks, brief retrieval wait, flush budget, and scheduling margin must fit inside the pod's K8s `terminationGracePeriodSeconds` (gateway Helm chart default: 45s) or K8s SIGKILLs the drain mid-flight.
-- `model_name` - LLM for updates (null = default model)
-- `max_facts` / `fact_confidence_threshold` - Fact storage limits (100 / 0.7)
-- `fact_eviction_policy` / `fact_eviction_shadow_enabled` - Capacity policy (`confidence` default; opt-in `hybrid-v1`) and non-enforcing hybrid comparison audit
-- `eviction_confidence_weight` / `eviction_confirmation_weight` / `eviction_access_weight` - Hybrid weights (0.65 / 0.25 / 0.10; must sum to 1.0)
-- `eviction_confirmation_half_life_days` / `eviction_access_half_life_days` - Confirmation and query-heat decay windows (90 / 30 days)
-- `eviction_correction_reserved_fraction` / `eviction_correction_reserved_max` - Bounded minimum correction capacity (0.10 / 10; unused slots are released)
-- `eviction_audit_max_entries` - Metadata-only capacity audit bound per user/agent scope (200; 0 disables)
-- `max_injection_tokens` - Token limit for prompt injection (2000)
-- `token_counting` - Token counting strategy for the injection budget: `tiktoken` (default, accurate but may download BPE data from a public endpoint on first use — can block for a long time in network-restricted environments, see issues #3402/#3429) or `char` (network-free CJK-aware char estimate, never touches tiktoken)
-- `staleness_review_enabled` - Enable proactive staleness pruning of aged facts (default: `true`; only triggers when aged candidates exist)
-- `staleness_age_days` - Age in days before a fact becomes a staleness candidate (default: 90; range: 30–365)
-- `staleness_min_candidates` - Minimum aged candidates required to trigger a review cycle (default: 3; range: 1–50)
-- `staleness_max_removals_per_cycle` - Maximum facts removed in a single cycle; lowest-confidence entries are kept when the LLM requests more (default: 10; range: 1–50)
-- `staleness_protected_categories` - Fact categories that are never pruned by staleness review (default: `["correction"]`)
-- `staleness_max_lifetime_multiplier` - Creation-time cap multiplier for a fact's LLM-assigned `expected_valid_days`: stored value is clamped to `staleness_age_days × multiplier` so the model cannot defer first review indefinitely (default: 20.0; range: 1.0–100.0). Default 20.0 (90 × 20 = 1800 d ≈ 5 years) is generous enough to support the very-stable prompt tier without needing multiple review cycles to escape the cap.
-- `staleness_max_extension_days` - Absolute upper bound (in days) on `expected_valid_days` after a lifetime extension (`staleFactsToExtend`). Applied at write time as `min(days_since + extend_by, staleness_max_extension_days)`. Uses an absolute ceiling rather than the multiplier because extensions are deliberate review decisions; prevents `timedelta` overflow and LLM misfire from permanently deferring a fact (default: 3650 = 10 years; range: 90–36500).
-- `consolidation_enabled` - Enable memory consolidation (default: `true`; no extra API call — runs in the same LLM invocation as the normal memory update)
-- `consolidation_min_facts` - Minimum facts in a category to trigger consolidation review (default: 8; range: 3–30)
-- `consolidation_max_groups_per_cycle` - Maximum categories the LLM can merge in one cycle (default: 3; range: 1–10; also controls the LLM's prompt instruction)
-- `consolidation_max_sources` - Maximum source facts per merge group; prevents over-merging (default: 8; range: 2–20)
-- `watermark_max_keys` - Soft cap on the in-memory conversation-watermark cache (one entry per distinct thread/user/agent). A bounded LRU: when over capacity the least-recently-used entry is dropped, and a dropped key re-extracts one batch on that thread's next turn (same as a restart). Bounds memory in long-lived gateways handling many threads (default: 4096; 0 = unbounded)
+Server-owned `langgraph_auth_user_id` takes precedence over ordinary client identity.
+Lead-agent construction normalizes it with `make_safe_user_id`.
+Memory, custom agents, user skills, skill policy, and prompt assembly reuse that identity.
+Gateway removes client-supplied `langgraph_auth_user` and `langgraph_auth_user_id` before graph construction.
+
+Gateway memory routes use `_resolve_memory_user_id(request)`.
+Trusted IM requests can act for the connection owner.
+Other requests use `get_effective_user_id()`.
+Only `AuthMiddleware` can authorize the internal owner header.
+
+No-auth mode uses `DEFAULT_USER_ID`, which is `"default"`.
+An absolute `storage_path` opts out of the default per-user root.
+
+DeerMem uses this layout:
+
+```text
+{base_dir}/users/{user_id}/memory.json
+{base_dir}/users/{user_id}/agents/{agent_name}/facts/{sha256-prefix}/{fact-id}.md
+```
+
+`memory.json` stores only shared summaries, revision data, and timestamps.
+It never stores facts or a fact index.
+Each Markdown file stores one fact with YAML front matter.
+
+Custom agent files share the per-user agent directory.
+The legacy shared agent layout is read-only fallback data.
+
+DeerMem maps a missing agent name to `__default__`.
+That name is reserved and cannot identify a custom agent.
+Public agent names use lowercase canonical form.
+
+#### Operating modes
+
+`memory.mode: middleware` is the default passive mode.
+`MemoryMiddleware` queues filtered user and final assistant messages.
+It captures `user_id` when it enqueues work.
+This identity survives the background timer boundary.
+
+`memory.mode: tool` registers the four memory tools.
+The model chooses when to search or change facts.
+Tool mode still uses `MemoryMiddleware` for passive writes on supported remote backends.
+
+Middleware injection includes shared summaries and the selected agent's facts.
+Tool-mode injection includes only shared summaries.
+Tool mode leaves agent facts behind `memory_search`.
+`memory.injection_enabled: false` disables the complete injected block.
+
+#### DeerMem storage contract
+
+`FileMemoryStorage` owns canonical storage and the retrieval adapter.
+Do not reach into its private adapter state from higher layers.
+
+The repository supports fact CRUD, summary updates, migration, search, and index lifecycle operations.
+Targeted writes change only the selected Markdown files.
+Whole-document `load` and `save` remain compatibility operations.
+
+`apply_changes()` returns `complete: false` with fact deltas.
+It never labels a partial cache as a complete memory document.
+Public callers reload only when their response contract requires a complete document.
+
+Writes use a user lock, shared revision, fact revisions, and a recovery journal.
+Point operations can rebase only when all original fact preconditions still hold.
+Snapshot operations must reload and recompute after a manifest conflict.
+Use the typed conflict classes instead of matching exception text.
+
+The weak lock cache must not retain inactive user scopes.
+Cache validation uses the manifest metadata and persisted revision.
+Out-of-band Markdown edits require `reload()`.
+POSIX atomic replacement must sync the parent directory.
+
+DeerMem converts storage conflicts to the public `MemoryManager` error types.
+The Gateway maps conflicts to HTTP 409.
+The Gateway maps storage corruption to a stable HTTP 500 response.
+
+#### Migration
+
+A normal default-manager read migrates legacy facts into `__default__`.
+It adopts an old `lead-agent` bucket only when no custom-agent config exists.
+Unexpected files stop migration and remain on disk.
+
+The v1-to-v2 migration is one-way during application operation.
+Operators must stop DeerFlow and snapshot the storage root before migration.
+Every destructive migration first writes a verified `{manifest_filename}.v1.bak` file.
+Missing or mismatched backups abort migration without changing v1 data.
+Delete legacy agent JSON only after safe summary adoption or equality checks.
+Summary conflicts keep the source file and return an error.
+
+Run the proactive migration from `backend/`:
+
+```bash
+PYTHONPATH=. python scripts/migrate_memory_markdown.py --all-users --dry-run
+```
+
+Remove `--dry-run` to migrate.
+Use repeated `--user-id` options for exact source identities.
+Use `--storage-path` for a non-default DeerMem root.
+The command is idempotent and continues after per-user failures.
+It returns a nonzero status when any user fails.
+
+The older isolation migration remains available:
+
+```bash
+PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run
+```
+
+#### Retrieval
+
+`retrieval_adapter` owns indexing and retrieval.
+DeerMem selects persistent SQLite FTS5 by default.
+An empty value selects the substring fallback.
+
+SQLite index data lives below `.retrieval/` and remains rebuildable.
+Chinese tokenization uses `jieba` only with the `memory-zh` extra.
+Malformed facts are logged and skipped during rebuild.
+A fatal rebuild failure keeps lazy retry active.
+A corrupt persistent database is deleted and recreated once.
+
+Storage sends adapter updates after it releases durable locks.
+Adapter failures mark the scope dirty.
+Search then uses canonical substring matching until rebuild succeeds.
+
+Gateway startup schedules `DeerMem.warm_retrieval()` without delaying readiness.
+The first search can rebuild its exact scope.
+Shutdown waits one second for retrieval warm-up.
+It reserves the full configured timeout for canonical memory flush.
+The Gateway closes the derived SQLite connection after that flush.
+
+#### Extraction safety
+
+Extraction labels proposals with `scope`, `durability`, and `authority`.
+Automatic writes accept only user-scoped, durable, descriptive facts.
+Summary prose must be user-scoped and descriptive.
+Missing labels reject that item without stopping unrelated updates.
+
+Contradiction removals include `id`, `scope`, `reason`, and optional `replacementFactIndex`.
+Task-scoped and project-scoped removals fail closed.
+A paired removal requires its replacement to pass every write gate.
+Tool-mode CRUD does not use the extraction gate.
+
+Custom prompt directories must include the same classification fields.
+Old templates cause extraction writes to fail closed.
+The rejection counter and high-rejection warning expose this condition.
+
+#### Capacity and review
+
+All automatic, manual, tool, and import paths use `deermem/core/eviction.py`.
+`confidence` is the default capacity policy.
+`hybrid-v1` is opt-in and uses confidence, confirmation freshness, and access heat.
+Shadow mode records disagreement while enforcing confidence-only selection.
+
+Only deterministic message processing can confirm a fact.
+The updater's `factsToReinforce` output supplies only the fact binding.
+The deterministic gate matches a human message in the last six filtered batch messages.
+It does not require a separate signal-to-fact match.
+Search increments access heat only for facts it returns.
+Prompt injection and `get_context()` do not increment access heat.
+
+Usage and audit sidecars live below the agent `.metadata/` directory.
+They must not change canonical Markdown timestamps or revisions.
+Write audits only after canonical persistence succeeds.
+User delete and clear operations must remove matching sidecar data.
+
+Staleness review reuses the regular updater call.
+It can keep, remove, or extend eligible aged facts.
+Protected categories and non-aged facts cannot become removal targets.
+Apply the per-cycle removal cap after candidate validation.
+Do not extend a fact proposed for removal, even when the cap keeps that fact.
+Extension bounds must prevent date overflow.
+
+Consolidation also reuses the regular updater call.
+Source facts must exist and cannot overlap across groups.
+Enforce the source-count and confidence limits at apply time.
+Use the newest source creation time for the merged fact.
+Use the earliest source review deadline for its next review.
+
+#### Remote backends
+
+OpenViking uses the maintained `langchain-openviking` package.
+Keep it in middleware mode.
+One API key is bound to one configured DeerFlow owner.
+Reject another owner before remote access.
+
+DeerFlow owns capture timing, the recall query, and the transcript cursor.
+The package owns transport, message conversion, batching, and Session commits.
+One DeerFlow thread maps to one stable OpenViking Session.
+Store bounded hash-only cursors below `{storage_path}/openviking/sessions/`.
+
+Async OpenViking entry points must offload synchronous SDK and file operations.
+Shutdown must drain active work before closing the recorder client.
+Pass an empty `extra_headers` mapping to prevent configuration-added transport headers.
+Do not add embedded OpenViking imports, root-key access, or trusted identity headers.
+
+Honcho is a remote HTTP adapter for user-model memory.
+It creates one workspace per resolved `user_id`.
+A missing user fails closed to no memory.
+Its async methods offload synchronous HTTP work with `asyncio.to_thread`.
+The default read failure policy logs and returns no results.
+`failure_policy.read: fail_closed` rethrows recall failures.
+
+Honcho configuration rejects non-finite or non-positive timeouts.
+It also rejects non-positive character budgets during construction.
+
+#### Run identity and token counting
+
+Each run hashes its effective hidden memory block.
+The run records one `context:memory` event with `content_sha256`.
+The full memory text stays in checkpoint state.
+
+Only current `DynamicContextMiddleware` output can establish first-run memory identity.
+Checkpoint reuse requires the block to exist before the run.
+Gateway input handling removes forged dynamic-context markers.
+
+`prompt.py::_count_tokens` controls the injection budget.
+Default `tiktoken` mode loads and caches its encoding lazily.
+A failed load uses character estimation for a 600-second cooldown.
+Concurrent callers use character estimation while one load is active.
+Set `memory.token_counting: char` to prevent network access.
+
+#### Configuration
+
+The schema lives in `deerflow/config/memory_config.py`.
+Do not duplicate its complete field list here.
+
+Keep these cross-component constraints in sync:
+
+- The shutdown flush budget is between 1 and 300 seconds.
+- The pod grace period must include retrieval wait, flush time, and shutdown margin.
+- `retrieval_adapter` selects FTS5, a custom factory, or the empty fallback.
+- Eviction weights must total `1.0`.
+- `watermark_max_keys: 0` makes the conversation watermark cache unbounded.
+- A dropped watermark can re-extract one batch on the next turn.
