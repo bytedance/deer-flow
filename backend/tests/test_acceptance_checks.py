@@ -1190,6 +1190,35 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["checked"] is False
 
+    @pytest.mark.parametrize(
+        "target",
+        (
+            r"..\..\tmp",
+            r"'\mnt\user-data\workspace\fake'",
+        ),
+    )
+    def test_cd_with_backslashes_is_unprovable_before_posix_tokenization(self, target):
+        """Shell provenance is absent, so a backslash-bearing ``cd`` target
+        cannot be interpreted safely as either POSIX escaping or a Windows
+        path separator."""
+        executions = [_bash_execution(f"cd {target} && pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    @pytest.mark.parametrize("target", ("%TEMP%", "%USERPROFILE%/fake"))
+    def test_cd_with_cmd_environment_expansion_is_unprovable(self, target):
+        executions = [_bash_execution(f"cd {target} && pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_cd_with_unpaired_percent_remains_a_literal_relative_path(self):
+        executions = [_bash_execution("cd reports/100% && pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
     def test_cd_to_out_of_scope_windows_drive_path_is_unprovable(self):
         thread_data = {
             "workspace_path": "D:/ws/thread/user-data/workspace",

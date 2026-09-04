@@ -468,6 +468,10 @@ _SHELL_OPERATORS = ";&|"
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _WINDOWS_DRIVE_QUALIFIED_RE = re.compile(r"^[A-Za-z]:")
 _WINDOWS_DRIVE_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:/")
+#: ``cmd.exe`` expands paired-percent environment references before running
+#: the command. Without shell provenance, a target such as ``%TEMP%`` cannot
+#: be treated as the literal relative path seen by the POSIX parser.
+_CMD_ENV_EXPANSION_RE = re.compile(r"%[^%\r\n]+%")
 
 
 def _carries_summary_shape(text: str) -> bool:
@@ -655,7 +659,7 @@ def _normalize_command(command: str) -> str:
     return " ".join(command.split())
 
 
-def _shell_parse_line(line: str) -> tuple[str | None, list[list[str]], list[str]] | None:
+def _shell_parse_line(line: str, *, posix: bool = True) -> tuple[str | None, list[list[str]], list[str]] | None:
     """Tokenize one physical line into segments plus the operators joining them.
 
     Returns ``(leading_op, segments, ops)``: ``ops[i]`` is the operator
@@ -667,9 +671,11 @@ def _shell_parse_line(line: str) -> tuple[str | None, list[list[str]], list[str]
     ``;`` would overstate what provably ran. Comments are stripped (a
     ``# pytest ...`` remark executes nothing) and quotes are honored, so an
     operator inside an argument cannot split a segment. Returns ``None`` on
-    malformed shell (unbalanced quotes).
+    malformed shell (unbalanced quotes). ``posix=False`` is reserved for the
+    raw-token safety pass: it keeps backslashes and surrounding quotes visible
+    before the normal POSIX parse can consume them as escaping syntax.
     """
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=_SHELL_OPERATORS)
+    lexer = shlex.shlex(line, posix=posix, punctuation_chars=_SHELL_OPERATORS)
     lexer.whitespace_split = True
     lexer.commenters = "#"
     try:
@@ -701,7 +707,7 @@ def _shell_parse_line(line: str) -> tuple[str | None, list[list[str]], list[str]
     return leading_op, segments, ops
 
 
-def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
+def _shell_parse(command: str, *, posix: bool = True) -> tuple[list[list[str]], list[str]] | None:
     """Tokenize a shell command into segments plus the operators joining them.
 
     Physical newlines are command separators with ``;`` semantics — bash
@@ -723,7 +729,7 @@ def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
     segments: list[list[str]] = []
     ops: list[str] = []
     for line in command.split("\n"):
-        parsed = _shell_parse_line(line)
+        parsed = _shell_parse_line(line, posix=posix)
         if parsed is None:
             return None
         leading_op, line_segments, line_ops = parsed
@@ -738,6 +744,29 @@ def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
         segments.extend(line_segments)
         ops.extend(line_ops)
     return segments, ops
+
+
+def _cd_target_requires_shell_provenance(command: str) -> bool:
+    """Whether a raw ``cd`` target has shell-dependent Windows semantics.
+
+    The acceptance evidence does not currently record which shell executed a
+    command. Inspect a non-POSIX tokenization before the authoritative POSIX
+    parser can discard backslashes: PowerShell/cmd treat them as path
+    separators while POSIX shells treat them as escapes. Paired-percent
+    references likewise expand only under cmd.exe. Either spelling therefore
+    fails closed instead of certifying a test run from an unknown directory.
+    """
+    parsed = _shell_parse(command, posix=False)
+    if parsed is None:
+        return "\\" in command or bool(_CMD_ENV_EXPANSION_RE.search(command))
+    segments, _ops = parsed
+    for segment in segments:
+        stripped = _strip_env_assignments(segment)
+        if not stripped or os.path.basename(stripped[0].strip("'\"")) != "cd":
+            continue
+        if any("\\" in target or _CMD_ENV_EXPANSION_RE.search(target) for target in stripped[1:]):
+            return True
+    return False
 
 
 def _strip_env_assignments(tokens: list[str]) -> list[str]:
@@ -1141,10 +1170,13 @@ def _commands_match(criterion_command: str, executed_command: str, *, executed_s
     """
     expected_parsed = _shell_parse(criterion_command)
     actual_parsed = _shell_parse(executed_command)
+    needs_shell_provenance = _cd_target_requires_shell_provenance(criterion_command) or _cd_target_requires_shell_provenance(executed_command)
     if expected_parsed is None or actual_parsed is None:
         # Malformed shell: only exact normalized equality survives.
         expected_norm = _normalize_command(criterion_command)
-        return "match" if expected_norm and expected_norm == _normalize_command(executed_command) else "no_match"
+        if not expected_norm or expected_norm != _normalize_command(executed_command):
+            return "no_match"
+        return "unprovable" if needs_shell_provenance else "match"
     expected, expected_ops = expected_parsed
     actual, ops = actual_parsed
     if not expected or not actual or len(expected) > len(actual):
@@ -1174,6 +1206,9 @@ def _commands_match(criterion_command: str, executed_command: str, *, executed_s
             saw_unprovable = True
             continue
         if _span_attributable(ops[:start], ops[start : start + span - 1], ops[start + span - 1 :], executed_success):
+            if needs_shell_provenance:
+                saw_unprovable = True
+                continue
             return "match"
         saw_unprovable = True
     return "unprovable" if saw_unprovable else "no_match"
