@@ -44,10 +44,10 @@ import asyncio
 import hashlib
 import logging
 import os
+import posixpath
 import re
 import uuid
 from datetime import datetime, tzinfo
-from pathlib import Path
 from typing import TYPE_CHECKING, override
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -110,9 +110,6 @@ def _date_timezone() -> tzinfo | None:
         return None
 
 
-_ZONEINFO_TREE_PREFIXES = ("/usr/share/zoneinfo/", "/var/db/timezone/zoneinfo/")
-
-
 def _server_local_timezone_name() -> str | None:
     """IANA key of the server's local zone, or ``None`` when not resolvable.
 
@@ -121,7 +118,12 @@ def _server_local_timezone_name() -> str | None:
     DST-churns), never a ``zoneinfo.ZoneInfo`` carrying an IANA key. The key is
     instead read from the platform: the ``TZ`` environment variable when it
     names a real zone, or the ``/etc/localtime`` symlink target on
-    Linux/macOS. Hosts with neither (Windows, stripped containers) return
+    Linux/macOS. Only the symlink's *direct* target is read (``os.readlink``),
+    not a fully resolved path: on macOS ``/etc/localtime`` points into
+    ``/var/db/timezone/zoneinfo/`` whose own directory symlink resolves to a
+    versioned path (``.../tz/<version>/zoneinfo/...``) that would defeat any
+    fixed prefix list. The zone key is whatever follows the last ``/zoneinfo/``
+    segment. Hosts with no symlink (Windows, stripped containers) return
     ``None``.
     """
     tz_env = os.environ.get("TZ", "").strip()
@@ -130,17 +132,20 @@ def _server_local_timezone_name() -> str | None:
             return ZoneInfo(tz_env).key
         except (ZoneInfoNotFoundError, ValueError, OSError):
             pass
-    localtime = Path("/etc/localtime")
     try:
-        if not localtime.is_symlink():
-            return None
-        target = str(localtime.resolve(strict=False))
+        target = os.readlink("/etc/localtime")
     except OSError:
         return None
-    for prefix in _ZONEINFO_TREE_PREFIXES:
-        if target.startswith(prefix):
-            return target[len(prefix) :] or None
-    return None
+    if not target.startswith("/"):
+        target = posixpath.normpath(posixpath.join("/etc", target))
+    zoneinfo_marker = "/zoneinfo/"
+    marker_index = target.rfind(zoneinfo_marker)
+    if marker_index == -1:
+        return None
+    key = target[marker_index + len(zoneinfo_marker) :]
+    if not key or key.startswith("/") or ".." in key:
+        return None
+    return key
 
 
 def _server_local_utc_offset_minutes() -> int:

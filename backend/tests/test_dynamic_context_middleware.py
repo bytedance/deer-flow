@@ -918,6 +918,41 @@ def test_server_local_timezone_name_reads_tz_env(monkeypatch):
     assert _server_local_timezone_name() == "Asia/Shanghai"
 
 
+def test_server_local_timezone_name_reads_direct_macos_symlink_target(monkeypatch):
+    """macOS /etc/localtime points at the unversioned zoneinfo dir; the direct
+    symlink target must be read instead of a fully resolved path."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(module.os, "readlink", lambda _path: "/var/db/timezone/zoneinfo/Asia/Shanghai")
+
+    assert module._server_local_timezone_name() == "Asia/Shanghai"
+
+
+def test_server_local_timezone_name_reads_apple_versioned_symlink_target(monkeypatch):
+    """Apple's canonical versioned zoneinfo path must still yield the zone key."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(
+        module.os,
+        "readlink",
+        lambda _path: "/private/var/db/timezone/tz/2026c.1.0/zoneinfo/America/New_York",
+    )
+
+    assert module._server_local_timezone_name() == "America/New_York"
+
+
+def test_server_local_timezone_name_normalizes_relative_symlink_target(monkeypatch):
+    """A relative /etc/localtime target is resolved against /etc."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(module.os, "readlink", lambda _path: "../usr/share/zoneinfo/Etc/UTC")
+
+    assert module._server_local_timezone_name() == "Etc/UTC"
+
+
 def test_effective_timezone_sentinel_uses_offset_when_local_zone_is_not_resolvable(monkeypatch):
     """Without a recoverable IANA key the declaration pins a stable sentinel."""
     import deerflow.agents.middlewares.dynamic_context_middleware as module
