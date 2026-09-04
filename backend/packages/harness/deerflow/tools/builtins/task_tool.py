@@ -86,7 +86,7 @@ def _record_middleware_on_parent_loop(journal: Any, kwargs: dict[str, Any]) -> N
 
 
 class _ParentLoopMiddlewareRecorderProxy:
-    """Forward subagent loop-detection events to the parent run's event loop.
+    """Forward narrowly scoped subagent middleware events to the parent loop.
 
     ``RunJournal`` owns parent-loop tasks and may wrap an event store backed by
     a loop-bound SQL pool. Subagents execute on a persistent isolated loop, so
@@ -98,6 +98,17 @@ class _ParentLoopMiddlewareRecorderProxy:
         self._loop = loop
         self._state_lock = threading.Lock()
         self._closed = False
+        self._claimed_tool_promotions: set[str] = set()
+
+    def claim_tool_promotions(self, tool_names: list[str]) -> list[str]:
+        """Atomically deduplicate promotions within this one child execution."""
+        candidates = sorted(set(tool_names))
+        with self._state_lock:
+            if self._closed:
+                return []
+            claimed = [name for name in candidates if name not in self._claimed_tool_promotions]
+            self._claimed_tool_promotions.update(claimed)
+        return claimed
 
     def record_middleware(self, **kwargs: Any) -> None:
         with self._state_lock:
@@ -887,17 +898,18 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
-    loop_detection_recorder = None
+    middleware_recorder = None
     parent_journal = parent_context.get("__run_journal")
     if parent_journal is not None:
         # The task tool runs on the parent run's loop. Pass only a proxy across
         # the isolated-subagent boundary so middleware persistence is delivered
         # on the loop that owns the RunJournal and its event store.
-        loop_detection_recorder = _ParentLoopMiddlewareRecorderProxy(
+        middleware_recorder = _ParentLoopMiddlewareRecorderProxy(
             parent_journal,
             asyncio.get_running_loop(),
         )
-        executor_kwargs["loop_detection_recorder"] = loop_detection_recorder
+        executor_kwargs["loop_detection_recorder"] = middleware_recorder
+        executor_kwargs["tool_promotion_recorder"] = middleware_recorder
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
     if run_extensions is not None:
@@ -1189,5 +1201,5 @@ async def task_tool(
             raise asyncio.CancelledError
         raise
     finally:
-        if loop_detection_recorder is not None:
-            await loop_detection_recorder.aclose()
+        if middleware_recorder is not None:
+            await middleware_recorder.aclose()

@@ -5,6 +5,8 @@ Uses MemoryRunEventStore as the backend for direct event inspection.
 
 import asyncio
 import weakref
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -18,6 +20,20 @@ from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 def test_run_journal_is_marked_as_loop_bound():
     assert RunJournal.deerflow_loop_bound is True
+
+
+def test_tool_promotion_claim_is_atomic_across_parallel_sync_wrappers():
+    journal = RunJournal("r-claim", "t-claim", MemoryRunEventStore())
+    barrier = Barrier(16)
+
+    def claim():
+        barrier.wait()
+        return journal.claim_tool_promotions(["mcp_a"])
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(lambda _: claim(), range(16)))
+
+    assert sum((result for result in results), []) == ["mcp_a"]
 
 
 @pytest.mark.anyio

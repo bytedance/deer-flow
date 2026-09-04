@@ -18,6 +18,7 @@ from deerflow.runtime.events.catalog import (
     MIDDLEWARE_EVENT_PATTERN,
     MIDDLEWARE_EVENT_TAG_MAX_LENGTH,
     MIDDLEWARE_EVENT_TAGS,
+    MIDDLEWARE_TOOL_PROMOTION_TAG,
     RUN_EVENT_CATEGORY_MAX_LENGTH,
     RUN_EVENT_TYPE_MAX_LENGTH,
     SUBAGENT_RUN_EVENT_DEFINITIONS,
@@ -365,6 +366,15 @@ def test_dynamic_middleware_event_rejects_tags_that_do_not_fit_persistence(tag):
             action="record",
             changes={},
         )
+
+
+def test_tool_promotion_tag_is_declared_and_fits_the_persisted_event_type():
+    pattern = _load_contract()["dynamic_event_patterns"][0]
+
+    assert MIDDLEWARE_TOOL_PROMOTION_TAG == "tool_promotion"
+    assert MIDDLEWARE_TOOL_PROMOTION_TAG in MIDDLEWARE_EVENT_TAGS
+    assert MIDDLEWARE_TOOL_PROMOTION_TAG in pattern["known_tags"]
+    assert len(MIDDLEWARE_EVENT_PATTERN.event_type(MIDDLEWARE_TOOL_PROMOTION_TAG)) <= RUN_EVENT_TYPE_MAX_LENGTH
 
 
 def test_subagent_observed_events_exactly_match_its_catalog_and_payloads():

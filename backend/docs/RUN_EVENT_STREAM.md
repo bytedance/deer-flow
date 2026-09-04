@@ -77,10 +77,10 @@ through run-event or specialized APIs:
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
 
 Current middleware tags are `guardrail`, `loop_detection`,
-`safety_termination`, `skill_activation`, and `skill_secrets`. The pattern is
-intentionally open so new middleware tags are additive. Because the full event
-type is limited to 32 characters and `middleware:` uses 11, a tag must contain
-1-21 characters.
+`safety_termination`, `skill_activation`, `skill_secrets`, and
+`tool_promotion`. The pattern is intentionally open so new middleware tags are
+additive. Because the full event type is limited to 32 characters and
+`middleware:` uses 11, a tag must contain 1-21 characters.
 
 `middleware:loop_detection` records transitions into the warned state (first
 per call hash or per tool-frequency burst) and each hard stop produced by
@@ -94,6 +94,22 @@ names, observed count, effective threshold, whether the producer was a
 subagent, and its agent id when applicable. Tool arguments, prompts, message
 content, tool results, and argument-derived hashes are not persisted in this
 event.
+
+`middleware:tool_promotion` records deferred MCP schemas newly promoted for
+the active catalog. `changes.source` distinguishes automatic `routing_hint`
+promotion from an explicit `tool_search`; the remaining fields contain sorted
+new tool names, their count, `is_subagent`, and the optional subagent
+`agent_id`. Explicit-search events observe the final `Command` after the active
+skill policy has removed denied schemas. Automatic promotion records the graph
+state transition, but promotion never bypasses the independent skill or
+authorization execution policies. Repeated model passes or searches that add
+no names emit no event. Queries, routing keywords, catalog hashes, tool schemas
+and descriptions, arguments, and results are not copied into this middleware
+event. Other event types retain their existing payload contracts.
+
+Ordinary task-tool subagents forward both loop-detection and tool-promotion
+appends to the parent run loop through dedicated recorder context keys. The
+loop-bound `RunJournal` itself never enters the isolated subagent loop.
 
 ### Opaque Run Outputs
 
@@ -191,6 +207,6 @@ be used by new producers.
   representations: memory retains Python values, while JSONL and database
   stores read them back as strings.
 - Durable batch subagent loop detection and deferred-tool promotion do not
-  currently emit middleware events.
+  emit middleware events because those runs have no parent run journal.
 - Journal attribution, token accounting, and external tracing metadata still
   depend on manual instrumentation at several LLM call sites.

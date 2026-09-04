@@ -763,6 +763,12 @@ finalization) keep the existing completion-data behavior: they receive the
 zero-delivery receipt but do not overwrite RunStore completion fields with an
 empty snapshot.
 
+The same run event history records loop-detection decisions and deferred MCP
+tool promotions for both the lead agent and ordinary task subagents. Promotion
+events identify newly promoted deferred-tool names and whether routing metadata or
+`tool_search` selected them, without copying the search query, routing keywords,
+schemas, arguments, results, or catalog hash into the promotion event itself.
+
 #### LangSmith Tracing
 
 DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, and tool executions are traced and visible in the LangSmith dashboard.

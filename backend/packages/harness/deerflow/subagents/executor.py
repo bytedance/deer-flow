@@ -26,7 +26,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
-from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY, TOOL_PROMOTION_RECORDER_CONTEXT_KEY
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
@@ -789,6 +789,7 @@ class SubagentExecutor:
         execution_capacity: SubagentExecutionCapacity | None = None,
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
+        tool_promotion_recorder: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -836,6 +837,8 @@ class SubagentExecutor:
                 parent task tool. Native subagents execute on a separate event
                 loop, so this must be a proxy rather than the parent
                 ``RunJournal`` itself.
+            tool_promotion_recorder: Optional loop-safe recorder for deferred-tool
+                promotion events. It follows the same isolated-loop boundary.
         """
         self.config = config
         self.app_config = app_config
@@ -884,6 +887,7 @@ class SubagentExecutor:
         # in report_contract.render_acceptance_criteria_block.
         self.acceptance_criteria = acceptance_criteria
         self.loop_detection_recorder = loop_detection_recorder
+        self.tool_promotion_recorder = tool_promotion_recorder
 
         self._base_tools = _filter_tools(
             tools,
@@ -1494,6 +1498,8 @@ class SubagentExecutor:
             context["agent_id"] = self.config.name
             if self.loop_detection_recorder is not None:
                 context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder
+            if self.tool_promotion_recorder is not None:
+                context[TOOL_PROMOTION_RECORDER_CONTEXT_KEY] = self.tool_promotion_recorder
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 

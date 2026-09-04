@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
@@ -267,6 +268,8 @@ class RunJournal(BaseCallbackHandler):
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
         self._memory_context_recorded = False
+        self._tool_promotion_claim_lock = threading.Lock()
+        self._claimed_tool_promotions: set[str] = set()
 
         # Convenience fields
         self._last_ai_msg: str | None = None
@@ -858,6 +861,14 @@ class RunJournal(BaseCallbackHandler):
             category=MIDDLEWARE_EVENT_PATTERN.category,
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
+
+    def claim_tool_promotions(self, tool_names: Iterable[str]) -> list[str]:
+        """Atomically claim names not yet reported by this run's lead agent."""
+        candidates = sorted(set(tool_names))
+        with self._tool_promotion_claim_lock:
+            claimed = [name for name in candidates if name not in self._claimed_tool_promotions]
+            self._claimed_tool_promotions.update(claimed)
+        return claimed
 
     def record_memory_context(self, *, content_sha256: str) -> None:
         """Record the effective hidden memory block for this run.

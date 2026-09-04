@@ -58,6 +58,8 @@ def test_parent_loop_middleware_recorder_proxy_delivers_on_owner_loop():
             LoopPinnedJournal(),
             parent_loop,
         )
+        assert proxy.claim_tool_promotions(["mcp_b", "mcp_a", "mcp_a"]) == ["mcp_a", "mcp_b"]
+        assert proxy.claim_tool_promotions(["mcp_a"]) == []
         proxy.record_middleware(
             tag="loop_detection",
             name="LoopDetectionMiddleware",
@@ -74,6 +76,7 @@ def test_parent_loop_middleware_recorder_proxy_delivers_on_owner_loop():
         assert kwargs["action"] == "warn"
 
         asyncio.run_coroutine_threadsafe(proxy.aclose(), parent_loop).result(timeout=5)
+        assert proxy.claim_tool_promotions(["late_tool"]) == []
         proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="hard_stop", changes={})
         time.sleep(0.05)
         assert len(calls) == 1, "events emitted after the parent task boundary must be dropped"
@@ -429,7 +432,7 @@ def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
     assert captured["executor_kwargs"]["extensions"] is loaded
 
 
-def test_task_tool_installs_and_closes_narrow_loop_detection_recorder(monkeypatch):
+def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
     journal = MagicMock()
     runtime = _make_runtime()
     runtime.context["__run_journal"] = journal
@@ -458,6 +461,7 @@ def test_task_tool_installs_and_closes_narrow_loop_detection_recorder(monkeypatc
 
     kwargs = captured["executor_kwargs"]
     proxy = kwargs["loop_detection_recorder"]
+    assert kwargs["tool_promotion_recorder"] is proxy
     assert proxy.is_closed is True
     proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="warn", changes={})
     journal.record_middleware.assert_not_called()

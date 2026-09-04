@@ -105,6 +105,17 @@ one accumulated receipt across multiple goal-continuation `_stream_once` calls;
 journal tests drive LangChain's real async callback dispatcher against a single
 journal to pin serialized, deduplicated parallel tool callbacks.
 
+**Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
+`RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
+`tool_search` Sends read the same pre-step state, so state diffing alone can
+label the same schema as new more than once even though the `promoted` reducer
+unions it once. Producers claim sorted candidate names before appending
+`middleware:tool_promotion`; later overlapping decisions emit only their
+unclaimed remainder. Ordinary task-tool subagents use an equivalent claim on
+their per-execution parent-loop proxy, preserving separate events when two
+different delegated agents promote the same tool. The active catalog is fixed
+for one graph execution, so the claim needs no persisted catalog hash.
+
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
 contract. Its default implementation walks `list_messages()` backward in
