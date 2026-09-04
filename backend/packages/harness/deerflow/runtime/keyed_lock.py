@@ -33,9 +33,7 @@ class AsyncKeyedLockTable[KeyT: Hashable]:
 
     def __init__(self) -> None:
         self._guard = threading.Lock()
-        self._entries_by_loop: weakref.WeakKeyDictionary[
-            asyncio.AbstractEventLoop, dict[KeyT, _Entry]
-        ] = weakref.WeakKeyDictionary()
+        self._entries_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[KeyT, _Entry]] = weakref.WeakKeyDictionary()
 
     @asynccontextmanager
     async def hold(self, key: KeyT) -> AsyncIterator[None]:
