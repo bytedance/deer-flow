@@ -10,8 +10,10 @@ Key design decisions:
   extracts the first human message for run.input, because it is more reliable than
   on_chain_start (fires on every node) — messages here are fully structured.
 - on_chain_start with parent_run_id=None emits a run.start trace marking root invocation.
-- on_llm_end emits llm.ai.response in checkpoint-aligned AIMessage.model_dump() format
-- Token usage accumulated in memory, written to RunRow on run completion
+- on_llm_end keeps the first llm.ai.response for a LangChain run_id as the
+  canonical checkpoint-aligned AIMessage.model_dump() event
+- Token usage is accumulated independently in memory and written to RunRow on
+  run completion, because provider usage may arrive after the canonical event
 - Caller identification via tags injection (lead_agent / subagent:{name} / middleware:{name})
 """
 
@@ -475,13 +477,8 @@ class RunJournal(BaseCallbackHandler):
                 call_index = self._llm_call_index
                 self._seen_llm_starts.add(rid)
 
-            # Message event: checkpoint-aligned llm.ai.response payload.
-            # LangChain may re-fire on_llm_end for the same run_id (the token
-            # accounting below dedups on that exact premise). The event store is
-            # append-only and count_messages/list_messages read raw rows, so
-            # re-persisting the response would leave a duplicate llm.ai.response
-            # in the durable feed. Gate it by the same per-run_id guard that
-            # already dedups the run summary so a replayed callback is a no-op.
+            # Later callbacks may add provider usage, but the append-only feed
+            # must retain the first response as the canonical message for this run_id.
             if rid not in self._counted_message_llm_run_ids:
                 self._put(
                     event_type=LLM_AI_RESPONSE_EVENT.event_type,
@@ -496,8 +493,8 @@ class RunJournal(BaseCallbackHandler):
                 )
                 self._record_message_summary(message, caller=caller)
 
-            # Token accumulation (dedup by langchain run_id to avoid double-counting
-            # when the callback fires more than once for the same response)
+            # Usage can arrive only on a later callback, so run-summary
+            # accounting must remain independent from message persistence.
             if self._track_tokens:
                 input_tk = usage_dict.get("input_tokens", 0) or 0
                 output_tk = usage_dict.get("output_tokens", 0) or 0

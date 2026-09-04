@@ -980,17 +980,20 @@ class TestCallerBucketing:
         await j.flush()
         assert await store.count_messages("t1") == 2
 
-    def test_first_no_usage_second_with_usage(self, journal_setup):
-        """First callback with no usage must not block second callback with usage for same run_id."""
-        j, _ = journal_setup
+    @pytest.mark.anyio
+    async def test_first_no_usage_second_with_usage(self, journal_setup):
+        """Late usage updates the summary without replacing the canonical event."""
+        j, store = journal_setup
         run_id = uuid4()
         j.on_llm_end(_make_llm_response("A", usage=None), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
-        assert str(run_id) not in j._counted_llm_run_ids
-        # Second callback for the same run_id with actual usage must still count
         usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
         j.on_llm_end(_make_llm_response("A", usage=usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
-        assert j._total_tokens == 15
-        assert j._lead_agent_tokens == 15
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["metadata"]["usage"] == {}
+        assert j.get_completion_data()["total_tokens"] == 15
 
     def test_track_token_usage_false_skips_buckets(self):
         """When token tracking is disabled, caller buckets stay at 0."""
