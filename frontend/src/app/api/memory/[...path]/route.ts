@@ -12,6 +12,11 @@ async function proxyRequest(request: NextRequest, pathname: string) {
   headers.delete("host");
   headers.delete("connection");
   headers.delete("content-length");
+  // The gateway treats these as internal trust credentials that bypass
+  // session auth; browser clients can set arbitrary custom headers, so a
+  // request transiting this public proxy must never forward them.
+  headers.delete("x-deerflow-internal-token");
+  headers.delete("x-deerflow-owner-user-id");
 
   const hasBody = !["GET", "HEAD"].includes(request.method);
   const response = await fetch(buildBackendUrl(pathname), {
