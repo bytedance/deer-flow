@@ -753,6 +753,7 @@ def test_build_middlewares_passes_run_model_name_to_summarization(monkeypatch):
 
 def test_build_middlewares_orders_skill_activation_before_policy_and_durable_context(monkeypatch):
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
     from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
 
@@ -770,7 +771,8 @@ def test_build_middlewares_orders_skill_activation_before_policy_and_durable_con
     activation_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, SkillActivationMiddleware))
     policy_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, SkillToolPolicyMiddleware))
     durable_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DurableContextMiddleware))
-    assert policy_idx == activation_idx + 1
+    assert isinstance(middlewares[activation_idx + 1], DynamicContextMiddleware)
+    assert policy_idx == activation_idx + 2
     assert durable_idx == policy_idx + 1
     assert middlewares[activation_idx]._slash_source_owner_token == middlewares[policy_idx]._slash_source_owner_token
 
@@ -778,6 +780,7 @@ def test_build_middlewares_orders_skill_activation_before_policy_and_durable_con
 @pytest.mark.parametrize("use_stale_path", [False, True], ids=["restrictive-skill", "stale-active-path"])
 def test_compiled_skill_policy_chain_filters_schema_and_blocks_execution(monkeypatch, use_stale_path):
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
     from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
 
@@ -785,6 +788,7 @@ def test_compiled_skill_policy_chain_filters_schema_and_blocks_execution(monkeyp
         [_make_model("safe-model", supports_thinking=False)],
         loop_detection=LoopDetectionConfig(enabled=False),
     )
+    app_config.memory.injection_enabled = False
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
     monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
@@ -797,7 +801,7 @@ def test_compiled_skill_policy_chain_filters_schema_and_blocks_execution(monkeyp
     activation_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, SkillActivationMiddleware))
     durable_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DurableContextMiddleware))
     compiled_slice = middlewares[activation_idx : durable_idx + 1]
-    assert [type(middleware) for middleware in compiled_slice] == [SkillActivationMiddleware, SkillToolPolicyMiddleware, DurableContextMiddleware]
+    assert [type(middleware) for middleware in compiled_slice] == [SkillActivationMiddleware, DynamicContextMiddleware, SkillToolPolicyMiddleware, DurableContextMiddleware]
 
     skill_dir = Path("/tmp/skills/public/restricted")
     restricted = Skill(
@@ -811,7 +815,7 @@ def test_compiled_skill_policy_chain_filters_schema_and_blocks_execution(monkeyp
         allowed_tools=("read_file",),
         enabled=True,
     )
-    policy = compiled_slice[1]
+    policy = compiled_slice[2]
     policy._storage = lambda: _PolicyStorageStub([] if use_stale_path else [restricted])
 
     context: dict[str, object] = {}

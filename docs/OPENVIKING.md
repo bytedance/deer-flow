@@ -7,10 +7,10 @@ package instead of implementing OpenViking's HTTP protocol inside DeerFlow.
 
 ## Current scope
 
-The first official-adapter integration deliberately preserves DeerFlow's
-existing automatic-memory behavior:
+The official adapter:
 
-- memory is recalled through DeerFlow's existing fixed memory query;
+- per-turn recall uses the latest real user question while retaining
+  the thread's stable OpenViking Session mapping;
 - completed turns are captured by the existing memory middleware;
 - messages about to be compacted are captured by the existing summarization hook;
 - every accepted capture is committed to the thread's stable OpenViking Session;
@@ -73,6 +73,8 @@ Select the backend in `config.yaml`:
 memory:
   enabled: true
   injection_enabled: true
+  session_injection_enabled: false
+  turn_injection_enabled: true
   shutdown_flush_timeout_seconds: 30
   manager_class: openviking
   mode: middleware
@@ -93,6 +95,14 @@ memory:
         user profile preferences important entities events ongoing goals
         constraints and prior decisions
 ```
+
+The recommended OpenViking setup enables per-turn query-aware recall and
+disables session-start injection because the baseline runs the fixed
+`retrieval.injection_query` as a similarity search instead of directly loading
+the authoritative user profile. Per-turn recall runs once per DeerFlow user
+turn and is not written to graph state, checkpoints, history, or memory capture
+input; directly loading authoritative profile, preference, or entity files
+remains future work.
 
 For a host-installed OpenViking used by Docker DeerFlow, set `base_url` to
 `http://host.docker.internal:1933` and `allow_insecure_http: true`. The optional
@@ -156,7 +166,10 @@ boundary; peers separate memory scopes within that user.
 ## Retry and failure behavior
 
 - `read: fail_open` logs retrieval failures and returns no injected OpenViking
-  memory. `read: raise` propagates the retrieval failure to its DeerFlow caller.
+  memory. `read: raise` raises from the backend, but DeerFlow's shared context
+  loader currently suppresses it during automatic injection (both baseline and
+  turn recall). Do not rely on it to stop the turn yet; the fix is tracked in
+  [#4726](https://github.com/bytedance/deer-flow/pull/4726).
 - `write: log_and_drop` logs capture failures without failing an already
   generated answer. `write: raise` propagates them.
 - DeerFlow stores only hashes and counters in a bounded local capture cursor

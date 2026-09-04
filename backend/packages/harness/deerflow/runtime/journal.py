@@ -18,6 +18,8 @@ Key design decisions:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -41,7 +43,7 @@ from deerflow.runtime.events.catalog import (
     RUN_ERROR_EVENT,
     RUN_START_EVENT,
 )
-from deerflow.utils.messages import message_to_text, restore_original_human_message
+from deerflow.utils.messages import DYNAMIC_TURN_MEMORY_KEY, is_dynamic_context_reminder, message_to_text, restore_original_human_message
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
@@ -400,6 +402,8 @@ class RunJournal(BaseCallbackHandler):
 
         # Capture the first user message sent to the lead agent in this run.
         caller = self._identify_caller(tags)
+        if caller == "lead_agent" and not self._memory_context_recorded:
+            self._record_model_memory(messages)
         if caller == "lead_agent" and not self._first_human_msg and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
@@ -859,11 +863,38 @@ class RunJournal(BaseCallbackHandler):
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
 
-    def record_memory_context(self, *, content_sha256: str) -> None:
-        """Record the effective hidden memory block for this run.
+    def _record_model_memory(self, messages: list[list[BaseMessage]]) -> None:
+        """Hash memory that reached the lead model, not a wrapper's preparation.
 
-        The full block already lives in checkpoint state and may contain user
-        data, so the event stores only its exact SHA-256 identity. Operators
+        Baseline-only runs retain their earlier before-agent audit. Turn-enabled
+        runs wait for this callback so short-circuits and pre-model errors cannot
+        claim memory use. Gateway strips caller-supplied reminder markers.
+        """
+        try:
+            for batch in messages:
+                blocks = [
+                    message.content
+                    for message in batch
+                    if isinstance(message, HumanMessage)
+                    and is_dynamic_context_reminder(message)
+                    and isinstance(message.content, str)
+                    and (str(message.id or "").endswith("__memory") or (str(message.id or "").endswith("__turn_memory") and message.additional_kwargs.get(DYNAMIC_TURN_MEMORY_KEY)))
+                ]
+                if blocks:
+                    # Preserve single-block hashes; frame multiple blocks without
+                    # storing their contents or changing their model-visible order.
+                    content = blocks[0] if len(blocks) == 1 else json.dumps(blocks, ensure_ascii=False, separators=(",", ":"))
+                    self.record_memory_context(content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest())
+                    break
+        except Exception:
+            logger.debug("Failed to record model memory context", exc_info=True)
+
+    def record_memory_context(self, *, content_sha256: str) -> None:
+        """Record the first effective memory identity supplied for this run.
+
+        The caller hashes one block or an ordered combination of baseline and
+        request-only turn blocks. Memory can contain user data, so this event
+        stores only the SHA-256 identity, never the contents. Operators
         consume it through the existing run-events debug API to compare the
         effective memory used by different runs without copying that content.
         """

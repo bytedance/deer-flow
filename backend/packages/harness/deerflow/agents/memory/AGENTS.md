@@ -72,6 +72,15 @@ Tool-mode injection includes only shared summaries.
 Tool mode leaves agent facts behind `memory_search`.
 `memory.injection_enabled: false` disables the complete injected block.
 
+`context.py` owns the shared read gates and the single `<memory>` wrapper.
+Backends return plain text from `get_context()` / `aget_context()`.
+Only `supports_query_aware_context` backends receive the optional query and thread ID.
+`session_injection_enabled` defaults on; request-only `turn_injection_enabled` defaults off.
+Both child switches cannot be off while the master injection gate is on.
+Turn recall uses the current run's genuine input, including hidden card answers,
+and excludes checkpointed input after normalizing the date-injection `__user` suffix.
+Its redacted run cache prevents repeated tool-loop retrieval; recall is never captured or checkpointed.
+
 #### DeerMem storage contract
 
 `FileMemoryStorage` owns canonical storage and the retrieval adapter.
@@ -229,13 +238,18 @@ It also rejects non-positive character budgets during construction.
 
 #### Run identity and token counting
 
-Each run hashes its effective hidden memory block.
-The run records one `context:memory` event with `content_sha256`.
-The full memory text stays in checkpoint state.
-
-Only current `DynamicContextMiddleware` output can establish first-run memory identity.
-Checkpoint reuse requires the block to exist before the run.
-Gateway input handling removes forged dynamic-context markers.
+`context:memory` has one field, `content_sha256`, and records once per run.
+One block keeps the SHA-256 of its exact UTF-8 content, including the wrapper.
+Multiple blocks hash a JSON array of their contents in model-request order,
+using `ensure_ascii=False` and compact separators `(',', ':')`.
+With turn recall enabled, `RunJournal.on_chat_model_start` records the actual lead-model
+messages, including cache hits and empty recall with baseline memory. A wrapper's
+early reply or pre-model error records nothing; failure after model start still records.
+Baseline-only runs retain before-agent recording: new blocks come from the middleware
+update, and reused blocks must predate the run. At model-call time, require the
+dynamic-context marker and a memory ID; Gateway strips caller-forged markers.
+Baseline text stays checkpointed; turn text stays request-local. Neither is copied into events.
+Shared reminder markers live in `utils/messages.py`; the journal must not import middleware.
 
 `prompt.py::_count_tokens` controls the injection budget.
 Default `tiktoken` mode loads and caches its encoding lazily.

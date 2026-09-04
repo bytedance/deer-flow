@@ -760,53 +760,14 @@ def _get_memory_context(
     app_config: AppConfig | None = None,
     user_id: str | None = None,
 ) -> str:
-    """Get memory context for injection into system prompt.
+    """Compatibility wrapper for the shared memory-owned context loader."""
+    from deerflow.agents.memory.context import load_memory_context
 
-    Args:
-        agent_name: If provided, loads per-agent memory. If None, loads global memory.
-        app_config: Explicit application config. When provided, memory options
-            are read from this value instead of the global config singleton.
-        user_id: Explicit user bucket. When omitted, resolves the current
-            Gateway or standalone LangGraph Server identity.
-
-    Returns:
-        Formatted memory context string wrapped in XML tags, or empty string if disabled.
-    """
-    config = None
-    try:
-        from deerflow.agents.memory import get_memory_manager
-        from deerflow.runtime.user_context import resolve_runtime_user_id
-
-        if app_config is None:
-            from deerflow.config.memory_config import get_memory_config
-
-            config = get_memory_config()
-        else:
-            config = app_config.memory
-
-        if not config.enabled or not config.injection_enabled:
-            return ""
-
-        memory_content = get_memory_manager().get_context(
-            user_id=user_id or resolve_runtime_user_id(None),
-            agent_name=agent_name,
-        )
-
-        if not memory_content.strip():
-            return ""
-
-        return f"""<memory>
-{memory_content}
-</memory>
-"""
-    except Exception as exc:
-        logger.exception("Failed to load memory context")
-        from deerflow.agents.memory import MemoryManagerError
-
-        failure_policy = getattr(config, "backend_config", {}).get("failure_policy", {}) if config is not None else {}
-        if isinstance(exc, MemoryManagerError) and failure_policy.get("read") == "fail_closed":
-            raise
-        return ""
+    return load_memory_context(
+        agent_name,
+        app_config=app_config,
+        user_id=user_id,
+    )
 
 
 @lru_cache(maxsize=32)

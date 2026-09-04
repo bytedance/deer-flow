@@ -42,6 +42,7 @@ class OpenVikingMemoryManager(MemoryManager):
     """
 
     supports_search: ClassVar[bool] = True
+    supports_query_aware_context: ClassVar[bool] = True
 
     _config: OpenVikingConfig = PrivateAttr()
     _client: Any = PrivateAttr()
@@ -159,6 +160,7 @@ class OpenVikingMemoryManager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         if not self._begin_operation():
             return ""
@@ -175,7 +177,7 @@ class OpenVikingMemoryManager(MemoryManager):
                 )
             try:
                 with self._actor_peer_scope(peer_id):
-                    documents = retriever.invoke(self._config.injection_query)
+                    documents = retriever.invoke(query if query is not None else self._config.injection_query)
             except Exception:
                 if self._config.read_failure_policy == "raise":
                     raise
@@ -197,12 +199,14 @@ class OpenVikingMemoryManager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         return await asyncio.to_thread(
             self.get_context,
             user_id,
             agent_name=agent_name,
             thread_id=thread_id,
+            query=query,
         )
 
     def search(
