@@ -176,10 +176,10 @@ class MemoryManager(BaseModel):
         cls,
         backend_config: dict[str, Any] | None,
     ) -> bool:
-        """Return strict-read policy using only in-memory config; do not perform I/O."""
+        """Honor legacy fail_closed using only in-memory config; do not perform I/O."""
 
-        del backend_config
-        return False
+        failure_policy = backend_config.get("failure_policy") if isinstance(backend_config, dict) else None
+        return isinstance(failure_policy, dict) and failure_policy.get("read") == "fail_closed"
 
     @property
     def read_failures_are_fatal(self) -> bool:
@@ -187,7 +187,8 @@ class MemoryManager(BaseModel):
 
         Backends that require memory context override the class-level config
         resolver so this remains available before or after manager creation.
-        The default preserves DeerMem, noop, and third-party backend behavior.
+        The default honors legacy ``fail_closed``; other settings are permissive
+        unless the backend overrides the config resolver.
         """
 
         return type(self).read_failures_are_fatal_for_config(self.backend_config)

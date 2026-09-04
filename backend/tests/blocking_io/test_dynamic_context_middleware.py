@@ -24,9 +24,10 @@ import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
+from pydantic import PrivateAttr
 
 from deerflow.agents.lead_agent import prompt as prompt_module
-from deerflow.agents.memory import MemoryReadError, reset_memory_manager
+from deerflow.agents.memory import MemoryManager, MemoryReadError, reset_memory_manager
 from deerflow.agents.memory.manager import _scan_backends
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
@@ -43,6 +44,27 @@ class _FakeModel(FakeMessagesListChatModel):
 
     def bind_tools(self, tools, **kwargs):  # type: ignore[override]
         return self
+
+
+class _LegacyBackend(MemoryManager):
+    """Third-party backend that inherits the default timeout-policy resolver."""
+
+    _release: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _finished: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    @classmethod
+    def from_config(cls, backend_config, *, mode="middleware", **host_hooks):
+        return cls(backend_config=backend_config, mode=mode)
+
+    def add(self, thread_id, messages, **kwargs):
+        pass
+
+    def get_context(self, user_id, **kwargs):
+        try:
+            self._release.wait(timeout=2)
+            return "Late memory context"
+        finally:
+            self._finished.set()
 
 
 @pytest.fixture(autouse=True)
@@ -405,6 +427,33 @@ async def test_timeout_does_not_wait_for_saturated_executor(monkeypatch, read_po
     finally:
         release.set()
         await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+
+
+@pytest.mark.parametrize("read_policy", ["fail_closed", "fail_open"])
+async def test_legacy_backend_timeout_preserves_read_policy(read_policy):
+    """The real read path honors legacy policy without waiting for its worker."""
+    cfg = MemoryConfig(manager_class=f"{__name__}:_LegacyBackend", backend_config={"failure_policy": {"read": read_policy}})
+    backend = _LegacyBackend.from_config(cfg.backend_config)
+    mw = DynamicContextMiddleware(app_config=SimpleNamespace(memory=cfg))
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        with (
+            mock.patch.object(asyncio.get_running_loop(), "_default_executor", executor),
+            mock.patch("deerflow.agents.memory.get_memory_manager", return_value=backend),
+            mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS", 0.01),
+        ):
+            call = mw.abefore_agent({"messages": [HumanMessage(content="hi", id="m1")]}, SimpleNamespace(context={}))
+            if read_policy == "fail_closed":
+                with pytest.raises(MemoryReadError) as exc_info:
+                    await asyncio.wait_for(call, 0.25)
+                assert isinstance(exc_info.value.__cause__, TimeoutError)
+            else:
+                assert await asyncio.wait_for(call, 0.25) is None
+            assert not backend._finished.is_set()
+    finally:
+        backend._release.set()
+        await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+    assert backend._finished.is_set()
 
 
 @pytest.mark.parametrize("explicit_config", [True, False], ids=["cold_registry", "config_fallback"])

@@ -232,6 +232,25 @@ def test_required_read_error_shares_manager_boundary():
     )
 
 
+@pytest.mark.parametrize(
+    ("backend_config", "expected"),
+    [
+        (None, False),
+        ({}, False),
+        ({"failure_policy": {"read": "fail_closed"}}, True),
+        ({"failure_policy": {"read": "fail_open"}}, False),
+        ({"failure_policy": {"read": "raise"}}, False),
+        ({"failure_policy": None}, False),
+        ({"failure_policy": "fail_closed"}, False),
+        ({"failure_policy": []}, False),
+    ],
+)
+def test_base_read_failure_policy_preserves_legacy_config(backend_config, expected):
+    """A backend without a policy override keeps the prompt's legacy semantics."""
+    assert _MinimalBackend(backend_config=backend_config).read_failures_are_fatal is expected
+    assert memory_read_failures_are_fatal(f"{__name__}:_MinimalBackend", backend_config, resolved_only=True) is expected
+
+
 def test_read_failure_capability_uses_requested_backend_config(
     monkeypatch: pytest.MonkeyPatch,
 ):
