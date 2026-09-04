@@ -159,6 +159,10 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+            # /health/ready bounds both probes to a 3s endpoint deadline;
+            # timeoutSeconds must stay above that bound or Kubernetes aborts
+            # slow-but-healthy responses at its 1s default.
+            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /health

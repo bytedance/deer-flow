@@ -1,6 +1,10 @@
 """Unit tests for the gateway readiness probe (app.gateway.health)."""
 
+import asyncio
+import pathlib
+import sqlite3
 import sys
+import time
 from contextlib import asynccontextmanager
 
 import pytest
@@ -13,6 +17,7 @@ from app.gateway.health import (
     _probe_checkpointer_backend,
     check_database_health,
     readiness_payload,
+    resolve_checkpointer_config,
 )
 from deerflow.config.checkpointer_config import CheckpointerConfig
 
@@ -36,21 +41,10 @@ class _FakeEngine:
         return _connect()
 
 
-async def _constant_result(value: str) -> str:
-    return value
-
-
-def _patch_checkpointer_probe(monkeypatch, value: str) -> None:
-    """Point the checkpointer probe at a canned result for payload tests."""
-    monkeypatch.setattr(
-        health_module,
-        "_probe_checkpointer_backend",
-        lambda: _constant_result(value),
-    )
-
-
-def _patch_checkpointer_config(monkeypatch, config: CheckpointerConfig | None) -> None:
-    monkeypatch.setattr(health_module, "_effective_checkpointer_config", lambda: config)
+def _create_sqlite_file(path: pathlib.Path) -> None:
+    """Create a valid (empty) SQLite database file at *path*."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sqlite3.connect(str(path)).close()
 
 
 @pytest.mark.anyio
@@ -76,37 +70,35 @@ async def test_check_database_health_unreachable(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_readiness_payload_ready_when_database_ok(monkeypatch):
+async def test_readiness_payload_ready_when_database_ok_and_memory_backend(monkeypatch):
     monkeypatch.setattr("app.gateway.health.get_engine", lambda: _FakeEngine())
-    _patch_checkpointer_probe(monkeypatch, DATABASE_OK)
 
-    status_code, payload = await readiness_payload()
+    status_code, payload = await readiness_payload(CheckpointerConfig(type="memory"))
 
     assert status_code == 200
     assert payload["status"] == "ready"
     assert payload["database"] == DATABASE_OK
-    assert payload["checkpointer"] == DATABASE_OK
+    assert payload["checkpointer"] == DATABASE_NOT_CONFIGURED
 
 
 @pytest.mark.anyio
 async def test_readiness_payload_degraded_when_database_unreachable(monkeypatch):
     monkeypatch.setattr("app.gateway.health.get_engine", lambda: _FakeEngine(unreachable=True))
-    _patch_checkpointer_probe(monkeypatch, DATABASE_OK)
 
-    status_code, payload = await readiness_payload()
+    status_code, payload = await readiness_payload(CheckpointerConfig(type="memory"))
 
     assert status_code == 503
     assert payload["status"] == "degraded"
     assert payload["database"] == DATABASE_UNREACHABLE
-    assert payload["checkpointer"] == DATABASE_OK
+    assert payload["checkpointer"] == DATABASE_NOT_CONFIGURED
 
 
 @pytest.mark.anyio
-async def test_readiness_payload_ready_when_not_configured(monkeypatch):
+async def test_readiness_payload_ready_when_nothing_configured(monkeypatch):
+    """backend=memory end to end must stay ready with not_configured results."""
     monkeypatch.setattr("app.gateway.health.get_engine", lambda: None)
-    _patch_checkpointer_probe(monkeypatch, DATABASE_NOT_CONFIGURED)
 
-    status_code, payload = await readiness_payload()
+    status_code, payload = await readiness_payload(CheckpointerConfig(type="memory"))
 
     assert status_code == 200
     assert payload["status"] == "ready"
@@ -115,12 +107,12 @@ async def test_readiness_payload_ready_when_not_configured(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_readiness_payload_degraded_when_checkpointer_unreachable_but_database_ok(monkeypatch):
+async def test_readiness_payload_degraded_when_checkpointer_unreachable_but_database_ok(tmp_path, monkeypatch):
     """A healthy ORM engine must not mask an unreachable legacy checkpointer backend."""
     monkeypatch.setattr("app.gateway.health.get_engine", lambda: _FakeEngine())
-    _patch_checkpointer_probe(monkeypatch, DATABASE_UNREACHABLE)
+    config = CheckpointerConfig(type="sqlite", connection_string=str(tmp_path / "missing" / "checkpoints.db"))
 
-    status_code, payload = await readiness_payload()
+    status_code, payload = await readiness_payload(config)
 
     assert status_code == 503
     assert payload["status"] == "degraded"
@@ -129,42 +121,151 @@ async def test_readiness_payload_degraded_when_checkpointer_unreachable_but_data
 
 
 @pytest.mark.anyio
-async def test_probe_checkpointer_memory_reports_not_configured(monkeypatch):
-    _patch_checkpointer_config(monkeypatch, CheckpointerConfig(type="memory"))
+async def test_readiness_payload_fails_closed_without_startup_snapshot(monkeypatch):
+    """No startup config snapshot must degrade readiness, never report ready."""
+    monkeypatch.setattr("app.gateway.health.get_engine", lambda: _FakeEngine())
 
-    assert await _probe_checkpointer_backend() == DATABASE_NOT_CONFIGURED
+    status_code, payload = await readiness_payload(None)
 
-
-@pytest.mark.anyio
-async def test_probe_checkpointer_sqlite_reachable(tmp_path, monkeypatch):
-    _patch_checkpointer_config(
-        monkeypatch,
-        CheckpointerConfig(type="sqlite", connection_string=str(tmp_path / "checkpoints.db")),
-    )
-
-    assert await _probe_checkpointer_backend() == DATABASE_OK
+    assert status_code == 503
+    assert payload["status"] == "degraded"
+    assert payload["database"] == DATABASE_OK
+    assert payload["checkpointer"] == DATABASE_UNREACHABLE
 
 
 @pytest.mark.anyio
-async def test_probe_checkpointer_sqlite_unreachable(tmp_path, monkeypatch):
+async def test_readiness_probes_run_concurrently(monkeypatch):
+    """Slow-but-healthy probes must not add their budgets together."""
+
+    async def _slow_ok(*args) -> str:
+        await asyncio.sleep(0.35)
+        return DATABASE_OK
+
+    monkeypatch.setattr(health_module, "check_database_health", _slow_ok)
+    monkeypatch.setattr(health_module, "_probe_checkpointer_backend", _slow_ok)
+
+    started = time.perf_counter()
+    status_code, payload = await readiness_payload(CheckpointerConfig(type="memory"))
+    elapsed = time.perf_counter() - started
+
+    assert status_code == 200
+    assert payload["database"] == DATABASE_OK
+    assert payload["checkpointer"] == DATABASE_OK
+    # Two sequential 0.35s probes would take ~0.7s; concurrent ones finish
+    # within a single probe window.
+    assert elapsed < 0.6
+
+
+@pytest.mark.anyio
+async def test_readiness_payload_enforces_endpoint_deadline(monkeypatch):
+    """A probe ignoring its own budget must trip the endpoint-wide deadline."""
+
+    async def _hanging(*args) -> str:
+        await asyncio.sleep(30)
+        return DATABASE_OK
+
+    monkeypatch.setattr(health_module, "check_database_health", _hanging)
+    monkeypatch.setattr(health_module, "_probe_checkpointer_backend", _hanging)
+    monkeypatch.setattr(health_module, "_READINESS_DEADLINE_SECONDS", 0.05)
+
+    status_code, payload = await readiness_payload(CheckpointerConfig(type="memory"))
+
+    assert status_code == 503
+    assert payload["status"] == "degraded"
+    assert payload["database"] == DATABASE_UNREACHABLE
+    assert payload["checkpointer"] == DATABASE_UNREACHABLE
+
+
+@pytest.mark.anyio
+async def test_probe_checkpointer_memory_reports_not_configured():
+    assert await _probe_checkpointer_backend(CheckpointerConfig(type="memory")) == DATABASE_NOT_CONFIGURED
+
+
+@pytest.mark.anyio
+async def test_probe_checkpointer_sqlite_reachable(tmp_path):
+    db_path = tmp_path / "checkpoints.db"
+    _create_sqlite_file(db_path)
+
+    result = await _probe_checkpointer_backend(CheckpointerConfig(type="sqlite", connection_string=str(db_path)))
+
+    assert result == DATABASE_OK
+
+
+@pytest.mark.anyio
+async def test_probe_checkpointer_sqlite_file_uri_reachable(tmp_path):
+    db_path = tmp_path / "checkpoints.db"
+    _create_sqlite_file(db_path)
+
+    result = await _probe_checkpointer_backend(CheckpointerConfig(type="sqlite", connection_string=pathlib.Path(db_path).as_uri()))
+
+    assert result == DATABASE_OK
+
+
+@pytest.mark.anyio
+async def test_probe_checkpointer_sqlite_missing_file_stays_missing_and_unreachable(tmp_path):
+    """The probe must never create a missing SQLite file (regression)."""
+    missing = tmp_path / "checkpoints.db"
+
+    result = await _probe_checkpointer_backend(CheckpointerConfig(type="sqlite", connection_string=str(missing)))
+
+    assert result == DATABASE_UNREACHABLE
+    assert not missing.exists()
+
+
+@pytest.mark.anyio
+async def test_probe_checkpointer_sqlite_unreachable_when_parent_missing(tmp_path):
     missing_parent = tmp_path / "does-not-exist" / "checkpoints.db"
-    _patch_checkpointer_config(
-        monkeypatch,
-        CheckpointerConfig(type="sqlite", connection_string=str(missing_parent)),
-    )
 
-    assert await _probe_checkpointer_backend() == DATABASE_UNREACHABLE
+    result = await _probe_checkpointer_backend(CheckpointerConfig(type="sqlite", connection_string=str(missing_parent)))
+
+    assert result == DATABASE_UNREACHABLE
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "conn_string",
+    [":memory:", "file:memdb1?mode=memory&cache=shared", "file::memory:?cache=shared"],
+)
+async def test_probe_checkpointer_sqlite_in_memory_is_not_configured(conn_string):
+    """In-memory SQLite has no external state, mirroring the memory backend."""
+    result = await _probe_checkpointer_backend(CheckpointerConfig(type="sqlite", connection_string=conn_string))
+
+    assert result == DATABASE_NOT_CONFIGURED
 
 
 @pytest.mark.anyio
 async def test_probe_checkpointer_postgres_without_psycopg_is_unreachable(monkeypatch):
-    _patch_checkpointer_config(
-        monkeypatch,
+    monkeypatch.setitem(sys.modules, "psycopg", None)
+
+    result = await _probe_checkpointer_backend(
         CheckpointerConfig(
             type="postgres",
             connection_string="postgresql://user:pass@localhost:5432/deerflow",
-        ),
+        )
     )
-    monkeypatch.setitem(sys.modules, "psycopg", None)
 
-    assert await _probe_checkpointer_backend() == DATABASE_UNREACHABLE
+    assert result == DATABASE_UNREACHABLE
+
+
+def test_resolve_checkpointer_config_passes_through_resolution(monkeypatch):
+    resolved = CheckpointerConfig(type="memory")
+    monkeypatch.setattr(
+        "deerflow.runtime.checkpointer.provider._resolve_checkpointer_config",
+        lambda app_config: resolved,
+    )
+
+    assert resolve_checkpointer_config(object()) is resolved
+
+
+def test_resolve_checkpointer_config_failure_fails_closed(monkeypatch):
+    """A resolution failure must surface as None, never as a memory default."""
+
+    def _raise(app_config):
+        raise RuntimeError("broken checkpointer config")
+
+    monkeypatch.setattr(
+        "deerflow.runtime.checkpointer.provider._resolve_checkpointer_config",
+        _raise,
+    )
+
+    assert resolve_checkpointer_config(object()) is None
