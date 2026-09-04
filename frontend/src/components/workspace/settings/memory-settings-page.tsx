@@ -27,6 +27,8 @@ import { createMarkdownLinkComponent } from "@/components/workspace/messages/mar
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
 import {
+  useBatchDeleteMemoryFacts,
+  useBatchUpdateMemoryFacts,
   useClearMemory,
   useCreateMemoryFact,
   useDeleteMemoryFact,
@@ -305,6 +307,16 @@ export function MemorySettingsPage() {
   const factCategoryInputId = useId();
   const factConfidenceInputId = useId();
   const factConfidenceHintId = useId();
+
+  // Batch operations state
+  const [selectedFactIds, setSelectedFactIds] = useState<Set<string>>(new Set());
+  const [batchDeleteDialogOpen, setBatchDeleteDialogOpen] = useState(false);
+  const [batchCategoryDialogOpen, setBatchCategoryDialogOpen] = useState(false);
+  const [batchCategoryValue, setBatchCategoryValue] = useState("");
+
+  // Batch operations hooks
+  const batchDeleteFacts = useBatchDeleteMemoryFacts();
+  const batchUpdateFacts = useBatchUpdateMemoryFacts();
 
   const clearAllLabel = t.settings.memory.clearAll ?? "Clear all memory";
   const clearAllConfirmTitle =
@@ -661,11 +673,54 @@ export function MemorySettingsPage() {
 
             {shouldRenderFactsBlock ? (
               <div className="min-w-0 rounded-lg border p-4">
-                <div className="mb-4">
+                <div className="mb-4 flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-gray-300"
+                    checked={filteredFacts.length > 0 && selectedFactIds.size === filteredFacts.length}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setSelectedFactIds(new Set(filteredFacts.map((f) => f.id)));
+                      } else {
+                        setSelectedFactIds(new Set());
+                      }
+                    }}
+                  />
                   <h3 className="text-base font-medium">
                     {t.settings.memory.markdown.facts}
                   </h3>
                 </div>
+
+                {selectedFactIds.size > 0 && (
+                  <div className="mb-4 flex items-center gap-2">
+                    <span className="text-sm text-muted-foreground">
+                      {t.settings.memory.batchSelectCount?.replace("{count}", String(selectedFactIds.size)) ?? `${selectedFactIds.size} selected`}
+                    </span>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => setBatchDeleteDialogOpen(true)}
+                      disabled={batchDeleteFacts.isPending}
+                    >
+                      {t.settings.memory.batchDeleteSelected ?? "Delete Selected"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setBatchCategoryDialogOpen(true)}
+                      disabled={batchUpdateFacts.isPending}
+                    >
+                      {t.settings.memory.batchMoveToCategory ?? "Move to Category"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setSelectedFactIds(new Set())}
+                    >
+                      {t.settings.memory.batchClearSelection ?? "Clear Selection"}
+                    </Button>
+                  </div>
+                )}
 
                 {filteredFacts.length === 0 ? (
                   <div className="text-muted-foreground text-sm">
@@ -683,7 +738,22 @@ export function MemorySettingsPage() {
                           key={fact.id}
                           className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-start sm:justify-between"
                         >
-                          <div className="min-w-0 space-y-2 [overflow-wrap:anywhere]">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 rounded border-gray-300"
+                              checked={selectedFactIds.has(fact.id)}
+                              onChange={(e) => {
+                                const newSelected = new Set(selectedFactIds);
+                                if (e.target.checked) {
+                                  newSelected.add(fact.id);
+                                } else {
+                                  newSelected.delete(fact.id);
+                                }
+                                setSelectedFactIds(newSelected);
+                              }}
+                            />
+                            <div className="min-w-0 flex-1 space-y-2 [overflow-wrap:anywhere]">
                             <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
                               <span>
                                 <span className="text-muted-foreground">
@@ -722,6 +792,7 @@ export function MemorySettingsPage() {
                             <p className="text-sm [overflow-wrap:anywhere]">
                               {fact.content}
                             </p>
+                          </div>
                           </div>
 
                           <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
@@ -995,6 +1066,106 @@ export function MemorySettingsPage() {
               {importMemoryMutation.isPending
                 ? t.common.loading
                 : t.common.import}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Batch Delete Dialog */}
+      <Dialog open={batchDeleteDialogOpen} onOpenChange={setBatchDeleteDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {t.settings.memory.batchDeleteTitle?.replace("{count}", String(selectedFactIds.size)) ?? `Delete ${selectedFactIds.size} facts?`}
+            </DialogTitle>
+            <DialogDescription>
+              {t.settings.memory.batchDeleteDescription?.replace("{count}", String(selectedFactIds.size)) ?? `This will remove ${selectedFactIds.size} facts from memory immediately. This action cannot be undone.`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setBatchDeleteDialogOpen(false)}
+              disabled={batchDeleteFacts.isPending}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                batchDeleteFacts.mutate(
+                  { fact_ids: Array.from(selectedFactIds) },
+                  {
+                    onSuccess: () => {
+                      setSelectedFactIds(new Set());
+                      setBatchDeleteDialogOpen(false);
+                      toast.success(
+                        t.settings.memory.batchDeleteSuccess?.replace("{count}", String(selectedFactIds.size)) ?? `Deleted ${selectedFactIds.size} facts`,
+                      );
+                    },
+                    onError: (error) => {
+                      toast.error(error.message);
+                    },
+                  }
+                );
+              }}
+              disabled={batchDeleteFacts.isPending}
+            >
+              {batchDeleteFacts.isPending ? t.common.loading : t.common.delete}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Batch Category Update Dialog */}
+      <Dialog open={batchCategoryDialogOpen} onOpenChange={setBatchCategoryDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {t.settings.memory.batchCategoryTitle?.replace("{count}", String(selectedFactIds.size)) ?? `Move ${selectedFactIds.size} facts to category`}
+            </DialogTitle>
+            <DialogDescription>
+              {t.settings.memory.batchCategoryDescription ?? "Select a category to move all selected facts to."}
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            placeholder={t.settings.memory.batchCategoryPlaceholder ?? "Enter category name"}
+            value={batchCategoryValue}
+            onChange={(e) => setBatchCategoryValue(e.target.value)}
+          />
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setBatchCategoryDialogOpen(false)}
+              disabled={batchUpdateFacts.isPending}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button
+              onClick={() => {
+                if (!batchCategoryValue.trim()) return;
+                const updates = Array.from(selectedFactIds).map((factId) => ({
+                  fact_id: factId,
+                  category: batchCategoryValue.trim(),
+                }));
+                batchUpdateFacts.mutate(
+                  { updates },
+                  {
+                    onSuccess: () => {
+                      setSelectedFactIds(new Set());
+                      setBatchCategoryDialogOpen(false);
+                      setBatchCategoryValue("");
+                      toast.success(`Updated ${selectedFactIds.size} facts`);
+                    },
+                    onError: (error) => {
+                      toast.error(error.message);
+                    },
+                  }
+                );
+              }}
+              disabled={batchUpdateFacts.isPending || !batchCategoryValue.trim()}
+            >
+              {batchUpdateFacts.isPending ? t.common.loading : (t.settings.memory.batchCategoryAction ?? "Update Category")}
             </Button>
           </DialogFooter>
         </DialogContent>

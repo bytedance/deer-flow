@@ -1238,6 +1238,124 @@ class MemoryUpdater:
             raise OSError(f"Failed to save memory data after updating fact '{fact_id}'")
         return updated_memory
 
+    def batch_delete_memory_facts(self, fact_ids: list[str], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        """Atomically delete multiple facts in one transaction.
+
+        Pre-validates every id before mutating anything. Raises KeyError for
+        the first missing id so no partial deletion leaks state.
+        """
+        if agent_name is None:
+            raise ValueError("agent_name")
+        if not fact_ids:
+            raise ValueError("fact_ids")
+        if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes and hasattr(self._storage, "get_fact"):
+            # Pre-validate every id
+            delete_revisions: dict[str, int] = {}
+            for fact_id in fact_ids:
+                deleted = self._storage.get_fact(fact_id, agent_name=agent_name, user_id=user_id)
+                if deleted is None:
+                    raise KeyError(fact_id)
+                delete_revisions[fact_id] = int(deleted.get("revision") or 1)
+            global_memory = self.get_memory_data(user_id=user_id)
+            self._storage.apply_changes(
+                {"deletes": fact_ids, "deleteRevisions": delete_revisions},
+                agent_name=agent_name,
+                user_id=user_id,
+                expected_manifest_revision=int(global_memory.get("revision") or 0),
+                allow_manifest_rebase=True,
+            )
+            return self.get_memory_data(agent_name, user_id=user_id)
+        # Legacy single-file path
+        memory_data = self.get_memory_data(agent_name, user_id=user_id)
+        facts = memory_data.get("facts", [])
+        id_set = set(fact_ids)
+        updated_facts = [fact for fact in facts if fact.get("id") not in id_set]
+        missing = [fid for fid in fact_ids if fid not in {f.get("id") for f in facts}]
+        if missing:
+            raise KeyError(missing[0])
+        updated_memory = dict(memory_data)
+        updated_memory["facts"] = updated_facts
+        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
+            raise OSError("Failed to save memory data after batch deleting facts")
+        return updated_memory
+
+    def batch_update_memory_facts(self, updates: list[dict[str, Any]], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        """Atomically update multiple facts in one transaction.
+
+        Pre-validates every fact_id and field before mutating anything.
+        Each update dict must contain 'fact_id' and optional 'content', 'category',
+        'confidence' fields.
+        """
+        if agent_name is None:
+            raise ValueError("agent_name")
+        if not updates:
+            raise ValueError("updates")
+        # Pre-validate all fact_ids
+        for update in updates:
+            fact_id = update.get("fact_id")
+            if not fact_id:
+                raise ValueError("Empty fact_id in update")
+        if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes and hasattr(self._storage, "get_fact"):
+            upsert_revisions: dict[str, int] = {}
+            upsert_facts: list[dict[str, Any]] = []
+            for update in updates:
+                fact_id = update["fact_id"]
+                existing = self._storage.get_fact(fact_id, agent_name=agent_name, user_id=user_id)
+                if existing is None:
+                    raise KeyError(fact_id)
+                updated_fact = dict(existing)
+                if "content" in update and update.get("content") is not None:
+                    normalized_content = str(update["content"]).strip()
+                    if not normalized_content:
+                        raise ValueError("content")
+                    updated_fact["content"] = normalized_content
+                if "category" in update and update.get("category") is not None:
+                    updated_fact["category"] = str(update["category"]).strip() or "context"
+                if "confidence" in update and update.get("confidence") is not None:
+                    updated_fact["confidence"] = _validate_confidence(float(update["confidence"]))
+                upsert_facts.append(updated_fact)
+                upsert_revisions[fact_id] = int(existing.get("revision") or 1)
+            global_memory = self.get_memory_data(user_id=user_id)
+            self._storage.apply_changes(
+                {"upserts": upsert_facts, "upsertRevisions": upsert_revisions},
+                agent_name=agent_name,
+                user_id=user_id,
+                expected_manifest_revision=int(global_memory.get("revision") or 0),
+                allow_manifest_rebase=True,
+            )
+            return self.get_memory_data(agent_name, user_id=user_id)
+        # Legacy single-file path
+        memory_data = self.get_memory_data(agent_name, user_id=user_id)
+        facts = memory_data.get("facts", [])
+        fact_by_id = {f.get("id"): f for f in facts}
+        # Pre-validate all ids
+        for update in updates:
+            if update["fact_id"] not in fact_by_id:
+                raise KeyError(update["fact_id"])
+        updated_facts: list[dict[str, Any]] = []
+        for fact in facts:
+            fid = fact.get("id")
+            if fid in fact_by_id and fid in {u["fact_id"] for u in updates}:
+                update = next(u for u in updates if u["fact_id"] == fid)
+                updated_fact = dict(fact)
+                if "content" in update and update.get("content") is not None:
+                    normalized_content = str(update["content"]).strip()
+                    if not normalized_content:
+                        raise ValueError("content")
+                    updated_fact["content"] = normalized_content
+                if "category" in update and update.get("category") is not None:
+                    updated_fact["category"] = str(update["category"]).strip() or "context"
+                if "confidence" in update and update.get("confidence") is not None:
+                    updated_fact["confidence"] = _validate_confidence(float(update["confidence"]))
+                updated_facts.append(updated_fact)
+            else:
+                updated_facts.append(fact)
+        updated_memory = dict(memory_data)
+        updated_memory["facts"] = updated_facts
+        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
+            raise OSError("Failed to save memory data after batch updating facts")
+        return updated_memory
+
     def _build_signal_hints(self, signals: frozenset[str]) -> str:
         """Build optional prompt hints for the detected signal classes.
 

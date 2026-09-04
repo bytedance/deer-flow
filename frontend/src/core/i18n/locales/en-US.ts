@@ -882,6 +882,18 @@ export const enUS: Translations = {
       clearAllConfirmDescription:
         "This will remove all saved summaries and facts. This action cannot be undone.",
       clearAllSuccess: "All memory cleared",
+      batchSelectCount: "{count} selected",
+      batchDeleteSelected: "Delete Selected",
+      batchMoveToCategory: "Move to Category",
+      batchClearSelection: "Clear Selection",
+      batchDeleteTitle: "Delete {count} facts?",
+      batchDeleteDescription: "This will remove {count} facts from memory immediately. This action cannot be undone.",
+      batchDeleteSuccess: "Deleted {count} facts",
+      batchCategoryTitle: "Move {count} facts to category",
+      batchCategoryDescription: "Select a category to move all selected facts to.",
+      batchCategoryPlaceholder: "Enter category name",
+      batchCategoryAction: "Update Category",
+      batchCategorySuccess: "Updated {count} facts",
       factDeleteConfirmTitle: "Delete this fact?",
       factDeleteConfirmDescription:
         "This fact will be removed from memory immediately. This action cannot be undone.",

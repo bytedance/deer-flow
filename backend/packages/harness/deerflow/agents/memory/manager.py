@@ -460,6 +460,30 @@ class MemoryManager(BaseModel):
         """Update one fact by id (preserving omitted fields). Default: unsupported."""
         raise NotImplementedError(f"update_fact not supported by {type(self).__name__}")
 
+    # ── Batch operations ──────────────────────────────────────────────
+    def batch_delete_facts(
+        self,
+        fact_ids: list[str],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete multiple facts by id. Returns memory data with deleted facts removed.
+        Default: unsupported (raise NotImplementedError)."""
+        raise NotImplementedError(f"batch_delete_facts not supported by {type(self).__name__}")
+
+    def batch_update_facts(
+        self,
+        updates: list[dict[str, Any]],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Update multiple facts. Each update dict must contain 'fact_id' and optional
+        'content', 'category', 'confidence' fields. Returns memory data with updated facts.
+        Default: unsupported (raise NotImplementedError)."""
+        raise NotImplementedError(f"batch_update_facts not supported by {type(self).__name__}")
+
     # B-class: no agent-side caller yet -- signatures only, for future scenarios.
     # Default no-op so callers can invoke unconditionally without gating. (The
     # self-serving hooks on_delegation / on_session_end / on_memory_write are
