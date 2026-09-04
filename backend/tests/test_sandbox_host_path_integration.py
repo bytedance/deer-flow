@@ -319,12 +319,12 @@ def test_run_host_program_clamps_model_timeout_to_sandbox_limit() -> None:
         patch("deerflow.config.get_app_config", return_value=config),
     ):
         result = run_host_program_tool.func(
-            runtime,
-            "运行程序",
-            "/root/tools/build.exe",
-            [],
-            None,
-            99,
+            runtime=runtime,
+            description="运行程序",
+            program_path="/root/tools/build.exe",
+            arguments=[],
+            cwd=None,
+            timeout=99,
         )
 
     assert result == "ok"
@@ -369,7 +369,7 @@ def test_run_host_program_launch_error_does_not_leak_host_path(tmp_path) -> None
             runtime=runtime,
             description="run program",
             program_path="/root/tools/build.exe",
-            args=[],
+            arguments=[],
         )
 
     assert str(host_program) not in result
@@ -409,12 +409,12 @@ def test_run_host_program_rejects_non_custom_mount_cwd() -> None:
         patch("deerflow.config.get_app_config", return_value=config),
     ):
         result = run_host_program_tool.func(
-            runtime,
-            "运行程序",
-            "/root/tools/build.exe",
-            [],
-            "/mnt/user-data/workspace",
-            30,
+            runtime=runtime,
+            description="运行程序",
+            program_path="/root/tools/build.exe",
+            arguments=[],
+            cwd="/mnt/user-data/workspace",
+            timeout=30,
         )
 
     assert result == "Error: Working directory must be inside a configured sandbox mount"
@@ -456,12 +456,12 @@ def test_run_host_program_rejects_non_positive_timeout(timeout: float) -> None:
         patch("deerflow.config.get_app_config", return_value=config),
     ):
         result = run_host_program_tool.func(
-            runtime,
-            "运行程序",
-            "/root/tools/build.exe",
-            [],
-            None,
-            timeout,
+            runtime=runtime,
+            description="运行程序",
+            program_path="/root/tools/build.exe",
+            arguments=[],
+            cwd=None,
+            timeout=timeout,
         )
 
     assert "timeout must be positive" in result

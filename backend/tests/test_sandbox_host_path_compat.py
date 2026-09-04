@@ -251,6 +251,9 @@ def test_split_program_argument_does_not_hide_path_before_embedded_url() -> None
         "/out:\tFILE:///etc/passwd",
         "--out: file:///C:/Windows/secret.txt",
         "--out:\tFILE:///etc/passwd",
+        "/etc/passwd",
+        "/c/Windows/secret.txt",
+        "//host/share/secret.txt",
     ],
 )
 def test_program_argument_path_predicate_covers_rooted_drive_and_traversal_forms(value: str) -> None:
@@ -275,6 +278,10 @@ def test_program_argument_path_predicate_covers_rooted_drive_and_traversal_forms
         "HTTPS://example.test/?next=FILE:///C:/Windows/secret.txt",
         " https://example.test/?next=file:///C:/Windows/secret.txt ",
         "--input=https://example.test,relative.txt",
+        "/quiet",
+        "/nologo",
+        "/S",
+        "/?",
     ],
 )
 def test_program_argument_path_predicate_keeps_non_path_arguments_opaque(value: str) -> None:

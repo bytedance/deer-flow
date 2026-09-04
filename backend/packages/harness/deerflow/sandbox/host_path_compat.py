@@ -57,7 +57,10 @@ def is_windows_host_path_spelling(path: str, *, platform_name: str | None = None
 
 def _has_program_path_syntax(value: str) -> bool:
     normalized = value.replace("\\", "/")
-    return bool(value) and (normalized.startswith("/") or value.startswith("\\") or _PROGRAM_ARGUMENT_DRIVE.match(normalized) is not None or _PROGRAM_ARGUMENT_TRAVERSAL.search(normalized) is not None)
+    if not value:
+        return False
+    rooted_slash_path = normalized.startswith("/") and (normalized == "/" or normalized.startswith("//") or "/" in normalized[1:])
+    return rooted_slash_path or value.startswith("\\") or _PROGRAM_ARGUMENT_DRIVE.match(normalized) is not None or _PROGRAM_ARGUMENT_TRAVERSAL.search(normalized) is not None
 
 
 def _find_colon_path_separator(value: str, start: int = 0) -> int | None:

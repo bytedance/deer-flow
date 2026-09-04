@@ -62,30 +62,30 @@ def _sanitize_program_exception(error: Exception, *, sandbox: object | None, thr
 @tool("run_host_program", parse_docstring=True)
 def run_host_program_tool(
     runtime: Runtime,
-    description: str,
     program_path: str,
-    args: list[str] | None = None,
+    arguments: list[str] | None = None,
     cwd: str | None = None,
     timeout: float | None = None,
+    description: str = "",
 ) -> str:
     """Run a Windows program from a configured local sandbox mount.
 
     Use this for a native ``.exe``, ``.cmd``/``.bat`` or ``.ps1`` program when
     the requested program lives under a configured ``sandbox.mounts`` host
-    directory. Host paths in ``program_path``, ``args`` and ``cwd`` are
+    directory. Host paths in ``program_path``, ``arguments`` and ``cwd`` are
     accepted and normalized to the mount's virtual ``container_path`` before
     authorization. This tool is available only in trusted local mode.
 
     Args:
-        description: Explain why the program is being run.
         program_path: Program path, as a configured virtual or Windows host path. For ``.cmd``/``.bat`` files, paths containing ``%`` or ``^`` are not supported by the Windows command wrapper.
-        args: Optional program arguments. Configured host paths in arguments
+        arguments: Optional program arguments. Configured host paths in arguments
         are normalized; absolute, rooted, drive-relative, traversal, and local
         file URLs must resolve inside a configured mount. Network URLs
         remain opaque. ``%``, ``^``, quotes, and control characters are not
         supported for batch arguments.
         cwd: Optional working directory, as a configured virtual or Windows host path. When omitted, the program's mapped parent directory is used.
         timeout: Optional wall-clock timeout in seconds.
+        description: Optional short explanation of why the program is being run, shown in the UI.
     """
     sandbox = None
     thread_data = None
@@ -115,7 +115,7 @@ def run_host_program_tool(
             return "Error: Thread data is not available"
 
         normalized_program = normalize_local_tool_path(program_path)
-        normalized_args = [_normalize_program_argument(value) for value in (args or [])]
+        normalized_args = [_normalize_program_argument(value) for value in (arguments or [])]
         normalized_cwd = normalize_local_tool_path(cwd) if cwd else None
         thread_data = get_thread_data(runtime)
         validate_local_tool_path(normalized_program, thread_data, read_only=True)

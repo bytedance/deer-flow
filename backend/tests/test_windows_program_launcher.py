@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from langchain.tools import ToolRuntime
 
 import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
@@ -238,6 +239,10 @@ def test_run_host_program_normalizes_shared_option_path_candidates(argument: str
         "https://example.test/path",
         "https://example.test/?next=file:///C:/Windows/secret.txt",
         "--url=https://example.test/?next=file:///C:/Windows/secret.txt",
+        "/quiet",
+        "/nologo",
+        "/S",
+        "/?",
     ],
 )
 def test_execute_program_allows_non_path_arguments(argument: str, monkeypatch) -> None:
@@ -254,6 +259,45 @@ def test_execute_program_allows_non_path_arguments(argument: str, monkeypatch) -
     sandbox.execute_program("/root/tools/app.exe", [argument])
 
     assert calls[0][1] == argument
+
+
+def test_run_host_program_schema_exposes_arguments_and_optional_description() -> None:
+    assert list(run_host_program_tool.tool_call_schema.model_fields) == [
+        "program_path",
+        "arguments",
+        "cwd",
+        "timeout",
+        "description",
+    ]
+    assert run_host_program_tool.tool_call_schema.model_fields["description"].is_required() is False
+
+    runtime = ToolRuntime(
+        state={},
+        context={},
+        config={},
+        stream_writer=lambda _: None,
+        tools=[],
+        tool_call_id="call-1",
+        store=None,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_tool(**kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    with patch.object(run_host_program_tool, "func", fake_tool):
+        result = run_host_program_tool.invoke(
+            {
+                "runtime": runtime,
+                "program_path": "/root/tools/app.exe",
+                "arguments": ["/quiet"],
+            }
+        )
+
+    assert result == "ok"
+    assert captured["arguments"] == ["/quiet"]
+    assert captured["description"] == ""
 
 
 def test_execute_program_allows_parentheses_in_configured_cmd_program_path(monkeypatch) -> None:
@@ -442,12 +486,12 @@ def test_run_host_program_tool_normalizes_host_paths_before_launch(monkeypatch) 
         patch("deerflow.config.get_app_config", return_value=config),
     ):
         result = run_host_program_tool.func(
-            runtime,
-            "运行构建脚本",
-            r"C:\Users\lichen\tools\build.ps1",
-            ["--config", r"C:\Users\lichen\config.tfx-dms"],
-            r"C:\Users\lichen\tools",
-            30,
+            runtime=runtime,
+            description="运行构建脚本",
+            program_path=r"C:\Users\lichen\tools\build.ps1",
+            arguments=["--config", r"C:\Users\lichen\config.tfx-dms"],
+            cwd=r"C:\Users\lichen\tools",
+            timeout=30,
         )
 
     assert result == "ok"
@@ -474,7 +518,7 @@ def test_run_host_program_tool_rejects_program_outside_custom_mount(monkeypatch)
         patch("deerflow.tools.builtins.run_host_program_tool.is_host_bash_allowed", return_value=True),
         patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_WINDOWS_MOUNTS),
     ):
-        result = run_host_program_tool.func(runtime, "运行程序", r"C:\Windows\System32\whoami.exe")
+        result = run_host_program_tool.func(runtime=runtime, description="运行程序", program_path=r"C:\Windows\System32\whoami.exe")
 
     assert "Host path is not allowed" in result
 
@@ -492,7 +536,7 @@ def test_run_host_program_tool_rejects_unsupported_extension(monkeypatch) -> Non
         patch("deerflow.tools.builtins.run_host_program_tool.is_host_bash_allowed", return_value=True),
         patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_MOUNTS),
     ):
-        result = run_host_program_tool.func(runtime, "运行程序", "/root/tools/build.py")
+        result = run_host_program_tool.func(runtime=runtime, description="运行程序", program_path="/root/tools/build.py")
 
     assert "Only .exe, .cmd, .bat, and .ps1" in result
 
