@@ -312,21 +312,23 @@ def ensure_lark_cli_credential_tree(user_id: str, *, paths: Paths | None = None)
     every descendant is opened/created relative to an already-open parent handle, so a pathname
     swap cannot redirect validation, the ACL update, or traversal for the duration of that
     hardening walk. This guarantee does not extend to a later pathname-based reopen by a
-    credential consumer after ``ensure`` returns. POSIX keeps the ``lstat()``-before-descent walk.
+    credential consumer after ``ensure`` returns. POSIX keeps the ``lstat()``-before-descent
+    walk and does not take the hardening lock (its share mode has no cross-process race).
     """
     paths = paths or get_paths()
-    with _lark_hardening_lock(user_id, paths):
-        root = paths.user_dir(user_id) / "integrations" / INTEGRATION_ID
-        if os.name == "nt":
+    root = paths.user_dir(user_id) / "integrations" / INTEGRATION_ID
+    if os.name == "nt":
+        with _lark_hardening_lock(user_id, paths):
             _ensure_and_harden_windows_credential_tree(paths, root)
-        else:
-            _reject_credential_reparse(root)
-            root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            root.chmod(0o700)
-            for required in (root / "config", root / "config" / "locks", root / "data"):
-                _reject_credential_reparse(required)
-                required.mkdir(parents=True, exist_ok=True, mode=0o700)
-            _harden_posix_credential_tree(root)
+        return
+
+    _reject_credential_reparse(root)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root.chmod(0o700)
+    for required in (root / "config", root / "config" / "locks", root / "data"):
+        _reject_credential_reparse(required)
+        required.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _harden_posix_credential_tree(root)
 
 
 def _ensure_and_harden_windows_credential_tree(paths: Paths, root: Path) -> None:
@@ -1314,13 +1316,16 @@ def _lark_hardening_thread_lock(user_id: str) -> threading.RLock:
 def _lark_hardening_lock(user_id: str, paths: Paths):
     """Serialize credential-tree hardening across threads and Gateway worker processes.
 
-    Distinct from :func:`_lark_credential_lock` (a non-reentrant lock callers already hold):
-    this uses its own lock file so ``credential lock -> ensure -> hardening lock`` never
-    self-deadlocks, and the advisory file lock covers the ``GATEWAY_WORKERS`` > 1 case.
+    The advisory lock file lives directly under the trusted ``paths.base_dir`` anchor, not
+    under the per-user chain — that chain is only validated by the handle-relative walker
+    *after* this lock is taken, so placing the lock file beneath an unverified ancestor would
+    itself be a pathname write before reparse validation. It is a separate lock domain from
+    the non-reentrant ``_lark_credential_lock`` so ``credential lock -> ensure -> hardening
+    lock`` never self-deadlocks, and the advisory file lock covers ``GATEWAY_WORKERS`` > 1.
     """
-    root = paths.user_dir(user_id) / "integrations" / INTEGRATION_ID
-    root.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = root.parent / f".{INTEGRATION_ID}.hardening.lock"
+    user_dir = paths.user_dir(user_id)  # validates user_id
+    paths.base_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = paths.base_dir / f".{INTEGRATION_ID}.{user_dir.name}.hardening.lock"
     with _exclusive_install_lock(lock_path, _lark_hardening_thread_lock(user_id)):
         yield
 

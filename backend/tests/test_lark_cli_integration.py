@@ -1377,10 +1377,10 @@ def test_windows_credential_tree_hardening_issues_single_owner_apply_no_reset_fa
 def test_windows_credential_tree_hardening_rejects_reparse_before_descent(monkeypatch, tmp_path) -> None:
     """A symlink/junction inside the tree is rejected before traversal uses it.
 
-    The walker opens children no-follow relative to the parent handle, so a reparse
-    pointer is detected (and rejected) before it is followed. Children are validated
-    before the parent propagates an inheritable ACE, so the reparse target is never
-    reached and the external directory is never hardened.
+    The parent is hardened first through its exclusive handle; that exclusive open
+    suppresses propagation of the inheritable ACL into existing unvalidated children.
+    Each child is then opened no-follow relative to the parent and a reparse point is
+    rejected before its own security descriptor is touched or traversal follows it.
     """
     subprocess_calls, dacl_calls = _patch_windows_hardening(monkeypatch, tmp_path)
     config_dir = lark_cli.lark_cli_config_dir("alice")
@@ -1532,8 +1532,8 @@ def test_windows_credential_tree_hardening_removes_arbitrary_existing_explicit_s
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires real Windows ACLs")
-def test_windows_credential_tree_set_security_info_failure_preserves_prior_dacl(monkeypatch, tmp_path) -> None:
-    """A final handle-bound SetSecurityInfo failure leaves the prior private DACL unchanged."""
+def test_windows_credential_tree_final_security_apply_failure_has_no_prior_broadening(monkeypatch, tmp_path) -> None:
+    """Failure at the final handle-bound apply seam has no prior /reset or widening step."""
     config_dir, _ = _bootstrap_credential_dirs(monkeypatch, tmp_path, data=False)
     secret_file = config_dir / "config.json"
     secret_file.write_text('{"appSecret":"secret"}', encoding="utf-8")
@@ -1642,6 +1642,8 @@ def test_windows_credential_tree_rejects_reparse_ancestor(monkeypatch, tmp_path)
         # The reparse ancestor was rejected before the credential root was used.
         assert not (outside / "lark-cli").exists()
         assert not (integrations / "lark-cli").exists()
+        # The hardening lock is anchored under the trusted base_dir, never the external target.
+        assert not (outside / ".lark-cli.hardening.lock").exists()
     finally:
         if integrations.exists():
             os.rmdir(integrations)
