@@ -226,6 +226,13 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Skills
 
+- **skills:** SkillScan reports a non-blocking `python-client-exfil-heuristic`
+  finding where the blocking instance-client signal deliberately stays silent —
+  a client handle reached through a rebind, a branch, a walrus, an attribute, a
+  container item, a factory return, or another scope. It fires only when a file
+  reads sensitive data or dumps the environment, proves no client sink, and
+  still constructs a known client and calls one of its methods, and it is
+  adjudicated by the LLM scanner rather than blocking an install. ([#5169])
 - **skills:** Native SkillScan (phase 1) statically analyzes skill packages at
   load, and `describe_skill` enables deferred discovery so the model fetches a
   skill's schema on demand instead of loading all skills up front. ([#3033],
@@ -2672,3 +2679,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5281]: https://github.com/bytedance/deer-flow/pull/5281
 [#5284]: https://github.com/bytedance/deer-flow/pull/5284
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
+[#5169]: https://github.com/bytedance/deer-flow/pull/5169
