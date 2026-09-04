@@ -6,7 +6,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
-from app.gateway.deps import is_admin_user
+from app.gateway.deps import require_admin_user
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryManager, get_memory_manager
 from deerflow.config.memory_config import get_memory_config
@@ -16,14 +16,30 @@ from deerflow.runtime.user_context import get_effective_user_id
 router = APIRouter(prefix="/api", tags=["memory"])
 
 
+_ADMIN_REQUIRED_DETAIL = "Admin privileges required to view memory configuration."
+
+
+async def _is_admin_user(request: Request) -> bool:
+    """Non-raising admin check used to gate host-path disclosure in responses.
+
+    Fails closed: any error (missing middleware state, auth failure) is treated
+    as non-admin so host paths are redacted rather than accidentally exposed.
+    Mirrors ``integrations._is_admin_user``.
+    """
+    try:
+        await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    except Exception:
+        return False
+    return True
+
+
 async def _redact_backend_config(backend_config: dict, request: Request) -> dict:
     """Return ``backend_config`` with host paths redacted for non-admin callers.
 
     Applied by **every** host-path-emitting memory route (config and status)
     so the redaction cannot be bypassed by hitting the other endpoint.
-    Uses the shared fail-closed ``deps.is_admin_user`` gating.
     """
-    if "storage_path" in backend_config and not await is_admin_user(request):
+    if "storage_path" in backend_config and not await _is_admin_user(request):
         return {**backend_config, "storage_path": None}
     return backend_config
 
