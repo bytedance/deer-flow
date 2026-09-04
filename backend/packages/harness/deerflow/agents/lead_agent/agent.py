@@ -524,7 +524,10 @@ def build_middlewares(
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
-    middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
+    # Per-run opt-out: configurable.disable_memory_injection=True skips memory (date kept).
+    cfg = _get_runtime_config(config)
+    disable_memory = bool(cfg.get("disable_memory_injection", False))
+    middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config, disable_memory=disable_memory))
 
     # Deterministically load a full SKILL.md when the user starts the turn with
     # /skill-name. This keeps the base system prompt metadata-only while giving

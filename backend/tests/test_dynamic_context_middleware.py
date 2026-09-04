@@ -800,3 +800,60 @@ def test_no_recursive_id_swap_in_full_middleware_flow():
     msgs_v2 = result_v2["messages"]
     assert msgs_v2[0].id == "msg-2"  # reminder takes new message's ID
     assert msgs_v2[1].id == "msg-2__user"  # user content gets derived ID
+
+
+# ---------------------------------------------------------------------------
+# Per-run opt-out: configurable.disable_memory_injection
+# ---------------------------------------------------------------------------
+
+_MEMORY_BLOCK = "<memory>\nUser prefers Python.\n</memory>"
+
+
+def _app_config_with_injection_enabled():
+    """Minimal app_config stub: memory.injection_enabled=True (global switch on)."""
+    return SimpleNamespace(memory=SimpleNamespace(injection_enabled=True))
+
+
+def test_disable_memory_skips_memory_but_keeps_current_date():
+    """disable_memory=True → reminder has <current_date> but no <memory>."""
+    mw = _make_middleware(agent_name="test-agent", app_config=_app_config_with_injection_enabled(), disable_memory=True)
+
+    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=_MEMORY_BLOCK):
+        _date_reminder, memory_block = mw._build_full_reminder()
+
+    assert memory_block is None
+    assert "<current_date>" in _date_reminder
+
+
+def test_build_middlewares_propagates_disable_memory_injection_flag():
+    """configurable.disable_memory_injection=True → DynamicContextMiddleware gets disable_memory=True."""
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    config = {"configurable": {"disable_memory_injection": True}}
+    middlewares = build_middlewares(config, model_name=None, agent_name="test-agent", app_config=AppConfig(sandbox=SandboxConfig(use="test")))
+
+    dcm = [m for m in middlewares if isinstance(m, DynamicContextMiddleware)]
+    assert len(dcm) == 1
+    assert dcm[0]._disable_memory is True
+
+
+def test_default_behavior_still_injects_memory():
+    """Regression: without the flag, memory is injected as before."""
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    middlewares = build_middlewares({"configurable": {}}, model_name=None, agent_name="test-agent", app_config=AppConfig(sandbox=SandboxConfig(use="test")))
+
+    dcm = [m for m in middlewares if isinstance(m, DynamicContextMiddleware)]
+    assert len(dcm) == 1
+    assert dcm[0]._disable_memory is False
+
+    mw = _make_middleware(agent_name="test-agent", app_config=_app_config_with_injection_enabled())
+    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=_MEMORY_BLOCK):
+        _date_reminder, memory_block = mw._build_full_reminder()
+
+    assert memory_block is not None and "<memory>" in memory_block
+    assert "<current_date>" in _date_reminder
