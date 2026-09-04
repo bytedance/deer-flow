@@ -709,6 +709,8 @@ run Windows host programs. Keep every mount `container_path` as a POSIX virtual
 path. Drive-prefixed values such as `C:/projects` are rejected on every OS;
 slash-prefixed single-letter roots such as `/c/projects` are rejected during
 Windows configuration validation but remain valid POSIX roots on POSIX hosts.
+Accepted POSIX `container_path` values are canonicalized during configuration
+loading so provider mappings and tool authorization share one spelling.
 For native program arguments, absolute, rooted, drive-relative, traversal, and
 local `file://` paths must resolve under configured mounts. Network URLs remain
 opaque arguments. The Windows wrapper rejects `%`, `^`, quotes, and control

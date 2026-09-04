@@ -684,7 +684,7 @@ LocalSandbox 还会提供 `run_host_program`，用于运行 `.exe`、`.cmd`/`.ba
 `run_host_program` 的超时必须为正数，并且不会超过
 `sandbox.bash_command_timeout`（默认 600 秒）。挂载的 `container_path` 必须
 保持为 POSIX 虚拟路径；像 `C:/projects` 这样的盘符前缀路径在所有系统都会被拒绝，
-而 `/c/projects` 这样的单字母 POSIX 根目录只在 Windows 配置校验时拒绝。
+而 `/c/projects` 这样的单字母 POSIX 根目录只在 Windows 配置校验时拒绝。配置加载时会将合法的 POSIX 路径归一化，因此 provider 映射和工具授权使用相同的路径写法。
 主机路径别名仅适用于 Windows；POSIX 本地部署仍应在工具参数中使用配置的虚拟路径。
 修改沙盒挂载后需要重启 Gateway，以保持授权结果与沙盒路径映射一致。
 原生程序的绝对路径、根路径、盘符相对路径、遍历路径和本地 `file://` 参数必须位于配置的挂载目录下；网络 URL 会作为普通参数保留。Windows 包装器会拒绝 `%`、`^`、引号和控制字符，因为 `cmd.exe` 会在启动前展开或解释这些字符；其他 shell 元字符会被加引号。未指定 `cwd` 时，`run_host_program` 会将工作目录设为程序映射后的父目录，因此相对参数会在该挂载目录内解析。

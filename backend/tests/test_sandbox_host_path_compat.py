@@ -150,6 +150,25 @@ def test_volume_mount_rejects_drive_path_on_non_windows() -> None:
             )
 
 
+def test_volume_mount_canonicalizes_container_path() -> None:
+    mount = VolumeMountConfig(
+        host_path="/tmp",
+        container_path="/root//nested/./",
+        read_only=False,
+    )
+
+    assert mount.container_path == "/root/nested"
+
+
+def test_volume_mount_rejects_drive_relative_container_path() -> None:
+    with pytest.raises(ValidationError, match="POSIX virtual path"):
+        VolumeMountConfig(
+            host_path="/tmp",
+            container_path="C:projects",
+            read_only=False,
+        )
+
+
 def test_normalize_host_path_preserves_single_letter_posix_container_root() -> None:
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr("deerflow.config.sandbox_config.os.name", "posix")
@@ -165,16 +184,23 @@ def test_normalize_host_path_preserves_single_letter_posix_container_root() -> N
         (r"/out:C:\Windows\secret.txt", ("/out:", r"C:\Windows\secret.txt")),
         (r"/LIBPATH:C:\outside", ("/LIBPATH:", r"C:\outside")),
         (r"@C:\outside\args.rsp", ("@", r"C:\outside\args.rsp")),
+        (r"--input=C:\Windows\secret.txt,http://example.test", ("--input=", r"C:\Windows\secret.txt,http://example.test")),
         ("--mode=release", ("--mode=", "release")),
         ("https://example.test/path", ("", "https://example.test/path")),
         ("url:http://example.test/path", ("", "url:http://example.test/path")),
         ("file:///C:/Windows/secret.txt", ("", "file:///C:/Windows/secret.txt")),
-        ("--input=file:///C:/Windows/secret.txt", ("", "--input=file:///C:/Windows/secret.txt")),
-        ("/out:FILE:///C:/Windows/secret.txt", ("", "/out:FILE:///C:/Windows/secret.txt")),
+        ("--input=file:///C:/Windows/secret.txt", ("--input=", "file:///C:/Windows/secret.txt")),
+        ("/out:FILE:///C:/Windows/secret.txt", ("/out:", "FILE:///C:/Windows/secret.txt")),
     ],
 )
 def test_split_program_argument_preserves_option_prefix(value: str, expected: tuple[str, str]) -> None:
     assert split_program_argument(value) == expected
+
+
+def test_split_program_argument_does_not_hide_path_before_embedded_url() -> None:
+    value = r"--input=C:\Windows\secret.txt,http://example.test"
+
+    assert split_program_argument(value) == ("--input=", r"C:\Windows\secret.txt,http://example.test")
 
 
 @pytest.mark.parametrize(
@@ -193,6 +219,8 @@ def test_split_program_argument_preserves_option_prefix(value: str, expected: tu
         "@file:///C:/Windows/args.rsp",
         "FILE:///etc/passwd",
         "/out:file:///C:/Windows/secret.txt",
+        "--input=C:\\Windows\\secret.txt,http://example.test",
+        "--input=C:\\Windows\\secret.txt,foo=http://example.test",
         " file:///etc/passwd ",
         "/out: file:///C:/Windows/secret.txt",
         "/out:\tFILE:///etc/passwd",
@@ -224,4 +252,10 @@ def test_program_argument_path_predicate_covers_rooted_drive_and_traversal_forms
     ],
 )
 def test_program_argument_path_predicate_keeps_non_path_arguments_opaque(value: str) -> None:
+    assert not is_program_argument_path(value)
+
+
+def test_program_argument_path_predicate_handles_long_colon_arguments() -> None:
+    value = ":".join(["0"] * 1000)
+
     assert not is_program_argument_path(value)

@@ -169,6 +169,7 @@ def test_execute_program_batch_invocation_uses_single_helper(monkeypatch) -> Non
         "/out:file:///C:/Windows/secret.txt",
         "/out: file:///C:/Windows/secret.txt",
         "/out:\tFILE:///etc/passwd",
+        "--input=C:\\Windows\\secret.txt,http://example.test",
     ],
 )
 def test_execute_program_rejects_unmapped_path_shaped_argument(argument: str, monkeypatch) -> None:

@@ -20,6 +20,7 @@ _GIT_BASH_DRIVE_PATH = re.compile(r"^/(?P<drive>[A-Za-z])(?:/|$)")
 _PROGRAM_ARGUMENT_DRIVE = re.compile(r"^[A-Za-z]:")
 _PROGRAM_ARGUMENT_TRAVERSAL = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
 _URL_SCHEME_ANYWHERE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+_URL_SCHEME_AT_START = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _FILE_URL_SCHEME = re.compile(r"^file://", re.IGNORECASE)
 
 # Match only absolute Windows drive spellings in command text.  POSIX paths
@@ -57,36 +58,6 @@ def _has_program_path_syntax(value: str) -> bool:
     return bool(value) and (normalized.startswith("/") or value.startswith("\\") or _PROGRAM_ARGUMENT_DRIVE.match(normalized) is not None or _PROGRAM_ARGUMENT_TRAVERSAL.search(normalized) is not None)
 
 
-def _contains_file_url(value: str) -> bool:
-    """Return whether an argument's path candidate is a local ``file://`` URL."""
-    if not isinstance(value, str) or not value:
-        return False
-
-    value = value.strip()
-    if not value:
-        return False
-
-    # A network URL is opaque even when its query or fragment happens to
-    # contain the text ``file://``. Only inspect nested values after an
-    # argument separator, response-file marker, or option-colon prefix.
-    if _FILE_URL_SCHEME.match(value):
-        return True
-    if _URL_SCHEME_ANYWHERE.match(value):
-        return False
-    if value.startswith("@"):
-        return _contains_file_url(value[1:])
-    if "=" in value:
-        candidate = value.split("=", 1)[1]
-        if _URL_SCHEME_ANYWHERE.match(candidate) and not _FILE_URL_SCHEME.match(candidate):
-            return False
-        return _contains_file_url(candidate)
-
-    for index, character in enumerate(value):
-        if character == ":" and _contains_file_url(value[index + 1 :]):
-            return True
-    return False
-
-
 def split_program_argument(value: str) -> tuple[str, str]:
     """Split an option-bearing program argument into prefix and path candidate.
 
@@ -94,25 +65,33 @@ def split_program_argument(value: str) -> tuple[str, str]:
     value (``--tool=C:\\tool.exe``), a colon option (``/out:C:\\tool.exe``),
     or a response-file argument (``@C:\\args.rsp``). URL values remain opaque.
     """
-    if not isinstance(value, str) or not value or _URL_SCHEME_ANYWHERE.search(value):
+    if not isinstance(value, str) or not value:
         return "", value
 
-    if "=" in value:
+    if _URL_SCHEME_AT_START.match(value.strip()):
+        return "", value
+
+    equals_index = value.find("=")
+    url_match = _URL_SCHEME_ANYWHERE.search(value)
+    if equals_index >= 0 and (url_match is None or url_match.start() > equals_index) and not _has_program_path_syntax(value[:equals_index]):
         prefix, candidate = value.split("=", 1)
         nested_prefix, nested_candidate = split_program_argument(candidate)
         return f"{prefix}={nested_prefix}", nested_candidate
 
-    if value.startswith("@") and _has_program_path_syntax(value[1:]):
-        return "@", value[1:]
+    if value.startswith("@"):
+        candidate = value[1:]
+        if _has_program_path_syntax(candidate) or _URL_SCHEME_AT_START.match(candidate.strip()):
+            nested_prefix, nested_candidate = split_program_argument(candidate)
+            return f"@{nested_prefix}", nested_candidate
 
     if _PROGRAM_ARGUMENT_DRIVE.match(value):
         return "", value
 
     for index, character in enumerate(value):
-        if character != ":" or index == 0 or (index == 1 and value[0].isalpha()):
+        if character != ":" or index == 0 or (index == 1 and value[0].isalpha()) or value[index + 1 : index + 3] == "//":
             continue
         candidate = value[index + 1 :]
-        if _has_program_path_syntax(candidate):
+        if _has_program_path_syntax(candidate) or _FILE_URL_SCHEME.match(candidate.strip()):
             nested_prefix, nested_candidate = split_program_argument(candidate)
             return f"{value[: index + 1]}{nested_prefix}", nested_candidate
 
@@ -126,11 +105,13 @@ def program_argument_candidate(value: str) -> str:
 
 def is_program_argument_path(value: str) -> bool:
     """Return whether a program argument contains a rooted, drive, or escape path."""
-    if _URL_SCHEME_ANYWHERE.search(value):
-        return _contains_file_url(value)
-    if _contains_file_url(value):
+    candidate = program_argument_candidate(value)
+    candidate_text = candidate.strip()
+    if _FILE_URL_SCHEME.match(candidate_text):
         return True
-    return _has_program_path_syntax(program_argument_candidate(value))
+    if _URL_SCHEME_AT_START.match(candidate_text):
+        return False
+    return _has_program_path_syntax(candidate)
 
 
 def _canonical_host_path(path: str) -> tuple[str, bool]:

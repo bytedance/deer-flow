@@ -1304,7 +1304,9 @@ the Gateway host and is not a security boundary; remote/container sandbox
 providers do not expose it. Keep mount `container_path` values POSIX-style;
 drive-prefixed values such as `C:/projects` are rejected on every OS, while
 slash-prefixed single-letter roots such as `/c/projects` are rejected only by
-Windows configuration validation.
+Windows configuration validation. Accepted POSIX paths are canonicalized when
+the configuration is loaded, so provider mappings and tool authorization use
+the same path spelling.
 
 This host-path alias is intentionally Windows-only. POSIX local deployments
 continue to use the configured virtual `container_path` in tool arguments.
