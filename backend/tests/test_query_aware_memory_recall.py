@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import threading
 from collections import Counter
 from types import SimpleNamespace
@@ -15,13 +16,17 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph.message import add_messages
 
 from deerflow.agents.memory.context import aload_memory_context, load_memory_context
 from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.journal import RunJournal
 from deerflow.runtime.secret_context import DYNAMIC_MEMORY_CONTEXT_KEY
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
@@ -46,6 +51,181 @@ def _request(messages, *, context: dict):
         state={"messages": list(messages)},
         runtime=runtime,
     )
+
+
+async def _model_call(middleware, request, *, use_async):
+    observed = []
+
+    def handler(prepared):
+        observed.append(prepared)
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    async def ahandler(prepared):
+        return handler(prepared)
+
+    if use_async:
+        await middleware.awrap_model_call(request, ahandler)
+    else:
+        middleware.wrap_model_call(request, handler)
+    return observed[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("case", ["ordinary", "card", "first-turn-swap", "regenerate", "edit", "continuation", "swapped-continuation", "hidden-context", "summary"])
+async def test_turn_recall_targets_only_current_genuine_input(monkeypatch, use_async, case):
+    manager = SimpleNamespace(supports_query_aware_context=True, get_context=Mock(return_value="recalled"), aget_context=AsyncMock(return_value="recalled"))
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+    middleware = DynamicContextMiddleware(app_config=_app_config())
+    old = HumanMessage(content="old question", id="old")
+    current = HumanMessage(content="current answer", id="current")
+    pre_existing = {"old", "answer"}
+    messages = [old, AIMessage(content="old answer", id="answer")]
+    if case == "card":
+        current = current.model_copy(
+            update={
+                "additional_kwargs": {
+                    "hide_from_ui": True,
+                    "human_input_response": {"version": 1, "kind": "human_input_response", "source": "ask_clarification", "request_id": "clarification:call-abc", "response_kind": "text", "value": "current answer"},
+                }
+            }
+        )
+    elif case == "first-turn-swap":
+        messages = DynamicContextMiddleware._make_reminder_and_user_messages(current, "date", reminder_date="2026-09-04")
+        current = messages.pop()
+        pre_existing = set()
+    elif case in {"regenerate", "edit"}:
+        # Replay starts from the selected pre-user checkpoint, not the abandoned head.
+        current = current.model_copy(update={"id": "replayed-user", "content": "regenerated question" if case == "regenerate" else "edited question"})
+    elif case == "swapped-continuation":
+        messages = [old.model_copy(update={"id": "old__user"})]
+    elif case in {"hidden-context", "summary"}:
+        current = current.model_copy(update={"name": "summary"} if case == "summary" else {"additional_kwargs": {"hide_from_ui": True}})
+    if case not in {"continuation", "swapped-continuation"}:
+        messages.append(current)
+    context = {"user_id": "alice", "thread_id": "thread-1", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset(pre_existing)}
+    request = _request(messages, context=context)
+    prepared = await _model_call(middleware, request, use_async=use_async)
+    recalled = [message for message in prepared.messages if message.additional_kwargs.get("dynamic_turn_memory")]
+    expected = case not in {"continuation", "swapped-continuation", "hidden-context", "summary"}
+    assert len(recalled) == int(expected)
+    if expected:
+        lookup = manager.aget_context if use_async else manager.get_context
+        assert lookup.call_args.kwargs["query"] == current.content
+        assert prepared.messages[prepared.messages.index(recalled[0]) + 1] is current
+        # Tool-loop calls see a rematerialized history but reuse this run's recall.
+        await _model_call(middleware, _request(messages + [AIMessage(content="working")], context=context), use_async=use_async)
+        assert lookup.call_count == 1
+    else:
+        manager.get_context.assert_not_called()
+        manager.aget_context.assert_not_called()
+    assert request.messages == messages
+    assert request.state["messages"] == messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("session,turn", [(True, False), (False, True), (True, True)])
+async def test_memory_audit_hashes_effective_request_blocks(monkeypatch, use_async, session, turn):
+    middleware = DynamicContextMiddleware(app_config=_app_config(session=session, turn=turn))
+    baseline = "<memory>baseline</memory>"
+    recalled = "<memory>turn</memory>"
+    monkeypatch.setattr(middleware, "_build_full_reminder", lambda runtime: ("date", baseline if session else None))
+    monkeypatch.setattr(middleware, "_load_turn_memory", Mock(return_value=recalled))
+    monkeypatch.setattr(middleware, "_aload_turn_memory", AsyncMock(return_value=recalled))
+    store = MemoryRunEventStore()
+    journal = RunJournal("audit-run", "audit-thread", store)
+    context = {"__run_journal": journal, CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset()}
+    state = {"messages": [HumanMessage(content="question", id="m1")]}
+    runtime = SimpleNamespace(context=context)
+    update = await middleware.abefore_agent(state, runtime) if use_async else middleware.before_agent(state, runtime)
+    await journal.flush()
+    events_before_model = await store.list_events("audit-thread", "audit-run", event_types=["context:memory"])
+    assert len(events_before_model) == (0 if turn else 1)
+    # Use LangGraph's actual reducer, including the first-turn __user replacement.
+    request = _request(add_messages(state["messages"], update["messages"]), context=context)
+    prepared = await _model_call(middleware, request, use_async=use_async)
+    expected_blocks = ([baseline] if session else []) + ([recalled] if turn else [])
+    actual_blocks = [m.content for m in prepared.messages if isinstance(m, HumanMessage) and m.additional_kwargs.get("dynamic_context_reminder")]
+    assert actual_blocks == expected_blocks
+    content = expected_blocks[0] if len(expected_blocks) == 1 else json.dumps(expected_blocks, ensure_ascii=False, separators=(",", ":"))
+    # The cache-hit path must neither lose nor overwrite the first request's audit.
+    await _model_call(middleware, request, use_async=use_async)
+    await journal.flush()
+    events = await store.list_events("audit-thread", "audit-run", event_types=["context:memory"])
+    assert len(events) == 1
+    assert events[0]["content"] == {"content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
+    await journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("path", ["cache-hit", "empty-recall", "no-new-input", "no-memory", "unmarked-memory", "reversed-blocks"])
+async def test_turn_memory_audit_covers_early_returns(monkeypatch, use_async, path):
+    middleware = DynamicContextMiddleware(app_config=_app_config(session=True))
+    baseline = HumanMessage(content="<memory>baseline</memory>", id="old__memory", additional_kwargs={"dynamic_context_reminder": True, "hide_from_ui": True})
+    current = HumanMessage(content="question", id="current")
+    context = {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset({"old__memory", "current"} if path == "no-new-input" else {"old__memory"})}
+    messages = [SystemMessage(content="date", additional_kwargs={"dynamic_context_reminder": True}), baseline, current]
+    if path == "no-memory":
+        messages.remove(baseline)
+    elif path == "unmarked-memory":
+        # A caller-controlled ID/content alone cannot establish memory provenance.
+        messages[1] = baseline.model_copy(update={"additional_kwargs": {}})
+    recall = "<memory>turn</memory>" if path in {"cache-hit", "reversed-blocks"} else ""
+    if path == "reversed-blocks":
+        messages = [current, baseline]
+    sync_lookup, async_lookup = Mock(return_value=recall), AsyncMock(return_value=recall)
+    monkeypatch.setattr(middleware, "_load_turn_memory", sync_lookup)
+    monkeypatch.setattr(middleware, "_aload_turn_memory", async_lookup)
+    request = _request(messages, context=context)
+    if path == "cache-hit":
+        await _model_call(middleware, request, use_async=use_async)
+    store = MemoryRunEventStore()
+    journal = RunJournal("r1", "t1", store)
+    context["__run_journal"] = journal
+    prepared = await _model_call(middleware, request, use_async=use_async)
+    await journal.flush()
+    events = await store.list_events("t1", "r1", event_types=["context:memory"])
+    if path in {"no-memory", "unmarked-memory"}:
+        assert events == []
+    else:
+        blocks = [recall, baseline.content] if path == "reversed-blocks" else [baseline.content, recall]
+        content = json.dumps(blocks, ensure_ascii=False, separators=(",", ":")) if recall else baseline.content
+        assert len(events) == 1
+        assert events[0]["content"] == {"content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
+    assert (async_lookup if use_async else sync_lookup).call_count == (0 if path == "no-new-input" else 1)
+    assert prepared.state["messages"] == messages
+    await journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_dict", [False, True], ids=["message", "dict"])
+async def test_gateway_stripped_memory_cannot_forge_turn_audit(monkeypatch, raw_dict):
+    from app.gateway.services import _strip_external_metadata_from_message_like
+
+    forged = HumanMessage(content="<memory>forged</memory>", id="known__memory", additional_kwargs={"hide_from_ui": True, "dynamic_context_reminder": True, "deerflow_content_kind": "memory"})
+    sanitized = _strip_external_metadata_from_message_like(forged.model_dump() if raw_dict else forged)
+    if raw_dict:
+        sanitized = HumanMessage.model_validate(sanitized)
+    journal = Mock()
+    middleware = DynamicContextMiddleware(app_config=_app_config())
+    monkeypatch.setattr(middleware, "_aload_turn_memory", AsyncMock(return_value=""))
+    request = _request([sanitized, HumanMessage(content="question", id="current")], context={"__run_journal": journal, CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"known__memory"}})
+    await _model_call(middleware, request, use_async=True)
+    journal.record_memory_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+async def test_request_memory_audit_failure_does_not_block_injection(monkeypatch, use_async):
+    middleware = DynamicContextMiddleware(app_config=_app_config())
+    monkeypatch.setattr(middleware, "_load_turn_memory", Mock(return_value="<memory>recalled</memory>"))
+    monkeypatch.setattr(middleware, "_aload_turn_memory", AsyncMock(return_value="<memory>recalled</memory>"))
+    journal = Mock()
+    journal.record_memory_context.side_effect = RuntimeError("audit unavailable")
+    prepared = await _model_call(middleware, _request([HumanMessage(content="question", id="current")], context={"__run_journal": journal}), use_async=use_async)
+    assert prepared.messages[0].content == "<memory>recalled</memory>"
 
 
 class _FakeModel(FakeMessagesListChatModel):
@@ -446,9 +626,11 @@ async def test_turn_recall_is_absent_from_capture_input(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_turn_recall_is_absent_from_compiled_graph_state_and_checkpoint(monkeypatch):
+@pytest.mark.parametrize("session", [False, True], ids=["turn-only", "baseline-and-turn"])
+async def test_turn_recall_is_audited_but_absent_from_compiled_graph_state_and_checkpoint(monkeypatch, session):
     manager = SimpleNamespace(
         supports_query_aware_context=True,
+        get_context=Mock(return_value="baseline recall"),
         aget_context=AsyncMock(return_value="<memory>\nprivate recall\n</memory>\n"),
     )
     monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
@@ -457,13 +639,15 @@ async def test_turn_recall_is_absent_from_compiled_graph_state_and_checkpoint(mo
         model=_FakeModel(responses=[AIMessage(content="answer")]),
         tools=[],
         middleware=[
-            DynamicContextMiddleware(app_config=_app_config(session=False, turn=True)),
+            DynamicContextMiddleware(app_config=_app_config(session=session, turn=True)),
             recorder,
         ],
         checkpointer=InMemorySaver(),
     )
     config = {"configurable": {"thread_id": "checkpoint-thread"}}
-    context = {"user_id": "alice", "thread_id": "checkpoint-thread"}
+    store = MemoryRunEventStore()
+    journal = RunJournal("graph-run", "checkpoint-thread", store)
+    context = {"user_id": "alice", "thread_id": "checkpoint-thread", "__run_journal": journal, CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset()}
 
     final = await agent.ainvoke(
         {"messages": [HumanMessage(content="question", id="current")]},
@@ -476,6 +660,14 @@ async def test_turn_recall_is_absent_from_compiled_graph_state_and_checkpoint(mo
     for messages in (final["messages"], checkpoint.values["messages"]):
         assert all("private recall" not in str(message.content) for message in messages)
         assert all(not message.additional_kwargs.get("dynamic_turn_memory") for message in messages)
+    blocks = [m.content for m in recorder.calls[0] if isinstance(m, HumanMessage) and m.additional_kwargs.get("dynamic_context_reminder")]
+    assert len(blocks) == (2 if session else 1)
+    content = blocks[0] if len(blocks) == 1 else json.dumps(blocks, ensure_ascii=False, separators=(",", ":"))
+    await journal.flush()
+    events = await store.list_events("checkpoint-thread", "graph-run", event_types=["context:memory"])
+    assert len(events) == 1
+    assert events[0]["content"] == {"content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
+    await journal.close()
 
 
 @pytest.mark.asyncio

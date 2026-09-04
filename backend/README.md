@@ -98,7 +98,7 @@ LLM-powered persistent context retention across conversations:
 - **Structured storage**: User context (work, personal, top-of-mind), history, and confidence-scored facts
 - **Debounced updates**: Batches updates to minimize LLM calls (configurable wait time)
 - **System prompt injection**: Top facts + context injected into agent prompts
-- **Run-level memory identity**: `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory` returns the SHA-256 identity of the effective hidden memory block without copying memory text into the event store
+- **Run-level memory identity**: `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory` returns one SHA-256 identity for the effective hidden memory: the exact content for one block, or a compact JSON array of baseline/turn block contents in model-request order for multiple blocks. No memory text is copied into the event store. With turn recall enabled, recording waits for the first model request with memory; runs stopped before that boundary do not claim memory use. Baseline-only recording is unchanged.
 - **Storage**: JSON file with mtime-based cache invalidation
 
 ### Tool Ecosystem

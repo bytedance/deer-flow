@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import uuid
@@ -43,13 +44,13 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.context import aload_memory_context, load_memory_context
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.secret_context import DYNAMIC_MEMORY_CONTEXT_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.utils.messages import (
     INJECTED_USER_MESSAGE_ID_SUFFIX,
     get_original_user_content_text,
-    is_real_user_message,
     strip_injected_user_message_id_suffix,
 )
 
@@ -280,10 +281,16 @@ class DynamicContextMiddleware(AgentMiddleware):
         return memory_config.enabled and memory_config.injection_enabled and getattr(memory_config, "turn_injection_enabled", False)
 
     @staticmethod
-    def _latest_real_user_message(messages: list) -> tuple[int, HumanMessage, str] | None:
+    def _latest_genuine_user_message(messages: list, context: dict) -> tuple[int, HumanMessage, str] | None:
+        raw_ids = context.get(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY)
+        pre_existing_ids = {strip_injected_user_message_id_suffix(str(message_id)) for message_id in raw_ids if message_id} if isinstance(raw_ids, (frozenset, set, list, tuple)) else set()
         for index in reversed(range(len(messages))):
             message = messages[index]
-            if not is_real_user_message(message):
+            if not is_genuine_user_message(message) or is_dynamic_context_reminder(message):
+                continue
+            # The first-turn date injection replaces X with X__user. Normalize
+            # both sides so that this rewrite cannot turn old input into new input.
+            if strip_injected_user_message_id_suffix(message.id) in pre_existing_ids:
                 continue
             query = get_original_user_content_text(message.content, message.additional_kwargs).strip()
             return (index, message, query) if query else None
@@ -329,13 +336,13 @@ class DynamicContextMiddleware(AgentMiddleware):
     def _prepare_turn_request(self, request: ModelRequest) -> tuple[ModelRequest, tuple[int, HumanMessage, str, str, dict] | None]:
         if not self._turn_recall_enabled():
             return request, None
-        target = self._latest_real_user_message(list(request.messages))
-        if target is None:
-            return request, None
-        target_index, user_message, query = target
         context = self._turn_cache(request)
         if context is None:
             return request, None
+        target = self._latest_genuine_user_message(list(request.messages), context)
+        if target is None:
+            return request, None
+        target_index, user_message, query = target
         cache_key = self._turn_cache_key(user_message, query, target_index)
         cached = context.get(DYNAMIC_MEMORY_CONTEXT_KEY)
         if isinstance(cached, dict) and cached.get("owner_token") == self._turn_cache_owner_token and cached.get("key") == cache_key and isinstance(cached.get("content"), str):
@@ -489,7 +496,8 @@ class DynamicContextMiddleware(AgentMiddleware):
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
         result = self._inject(state, runtime)
-        self._record_effective_memory(state, result, runtime)
+        if not self._turn_recall_enabled():
+            self._record_effective_memory(state, result, runtime)
         return result
 
     @override
@@ -515,9 +523,11 @@ class DynamicContextMiddleware(AgentMiddleware):
                 "DynamicContextMiddleware: injection timed out (%.1fs); skipping new memory/date injection for this turn",
                 _INJECT_TIMEOUT_SECONDS,
             )
-            self._record_effective_memory(state, None, runtime)
+            if not self._turn_recall_enabled():
+                self._record_effective_memory(state, None, runtime)
             return None
-        self._record_effective_memory(state, result, runtime)
+        if not self._turn_recall_enabled():
+            self._record_effective_memory(state, result, runtime)
         return result
 
     @override
@@ -527,12 +537,13 @@ class DynamicContextMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
         prepared, pending = self._prepare_turn_request(request)
-        if pending is None:
-            return handler(prepared)
-        target_index, user_message, query, cache_key, context = pending
-        memory_context = self._load_turn_memory(request, query)
-        self._store_turn_memory(context, cache_key, memory_context)
-        return handler(self._inject_turn_memory(request, target_index, user_message, memory_context))
+        if pending is not None:
+            target_index, user_message, query, cache_key, context = pending
+            memory_context = self._load_turn_memory(request, query)
+            self._store_turn_memory(context, cache_key, memory_context)
+            prepared = self._inject_turn_memory(request, target_index, user_message, memory_context)
+        self._record_request_memory(prepared)
+        return handler(prepared)
 
     @override
     async def awrap_model_call(
@@ -541,12 +552,45 @@ class DynamicContextMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
         prepared, pending = self._prepare_turn_request(request)
-        if pending is None:
-            return await handler(prepared)
-        target_index, user_message, query, cache_key, context = pending
-        memory_context = await self._aload_turn_memory(request, query)
-        self._store_turn_memory(context, cache_key, memory_context)
-        return await handler(self._inject_turn_memory(request, target_index, user_message, memory_context))
+        if pending is not None:
+            target_index, user_message, query, cache_key, context = pending
+            memory_context = await self._aload_turn_memory(request, query)
+            self._store_turn_memory(context, cache_key, memory_context)
+            prepared = self._inject_turn_memory(request, target_index, user_message, memory_context)
+        self._record_request_memory(prepared)
+        return await handler(prepared)
+
+    def _record_request_memory(self, request: ModelRequest) -> None:
+        """Record baseline and turn memory in request order, once per run.
+
+        Baseline-only runs retain their before_agent audit. With turn recall on,
+        wait until request assembly so that baseline cannot win the journal's
+        first-write-wins slot before turn memory exists. Gateway input handling
+        strips caller-supplied reminder markers; an ID suffix alone is not proof.
+        """
+        if not self._turn_recall_enabled():
+            return
+        context = self._turn_cache(request)
+        journal = context.get("__run_journal") if context is not None else None
+        if journal is None:
+            return
+        blocks = [
+            message.content
+            for message in request.messages
+            if isinstance(message, HumanMessage)
+            and is_dynamic_context_reminder(message)
+            and isinstance(message.content, str)
+            and (str(message.id or "").endswith("__memory") or (str(message.id or "").endswith("__turn_memory") and message.additional_kwargs.get(_TURN_MEMORY_MESSAGE_KEY)))
+        ]
+        if not blocks:
+            return
+        try:
+            # Keep the historical identity for one block; JSON framing makes
+            # multiple blocks unambiguous without persisting their contents.
+            content = blocks[0] if len(blocks) == 1 else json.dumps(blocks, ensure_ascii=False, separators=(",", ":"))
+            journal.record_memory_context(content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest())
+        except Exception:
+            logger.debug("Failed to record effective request memory context", exc_info=True)
 
     @staticmethod
     def _effective_memory_message(state, update: dict | None, runtime: Runtime) -> HumanMessage | None:

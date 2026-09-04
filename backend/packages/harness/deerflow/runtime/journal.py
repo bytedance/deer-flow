@@ -860,10 +860,11 @@ class RunJournal(BaseCallbackHandler):
         )
 
     def record_memory_context(self, *, content_sha256: str) -> None:
-        """Record the effective hidden memory block for this run.
+        """Record the first effective memory identity supplied for this run.
 
-        The full block already lives in checkpoint state and may contain user
-        data, so the event stores only its exact SHA-256 identity. Operators
+        The caller hashes one block or an ordered combination of baseline and
+        request-only turn blocks. Memory can contain user data, so this event
+        stores only the SHA-256 identity, never the contents. Operators
         consume it through the existing run-events debug API to compare the
         effective memory used by different runs without copying that content.
         """

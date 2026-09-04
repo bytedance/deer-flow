@@ -143,12 +143,18 @@ Schema. It is the authoritative field-level reference.
 | Per-run message clients | Thread-scoped and stateless run message endpoints call `list_messages_by_run()`. |
 | Run debug/audit | `GET /api/threads/{thread_id}/runs/{run_id}/events` calls `list_events()` and supports `event_types`, `task_id`, `limit`, and `after_seq`. |
 | Historical subtask cards | Fetch `subagent.step` through the run-events endpoint, filtered and paginated by `task_id`. |
-| Memory audit | Filters run events to `context:memory` and compares `content_sha256`; full memory text is not duplicated into the event store. |
+| Memory audit | Filters run events to `context:memory` and compares `content_sha256`: exact UTF-8 content for one block, or a compact JSON array of block contents in model-request order (`ensure_ascii=False`, separators `(',', ':')`) for multiple blocks. Full memory text is not duplicated into the event store. |
 | Workspace review | `GET /api/threads/{thread_id}/runs/{run_id}/workspace-changes` projects the latest `workspace_changes` payload. |
 
 Token and cost summaries are not reconstructed by reading event rows.
 `RunJournal` accumulates usage while callbacks fire, and the worker writes the
 aggregates to `RunRow`.
+
+With turn recall enabled, memory identity is recorded at model-request assembly,
+after baseline and turn blocks are available, including cache hits and empty
+recall. Runs stopped before a model call do not claim memory use. Baseline-only
+mode retains before-agent recording. The journal keeps the first effective
+identity per run; it is not an audit of every subsequent model call.
 
 External Langfuse/LangSmith tracing is a parallel callback pipeline, not a
 `RunEventStore` consumer. It is correlated through trace metadata rather than

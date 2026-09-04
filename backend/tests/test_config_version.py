@@ -7,6 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from deerflow.config.app_config import AppConfig
@@ -126,8 +127,9 @@ def test_newer_user_version_no_warning(caplog):
         assert "outdated" not in caplog.text
 
 
-def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog):
-    """A v26 user config must be flagged outdated and merge the new persisted field.
+@pytest.mark.parametrize("old_version", [26, 39])
+def test_older_config_upgrades_without_overwriting_user_settings(tmp_path, caplog, old_version):
+    """Older configs must warn and gain new fields without losing custom settings.
 
     `database.checkpoint_channel_mode` shipped with config_version 27; the
     upgrade path must add it with the safe default (``full``) without touching
@@ -140,12 +142,12 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     example_src = repo_root / "config.example.yaml"
     example_data = yaml.safe_load(example_src.read_text(encoding="utf-8"))
     expected_version = example_data["config_version"]
-    assert expected_version > 26, "config.example.yaml must be bumped past 26 for checkpoint_channel_mode"
+    assert expected_version > old_version
 
     config_path = tmp_path / "config.yaml"
     (tmp_path / "config.example.yaml").write_text(example_src.read_text(encoding="utf-8"), encoding="utf-8")
     user_config = {
-        "config_version": 26,
+        "config_version": old_version,
         "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
         "database": {"backend": "sqlite", "sqlite_dir": "custom-data"},
     }
@@ -154,7 +156,7 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     with caplog.at_level(logging.WARNING, logger="deerflow.config.app_config"):
         AppConfig._check_config_version(dict(user_config), config_path)
     assert "outdated" in caplog.text
-    assert "(version 26)" in caplog.text
+    assert f"(version {old_version})" in caplog.text
 
     env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
     result = subprocess.run(
@@ -175,6 +177,8 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     assert upgraded["verification"]["receipts_render_mode"] == "delegation_only"
     assert upgraded["verification"]["judge_enabled"] is False
     assert upgraded["verification"]["judge_model_name"] is None
+    assert upgraded["memory"]["session_injection_enabled"] is True
+    assert upgraded["memory"]["turn_injection_enabled"] is False
 
 
 def _load_repo_example() -> dict:
