@@ -291,7 +291,9 @@ def test_thinking_enabled_merges_when_thinking_enabled_settings(monkeypatch):
 
 def test_thinking_disabled_openai_gateway_format(monkeypatch):
     """When thinking is configured via extra_body (OpenAI-compatible gateway),
-    disabling must inject extra_body.thinking.type=disabled and reasoning_effort=minimal."""
+    disabling must inject extra_body.thinking.type=disabled and a portable
+    reasoning_effort. The default is "low" — never "minimal", which is OpenAI-only
+    and rejected by DeepSeek and other OpenAI-compatible providers (issue #4514)."""
     wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 10000}}}
     cfg = _make_app_config(
         [
@@ -317,8 +319,46 @@ def test_thinking_disabled_openai_gateway_format(monkeypatch):
     factory_module.create_chat_model(name="openai-gw", thinking_enabled=False)
 
     assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
-    assert captured.get("reasoning_effort") == "minimal"
+    assert captured.get("reasoning_effort") == "low"
     assert "thinking" not in captured  # must NOT set the direct thinking param
+
+
+def test_flash_mode_reasoning_effort_portable_for_deepseek_style_provider(monkeypatch):
+    """Regression for issue #4514: a DeepSeek-style OpenAI-compatible provider
+    (supports_reasoning_effort=True, thinking nested under extra_body, no explicit
+    when_thinking_disabled) must not emit ``reasoning_effort="minimal"`` in flash
+    mode. "minimal" is OpenAI-only; DeepSeek rejects it with HTTP 400
+    (expected low/medium/high/max/xhigh). The portable default must be "low"."""
+    wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 10000}}}
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "deepseek-v4-flash",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                when_thinking_enabled=wte,
+                # NOTE: no when_thinking_disabled -> exercises the hardcoded default
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    # thinking_enabled=False mirrors the frontend "flash" conversation mode.
+    factory_module.create_chat_model(name="deepseek-v4-flash", thinking_enabled=False)
+
+    assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
+    effort = captured.get("reasoning_effort")
+    assert effort != "minimal"  # OpenAI-only variant must never be sent
+    assert effort == "low"  # portable across all reasoning-effort providers
 
 
 def test_thinking_disabled_langchain_anthropic_format(monkeypatch):
@@ -427,9 +467,11 @@ def test_required_thinking_profile_keeps_base_payload_when_runtime_requests_disa
 
 def test_when_thinking_disabled_takes_precedence_over_hardcoded_disable(monkeypatch):
     """When when_thinking_disabled is set, it takes full precedence over the
-    hardcoded disable logic (extra_body.thinking.type=disabled etc.)."""
+    hardcoded disable logic (extra_body.thinking.type=disabled etc.). The wtd
+    reasoning_effort ("medium") deliberately differs from the hardcoded default
+    ("low") so precedence is actually observable."""
     wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 10000}}}
-    wtd = {"extra_body": {"thinking": {"type": "disabled"}}, "reasoning_effort": "low"}
+    wtd = {"extra_body": {"thinking": {"type": "disabled"}}, "reasoning_effort": "medium"}
     cfg = _make_app_config(
         [
             _make_model(
@@ -455,8 +497,8 @@ def test_when_thinking_disabled_takes_precedence_over_hardcoded_disable(monkeypa
     factory_module.create_chat_model(name="custom-disable", thinking_enabled=False)
 
     assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
-    # User overrode the hardcoded "minimal" with "low"
-    assert captured.get("reasoning_effort") == "low"
+    # User overrode the hardcoded default ("low") with "medium" via wtd.
+    assert captured.get("reasoning_effort") == "medium"
 
 
 def test_when_thinking_disabled_not_used_when_thinking_enabled(monkeypatch):
@@ -599,8 +641,8 @@ def test_reasoning_effort_preserved_when_supported(monkeypatch):
     factory_module.create_chat_model(name="effort-model", thinking_enabled=False)
 
     # When supports_reasoning_effort=True, it should NOT be cleared to None
-    # The disable path sets it to "minimal"; supports_reasoning_effort=True keeps it
-    assert captured.get("reasoning_effort") == "minimal"
+    # The disable path sets it to the portable default "low"; supports_reasoning_effort=True keeps it
+    assert captured.get("reasoning_effort") == "low"
 
 
 # ---------------------------------------------------------------------------
@@ -1201,7 +1243,7 @@ def test_create_chat_model_resolves_patched_mimo_provider(model_id):
 
 def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disabled(monkeypatch):
     """When reasoning_effort is set in config.yaml (extra field) AND the thinking-disabled
-    path also injects reasoning_effort=minimal into kwargs, the factory must not raise
+    path also injects reasoning_effort=low into kwargs, the factory must not raise
     TypeError: got multiple values for keyword argument 'reasoning_effort'."""
     wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 5000}}}
     # ModelConfig.extra="allow" means extra fields from config.yaml land in model_dump()
@@ -1231,8 +1273,8 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
     # Must not raise TypeError
     factory_module.create_chat_model(name="doubao-model", thinking_enabled=False)
 
-    # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=minimal
-    assert captured.get("reasoning_effort") == "minimal"
+    # The thinking-disabled path overrides the config value with the portable default "low".
+    assert captured.get("reasoning_effort") == "low"
 
 
 # ---------------------------------------------------------------------------
