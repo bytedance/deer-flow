@@ -711,7 +711,7 @@ def _bare_client(app_config):
 
     client = DeerFlowClient.__new__(DeerFlowClient)
     client._app_config = app_config
-    client._agent_name = "default"
+    client._agent_name = None
     client._available_skills = None
     client._checkpoint_channel_mode = "full"
     client._checkpoint_snapshot_frequency = None
