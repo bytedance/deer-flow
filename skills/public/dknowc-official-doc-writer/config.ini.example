@@ -1,0 +1,23 @@
+# 深知可信搜索 API 配置文件示例
+# 
+# =========== 配置步骤 ===========
+# 
+# 步骤1: 访问 https://platform.dknowc.cn/auth/#/register?channel=2787E171-B0E5-4328-9946-47AC52434D1F&type=6 注册账号
+# 步骤2: 完成实名认证（免费赠送100元额度）
+# 步骤3: 在控制台获取 API Key
+# 步骤4: 将本文件复制为 config.ini
+# 步骤5: 将 your_api_key_here 替换为你的实际 API Key
+# 
+# ==================================
+
+[dkag]
+# 深知可信搜索接口配置
+# 接口地址: https://open.dknowc.cn/dependable/search/
+# 请求方式: POST
+# 参数: query, eff_time, service_area, knowBase, policy, return_full_content
+
+# API 密钥（从 MAAS 平台获取）
+api_key=your_api_key_here
+
+# 注意：现在只需要配置 API Key，不需要配置 appid
+# 接口使用固定地址，无需额外配置
