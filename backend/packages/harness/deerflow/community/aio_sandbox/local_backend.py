@@ -564,6 +564,14 @@ class LocalContainerBackend(SandboxBackend):
             )
         )
 
+    def _sandbox_labels(self, sandbox_id: str) -> dict[str, str]:
+        """Return the stable identity shared by every Docker sandbox mode."""
+        return {
+            "deerflow.sandbox_id": sandbox_id,
+            "deerflow.role": "sandbox",
+            "deerflow.network_mode": self._network_mode,
+        }
+
     def _network_policy_digest(self) -> str:
         allow_domains = self._network_config.get("allow_domains", [])
         canonical_domains = sorted({value for value in allow_domains if isinstance(value, str)}) if isinstance(allow_domains, list) else []
@@ -599,6 +607,37 @@ class LocalContainerBackend(SandboxBackend):
             "deerflow.network_mode": self._network_mode,
             _NETWORK_POLICY_DIGEST_LABEL: self._network_policy_digest(),
         }
+
+    def _persisted_sandbox_mode(self, sandbox: _ContainerInspection, sandbox_id: str) -> str | None:
+        """Classify an inspected container without claiming or mutating it.
+
+        Matching DeerFlow identity labels are authoritative. Unlabelled
+        containers can only be legacy ``open`` sandboxes: open mode preserves
+        the historical name-based discovery contract, while a restricted
+        process accepts the narrower legacy shape of the configured image with
+        a published API port. Any partial/mismatched DeerFlow identity is left
+        unmanaged so a configurable prefix cannot turn a sidecar or unrelated
+        labelled container into a sandbox.
+        """
+        labels = sandbox.labels
+        role = labels.get("deerflow.role")
+        labelled_id = labels.get("deerflow.sandbox_id")
+        labelled_mode = labels.get("deerflow.network_mode")
+        identity_keys_present = any(key in labels for key in ("deerflow.role", "deerflow.sandbox_id", "deerflow.network_mode"))
+
+        if role == "sandbox" and labelled_id == sandbox_id:
+            # A missing/unknown value still proves DeerFlow ownership, but it
+            # cannot be adopted under any current policy. Returning a sentinel
+            # routes it through the fenced replacement path.
+            return labelled_mode or "unknown"
+        if identity_keys_present:
+            return None
+
+        if self._network_mode == "open":
+            return "open"
+        if sandbox.host_port is not None and sandbox.image == self._image:
+            return "open"
+        return None
 
     @staticmethod
     def _labels_match(actual: dict[str, str], expected: dict[str, str]) -> bool:
@@ -796,6 +835,7 @@ class LocalContainerBackend(SandboxBackend):
                         port,
                         extra_mounts,
                         config_mount_exclusion_root=config_mount_exclusion_root,
+                        labels=self._sandbox_labels(sandbox_id),
                     )
                 else:
                     relay_token = secrets.token_urlsafe(32)
@@ -1063,7 +1103,11 @@ class LocalContainerBackend(SandboxBackend):
         stop_target = info.container_id or info.container_name
         if stop_target:
             self._stop_container(stop_target)
-        if self._network_mode != "open":
+        # An incompatible sandbox discovered while the new process is in open
+        # mode may have been provisioned by a previous restricted-mode process.
+        # Remove its deterministic sidecar/networks from this provider-owned,
+        # fenced destroy path as well (never from discovery itself).
+        if self._runtime == "docker" and (self._network_mode != "open" or info.requires_replacement):
             self._cleanup_restricted_resources(info.sandbox_id, stop_sandbox=False)
         # Extract port from sandbox_url for release
         try:
@@ -1117,29 +1161,48 @@ class LocalContainerBackend(SandboxBackend):
         request_headers: dict[str, str] = {}
         restricted_port: int | None = None
         created_at = time.time()
-        if self._network_mode != "open":
-            proxy_name, _ = self._resource_names(sandbox_id)
+        inspections: dict[str, _ContainerInspection] = {}
+        sandbox_inspection: _ContainerInspection | None = None
+        if self._runtime == "docker":
             try:
-                inspections = self._batch_inspect([container_name, proxy_name], strict=True)
-                resource_status = self._restricted_resources_status(sandbox_id, inspections=inspections)
+                inspections = self._batch_inspect([container_name], strict=True)
             except RuntimeError as e:
-                logger.warning("Could not verify persisted network policy for sandbox %s: %s", sandbox_id, e)
+                logger.warning("Could not inspect persisted sandbox %s: %s", sandbox_id, e)
                 return None
             sandbox_inspection = inspections.get(container_name)
             if sandbox_inspection is None:
                 return None
-            if sandbox_inspection.labels.get("deerflow.role") != "sandbox" or sandbox_inspection.labels.get("deerflow.sandbox_id") != sandbox_id:
+            persisted_mode = self._persisted_sandbox_mode(sandbox_inspection, sandbox_id)
+            if persisted_mode is None:
                 logger.warning(
-                    "Container %s uses the sandbox name but lacks matching DeerFlow ownership labels; leaving it unmanaged",
+                    "Container %s uses the sandbox name but lacks a compatible DeerFlow identity; leaving it unmanaged",
                     container_name,
                 )
+                return None
+            created_at = sandbox_inspection.created_at
+            if persisted_mode != self._network_mode:
+                return SandboxInfo(
+                    sandbox_id=sandbox_id,
+                    sandbox_url="",
+                    container_name=container_name,
+                    created_at=created_at,
+                    requires_replacement=True,
+                )
+
+        if self._network_mode != "open":
+            proxy_name, _ = self._resource_names(sandbox_id)
+            try:
+                inspections.update(self._batch_inspect([proxy_name], strict=True))
+                resource_status = self._restricted_resources_status(sandbox_id, inspections=inspections)
+            except RuntimeError as e:
+                logger.warning("Could not verify persisted network policy for sandbox %s: %s", sandbox_id, e)
                 return None
             if resource_status != "compatible":
                 return SandboxInfo(
                     sandbox_id=sandbox_id,
                     sandbox_url="",
                     container_name=container_name,
-                    created_at=sandbox_inspection.created_at,
+                    created_at=created_at,
                     requires_replacement=True,
                 )
             proxy_inspection = inspections.get(proxy_name)
@@ -1147,11 +1210,23 @@ class LocalContainerBackend(SandboxBackend):
                 return None
             restricted_port = proxy_inspection.host_port
             request_headers = {RELAY_AUTH_HEADER: proxy_inspection.relay_token}
-            created_at = sandbox_inspection.created_at
 
-        port = restricted_port if restricted_port is not None else self._get_container_port(container_name)
+        if restricted_port is not None:
+            port = restricted_port
+        elif sandbox_inspection is not None:
+            port = sandbox_inspection.host_port
+        else:
+            # Apple Container is supported only in open mode and does not use
+            # Docker labels, so retain its native port-discovery path.
+            port = self._get_container_port(container_name)
         if port is None:
-            return None
+            return SandboxInfo(
+                sandbox_id=sandbox_id,
+                sandbox_url="",
+                container_name=container_name,
+                created_at=created_at,
+                requires_replacement=True,
+            )
 
         sandbox_host = _normalize_sandbox_host_for_url(os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost"))
         sandbox_url = f"http://{sandbox_host}:{port}"
@@ -1171,17 +1246,20 @@ class LocalContainerBackend(SandboxBackend):
         """Enumerate all running containers matching the configured prefix.
 
         Uses a single ``docker ps`` call to list container names, then a
-        single batched ``docker inspect`` call to retrieve creation timestamp
-        and port mapping for all containers at once.  Total subprocess calls:
-        2 (down from 2N+1 in the naive per-container approach).
+        batched ``docker inspect`` calls to retrieve creation timestamp, mode,
+        and port mapping. Restricted mode uses a second inspect only for the
+        proxies paired with already-identified restricted sandboxes, avoiding
+        fabricated resource names for sidecars caught by an overlapping custom
+        prefix. Total subprocess calls: 2 in open mode and at most 3 in a
+        restricted mode (down from 2N+1 in the naive per-container approach).
 
         Note: Docker's ``--filter name=`` performs *substring* matching,
         so a secondary ``startswith`` check is applied to ensure only
         containers with the exact prefix are included.
 
-        Containers without port mappings are still included (with empty
-        sandbox_url) so that startup reconciliation can adopt orphans
-        regardless of their port state.
+        Containers without a usable port mapping are still included with an
+        empty sandbox URL and ``requires_replacement=True`` so startup
+        reconciliation can remove them only after ownership fencing.
         """
         # Step 1: enumerate container names via docker ps
         try:
@@ -1191,7 +1269,6 @@ class LocalContainerBackend(SandboxBackend):
                     "ps",
                     "--filter",
                     f"name={self._container_prefix}-",
-                    *(("--filter", "label=deerflow.role=sandbox") if self._network_mode != "open" else ()),
                     "--format",
                     "{{.Names}}",
                 ],
@@ -1219,15 +1296,32 @@ class LocalContainerBackend(SandboxBackend):
         if not container_names:
             return []
 
-        # Step 2: batched docker inspect — single subprocess call for all containers
-        inspect_names = list(container_names)
-        if self._network_mode != "open":
-            inspect_names.extend(self._resource_names(name[len(self._container_prefix) + 1 :])[0] for name in container_names)
+        # Step 2: inspect candidate containers before deriving any paired
+        # resource names. A custom prefix can overlap the fixed sidecar prefix,
+        # and only the inspected role label distinguishes that sidecar from a
+        # real sandbox.
         try:
-            inspections = self._batch_inspect(inspect_names, strict=True)
+            inspections = self._batch_inspect(container_names, strict=True)
         except RuntimeError as e:
             logger.warning("Failed to inspect running sandbox resources: %s", e)
             return []
+
+        persisted_modes: dict[str, str | None] = {}
+        for container_name in container_names:
+            data = inspections.get(container_name)
+            if data is None:
+                continue
+            sandbox_id = container_name[len(self._container_prefix) + 1 :]
+            persisted_modes[container_name] = self._persisted_sandbox_mode(data, sandbox_id) if self._runtime == "docker" else "open"
+
+        if self._network_mode != "open":
+            proxy_names = [self._resource_names(name[len(self._container_prefix) + 1 :])[0] for name, persisted_mode in persisted_modes.items() if persisted_mode == self._network_mode]
+            if proxy_names:
+                try:
+                    inspections.update(self._batch_inspect(proxy_names, strict=True))
+                except RuntimeError as e:
+                    logger.warning("Failed to inspect running sandbox proxy resources: %s", e)
+                    return []
 
         infos: list[SandboxInfo] = []
         sandbox_host = _normalize_sandbox_host_for_url(os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost"))
@@ -1237,17 +1331,17 @@ class LocalContainerBackend(SandboxBackend):
                 # Container disappeared between ps and inspect, or inspect failed
                 continue
             sandbox_id = container_name[len(self._container_prefix) + 1 :]
-            if self._network_mode != "open" and (data.labels.get("deerflow.role") != "sandbox" or data.labels.get("deerflow.sandbox_id") != sandbox_id):
+            persisted_mode = persisted_modes.get(container_name)
+            if persisted_mode is None:
                 # A custom prefix such as ``deer-flow`` also matches the fixed
-                # ``deer-flow-netproxy-*`` sidecar names. Docker's label filter
-                # excludes them in production; this inspection check keeps the
-                # role boundary explicit and fail-closed even if a runtime
-                # returns a broader name-filter result.
+                # ``deer-flow-netproxy-*`` sidecar names. Inspecting the stable
+                # role/id identity excludes them while still allowing legacy
+                # open sandboxes to be reported for a fenced mode transition.
                 continue
             created_at, host_port = data.created_at, data.host_port
             request_headers: dict[str, str] = {}
-            requires_replacement = False
-            if self._network_mode != "open":
+            requires_replacement = persisted_mode != self._network_mode
+            if not requires_replacement and self._network_mode != "open":
                 proxy_name, _ = self._resource_names(sandbox_id)
                 proxy_data = inspections.get(proxy_name)
                 try:
@@ -1262,6 +1356,13 @@ class LocalContainerBackend(SandboxBackend):
                     host_port = proxy_data.host_port if proxy_data is not None else None
                     if proxy_data is not None and proxy_data.relay_token is not None:
                         request_headers = {RELAY_AUTH_HEADER: proxy_data.relay_token}
+            elif not requires_replacement and host_port is None:
+                # An open-mode container without its published API port cannot
+                # be adopted. Report it instead of placing an unusable empty URL
+                # in the warm pool.
+                requires_replacement = True
+            if requires_replacement:
+                host_port = None
             sandbox_url = f"http://{sandbox_host}:{host_port}" if host_port else ""
 
             infos.append(

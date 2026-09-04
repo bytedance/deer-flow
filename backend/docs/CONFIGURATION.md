@@ -732,7 +732,13 @@ and IPv6 so the sandbox cannot reach services bound to either host-side bridge
 address. The sandbox, sidecar, internal network, and egress network carry a
 digest of the effective policy, proxy source, and image reference; startup and
 reconciliation destroy and recreate a persisted resource set when that identity
-or its required network properties no longer match. Docker Desktop is detected
+or its required network properties no longer match. Docker sandboxes in every
+mode also carry stable identity and mode labels. After a Gateway restart,
+changing between `open` and a restricted mode is therefore reported as an
+incompatible persisted sandbox and replaced only after the normal ownership,
+orphan-grace, and teardown fences. Unlabelled open containers from older
+DeerFlow versions are recognized when they use the configured image and retain
+their published API port. Docker Desktop is detected
 from the daemon, not the Gateway process, so Docker-outside-of-Docker deployments
 handle its synthetic DNS range correctly. The policy sidecar publishes only its
 fixed sandbox-API relay back to the Gateway; the sandbox API itself is not

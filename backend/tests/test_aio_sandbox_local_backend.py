@@ -221,6 +221,26 @@ def test_network_policy_digest_is_canonical_and_covers_effective_policy():
     assert backend._network_policy_digest() != original
 
 
+def test_open_create_labels_sandbox_identity_and_mode(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    captured: dict[str, object] = {}
+
+    def fake_start(*_args, **kwargs):
+        captured.update(kwargs)
+        return "container-id"
+
+    monkeypatch.setattr(backend, "_start_container", fake_start)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    backend.create(thread_id="thread", sandbox_id="labelled-open")
+
+    assert captured["labels"] == {
+        "deerflow.sandbox_id": "labelled-open",
+        "deerflow.role": "sandbox",
+        "deerflow.network_mode": "open",
+    }
+
+
 def test_create_internal_network_isolates_both_gateway_families_and_labels_policy(monkeypatch):
     backend = _restricted_backend()
     commands: list[list[str]] = []
@@ -1090,7 +1110,11 @@ def test_restricted_discovery_uses_proxy_relay_port(monkeypatch):
         container_name: _ContainerInspection(
             1.0,
             None,
-            {"deerflow.role": "sandbox", "deerflow.sandbox_id": "existing"},
+            {
+                "deerflow.role": "sandbox",
+                "deerflow.sandbox_id": "existing",
+                "deerflow.network_mode": "allowlist",
+            },
             "sandbox:latest",
             frozenset(),
         ),
@@ -1135,7 +1159,11 @@ def test_restricted_discovery_reports_stale_policy_without_removing_resources(mo
             container_name: _ContainerInspection(
                 1.0,
                 None,
-                {"deerflow.role": "sandbox", "deerflow.sandbox_id": "stale"},
+                {
+                    "deerflow.role": "sandbox",
+                    "deerflow.sandbox_id": "stale",
+                    "deerflow.network_mode": "allowlist",
+                },
                 "sandbox:latest",
                 frozenset(),
             )
@@ -1151,6 +1179,97 @@ def test_restricted_discovery_reports_stale_policy_without_removing_resources(mo
     assert info.container_name == "sandbox-stale"
     assert info.requires_replacement is True
     assert cleaned == []
+
+
+def test_restricted_discovery_reports_legacy_open_sandbox_for_fenced_replacement(monkeypatch):
+    backend = _restricted_backend()
+    container_name = "sandbox-legacy-open"
+    inspected_batches: list[list[str]] = []
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+
+    def fake_batch_inspect(names, **_kwargs):
+        inspected_batches.append(list(names))
+        return {
+            container_name: _ContainerInspection(
+                1.0,
+                18080,
+                {},
+                "sandbox:latest",
+                frozenset({"bridge"}),
+            )
+        }
+
+    monkeypatch.setattr(backend, "_batch_inspect", fake_batch_inspect)
+
+    info = backend.discover("legacy-open")
+
+    assert info is not None
+    assert info.requires_replacement is True
+    assert info.sandbox_url == ""
+    assert inspected_batches == [[container_name]]
+
+
+def test_restricted_discovery_reports_labelled_open_sandbox_for_fenced_replacement(monkeypatch):
+    backend = _restricted_backend()
+    container_name = "sandbox-labelled-open"
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            container_name: _ContainerInspection(
+                1.0,
+                18080,
+                {
+                    "deerflow.role": "sandbox",
+                    "deerflow.sandbox_id": "labelled-open",
+                    "deerflow.network_mode": "open",
+                },
+                "sandbox:latest",
+                frozenset({"bridge"}),
+            )
+        },
+    )
+    monkeypatch.setattr(
+        backend,
+        "_restricted_resources_status",
+        lambda *_args, **_kwargs: pytest.fail("a mode mismatch must be reported before restricted resource inspection"),
+    )
+
+    info = backend.discover("labelled-open")
+
+    assert info is not None
+    assert info.requires_replacement is True
+    assert info.sandbox_url == ""
+
+
+def test_open_discovery_reports_restricted_sandbox_for_fenced_replacement(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    container_name = "sandbox-old-restricted"
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            container_name: _ContainerInspection(
+                1.0,
+                None,
+                {
+                    "deerflow.role": "sandbox",
+                    "deerflow.sandbox_id": "old-restricted",
+                    "deerflow.network_mode": "allowlist",
+                },
+                "sandbox:latest",
+                frozenset({"deer-flow-sandbox-net-old"}),
+            )
+        },
+    )
+
+    info = backend.discover("old-restricted")
+
+    assert info is not None
+    assert info.requires_replacement is True
+    assert info.sandbox_url == ""
 
 
 def test_restricted_discovery_leaves_unlabelled_name_collision_unmanaged(monkeypatch):
@@ -1177,6 +1296,27 @@ def test_restricted_discovery_leaves_unlabelled_name_collision_unmanaged(monkeyp
 
     assert backend.discover("foreign") is None
     assert cleaned == []
+
+
+def test_restricted_discovery_leaves_unlabelled_published_foreign_image_unmanaged(monkeypatch):
+    backend = _restricted_backend()
+    container_name = "sandbox-foreign-published"
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            container_name: _ContainerInspection(
+                1.0,
+                18080,
+                {},
+                "foreign:latest",
+                frozenset({"bridge"}),
+            )
+        },
+    )
+
+    assert backend.discover("foreign-published") is None
 
 
 def test_restricted_health_rejects_resources_with_stale_policy(monkeypatch):
@@ -1210,7 +1350,11 @@ def test_restricted_list_reconciliation_reports_stale_policy_without_removing_re
             "sandbox-stale": _ContainerInspection(
                 1.0,
                 None,
-                {"deerflow.role": "sandbox", "deerflow.sandbox_id": "stale"},
+                {
+                    "deerflow.role": "sandbox",
+                    "deerflow.sandbox_id": "stale",
+                    "deerflow.network_mode": "allowlist",
+                },
                 "sandbox:latest",
                 frozenset(),
             ),
@@ -1234,6 +1378,68 @@ def test_restricted_list_reconciliation_reports_stale_policy_without_removing_re
     assert cleaned == []
 
 
+def test_restricted_list_reports_legacy_open_sandbox_for_fenced_replacement(monkeypatch):
+    backend = _restricted_backend()
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(stdout="sandbox-legacy-open\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda _names, **_kwargs: {
+            "sandbox-legacy-open": _ContainerInspection(
+                1.0,
+                18080,
+                {},
+                "sandbox:latest",
+                frozenset({"bridge"}),
+            )
+        },
+    )
+
+    infos = backend.list_running()
+
+    assert len(infos) == 1
+    assert infos[0].requires_replacement is True
+    assert infos[0].sandbox_url == ""
+    assert "label=deerflow.role=sandbox" not in commands[0]
+
+
+def test_open_list_reports_restricted_sandbox_for_fenced_replacement(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="sandbox-old-restricted\n", stderr="", returncode=0),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda _names, **_kwargs: {
+            "sandbox-old-restricted": _ContainerInspection(
+                1.0,
+                None,
+                {
+                    "deerflow.role": "sandbox",
+                    "deerflow.sandbox_id": "old-restricted",
+                    "deerflow.network_mode": "isolated",
+                },
+                "sandbox:latest",
+                frozenset({"deer-flow-sandbox-net-old"}),
+            )
+        },
+    )
+
+    infos = backend.list_running()
+
+    assert len(infos) == 1
+    assert infos[0].requires_replacement is True
+    assert infos[0].sandbox_url == ""
+
+
 def test_restricted_list_running_excludes_sidecars_for_overlapping_custom_prefix(monkeypatch):
     backend = _backend_for_inspect_tests()
     backend._network_mode = "allowlist"
@@ -1252,14 +1458,19 @@ def test_restricted_list_running_excludes_sidecars_for_overlapping_custom_prefix
         )
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    monkeypatch.setattr(
-        backend,
-        "_batch_inspect",
-        lambda _names, **_kwargs: {
+    inspected_batches: list[list[str]] = []
+
+    def fake_batch_inspect(names, **_kwargs):
+        inspected_batches.append(list(names))
+        return {
             sandbox_name: _ContainerInspection(
                 1.0,
                 None,
-                {"deerflow.role": "sandbox", "deerflow.sandbox_id": sandbox_id},
+                {
+                    "deerflow.role": "sandbox",
+                    "deerflow.sandbox_id": sandbox_id,
+                    "deerflow.network_mode": "allowlist",
+                },
                 "sandbox:latest",
                 frozenset(),
             ),
@@ -1271,8 +1482,9 @@ def test_restricted_list_running_excludes_sidecars_for_overlapping_custom_prefix
                 frozenset(),
                 "test-relay-token-that-is-at-least-32-bytes",
             ),
-        },
-    )
+        }
+
+    monkeypatch.setattr(backend, "_batch_inspect", fake_batch_inspect)
     checked: list[str] = []
 
     def compatible(current_sandbox_id, **_kwargs):
@@ -1285,7 +1497,10 @@ def test_restricted_list_running_excludes_sidecars_for_overlapping_custom_prefix
 
     assert [info.sandbox_id for info in infos] == [sandbox_id]
     assert checked == [sandbox_id]
-    assert "label=deerflow.role=sandbox" in commands[0]
+    assert "label=deerflow.role=sandbox" not in commands[0]
+    sidecar_as_sandbox_id = proxy_name[len(backend._container_prefix) + 1 :]
+    fabricated_proxy_name, _ = backend._resource_names(sidecar_as_sandbox_id)
+    assert fabricated_proxy_name not in {name for batch in inspected_batches for name in batch}
 
 
 def test_restricted_destroy_stops_pair_and_removes_both_networks(monkeypatch):
@@ -1315,6 +1530,30 @@ def test_restricted_destroy_stops_pair_and_removes_both_networks(monkeypatch):
     assert ["docker", "rm", "-f", proxy_name] in commands
     assert ["docker", "network", "rm", network_name] in commands
     assert ["docker", "network", "rm", egress_network_name] in commands
+
+
+def test_open_mode_replacement_destroy_removes_restricted_sidecar_and_networks(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    stopped: list[str] = []
+    cleaned: list[tuple[str, bool]] = []
+    monkeypatch.setattr(backend, "_stop_container", stopped.append)
+    monkeypatch.setattr(
+        backend,
+        "_cleanup_restricted_resources",
+        lambda sandbox_id, *, stop_sandbox=True: cleaned.append((sandbox_id, stop_sandbox)),
+    )
+
+    backend.destroy(
+        SandboxInfo(
+            sandbox_id="old-restricted",
+            sandbox_url="",
+            container_name="sandbox-old-restricted",
+            requires_replacement=True,
+        )
+    )
+
+    assert stopped == ["sandbox-old-restricted"]
+    assert cleaned == [("old-restricted", False)]
 
 
 def test_is_container_running_false_on_apple_container_not_found(monkeypatch):
@@ -1433,7 +1672,19 @@ def test_discover_brackets_ipv6_sandbox_host_for_url(monkeypatch, sandbox_host):
     backend = _backend_for_inspect_tests()
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", sandbox_host)
     monkeypatch.setattr(backend, "_is_container_running", lambda name: True)
-    monkeypatch.setattr(backend, "_get_container_port", lambda name: 18081)
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            "sandbox-sbx-ipv6": _ContainerInspection(
+                1.0,
+                18081,
+                {},
+                "sandbox:latest",
+                frozenset({"bridge"}),
+            )
+        },
+    )
 
     seen_urls = []
 

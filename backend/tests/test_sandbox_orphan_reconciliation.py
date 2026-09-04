@@ -178,6 +178,7 @@ def test_list_running_includes_containers_without_port(monkeypatch):
     assert len(infos) == 1
     assert infos[0].sandbox_id == "abc12345"
     assert infos[0].sandbox_url == ""
+    assert infos[0].requires_replacement is True
 
 
 def test_list_running_handles_docker_failure(monkeypatch):

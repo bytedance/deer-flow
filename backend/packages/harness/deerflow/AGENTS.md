@@ -97,7 +97,7 @@ reject policy-denied names before DNS and try all validated answers. Claim the
 oldest unsurfaced denial; subagent/non-interactive runs drain and deny. Approvals
 never replay tools; policy labels fence reuse. CONNECT/SNI cannot inspect
 encrypted authority. Discovery and enumeration are read-only, including on a
-policy mismatch; only the provider may replace a mismatched sandbox after the
+policy or network-mode mismatch; only the provider may replace it after the
 orphan grace, local teardown reservation, and cross-instance teardown lease.
 Destroy the sandbox, sidecar, and both networks together.
 
