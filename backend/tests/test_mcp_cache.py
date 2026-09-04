@@ -459,6 +459,79 @@ def test_config_change_during_initialization_discards_stale_tools(cache_globals,
     assert calls == 2
 
 
+def test_config_change_during_initialization_retires_pool_for_same_server_connection_change(cache_globals, monkeypatch, tmp_path):
+    """Discarding a mid-load config change must also retire pooled sessions.
+
+    A stale load can create a pooled session before ``initialize_mcp_tools``
+    notices that the config changed and discards the loaded tools. If the server
+    name and scope stay the same while the connection changes, the next load can
+    otherwise reuse that old session because ``MCPSessionPool`` keys only by
+    ``(server_name, scope_key)``.
+    """
+    from deerflow.mcp import session_pool as session_pool_module
+
+    class FakeSession:
+        def __init__(self, command: str) -> None:
+            self.command = command
+
+    class FakeSessionPool:
+        def __init__(self) -> None:
+            self.closed = False
+            self.sessions = {}
+
+        async def get_session(self, server_name, scope_key, connection):
+            key = (server_name, scope_key)
+            if key not in self.sessions:
+                self.sessions[key] = FakeSession(connection["command"])
+            return self.sessions[key]
+
+        def close_all_sync(self) -> None:
+            self.closed = True
+
+    real_reset_session_pool = session_pool_module.reset_session_pool
+    monkeypatch.setattr(session_pool_module, "MCPSessionPool", FakeSessionPool)
+    real_reset_session_pool()
+    old_pool = session_pool_module.get_session_pool()
+
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"same": _server("npx")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    calls = 0
+    loaded_pools = []
+    loaded_sessions = []
+
+    async def _fake_tools():
+        nonlocal calls
+        calls += 1
+        server = json.loads(cfg.read_text())["mcpServers"]["same"]
+        pool = session_pool_module.get_session_pool()
+        session = await pool.get_session("same", "thread-1", server)
+        loaded_pools.append(pool)
+        loaded_sessions.append(session)
+        if calls == 1:
+            _write_extensions_config(cfg, {"same": _server("uvx")})
+        return [f"session-{session.command}"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    try:
+        first = asyncio.run(cache_module.initialize_mcp_tools())
+        assert first == []
+        assert cache_module._cache_initialized is False
+
+        second = cache_module.get_cached_mcp_tools()
+
+        assert second == ["session-uvx"]
+        assert loaded_pools[0] is old_pool
+        assert loaded_pools[1] is not old_pool
+        assert loaded_sessions[0] is not loaded_sessions[1]
+        assert old_pool.closed is True
+        assert cache_module._cache_initialized is True
+    finally:
+        real_reset_session_pool()
+
+
 def test_reset_mcp_tools_cache_does_not_wait_for_in_flight_initialization(cache_globals, monkeypatch, tmp_path):
     """Event-loop callers can reset cache state without waiting for a slow tool load."""
     cfg = tmp_path / "extensions_config.json"

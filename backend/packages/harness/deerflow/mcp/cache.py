@@ -168,6 +168,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                     _initializing_generation = None
                 _init_condition.notify_all()
 
+    retired_pool = None
     with _init_condition:
         try:
             if _cache_generation != claim_generation:
@@ -176,22 +177,21 @@ async def initialize_mcp_tools() -> list[BaseTool]:
 
             if (pre_path, pre_sig) != (post_path, post_sig):
                 logger.warning("MCP config changed during initialization; discarding stale result")
-                _cache_generation += 1
-                _mcp_tools_cache = None
-                _cache_initialized = False
-                _config_path = None
-                _config_signature = None
-                return []
-
-            _mcp_tools_cache = loaded_tools
-            _cache_initialized = True
-            _config_path, _config_signature = post_path, post_sig
-            logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
-            return _mcp_tools_cache
+                retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+            else:
+                _mcp_tools_cache = loaded_tools
+                _cache_initialized = True
+                _config_path, _config_signature = post_path, post_sig
+                logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
+                return _mcp_tools_cache
         finally:
             if _initializing_generation == claim_generation:
                 _initializing_generation = None
             _init_condition.notify_all()
+
+    if retired_pool is not None:
+        retired_pool.close_all_sync()
+    return []
 
 
 def get_cached_mcp_tools() -> list[BaseTool]:
