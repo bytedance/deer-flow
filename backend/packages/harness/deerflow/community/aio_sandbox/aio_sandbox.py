@@ -187,6 +187,14 @@ class AioSandbox(Sandbox):
         exit_code = getattr(data, "exit_code", None) if data else None
         return output, exit_code
 
+    @staticmethod
+    def _is_missing_shell_session_error(error: ApiError) -> bool:
+        body = error.body
+        if error.status_code != 404 or not isinstance(body, dict):
+            return False
+        message = body.get("message")
+        return isinstance(message, str) and message.strip().casefold() == "session not found"
+
     def _create_shell_session(self, client) -> str:
         session_id = str(uuid.uuid4())
         client.shell.create_session(id=session_id)
@@ -279,11 +287,23 @@ class AioSandbox(Sandbox):
                     raise RuntimeError("sandbox client is closed")
                 if scoped.session_id is None:
                     scoped.session_id = self._create_shell_session(client)
-                output, exit_code = self._exec_shell(
-                    client,
-                    command,
-                    session_id=scoped.session_id,
-                )
+                try:
+                    output, exit_code = self._exec_shell(
+                        client,
+                        command,
+                        session_id=scoped.session_id,
+                    )
+                except ApiError as error:
+                    if not self._is_missing_shell_session_error(error):
+                        raise
+                    logger.warning("Execution-scoped sandbox shell session is missing; recreating it once")
+                    scoped.session_id = None
+                    output, exit_code, scoped.session_id = self._rotate_and_retry_shell(
+                        client,
+                        command,
+                        corrupted_session_id=None,
+                        context="execution scope after missing session",
+                    )
                 if output and _ERROR_OBSERVATION_SIGNATURE in output:
                     logger.warning("ErrorObservation detected in sandbox output for execution scope; rotating session")
                     output, exit_code, scoped.session_id = self._rotate_and_retry_shell(
