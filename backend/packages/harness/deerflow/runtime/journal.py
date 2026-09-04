@@ -277,6 +277,7 @@ class RunJournal(BaseCallbackHandler):
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
+        self._llm_response_callers: dict[str, str] = {}
         self._memory_context_recorded = False
         self._tool_promotion_claim_lock = threading.Lock()
         self._claimed_tool_promotions: set[str] = set()
@@ -443,9 +444,16 @@ class RunJournal(BaseCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
+        if self._closed:
+            return
+
         messages: list[AnyMessage] = []
         response_events: list[dict] = []
         should_schedule_progress = False
+        rid = str(run_id)
+        callback_caller = self._identify_caller(tags)
+        is_canonical_callback = rid not in self._counted_message_llm_run_ids
+        caller = self._llm_response_callers.get(rid, callback_caller)
         logger.debug("on_llm_end %s: tags=%s", run_id, tags)
         for generation in response.generations:
             for gen in generation:
@@ -455,11 +463,10 @@ class RunJournal(BaseCallbackHandler):
                     logger.warning(f"on_llm_end {run_id}: generation has no message attribute: {gen}")
 
         for message in messages:
-            caller = self._identify_caller(tags)
-            self._remember_current_run_tool_calls(message, caller=caller)
+            if is_canonical_callback:
+                self._remember_current_run_tool_calls(message, caller=caller)
 
             # Latency
-            rid = str(run_id)
             start = self._llm_start_times.pop(rid, None)
             latency_ms = int((time.monotonic() - start) * 1000) if start else None
 
@@ -467,7 +474,7 @@ class RunJournal(BaseCallbackHandler):
             usage = getattr(message, "usage_metadata", None)
             usage_dict = dict(usage) if usage else {}
             additional_kwargs = getattr(message, "additional_kwargs", None) or {}
-            if isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
+            if is_canonical_callback and isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
                 self._had_llm_error_fallback = True
                 detail = additional_kwargs.get("error_detail")
                 reason = additional_kwargs.get("error_reason")
@@ -537,7 +544,7 @@ class RunJournal(BaseCallbackHandler):
                 str(run_id),
                 response_events,
                 messages,
-                caller=self._identify_caller(tags),
+                caller=caller,
             )
 
         if should_schedule_progress:
@@ -714,6 +721,27 @@ class RunJournal(BaseCallbackHandler):
                     continue
         return False
 
+    @staticmethod
+    def _merge_response_event_usage(canonical_events: list[dict], replay_events: list[dict]) -> None:
+        """Enrich canonical generation events with only replayed usage fields."""
+        for canonical, replay in zip(canonical_events, replay_events, strict=False):
+            replay_metadata = replay.get("metadata")
+            if isinstance(replay_metadata, Mapping):
+                replay_usage = replay_metadata.get("usage")
+                if isinstance(replay_usage, Mapping):
+                    canonical["metadata"]["usage"] = dict(replay_usage)
+
+            canonical_content = canonical.get("content")
+            replay_content = replay.get("content")
+            if isinstance(canonical_content, dict) and isinstance(replay_content, Mapping) and "usage_metadata" in replay_content:
+                replay_content_usage = replay_content.get("usage_metadata")
+                canonical_content["usage_metadata"] = dict(replay_content_usage) if isinstance(replay_content_usage, Mapping) else replay_content_usage
+
+    def _flush_if_threshold_reached(self) -> None:
+        pending_count = len(self._pending_llm_response.events) if self._pending_llm_response is not None else 0
+        if len(self._buffer) + pending_count >= self._flush_threshold:
+            self._flush_sync()
+
     def _queue_llm_response_events(
         self,
         llm_run_id: str,
@@ -722,7 +750,7 @@ class RunJournal(BaseCallbackHandler):
         *,
         caller: str,
     ) -> None:
-        """Queue one logical LLM response, allowing an immediate usage-bearing replay to win."""
+        """Queue one logical response and merge usage into its canonical callback."""
         if self._closed:
             return
 
@@ -730,16 +758,12 @@ class RunJournal(BaseCallbackHandler):
         pending = self._pending_llm_response
         if pending is not None and pending.llm_run_id == llm_run_id:
             if has_usage:
-                # Keep the first callback position while replacing its payload
-                # with the richer late-usage copy.
-                for replacement, original in zip(events, pending.events, strict=False):
-                    replacement["created_at"] = original["created_at"]
-                    if replacement["metadata"].get("latency_ms") is None:
-                        replacement["metadata"]["latency_ms"] = original["metadata"].get("latency_ms")
-                self._pending_llm_response = _PendingLlmResponse(llm_run_id, events, messages, caller)
+                # The first callback's generation set, messages, caller, and
+                # non-usage payload are canonical. A provider's immediate
+                # replay may enrich only corresponding usage fields.
+                self._merge_response_event_usage(pending.events, events)
                 self._commit_pending_llm_response()
-                if len(self._buffer) >= self._flush_threshold:
-                    self._flush_sync()
+                self._flush_if_threshold_reached()
             return
         if llm_run_id in self._counted_message_llm_run_ids:
             return
@@ -747,15 +771,14 @@ class RunJournal(BaseCallbackHandler):
         # A different event is the ordering boundary for an earlier no-usage
         # callback. Commit it before accepting this response.
         self._commit_pending_llm_response()
-        if len(self._buffer) >= self._flush_threshold:
-            self._flush_sync()
+        self._flush_if_threshold_reached()
 
         self._counted_message_llm_run_ids.add(llm_run_id)
+        self._llm_response_callers[llm_run_id] = caller
         self._pending_llm_response = _PendingLlmResponse(llm_run_id, events, messages, caller)
         if has_usage:
             self._commit_pending_llm_response()
-            if len(self._buffer) >= self._flush_threshold:
-                self._flush_sync()
+        self._flush_if_threshold_reached()
         # Some providers immediately re-fire on_llm_end with usage filled in.
         # Defer an incomplete copy until the next event or flush.
 
@@ -1068,6 +1091,7 @@ class RunJournal(BaseCallbackHandler):
         self._counted_llm_run_ids.clear()
         self._counted_external_source_ids.clear()
         self._counted_message_llm_run_ids.clear()
+        self._llm_response_callers.clear()
         self._llm_start_times.clear()
         self._seen_llm_starts.clear()
         self._current_run_tool_call_names.clear()

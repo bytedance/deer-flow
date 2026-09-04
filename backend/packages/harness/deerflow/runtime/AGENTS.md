@@ -63,13 +63,18 @@ client input, because a welded-in seq goes stale when a fork re-seeds the feed
 
 **LLM response callback coalescing** (`runtime/journal.py`): a provider may fire
 `on_llm_end` twice for one LangChain run id, first without usage (or with all token
-counts zero) and immediately again with the complete usage-bearing generations.
-`RunJournal` stages that incomplete callback as one pending unit containing its events,
-messages, and caller. A same-id positive-usage callback replaces the whole staged
-payload; only committing that final unit updates the run message summary. The next
-unrelated event or explicit/synchronous flush commits it before later events, so the
-append-only message feed and summary receive the same response at its original ordering
-position. Once that boundary is crossed, the normal per-run-id dedup guard drops replays.
+counts zero) and immediately again with usage populated. The first callback's generation
+set is always canonical: `RunJournal` stages only its response events, messages, and
+caller, while applying the first callback's fallback state and tool-call bookkeeping
+immediately; those effects remain canonical. An adjacent same-id positive-usage replay
+may enrich only each corresponding staged event's metadata/content usage fields. Replay
+generation-count differences never add, remove, or replace canonical messages. The next
+unrelated event, an effective buffer size (committed plus pending events) reaching the
+flush threshold, or an explicit flush commits the staged unit and updates the message
+summary. Once that ordering boundary is crossed, a late usage replay can still update the
+authoritative run token summary, but it cannot mutate the append-only message event,
+caller attribution, fallback state, or tool-call bookkeeping. Closed journals return
+from `on_llm_end` before inspecting the response or touching any run state.
 
 **Run delivery receipts** (`runtime/journal.py` + `runs/worker.py`):
 `RunJournal` records each non-empty artifact update once per tool `Command` for

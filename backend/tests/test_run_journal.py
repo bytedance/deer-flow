@@ -69,6 +69,24 @@ async def test_close_flushes_and_detaches_runtime_dependencies():
 
 
 @pytest.mark.anyio
+async def test_closed_on_llm_end_returns_before_touching_response_or_state():
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-closed-callback", "t-closed-callback", store)
+    await journal.close()
+    completion_before = journal.get_completion_data()
+
+    # A plain object has no generations attribute, so this also pins the
+    # early return ahead of response inspection.
+    journal.on_llm_end(object(), run_id=uuid4(), tags=["lead_agent"])
+
+    assert journal.get_completion_data() == completion_before
+    assert journal._pending_llm_response is None
+    assert journal._buffer == []
+    assert journal._counted_message_llm_run_ids == set()
+    assert journal._counted_llm_run_ids == set()
+
+
+@pytest.mark.anyio
 async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
     class FailOnceRunEventStore(MemoryRunEventStore):
         def __init__(self) -> None:
@@ -99,6 +117,73 @@ async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
     assert journal._buffer == []
     events = await store.list_events("t-close-retry", "r-close-retry")
     assert [event["event_type"] for event in events] == ["middleware:test"]
+
+
+@pytest.mark.anyio
+async def test_close_retries_pending_no_usage_response_without_duplication():
+    class FailOnceRunEventStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_batch_calls = 0
+
+        async def put_batch(self, events):
+            self.put_batch_calls += 1
+            if self.put_batch_calls == 1:
+                raise RuntimeError("transient store failure")
+            return await super().put_batch(events)
+
+    async def progress_reporter(snapshot):
+        del snapshot
+
+    store = FailOnceRunEventStore()
+    journal = RunJournal(
+        "r-close-pending-retry",
+        "t-close-pending-retry",
+        store,
+        flush_threshold=100,
+        progress_reporter=progress_reporter,
+    )
+    journal.record_middleware("before", name="test", hook="after", action="record", changes={})
+    journal.on_llm_end(
+        _make_llm_response("Canonical without usage"),
+        run_id=uuid4(),
+        parent_run_id=None,
+        tags=["lead_agent"],
+    )
+
+    assert journal._pending_llm_response is not None
+    assert journal.get_completion_data()["message_count"] == 0
+
+    with pytest.raises(RuntimeError, match="transient store failure"):
+        await journal.close()
+
+    assert journal._closed is False
+    assert journal._store is store
+    assert journal._progress_reporter is progress_reporter
+    assert journal._pending_llm_response is None
+    assert [event["event_type"] for event in journal._buffer] == [
+        "middleware:before",
+        "llm.ai.response",
+    ]
+    assert journal.get_completion_data()["message_count"] == 1
+    assert journal.get_completion_data()["last_ai_message"] == "Canonical without usage"
+
+    await journal.close()
+
+    events = await store.list_events("t-close-pending-retry", "r-close-pending-retry")
+    assert [event["event_type"] for event in events] == [
+        "middleware:before",
+        "llm.ai.response",
+    ]
+    responses = [event for event in events if event["event_type"] == "llm.ai.response"]
+    assert len(responses) == 1
+    assert responses[0]["content"]["content"] == "Canonical without usage"
+    assert responses[0]["content"]["usage_metadata"] is None
+    assert responses[0]["metadata"]["usage"] == {}
+    assert journal.get_completion_data()["message_count"] == 1
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._progress_reporter is None
 
 
 @pytest.mark.anyio
@@ -584,6 +669,19 @@ class TestBufferFlush:
         assert len(events) >= 2
 
     @pytest.mark.anyio
+    async def test_pending_response_counts_toward_flush_threshold(self, journal_setup):
+        j, store = journal_setup
+        j._flush_threshold = 2
+        j.record_middleware("before", name="BeforeMiddleware", hook="after_model", action="record", changes={})
+
+        j.on_llm_end(_make_llm_response("Pending"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await asyncio.sleep(0.1)
+
+        assert j._pending_llm_response is None
+        events = await store.list_events("t1", "r1")
+        assert [event["event_type"] for event in events] == ["middleware:before", "llm.ai.response"]
+
+    @pytest.mark.anyio
     async def test_events_retained_when_no_loop(self, journal_setup):
         """Events buffered in a sync (no-loop) context should survive
         until the async flush() in the finally block."""
@@ -985,37 +1083,59 @@ class TestCallerBucketing:
         assert j._msg_count == 1
 
     @pytest.mark.anyio
-    async def test_late_usage_replaces_pending_response_and_summary(self, journal_setup):
+    async def test_adjacent_late_usage_enriches_canonical_response_only(self, journal_setup):
         j, store = journal_setup
         run_id = uuid4()
         usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        original_tool_calls = [{"id": "call-original", "name": "search", "args": {}}]
+        replay_tool_calls = [{"id": "call-replay", "name": "write_file", "args": {}}]
 
-        j.on_llm_end(_make_llm_response("Incomplete"), run_id=run_id, parent_run_id=None, tags=["subagent:research"])
-        assert j._pending_llm_response is not None
-        assert j._pending_llm_response.events[0]["content"]["content"] == "Incomplete"
-        assert j._pending_llm_response.messages[0].content == "Incomplete"
-        assert j._pending_llm_response.caller == "subagent:research"
-        assert j.get_completion_data()["message_count"] == 0
-        assert j.get_completion_data()["last_ai_message"] is None
-
-        j.on_llm_end(_make_llm_response("Complete", usage=usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
-        assert j._pending_llm_response is None
-        assert [event["event_type"] for event in j._buffer] == ["llm.ai.response"]
-        assert j.get_completion_data()["message_count"] == 1
-        assert j.get_completion_data()["last_ai_message"] == "Complete"
-        j.record_middleware("after", name="AfterMiddleware", hook="after_model", action="record", changes={})
+        j.on_llm_end(
+            _make_llm_response(
+                "Canonical",
+                tool_calls=original_tool_calls,
+                additional_kwargs={
+                    "deerflow_error_fallback": True,
+                    "error_detail": "canonical fallback",
+                },
+            ),
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _make_llm_response(
+                "Replay",
+                usage=usage,
+                tool_calls=replay_tool_calls,
+                additional_kwargs={
+                    "deerflow_error_fallback": True,
+                    "error_detail": "replay fallback",
+                },
+            ),
+            run_id=run_id,
+            parent_run_id=None,
+            tags=["subagent:research"],
+        )
         await j.flush()
 
-        events = await store.list_events("t1", "r1")
-        assert [event["event_type"] for event in events] == ["llm.ai.response", "middleware:after"]
-        assert events[0]["content"]["content"] == "Complete"
-        assert events[0]["content"]["usage_metadata"] == usage
-        assert events[0]["metadata"]["caller"] == "lead_agent"
-        assert events[0]["metadata"]["usage"] == usage
-        assert await store.count_messages("t1") == 1
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["content"] == "Canonical"
+        assert messages[0]["content"]["tool_calls"] == original_tool_calls
+        assert messages[0]["content"]["additional_kwargs"]["error_detail"] == "canonical fallback"
+        assert messages[0]["content"]["usage_metadata"] == usage
+        assert messages[0]["metadata"]["caller"] == "lead_agent"
+        assert messages[0]["metadata"]["usage"] == usage
+        assert j._current_run_tool_call_names == {"call-original": "search"}
+        assert j.had_llm_error_fallback is True
+        assert j.llm_error_fallback_message == "canonical fallback"
+        assert j.get_completion_data()["last_ai_message"] == "Canonical"
+        assert j.get_completion_data()["lead_agent_tokens"] == 15
+        assert j.get_completion_data()["subagent_tokens"] == 0
 
     @pytest.mark.anyio
-    async def test_all_zero_usage_remains_pending_and_positive_usage_replaces_it(self, journal_setup):
+    async def test_all_zero_usage_remains_pending_and_positive_usage_enriches_it(self, journal_setup):
         j, store = journal_setup
         run_id = uuid4()
         zero_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
@@ -1026,36 +1146,102 @@ class TestCallerBucketing:
         assert j._pending_llm_response is not None
         assert j.get_completion_data()["message_count"] == 0
 
-        j.on_llm_end(_make_llm_response("Final payload", usage=positive_usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("Replay payload", usage=positive_usage), run_id=run_id, parent_run_id=None, tags=["lead_agent"])
         await j.flush()
 
         messages = await store.list_messages("t1")
         assert len(messages) == 1
-        assert messages[0]["content"]["content"] == "Final payload"
+        assert messages[0]["content"]["content"] == "Zero usage"
+        assert messages[0]["content"]["usage_metadata"] == positive_usage
         assert messages[0]["metadata"]["usage"] == positive_usage
         assert j.get_completion_data()["message_count"] == 1
-        assert j.get_completion_data()["last_ai_message"] == "Final payload"
+        assert j.get_completion_data()["last_ai_message"] == "Zero usage"
 
     @pytest.mark.anyio
-    async def test_late_usage_replaces_all_generations_and_commits_their_summaries(self, journal_setup):
+    async def test_replay_generation_length_cannot_change_canonical_set(self, journal_setup):
         j, store = journal_setup
-        run_id = uuid4()
-        usage = {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11}
-        incomplete = _combine_llm_responses(_make_llm_response("Draft one"), _make_llm_response("Draft two"))
-        complete = _combine_llm_responses(
-            _make_llm_response("Final one", usage=usage),
-            _make_llm_response("Final two"),
-        )
+        short_usage = {"input_tokens": 8, "output_tokens": 3, "total_tokens": 11}
+        extra_usage = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        first_run_id = uuid4()
+        second_run_id = uuid4()
 
-        j.on_llm_end(incomplete, run_id=run_id, parent_run_id=None, tags=["lead_agent"])
-        assert j.get_completion_data()["message_count"] == 0
-        j.on_llm_end(complete, run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(
+            _combine_llm_responses(_make_llm_response("Canonical one"), _make_llm_response("Canonical two")),
+            run_id=first_run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _make_llm_response("Short replay", usage=short_usage),
+            run_id=first_run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _make_llm_response("Single canonical"),
+            run_id=second_run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        j.on_llm_end(
+            _combine_llm_responses(
+                _make_llm_response("Long replay one", usage=extra_usage),
+                _make_llm_response("Long replay two"),
+            ),
+            run_id=second_run_id,
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
         await j.flush()
 
         messages = await store.list_messages("t1")
-        assert [message["content"]["content"] for message in messages] == ["Final one", "Final two"]
+        assert [message["content"]["content"] for message in messages] == [
+            "Canonical one",
+            "Canonical two",
+            "Single canonical",
+        ]
+        assert messages[0]["metadata"]["usage"] == short_usage
+        assert messages[0]["content"]["usage_metadata"] == short_usage
+        assert messages[1]["metadata"]["usage"] == {}
+        assert messages[1]["content"]["usage_metadata"] is None
+        assert messages[2]["metadata"]["usage"] == extra_usage
+        assert messages[2]["content"]["usage_metadata"] == extra_usage
+        assert j.get_completion_data()["message_count"] == 3
+        assert j.get_completion_data()["last_ai_message"] == "Single canonical"
+
+    @pytest.mark.anyio
+    async def test_interleaved_late_usage_updates_summary_only(self, journal_setup):
+        j, store = journal_setup
+        first_run_id = uuid4()
+        second_run_id = uuid4()
+        usage = {"input_tokens": 9, "output_tokens": 4, "total_tokens": 13}
+
+        j.on_llm_end(_make_llm_response("First canonical"), run_id=first_run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("Second canonical"), run_id=second_run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(
+            _make_llm_response(
+                "Late replay",
+                usage=usage,
+                tool_calls=[{"id": "late-call", "name": "write_file", "args": {}}],
+                additional_kwargs={"deerflow_error_fallback": True, "error_detail": "late fallback"},
+            ),
+            run_id=first_run_id,
+            parent_run_id=None,
+            tags=["subagent:research"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert [message["content"]["content"] for message in messages] == ["First canonical", "Second canonical"]
+        assert messages[0]["metadata"]["usage"] == {}
+        assert messages[0]["content"]["usage_metadata"] is None
+        assert j.get_completion_data()["total_tokens"] == 13
+        assert j.get_completion_data()["lead_agent_tokens"] == 13
+        assert j.get_completion_data()["subagent_tokens"] == 0
         assert j.get_completion_data()["message_count"] == 2
-        assert j.get_completion_data()["last_ai_message"] == "Final two"
+        assert j.get_completion_data()["last_ai_message"] == "Second canonical"
+        assert "late-call" not in j._current_run_tool_call_names
+        assert j.had_llm_error_fallback is False
 
     @pytest.mark.anyio
     async def test_single_no_usage_response_persists_once_at_flush(self, journal_setup):
