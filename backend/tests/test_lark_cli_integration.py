@@ -214,10 +214,21 @@ class _FakeWindowsHandle:
         return False
 
 
+def _windows_os_stub() -> SimpleNamespace:
+    """Minimal ``os`` stub that forces the Windows code path in unit tests.
+
+    The real ``os`` module is replaced wholesale so ``lark_cli.os.name == "nt"``
+    drives the Windows handle-relative walker without touching the host. The
+    cross-process hardening lock (``_exclusive_install_lock``) also consults
+    ``os.SEEK_END`` when seeking the advisory lock file, so the stub must carry it.
+    """
+    return SimpleNamespace(name="nt", SEEK_END=os.SEEK_END)
+
+
 def _patch_windows_hardening(monkeypatch, tmp_path, sid: str = "S-1-5-21-111-222-333-1001"):
     """Set up the Windows path: mock whoami and record handle-bound DACL applies."""
     _patch_paths(monkeypatch, tmp_path / "home")
-    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(lark_cli, "os", _windows_os_stub())
     subprocess_calls: list[list[str]] = []
     dacl_calls: list[tuple[str, str, bool]] = []
 
@@ -1297,7 +1308,7 @@ def test_windows_credential_tree_raises_on_identity_or_acl_failure(monkeypatch, 
     """Identity or ACL manipulation failures must raise, never be silently ignored."""
     sid = "S-1-5-21-111-222-333-1001"
     _patch_paths(monkeypatch, tmp_path / "home")
-    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(lark_cli, "os", _windows_os_stub())
 
     config_dir = lark_cli.lark_cli_config_dir("alice")
     data_dir = lark_cli.lark_cli_data_dir("alice")
@@ -1395,7 +1406,7 @@ def test_windows_credential_tree_hardening_rejects_reparse_before_descent(monkey
 
 def test_credential_tree_path_kind_classifies_and_rejects(monkeypatch) -> None:
     """The path-kind resolver rejects symlinks and reparse points before descent."""
-    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(lark_cli, "os", _windows_os_stub())
 
     class _FakePath:
         def __init__(self, st_mode: int, st_attrs: int = 0) -> None:
@@ -1447,7 +1458,7 @@ def test_private_lark_temp_dir_hardens_before_yield(monkeypatch, tmp_path) -> No
 @pytest.mark.skipif(os.name != "nt", reason="requires a real NTFS junction")
 def test_windows_credential_tree_rejects_real_junction(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
-    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(lark_cli, "os", _windows_os_stub())
     config_dir = lark_cli.lark_cli_config_dir("alice")
     config_dir.mkdir(parents=True)
     outside = tmp_path / "outside"
@@ -1577,8 +1588,11 @@ def test_lark_credential_transaction_establishes_boundary_before_copy(monkeypatc
     _patch_paths(monkeypatch, tmp_path / "home")
     owner_sid = lark_cli._resolve_current_user_sid()
     root = lark_cli._lark_cli_credential_root("alice")
+    config_dir = root / "config"
     data_dir = root / "data"
+    config_dir.mkdir(parents=True)
     data_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text('{"appId":"x"}', encoding="utf-8")
     secret = data_dir / "auth.json"
     secret.write_text('{"token":"secret"}', encoding="utf-8")
 
@@ -1586,17 +1600,12 @@ def test_lark_credential_transaction_establishes_boundary_before_copy(monkeypatc
     orig_copytree = lark_cli.shutil.copytree
 
     def guarded_copytree(*args, **kwargs):
-        src = Path(args[0])
         dst = Path(args[1])
-        if src == root:
-            # Top-level credential snapshot copy: the snapshot boundary must
-            # already be protected + owner-only before credentials are copied.
-            temp_root = dst.parent
-            assert _windows_acl_protected(temp_root)
-            assert _windows_acl_owner_sid(temp_root) == owner_sid
-            assert _windows_acl_protected(dst)
-            assert _windows_acl_owner_sid(dst) == owner_sid
-            assert _windows_acl_sids(dst) == {owner_sid}
+        if dst.parent.name == "credentials":
+            # The snapshot boundary (dst.parent) must already be protected + owner-only
+            # before any top-level credential directory is copied into it.
+            assert _windows_acl_protected(dst.parent)
+            assert _windows_acl_owner_sid(dst.parent) == owner_sid
             observed.append(dst)
         return orig_copytree(*args, **kwargs)
 
@@ -1822,6 +1831,85 @@ def test_windows_credential_tree_late_insertion_blocked_by_exclusive_parent(monk
             late.unlink()
 
 
+def test_windows_credential_walker_iterative_handles_deep_tree() -> None:
+    """The handle-relative walker is iterative, so an unbounded tree depth cannot hit the recursion limit."""
+    depth = 1500
+
+    class _DeepHandle:
+        def __init__(self, path: Path, remaining: int) -> None:
+            self.path = path
+            self.remaining = remaining
+            self.info = SimpleNamespace(reparse=False, is_dir=True, link_count=1)
+
+        def set_security(self, owner_sid, *, inheritable_full):
+            assert inheritable_full is True
+
+        def enumerate(self):
+            if self.remaining > 0:
+                yield "child"
+
+        def open_child(self, name):
+            return _DeepHandle(self.path / name, self.remaining - 1)
+
+        def open_or_create_child_dir(self, name):
+            return _DeepHandle(self.path / name, self.remaining - 1)
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    # Must not raise RecursionError even though the chain is far deeper than the default limit.
+    lark_cli._walk_and_harden_windows_handle(Path("root"), _DeepHandle(Path("root"), depth), "S-1-5-21-1", Path("root"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires real exclusive-share semantics")
+def test_concurrent_ensure_serialized_by_hardening_lock(monkeypatch, tmp_path) -> None:
+    """Concurrent ``ensure()`` on the same user serializes (no ERROR_SHARING_VIOLATION).
+
+    The walker opens credential directories exclusively (share=0). Without serialization two
+    concurrent ``ensure()`` calls would race: the second would fail to open the already-exclusive
+    root. The per-user hardening lock must make the second caller wait and then succeed.
+    """
+    _bootstrap_credential_dirs(monkeypatch, tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    orig = lark_cli._set_windows_security_info_handle
+
+    def _pause_first(handle, owner_sid, *, inheritable_full):
+        if not started.is_set():
+            started.set()
+            release.wait(timeout=10)
+        return orig(handle, owner_sid, inheritable_full=inheritable_full)
+
+    monkeypatch.setattr(lark_cli, "_set_windows_security_info_handle", _pause_first)
+
+    results: list[str] = []
+
+    def _worker():
+        try:
+            lark_cli.ensure_lark_cli_credential_tree("alice")
+            results.append("ok")
+        except OSError as exc:
+            results.append(f"err:{type(exc).__name__}:{getattr(exc, 'winerror', None)}")
+
+    thread_a = threading.Thread(target=_worker)
+    thread_a.start()
+    assert started.wait(timeout=10), "thread A did not reach the root hardening step"
+    thread_b = threading.Thread(target=_worker)
+    thread_b.start()
+    time.sleep(0.2)  # give thread B a chance to race for the exclusive root
+    release.set()
+    thread_a.join(timeout=20)
+    thread_b.join(timeout=20)
+
+    assert results == ["ok", "ok"], f"concurrent ensure must serialize, got {results}"
+
+
 def test_lark_cli_env_rejects_symlinks_in_credential_tree(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
     config_dir = lark_cli.lark_cli_config_dir("alice")
@@ -1837,6 +1925,33 @@ def test_lark_cli_env_rejects_symlinks_in_credential_tree(monkeypatch, tmp_path)
     expected_error = "reparse" if os.name == "nt" else "symlink"
     with pytest.raises(ValueError, match=expected_error):
         lark_cli.lark_cli_env_overlay("alice")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX root symlink rejection before mkdir")
+def test_ensure_posix_rejects_symlink_root_before_creating_children(monkeypatch, tmp_path) -> None:
+    """A symlinked credential root is rejected before any child dir is created (POSIX).
+
+    ``mkdir(exist_ok=True)`` accepts a symlink that resolves to a directory, so a
+    symlinked ``lark-cli`` root must be rejected up front — otherwise ``config`` /
+    ``data`` would be created inside the symlink target (outside the credential tree)
+    before the walker notices the reparse.
+    """
+    _patch_paths(monkeypatch, tmp_path / "home")
+    root = lark_cli._lark_cli_credential_root("alice")
+    root.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        root.symlink_to(outside)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks are not available: {exc}")
+
+    with pytest.raises(ValueError, match="symlink"):
+        lark_cli.ensure_lark_cli_credential_tree("alice")
+
+    # The root symlink must have been rejected before any child was created inside it.
+    assert not (outside / "config").exists()
+    assert not (outside / "data").exists()
 
 
 def test_save_lark_app_config_rehardens_files_written_by_cli(monkeypatch, tmp_path) -> None:

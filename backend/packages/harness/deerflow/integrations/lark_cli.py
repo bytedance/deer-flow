@@ -176,6 +176,8 @@ _LARK_INSTALL_THREAD_LOCK = threading.Lock()
 _LARK_RUNTIME_INSTALL_THREAD_LOCK = threading.Lock()
 _LARK_CREDENTIAL_LOCKS_GUARD = threading.Lock()
 _LARK_CREDENTIAL_LOCKS: WeakValueDictionary[str, threading.Lock] = WeakValueDictionary()
+_LARK_HARDENING_LOCKS_GUARD = threading.Lock()
+_LARK_HARDENING_LOCKS: WeakValueDictionary[str, threading.RLock] = WeakValueDictionary()
 
 
 @dataclass(frozen=True)
@@ -313,16 +315,18 @@ def ensure_lark_cli_credential_tree(user_id: str, *, paths: Paths | None = None)
     credential consumer after ``ensure`` returns. POSIX keeps the ``lstat()``-before-descent walk.
     """
     paths = paths or get_paths()
-    root = paths.user_dir(user_id) / "integrations" / INTEGRATION_ID
-    if os.name == "nt":
-        _ensure_and_harden_windows_credential_tree(paths, root)
-    else:
-        _reject_credential_reparse_chain(paths.base_dir, root)
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        for required in (root / "config", root / "config" / "locks", root / "data"):
-            _reject_credential_reparse(required)
-            required.mkdir(parents=True, exist_ok=True, mode=0o700)
-        _harden_posix_credential_tree(root)
+    with _lark_hardening_lock(user_id, paths):
+        root = paths.user_dir(user_id) / "integrations" / INTEGRATION_ID
+        if os.name == "nt":
+            _ensure_and_harden_windows_credential_tree(paths, root)
+        else:
+            _reject_credential_reparse(root)
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            root.chmod(0o700)
+            for required in (root / "config", root / "config" / "locks", root / "data"):
+                _reject_credential_reparse(required)
+                required.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _harden_posix_credential_tree(root)
 
 
 def _ensure_and_harden_windows_credential_tree(paths: Paths, root: Path) -> None:
@@ -445,28 +449,6 @@ def _reject_credential_reparse(path: Path) -> None:
     except FileNotFoundError:
         return
     _reject_reparse_stat(path, info)
-
-
-def _reject_credential_reparse_chain(trusted_base: Path, target: Path) -> None:
-    """Lexically reject a symlink / reparse point on every component of *target*.
-
-    Walks each component below *trusted_base* (e.g. ``users``, ``alice``,
-    ``integrations``, ``lark-cli``) and rejects it before *target* is created or
-    used. This catches a reparse ancestor (e.g. ``integrations`` junction) that
-    would otherwise redirect the whole credential path outside the trust root;
-    it does not ``resolve()`` the target, which would follow the junction and
-    defeat the check.
-    """
-    current = trusted_base
-    for component in target.relative_to(trusted_base).parts:
-        current = current / component
-        try:
-            info = current.lstat()
-        except FileNotFoundError:
-            # Once a component is absent, deeper components cannot currently
-            # hold a static reparse point.
-            break
-        _reject_reparse_stat(current, info)
 
 
 def _resolve_current_user_sid() -> str:
@@ -706,9 +688,10 @@ def _set_windows_security_info_handle(handle: int, owner_sid: str, *, inheritabl
     """Apply an owner + protected owner-only DACL to an open object handle.
 
     This is the handle variant of ``SetNamedSecurityInfoW``: it acts on the
-    already-open object, so the ownership/DACL update cannot be redirected by a
-    concurrent pathname replacement. No intermediate parent-inherited DACL is ever
-    written; if the call fails the prior owner and DACL are unchanged.
+    already-open object, so it cannot be redirected by a concurrent pathname
+    replacement. No intermediate parent-inherited DACL is written before this final
+    handle-bound call, so a failure is surfaced to the caller rather than leaving a
+    broadened intermediate ACL in place.
     """
     with _windows_private_security_parts(owner_sid, inheritable_full=inheritable_full) as (owner, dacl):
         advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -1023,38 +1006,71 @@ def _required_credential_child_dirs(path: Path, root: Path) -> tuple[str, ...]:
     return ()
 
 
-def _walk_and_harden_windows_handle(path: Path, handle: _WindowsTreeHandle, owner_sid: str, root: Path) -> None:
-    """Recursively validate + harden a credential-tree object using handle-relative traversal.
+class _WindowsWalkFrame:
+    """One active directory frame in the iterative hardening walk.
+
+    An ancestor frame keeps its exclusive directory handle open while deeper frames process
+    descendants, which preserves the object-identity/exclusive-share invariant without
+    Python recursion (an unbounded tree depth).
+    """
+
+    __slots__ = ("path", "handle", "iterator", "close_when_done")
+
+    def __init__(self, path: Path, handle: _WindowsTreeHandle, *, close_when_done: bool) -> None:
+        self.path = path
+        self.handle = handle
+        self.iterator = None
+        self.close_when_done = close_when_done
+
+
+def _walk_and_harden_windows_handle(root_path: Path, root_handle: _WindowsTreeHandle, owner_sid: str, root: Path) -> None:
+    """Iteratively validate + harden a credential-tree object using handle-relative traversal.
 
     A file is only hardened if it has exactly one link: an NTFS hard link shares the
     underlying file object, so changing its security descriptor would also change the
     owner/DACL of every other hard-link path. Directories are opened exclusively (share=0):
     ``SetSecurityInfo`` therefore does not propagate the final inheritable OI|CI ACE into
-    as-yet-unvalidated children, and the namespace is locked while it is enumerated (native
-    regressions verify concurrent child rename/replacement and hard-link insertion fail with
-    sharing violations). The directory is made owner-only before descendants are validated;
-    a descendant that is a reparse point or a hard-linked file is rejected before its security
-    descriptor is touched.
+    as-yet-unvalidated children, and the namespace is locked while it is enumerated. This is a
+    plain DFS over a stack rather than recursion, so an unbounded tree depth cannot hit the
+    Python recursion limit.
     """
-    info = handle.info
-    if info.reparse:
-        raise ValueError(f"Lark CLI credential path must not be a reparse point: {path}")
-    if not info.is_dir:
-        if info.link_count != 1:
-            raise ValueError(f"Lark CLI credential file must not be hard-linked: {path}")
-        handle.set_security(owner_sid, inheritable_full=False)
-        return
-    # Exclusive directory handle: this apply does not propagate into existing children.
-    handle.set_security(owner_sid, inheritable_full=True)
-    for name in _required_credential_child_dirs(path, root):
-        with handle.open_or_create_child_dir(name):
-            pass
-    for name in handle.enumerate():
-        child = handle.open_child(name)
-        try:
-            _walk_and_harden_windows_handle(path / name, child, owner_sid, root)
-        finally:
-            child.close()
+    stack: list[_WindowsWalkFrame] = [_WindowsWalkFrame(root_path, root_handle, close_when_done=False)]
+    try:
+        while stack:
+            frame = stack[-1]
+            if frame.iterator is None:
+                info = frame.handle.info
+                if info.reparse:
+                    raise ValueError(f"Lark CLI credential path must not be a reparse point: {frame.path}")
+                if not info.is_dir:
+                    if info.link_count != 1:
+                        raise ValueError(f"Lark CLI credential file must not be hard-linked: {frame.path}")
+                    frame.handle.set_security(owner_sid, inheritable_full=False)
+                    stack.pop()
+                    if frame.close_when_done:
+                        frame.handle.close()
+                    continue
+                frame.handle.set_security(owner_sid, inheritable_full=True)
+                for name in _required_credential_child_dirs(frame.path, root):
+                    with frame.handle.open_or_create_child_dir(name):
+                        pass
+                frame.iterator = frame.handle.enumerate()
+            try:
+                name = next(frame.iterator)
+            except StopIteration:
+                stack.pop()
+                if frame.close_when_done:
+                    frame.handle.close()
+                continue
+            child = frame.handle.open_child(name)
+            stack.append(_WindowsWalkFrame(frame.path / name, child, close_when_done=True))
+    except BaseException:
+        # A hard-linked/reparse descendant raises mid-walk; close every open child frame's
+        # handle so nothing leaks (the caller owns the root handle and closes it separately).
+        for frame in reversed(stack):
+            if frame.close_when_done:
+                frame.handle.close()
+        raise
 
 
 def _credential_chain_paths(base_dir: Path, root: Path) -> list[Path]:
@@ -1282,6 +1298,31 @@ def _exclusive_install_lock(lock_path: Path, thread_lock):
 def _lark_credential_thread_lock(user_id: str) -> threading.Lock:
     with _LARK_CREDENTIAL_LOCKS_GUARD:
         return _LARK_CREDENTIAL_LOCKS.setdefault(user_id, threading.Lock())
+
+
+def _lark_hardening_thread_lock(user_id: str) -> threading.RLock:
+    """Per-user lock that serializes credential-tree hardening across threads.
+
+    Distinct from :func:`_lark_credential_thread_lock`, which callers may already
+    hold (and which is non-reentrant); reusing it inside ``ensure`` would self-deadlock.
+    """
+    with _LARK_HARDENING_LOCKS_GUARD:
+        return _LARK_HARDENING_LOCKS.setdefault(user_id, threading.RLock())
+
+
+@contextmanager
+def _lark_hardening_lock(user_id: str, paths: Paths):
+    """Serialize credential-tree hardening across threads and Gateway worker processes.
+
+    Distinct from :func:`_lark_credential_lock` (a non-reentrant lock callers already hold):
+    this uses its own lock file so ``credential lock -> ensure -> hardening lock`` never
+    self-deadlocks, and the advisory file lock covers the ``GATEWAY_WORKERS`` > 1 case.
+    """
+    root = paths.user_dir(user_id) / "integrations" / INTEGRATION_ID
+    root.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = root.parent / f".{INTEGRATION_ID}.hardening.lock"
+    with _exclusive_install_lock(lock_path, _lark_hardening_thread_lock(user_id)):
+        yield
 
 
 @contextmanager
@@ -2307,12 +2348,21 @@ def _clear_directory_contents(directory: Path) -> None:
 
 @contextmanager
 def _lark_credential_transaction(user_id: str, root: Path):
-    """Copy the active credential tree to a snapshot and restore on failure."""
-    with _private_lark_temp_dir(prefix=".switching-lark-app-", dir=root.parent) as temp_root:
+    """Copy the active credential tree to a snapshot and restore on failure.
+
+    The snapshot lives beneath the already-hardened credential *root* (owner-only) rather
+    than under the per-user parent namespace that a local principal could mutate, so a
+    pathname swap cannot redirect the snapshot to an external location. Only ``config`` and
+    ``data`` are snapshotted, keeping both the copy source and destination inside the
+    owner-only root.
+    """
+    ensure_lark_cli_credential_tree(user_id)
+    with _private_lark_temp_dir(prefix=".switching-lark-app-", dir=root) as temp_root:
         snapshot = temp_root / "credentials"
         _mkdir_under_private_boundary(snapshot)
         _establish_private_directory_boundary(snapshot)
-        shutil.copytree(root, snapshot, dirs_exist_ok=True, symlinks=False)
+        for name in ("config", "data"):
+            shutil.copytree(root / name, snapshot / name, dirs_exist_ok=True, symlinks=False)
         try:
             yield snapshot
         except Exception:
