@@ -19,9 +19,10 @@ import { isStaticWebsiteOnly } from "@/core/static-mode";
 // prerendered static page instead of per-request SSR. Next.js infers the
 // rendering mode from the dynamic APIs actually used at build time:
 // the full deployment calls cookies() (via getServerSideUser) and is
-// rendered per-request, while the static-website build keeps the guard
-// branch out (NEXT_PUBLIC_STATIC_WEBSITE_ONLY is inlined at build time)
-// and is prerendered as a plain static page.
+// rendered per-request, while the static-website build never reaches
+// cookies() because isStaticWebsiteOnly() is true at build time (the
+// flag is set in the build environment), so Next prerenders "/" as
+// static HTML.
 
 export default async function LandingPage() {
   // The marketing landing page is intended for the official static website

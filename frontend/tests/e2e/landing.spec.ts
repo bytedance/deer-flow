@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { DEMO_THREAD_IDS } from "@/core/threads/static-demo";
 import { mockLangGraphAPI } from "./utils/mock-api";
 
 test.describe("Landing page", () => {
@@ -43,10 +44,10 @@ test.describe("Landing page", () => {
     if (testInfo.project.name === "static-website") {
       // In static mode `/workspace` redirects to the demo thread, not /chats/new.
       await page.waitForURL(
-        "**/workspace/chats/21cfea46-34bd-4aa6-9e1f-3009452fbeb9",
+        `**/workspace/chats/${DEMO_THREAD_IDS[0]}`,
       );
       await expect(page).toHaveURL(
-        /\/workspace\/chats\/21cfea46-34bd-4aa6-9e1f-3009452fbeb9/,
+        `**/workspace/chats/${DEMO_THREAD_IDS[0]}`,
       );
     } else {
       // Full deployment: `/` redirects into the app, Get Started opens a new chat.

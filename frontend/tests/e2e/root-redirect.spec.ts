@@ -24,7 +24,11 @@ test.describe("Root path redirects into the app (full deployment)", () => {
   test("the visitor is not left on the marketing landing", async ({ page }) => {
     await page.goto("/");
     await page.waitForURL("**/workspace**");
-    // After the redirect the URL is no longer the root path.
-    await expect(page).not.toHaveURL(/\/$/);
+    // Pin the behaviour the name promises: after the redirect the landing
+    // hero (h1 "DeerFlow") must be gone. A bare URL assertion would pass
+    // for any redirect target, including /login.
+    await expect(
+      page.getByRole("heading", { name: /deerflow/i }),
+    ).toHaveCount(0);
   });
 });
