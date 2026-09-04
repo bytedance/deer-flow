@@ -755,6 +755,17 @@ tools:
     # region: wt-wt          # wt-wt is normalized for Wikipedia when backend includes auto/all/wikipedia.
     # safesearch: moderate   # on, moderate, off
 
+  # Web search tool (uses You.com, no API key required for the free tier)
+  # You.com has a keyless free tier (~100 queries/day) that upgrades to the
+  # full Search API when YDC_API_KEY is set. Results carry extracted page
+  # snippets, giving the agent usable context without a follow-up web_fetch.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.youcom.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $YDC_API_KEY  # Optional; omit to use the keyless free tier
+
+
   # Web search tool (uses SearXNG, self-hosted, no API key required)
   # SearXNG is a free internet metasearch engine which aggregates results from
   # various search services. Deploy your own instance: https://github.com/searxng/searxng
