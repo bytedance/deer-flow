@@ -52,12 +52,22 @@ def build_describe_skill_tool(
     catalog: SkillCatalog,
     *,
     container_base_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+    skill_authorization=None,
 ) -> BaseTool:
     """Build the ``describe_skill`` tool as a closure over *catalog*.
 
     The returned tool is a plain ``@tool``-decorated function that searches the
     catalog and returns a ``Command`` wrapping a ``ToolMessage``.  No graph state
     mutation is needed (unlike ``tool_search`` which promotes deferred tools).
+
+    *skill_authorization* (a ``ResolvedSkillAuthorization`` from
+    ``deerflow.authz.skill_filter``) gates describe results on the action-scoped
+    ``skill:activate`` decision: the catalog holds the Layer 1 visibility set
+    (action-agnostic), so an action-aware provider may list a skill the model
+    must still not be able to load. Denied skills are omitted from the output
+    (indistinguishable from a non-match, so the reason is not leaked) with the
+    provider's configured fail-closed / fail-open policy on errors. ``None``
+    (authorization disabled) describes everything in the catalog.
     """
 
     @tool
@@ -79,6 +89,16 @@ def build_describe_skill_tool(
           - "+podcast gen" -- require "podcast" in the name, rank by remaining terms (up to 5)
         """
         matched = catalog.search(name)
+        if skill_authorization is not None:
+            from deerflow.authz.skill_filter import skill_activation_allowed
+
+            allowed_matches = [s for s in matched if skill_activation_allowed(skill_authorization, s.name)]
+            if len(allowed_matches) != len(matched):
+                logger.info(
+                    "describe_skill: omitted %d skill(s) denied by the skill:activate policy",
+                    len(matched) - len(allowed_matches),
+                )
+            matched = allowed_matches
         if not matched:
             content = f"No skills matched: {name}"
         else:
@@ -104,12 +124,15 @@ def build_skill_search_setup(
     *,
     enabled: bool,
     container_base_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
+    skill_authorization=None,
 ) -> SkillSearchSetup:
     """Build the skill search setup from a filtered skill list.
 
     Mirrors ``build_deferred_tool_setup`` from ``tool_search.py``.
 
     Returns an empty setup when *enabled* is ``False`` or *skills* is empty.
+    *skill_authorization* is forwarded to the describe tool (see
+    ``build_describe_skill_tool``).
     """
     if not enabled or not skills:
         return SkillSearchSetup(None, frozenset())
@@ -119,6 +142,7 @@ def build_skill_search_setup(
         describe_skill_tool=build_describe_skill_tool(
             catalog,
             container_base_path=container_base_path,
+            skill_authorization=skill_authorization,
         ),
         skill_names=catalog.names,
     )

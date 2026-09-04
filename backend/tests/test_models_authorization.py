@@ -683,7 +683,7 @@ def _stub_client_assembly(monkeypatch) -> dict[str, str]:
     monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config, **kw: [])  # noqa: ARG005
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
-        lambda skills, *, enabled, container_base_path: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),  # noqa: ARG005
+        lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),  # noqa: ARG005
     )
     monkeypatch.setattr(
         "deerflow.client.assemble_deferred_tools",

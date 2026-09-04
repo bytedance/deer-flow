@@ -522,6 +522,11 @@ def build_middlewares(
         runtime_middleware_kwargs["owns_agent_skill_projection"] = False
     if authorization_provider is not None:
         runtime_middleware_kwargs["authorization_provider"] = authorization_provider
+    if skill_authorization is not None:
+        # Shared with the runtime chain (ToolErrorHandlingMiddleware gates the
+        # skill-file-load stamp on the same skill:activate decision the
+        # activation middleware enforces for slash commands).
+        runtime_middleware_kwargs["skill_authorization"] = skill_authorization
     if authorization_provider is not None and deferred_setup is not None:
         runtime_middleware_kwargs["deferred_setup"] = deferred_setup
     middlewares = build_lead_runtime_middlewares(**runtime_middleware_kwargs)
@@ -1050,6 +1055,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             bootstrap_skills,
             enabled=skill_search_enabled,
             container_base_path=container_base_path,
+            skill_authorization=skill_authorization,
         )
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
         configured_tools = raw_tools
@@ -1079,7 +1085,12 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             config,
             model_name=model_name,
             agent_name=agent_name,
-            available_skills=set(_BOOTSTRAP_SKILL_NAMES),
+            # The authorization-filtered bootstrap set, not the raw
+            # _BOOTSTRAP_SKILL_NAMES: when policy denies "bootstrap" this is an
+            # empty set, which the activation middleware's membership gate
+            # treats as "no skills activatable" (a raw {"bootstrap"} would
+            # re-admit the denied skill to slash activation).
+            available_skills=available_skills,
             owns_agent_skill_projection=False,
             app_config=resolved_app_config,
             deferred_setup=setup,
@@ -1093,11 +1104,21 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
             max_total_subagents=max_total_subagents,
-            available_skills=set(_BOOTSTRAP_SKILL_NAMES),
+            # Same filtered set as build_middlewares above; the legacy prompt
+            # path also consults it, and an unfiltered {"bootstrap"} would let
+            # the full-metadata rendering advertise a policy-denied skill.
+            available_skills=available_skills,
             app_config=resolved_app_config,
             deferred_names=setup.deferred_names,
             user_id=resolved_user_id,
-            skill_names=skill_setup.skill_names or None,
+            # Preserve the (possibly empty) index when deferred discovery is
+            # on: converting an empty set back to None would fall through to
+            # the legacy full-metadata prompt, which reloads every enabled
+            # skill from storage and re-advertises the denied one. When
+            # deferred discovery is off, None keeps the legacy rendering and
+            # the filtered available_skills above already blanks it for a
+            # denial.
+            skill_names=skill_setup.skill_names if skill_search_enabled else None,
             allowed_subagents=allowed_subagents,
             subagent_execution_capacity=subagent_execution_capacity,
         )
@@ -1150,6 +1171,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         enabled_skills,
         enabled=skill_search_enabled,
         container_base_path=container_base_path,
+        skill_authorization=skill_authorization,
     )
     #
     # Withhold ``update_agent`` from runs triggered by webhook channels

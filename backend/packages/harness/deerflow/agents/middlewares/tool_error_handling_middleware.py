@@ -13,7 +13,9 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.skill_context import (
+    SKILL_CONTEXT_DENIED_KEY,
     SKILL_CONTEXT_ENTRY_KEY,
+    _skill_name_from_path,
     _tool_call_path,
     build_skill_entry_metadata_from_read,
 )
@@ -56,9 +58,10 @@ def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error:
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Convert tool exceptions into error ToolMessages so the run can continue."""
 
-    def __init__(self, *, app_config: AppConfig | None = None) -> None:
+    def __init__(self, *, app_config: AppConfig | None = None, skill_authorization=None) -> None:
         super().__init__()
         self._app_config = app_config
+        self._skill_authorization = skill_authorization
         if app_config is None:
             self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES)
             self._skills_root = DEFAULT_SKILLS_CONTAINER_PATH
@@ -107,6 +110,24 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         entry = build_skill_entry_metadata_from_read(path, content, skills_root=self._skills_root)
         if entry is None:
             return message
+        # Phase 3: a completed SKILL.md read only *activates* a skill (durable
+        # skill_context entry, allowed-tools policy, autonomous secret binding)
+        # when the action-scoped ``skill:activate`` decision allows it. The
+        # catalog/visibility layer (Layer 1) may expose the file itself — the
+        # action decision is what gates the autonomous activation path the
+        # model drives through describe_skill + read_file. A denied read gets
+        # the denial marker instead of entry metadata, so extract_skills skips
+        # it without the "missing skill read metadata" warning.
+        if self._skill_authorization is not None:
+            from deerflow.authz.skill_filter import skill_activation_allowed
+
+            skill_name = _skill_name_from_path(entry["path"])
+            if not skill_activation_allowed(self._skill_authorization, skill_name):
+                logger.info("Skill file read for '%s' did not activate it: skill:activate denied", skill_name)
+                existing = dict(message.additional_kwargs or {})
+                existing[SKILL_CONTEXT_DENIED_KEY] = True
+                message.additional_kwargs = existing
+                return message
         existing = dict(message.additional_kwargs or {})
         existing[SKILL_CONTEXT_ENTRY_KEY] = dict(entry)
         message.additional_kwargs = existing
@@ -169,6 +190,7 @@ def _build_runtime_middlewares(
     authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
     available_skills: set[str] | None = None,
     owns_agent_skill_projection: bool = True,
+    skill_authorization=None,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
@@ -304,7 +326,7 @@ def _build_runtime_middlewares(
 
         tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
 
-    tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
+    tail.append(ToolErrorHandlingMiddleware(app_config=app_config, skill_authorization=skill_authorization))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
 
@@ -323,6 +345,7 @@ def build_lead_runtime_middlewares(
     deferred_setup: "DeferredToolSetup | None" = None,
     available_skills: set[str] | None = None,
     owns_agent_skill_projection: bool = True,
+    skill_authorization=None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
@@ -336,6 +359,7 @@ def build_lead_runtime_middlewares(
         authorization_provider=authorization_provider,
         available_skills=available_skills,
         owns_agent_skill_projection=owns_agent_skill_projection,
+        skill_authorization=skill_authorization,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
@@ -375,6 +399,7 @@ def build_subagent_runtime_middlewares(
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
         owns_agent_skill_projection=False,
+        skill_authorization=skill_authorization,
     )
 
     # Enabled/configured skills are discoverable metadata, not automatically

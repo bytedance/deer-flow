@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from deerflow.authz.principal import build_principal_from_context
+from deerflow.authz.provider import AuthzDecision, AuthzRequest
 from deerflow.authz.runtime import resolve_authorization_provider
 from deerflow.config.app_config import AppConfig
 
@@ -35,6 +36,36 @@ class ResolvedSkillAuthorization:
     provider: AuthorizationProvider
     principal: Any
     fail_closed: bool
+
+
+def skill_activation_allowed(
+    authorization: ResolvedSkillAuthorization | None,
+    skill_name: str,
+) -> bool:
+    """Action-scoped ``skill:activate`` decision for one skill name.
+
+    Shared by every runtime activation gate — explicit slash activation
+    (``SkillActivationMiddleware``), ``describe_skill``, and the skill-file
+    load that records ``skill_context`` — so all paths apply the same decision
+    and the same provider-error policy. ``_available_skills``-style visibility
+    sets are Layer 1 (action-agnostic ``filter_resources``); an action-aware
+    custom provider may expose a skill there while denying its activation, so
+    each activation path must additionally consult this check. ``None``
+    (authorization disabled) allows — visibility already decided membership.
+    Mirrors ``_authorize_model_name``'s second ``authorize("model", "use")``
+    check. Provider errors follow the configured fail-closed / fail-open
+    policy.
+    """
+    if authorization is None:
+        return True
+    try:
+        decision = authorization.provider.authorize(AuthzRequest(principal=authorization.principal, resource="skill", action="activate", target=skill_name))
+        if not isinstance(decision, AuthzDecision):
+            raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
+        return decision.allow
+    except Exception:
+        logger.warning("Authorization provider failed while checking skill:activate for '%s'", skill_name, exc_info=True)
+        return not authorization.fail_closed
 
 
 def resolve_skill_authorization(

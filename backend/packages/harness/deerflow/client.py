@@ -382,6 +382,7 @@ class DeerFlowClient:
             skills_list,
             enabled=self._app_config.skills.deferred_discovery,
             container_base_path=self._app_config.skills.container_path,
+            skill_authorization=skill_authorization,
         )
         late_tools = []
         if skill_setup.describe_skill_tool:

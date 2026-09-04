@@ -40,8 +40,6 @@ if TYPE_CHECKING:
     from deerflow.authz.skill_filter import ResolvedSkillAuthorization
     from deerflow.config.app_config import AppConfig
 
-from deerflow.authz.provider import AuthzDecision, AuthzRequest
-
 logger = logging.getLogger(__name__)
 
 _SLASH_SKILL_ACTIVATION_KEY = "slash_skill_activation"
@@ -122,18 +120,12 @@ class SkillActivationMiddleware(AgentMiddleware):
         second ``authorize("model", "use")`` check. Provider errors follow the
         configured fail-closed / fail-open policy. ``None`` (authorization
         disabled) allows — membership in the visibility set already decided.
+        Delegates to the shared ``skill_activation_allowed`` so the slash path,
+        ``describe_skill``, and the skill-file-load path cannot drift.
         """
-        authz = self._skill_authorization
-        if authz is None:
-            return True
-        try:
-            decision = authz.provider.authorize(AuthzRequest(principal=authz.principal, resource="skill", action="activate", target=skill_name))
-            if not isinstance(decision, AuthzDecision):
-                raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
-            return decision.allow
-        except Exception:
-            logger.warning("Authorization provider failed while checking skill:activate for '%s'", skill_name, exc_info=True)
-            return not authz.fail_closed
+        from deerflow.authz.skill_filter import skill_activation_allowed
+
+        return skill_activation_allowed(self._skill_authorization, skill_name)
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {

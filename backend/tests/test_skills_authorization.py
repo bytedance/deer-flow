@@ -540,7 +540,7 @@ def test_client_ensure_agent_filters_skills_by_authorization(monkeypatch):
     monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config, **kw: [])
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
-        lambda skills, *, enabled, container_base_path: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
+        lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
     )
     monkeypatch.setattr(
         "deerflow.client.assemble_deferred_tools",
@@ -593,7 +593,7 @@ def test_client_ensure_agent_noop_when_authorization_disabled(monkeypatch):
     monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config, **kw: [])
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
-        lambda skills, *, enabled, container_base_path: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
+        lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
     )
     monkeypatch.setattr(
         "deerflow.client.assemble_deferred_tools",
@@ -820,7 +820,7 @@ def test_client_wires_skill_authorization_into_middleware(monkeypatch):
     monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config, **kw: [])
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
-        lambda skills, *, enabled, container_base_path: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
+        lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
     )
     monkeypatch.setattr(
         "deerflow.client.assemble_deferred_tools",
@@ -904,7 +904,7 @@ def test_client_filter_candidates_reuse_catalog_loader(monkeypatch):
     monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled: []))
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
-        lambda skills, *, enabled, container_base_path: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
+        lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
     )
     monkeypatch.setattr(
         "deerflow.client.assemble_deferred_tools",
@@ -964,6 +964,14 @@ def test_subagent_chain_arms_skill_activate_check(monkeypatch):
     activation = [m for m in middlewares if isinstance(m, SkillActivationMiddleware)]
     assert len(activation) == 1
     assert activation[0]._skill_authorization is resolved
+
+    # The skill-read stamp gate on the same chain shares the resolved context
+    # so an autonomously read SKILL.md cannot activate a denied skill.
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+
+    stampers = [m for m in middlewares if isinstance(m, ToolErrorHandlingMiddleware)]
+    assert len(stampers) == 1
+    assert stampers[0]._skill_authorization is resolved
 
 
 def test_subagent_executor_resolves_skill_authorization_for_chain(monkeypatch):
@@ -1072,7 +1080,7 @@ def test_client_skill_surface_uses_one_effective_user(monkeypatch):
     monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled: []))
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
-        lambda skills, *, enabled, container_base_path: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
+        lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
     )
     monkeypatch.setattr(
         "deerflow.client.assemble_deferred_tools",
@@ -1103,3 +1111,271 @@ def test_client_skill_surface_uses_one_effective_user(monkeypatch):
     # context-scoped effective user, never the global bucket.
     assert captured["user_id"] == "user-123"
     assert catalog_calls and all(call == "user-123" for call in catalog_calls)
+
+
+# ── Autonomous path: describe_skill + skill-file-load gates (Layer 2) ──
+
+
+def _describe_setup_for(provider, *, fail_closed: bool = True, skills=("demo-skill", "other-skill")):
+    """Build a real describe_skill tool over *skills* with the provider wired."""
+    from pathlib import Path
+
+    from deerflow.skills.catalog import SkillCatalog
+    from deerflow.skills.describe import build_describe_skill_tool
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    made = []
+    for name in skills:
+        base = Path("/mnt/skills/public") / name
+        made.append(
+            SkillObject(
+                name=name,
+                description=f"Description for {name}",
+                license=None,
+                skill_dir=base,
+                skill_file=base / "SKILL.md",
+                relative_path=Path(name),
+                category=SkillCategory.PUBLIC,
+                enabled=True,
+            )
+        )
+    resolved = _resolved_skill_authorization(provider, fail_closed=fail_closed)
+    return build_describe_skill_tool(SkillCatalog(tuple(made)), skill_authorization=resolved)
+
+
+def _invoke_describe(tool, query: str) -> str:
+    result = tool.invoke({"args": {"name": query}, "name": "describe_skill", "type": "tool_call", "id": "describe-call"})
+    return result.update["messages"][0].content
+
+
+def test_describe_skill_gates_on_activate_decision():
+    """describe_skill omits skills denied by authorize(skill, activate) even
+    though the Layer 1 catalog lists them — the autonomous load path must not
+    be able to discover and read_file a skill whose activation is denied."""
+    provider = _ActionAwareProvider(denied_activate={"demo-skill"})
+    tool = _describe_setup_for(provider)
+
+    content = _invoke_describe(tool, "select:demo-skill,other-skill")
+
+    assert "other-skill" in content
+    assert "demo-skill" not in content
+
+
+def test_describe_skill_denied_only_reports_no_match():
+    """A describe whose every match is denied is indistinguishable from a
+    non-match (the denial reason is not leaked)."""
+    provider = _ActionAwareProvider(denied_activate={"demo-skill"})
+    tool = _describe_setup_for(provider, skills=("demo-skill",))
+
+    content = _invoke_describe(tool, "select:demo-skill")
+
+    assert "No skills matched" in content
+
+
+def test_describe_skill_provider_error_fail_closed():
+    provider = _RaisingAuthorizeProvider(denied_activate=set())
+    tool = _describe_setup_for(provider, fail_closed=True)
+
+    content = _invoke_describe(tool, "select:demo-skill")
+
+    assert "No skills matched" in content
+
+
+def test_describe_skill_provider_error_fail_open():
+    provider = _RaisingAuthorizeProvider(denied_activate=set())
+    tool = _describe_setup_for(provider, fail_closed=False)
+
+    content = _invoke_describe(tool, "select:demo-skill")
+
+    assert "demo-skill" in content
+
+
+def test_describe_skill_disabled_authorization_describes_all():
+    """Without a resolved authorization context the tool describes everything
+    in the catalog (pre-authorization behavior)."""
+    from pathlib import Path
+
+    from deerflow.skills.catalog import SkillCatalog
+    from deerflow.skills.describe import build_describe_skill_tool
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    made = []
+    for name in ("demo-skill", "other-skill"):
+        base = Path("/mnt/skills/public") / name
+        made.append(
+            SkillObject(
+                name=name,
+                description=f"Description for {name}",
+                license=None,
+                skill_dir=base,
+                skill_file=base / "SKILL.md",
+                relative_path=Path(name),
+                category=SkillCategory.PUBLIC,
+                enabled=True,
+            )
+        )
+    tool = build_describe_skill_tool(SkillCatalog(tuple(made)))
+
+    content = _invoke_describe(tool, "select:demo-skill,other-skill")
+
+    assert "demo-skill" in content
+    assert "other-skill" in content
+
+
+# ── Skill-file-load stamping gate ─────────────────────────────────────
+
+
+def _read_call_and_message(path: str):
+    from langchain_core.messages import ToolMessage
+
+    request = SimpleNamespace(tool_call={"name": "read_file", "id": "call-1", "args": {"path": path}})
+    message = ToolMessage(content="---\ndescription: Demo skill\n---\n# demo", tool_call_id="call-1", name="read_file")
+    return request, message
+
+
+def test_skill_read_stamp_gates_on_activate_decision():
+    """A completed SKILL.md read only records a skill_context entry when the
+    action-scoped skill:activate decision allows it; a denied read gets the
+    denial marker instead (no durable context, tool policy, or secrets)."""
+    from deerflow.agents.middlewares.skill_context import SKILL_CONTEXT_DENIED_KEY, SKILL_CONTEXT_ENTRY_KEY
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+
+    provider = _ActionAwareProvider(denied_activate={"demo-skill"})
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = ToolErrorHandlingMiddleware(app_config=_make_app_config(), skill_authorization=resolved)
+
+    request, message = _read_call_and_message("/mnt/skills/public/demo-skill/SKILL.md")
+    stamped = middleware._stamp_skill_read_metadata(message, request, tool_name="read_file")
+    assert SKILL_CONTEXT_ENTRY_KEY not in stamped.additional_kwargs
+    assert stamped.additional_kwargs.get(SKILL_CONTEXT_DENIED_KEY) is True
+
+    request_ok, message_ok = _read_call_and_message("/mnt/skills/public/other-skill/SKILL.md")
+    stamped_ok = middleware._stamp_skill_read_metadata(message_ok, request_ok, tool_name="read_file")
+    assert SKILL_CONTEXT_DENIED_KEY not in stamped_ok.additional_kwargs
+    assert SKILL_CONTEXT_ENTRY_KEY in stamped_ok.additional_kwargs
+
+
+def test_extract_skills_skips_denied_reads_without_warning(caplog):
+    """extract_skills treats the denial marker as intentional — no entry and
+    no misleading 'missing skill read metadata' warning."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from deerflow.agents.middlewares import skill_context as skill_context_module
+    from deerflow.agents.middlewares.skill_context import SKILL_CONTEXT_DENIED_KEY
+
+    messages = [
+        AIMessage(content="", tool_calls=[{"name": "read_file", "id": "call-1", "args": {"path": "/mnt/skills/public/demo-skill/SKILL.md"}}]),
+        ToolMessage(content="# demo", tool_call_id="call-1", name="read_file", additional_kwargs={SKILL_CONTEXT_DENIED_KEY: True}),
+    ]
+
+    with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.skill_context"):
+        entries = skill_context_module.extract_skills(messages, skills_root="/mnt/skills", read_tool_names={"read_file"})
+
+    assert entries == []
+    assert not caplog.records
+
+
+# ── Runtime-chain wiring for the autonomous-path gates ────────────────
+
+
+def test_lead_runtime_chain_forwards_skill_authorization_to_stamp_gate():
+    """build_lead_runtime_middlewares hands the resolved skill authorization to
+    ToolErrorHandlingMiddleware so the skill-read stamp gate runs with the same
+    provider instance the activation middleware uses."""
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware, build_lead_runtime_middlewares
+
+    provider = _rbac_provider({"user": {"skills": {"allow": "*"}}})
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+
+    middlewares = build_lead_runtime_middlewares(app_config=_make_app_config(), skill_authorization=resolved)
+
+    stampers = [m for m in middlewares if isinstance(m, ToolErrorHandlingMiddleware)]
+    assert len(stampers) == 1
+    assert stampers[0]._skill_authorization is resolved
+
+
+def test_subagent_executor_shares_one_skill_authorization_instance(monkeypatch):
+    """[P2 regression] A provider factory returning a distinct instance per
+    resolve must not split the subagent's layers: the Layer 1 filter in
+    ``_load_skills`` and the runtime ``skill:activate`` checks in
+    ``_create_agent`` see the same ResolvedSkillAuthorization (one resolve per
+    executor assembly)."""
+    import asyncio
+    import importlib
+    import sys
+
+    import deerflow.authz.skill_filter as skill_filter_module
+    from deerflow.authz.skill_filter import ResolvedSkillAuthorization
+
+    sys.modules.pop("deerflow.subagents.executor", None)
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentExecutor = executor_module.SubagentExecutor
+
+    resolved_providers: list = []
+
+    def _distinct_factory(config):
+        provider = _rbac_provider({"user": {"skills": {"allow": "*"}}})
+        resolved_providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(skill_filter_module, "resolve_authorization_provider", _distinct_factory)
+
+    filter_captured: dict = {}
+    _original_filter = skill_filter_module.filter_available_skills_by_authorization
+
+    def _filter_spy(available_skills, **kwargs):
+        filter_captured["authorization"] = kwargs.get("authorization")
+        return _original_filter(available_skills, **kwargs)
+
+    monkeypatch.setattr(skill_filter_module, "filter_available_skills_by_authorization", _filter_spy)
+
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+
+    monkeypatch.setattr(
+        "deerflow.skills.storage.get_or_new_user_skill_storage",
+        lambda user_id, **kw: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="demo-skill")]),
+    )
+
+    middleware_captured: dict = {}
+
+    def _capture_builder(**kwargs):
+        middleware_captured["skill_authorization"] = kwargs.get("skill_authorization")
+        return []
+
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.tool_error_handling_middleware.build_subagent_runtime_middlewares",
+        _capture_builder,
+    )
+    monkeypatch.setattr(executor_module, "create_chat_model", lambda **kw: object())
+
+    executor = SubagentExecutor.__new__(SubagentExecutor)
+    executor.config = SimpleNamespace(name="sub", skills=None)
+    executor.model_name = "m"
+    executor.app_config = app_config
+    executor._resolved_app_config = app_config
+    executor._available_skill_names = None
+    executor._skill_authorization = None
+    executor._stop_reason_middlewares = []
+    executor.extensions = None
+    executor.trace_id = "test-trace"
+    executor.user_id = "user-123"
+    executor.user_role = "user"
+    executor.oauth_provider = None
+    executor.oauth_id = None
+    executor.channel_user_id = None
+    executor.is_internal = False
+    executor.authz_attributes = None
+    executor.tools = []
+
+    asyncio.run(executor._load_skills())
+    executor._create_agent(tools=[])
+
+    layer1 = filter_captured["authorization"]
+    layer2 = middleware_captured["skill_authorization"]
+    assert isinstance(layer1, ResolvedSkillAuthorization)
+    assert layer2 is layer1
+    # One resolve per assembly even though the factory returns distinct objects.
+    assert len(resolved_providers) == 1
