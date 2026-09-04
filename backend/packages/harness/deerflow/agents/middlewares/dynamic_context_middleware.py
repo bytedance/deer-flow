@@ -252,17 +252,24 @@ class DynamicContextMiddleware(AgentMiddleware):
     def _build_date_update_reminder(self) -> str:
         return _format_current_date_reminder(_format_current_date())
 
-    def _read_failures_are_fatal(self) -> bool:
+    def _read_failures_are_fatal(self, *, allow_io: bool = True) -> bool | None:
         from deerflow.agents.memory import memory_read_failures_are_fatal
         from deerflow.config.memory_config import get_memory_config
 
-        memory_config = self._app_config.memory if self._app_config else get_memory_config()
-        if not memory_config.enabled or not memory_config.injection_enabled:
-            return False
-        return memory_read_failures_are_fatal(
-            memory_config.manager_class,
-            memory_config.backend_config,
-        )
+        if self._app_config is None and not allow_io:
+            return None  # get_memory_config() may reload config.yaml from disk.
+        try:
+            memory_config = self._app_config.memory if self._app_config else get_memory_config()
+            if not memory_config.enabled or not memory_config.injection_enabled:
+                return False
+            return memory_read_failures_are_fatal(
+                memory_config.manager_class,
+                memory_config.backend_config,
+                resolved_only=not allow_io,
+            )
+        except Exception:
+            logger.exception("DynamicContextMiddleware: could not resolve memory read failure policy; treating the injection timeout as fatal")
+            return True
 
     @staticmethod
     def _make_reminder_and_user_messages(
@@ -386,6 +393,18 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
+        # The warm path uses only this call's config and already-loaded class.
+        # Cold discovery/config reload shares the injection's bounded worker,
+        # never a second executor job after the timeout. Keep this value local:
+        # a late worker must not overwrite another run's timeout policy.
+        read_failures_are_fatal = self._read_failures_are_fatal(allow_io=False)
+
+        def inject_with_policy():
+            nonlocal read_failures_are_fatal
+            if read_failures_are_fatal is None:
+                read_failures_are_fatal = self._read_failures_are_fatal()
+            return self._inject(state, runtime)
+
         # _inject() performs synchronous file I/O (memory JSON loading) and
         # potentially blocking network calls (tiktoken encoding download on
         # first use).  Offload to a thread so the event loop is never blocked
@@ -399,18 +418,15 @@ class DynamicContextMiddleware(AgentMiddleware):
         # rather than hanging. Frozen context already in state remains active.
         try:
             result = await asyncio.wait_for(
-                asyncio.to_thread(self._inject, state, runtime),
+                asyncio.to_thread(inject_with_policy),
                 timeout=_INJECT_TIMEOUT_SECONDS,
             )
         except TimeoutError as exc:
             from deerflow.agents.memory import MemoryReadError
 
-            try:
-                read_failures_are_fatal = await asyncio.to_thread(self._read_failures_are_fatal)
-            except Exception:
-                logger.exception("DynamicContextMiddleware: could not resolve memory read failure policy; treating the injection timeout as fatal")
-                read_failures_are_fatal = True
-            if read_failures_are_fatal:
+            # A worker that never started (or is still resolving policy) leaves
+            # the policy unknown. Fail closed without waiting for that worker.
+            if read_failures_are_fatal is not False:
                 raise MemoryReadError("Required memory context retrieval timed out") from exc
             logger.warning(
                 "DynamicContextMiddleware: injection timed out (%.1fs); skipping new memory/date injection for this turn",

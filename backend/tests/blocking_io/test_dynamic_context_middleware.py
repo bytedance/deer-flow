@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest import mock
 
@@ -24,7 +25,9 @@ from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.agents.memory import MemoryReadError, reset_memory_manager
+from deerflow.agents.memory.manager import _scan_backends
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
     DynamicContextMiddleware,
@@ -66,7 +69,7 @@ async def test_abefore_agent_does_not_block_event_loop() -> None:
 
     with (
         mock.patch.object(mw, "_build_full_reminder", slow_build_reminder),
-        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""),
+        mock.patch.object(prompt_module, "_get_memory_context", return_value=""),
     ):
         agent = await asyncio.to_thread(
             lambda: create_agent(
@@ -93,7 +96,7 @@ async def test_abefore_agent_returns_same_result_as_before_agent() -> None:
     runtime = SimpleNamespace(context={})
 
     with (
-        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""),
+        mock.patch.object(prompt_module, "_get_memory_context", return_value=""),
         mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
     ):
         mock_dt.now.return_value.strftime.return_value = "2026-06-05, Friday"
@@ -120,6 +123,7 @@ async def test_abefore_agent_returns_none_on_timeout(
 ) -> None:
     """A timed-out worker must not emit a late, phantom context event."""
     monkeypatch.setenv("OPENVIKING_API_KEY", "test-key")
+    await asyncio.to_thread(_scan_backends)
     mw = DynamicContextMiddleware(
         app_config=SimpleNamespace(
             memory=MemoryConfig(
@@ -177,6 +181,7 @@ async def test_abefore_agent_propagates_strict_memory_timeout(
 ) -> None:
     """A strict backend must not degrade after the middleware timeout."""
     monkeypatch.setenv("OPENVIKING_API_KEY", "test-key")
+    await asyncio.to_thread(_scan_backends)
     mw = DynamicContextMiddleware(
         app_config=SimpleNamespace(
             memory=MemoryConfig(
@@ -351,3 +356,134 @@ async def test_abefore_agent_records_checkpointed_memory_on_timeout() -> None:
         content_sha256=hashlib.sha256(memory_content.encode("utf-8")).hexdigest(),
     )
     journal.record_memory_context.assert_called_once()
+
+
+@pytest.mark.parametrize("read_policy", ["fail_open", "raise"])
+@pytest.mark.parametrize("already_saturated", [False, True], ids=["read_occupies_worker", "pool_already_full"])
+async def test_timeout_does_not_wait_for_saturated_executor(monkeypatch, read_policy, already_saturated):
+    """Neither a running read nor another request may delay timeout handling."""
+    monkeypatch.setenv("OPENVIKING_API_KEY", "test-key")
+    await asyncio.to_thread(_scan_backends)  # normal Gateway startup discovery
+    mw = DynamicContextMiddleware(
+        app_config=SimpleNamespace(
+            memory=MemoryConfig(
+                manager_class="openviking",
+                backend_config={"owner_user_id": "alice", "failure_policy": {"read": read_policy}},
+            )
+        )
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.get_running_loop()
+
+    def occupy_worker(*_args):
+        entered.set()
+        release.wait(timeout=2)
+        finished.set()
+
+    try:
+        with mock.patch.object(loop, "_default_executor", executor):
+            if already_saturated:
+                executor.submit(occupy_worker)
+                while not entered.is_set():
+                    await asyncio.sleep(0)
+            with (
+                mock.patch.object(mw, "_inject", side_effect=occupy_worker) as inject,
+                mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS", 0.01),
+            ):
+                call = mw.abefore_agent({"messages": [HumanMessage(content="hi", id="m1")]}, SimpleNamespace(context={}))
+                if read_policy == "raise":
+                    with pytest.raises(MemoryReadError) as exc_info:
+                        await asyncio.wait_for(call, 0.25)
+                    assert isinstance(exc_info.value.__cause__, TimeoutError)
+                else:
+                    assert await asyncio.wait_for(call, 0.25) is None
+                assert not finished.is_set()  # the request returned before its worker
+                assert inject.call_count == (0 if already_saturated else 1)
+    finally:
+        release.set()
+        await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+
+
+@pytest.mark.parametrize("explicit_config", [True, False], ids=["cold_registry", "config_fallback"])
+async def test_cold_policy_resolution_stays_off_event_loop(monkeypatch, tmp_path, explicit_config):
+    """Cold discovery and the config-reload fallback remain inside the deadline."""
+    from deerflow.agents.memory import manager as manager_module
+
+    monkeypatch.setenv("OPENVIKING_API_KEY", "test-key")
+    cfg = MemoryConfig(manager_class="openviking", backend_config={"owner_user_id": "alice", "failure_policy": {"read": "fail_open"}})
+    policy_file = tmp_path / "policy.txt"
+    await asyncio.to_thread(policy_file.write_text, "policy", encoding="utf-8")
+    event_loop_thread = threading.get_ident()
+    seen = []
+
+    def cold_scan():
+        assert threading.get_ident() != event_loop_thread
+        policy_file.read_text(encoding="utf-8")
+        seen.append("scan")
+        return _scan_backends()
+
+    def reload_config():
+        assert threading.get_ident() != event_loop_thread
+        policy_file.read_text(encoding="utf-8")
+        seen.append("config")
+        return cfg
+
+    mw = DynamicContextMiddleware(app_config=SimpleNamespace(memory=cfg) if explicit_config else None)
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_inject(*_):
+        try:
+            release.wait(timeout=2)
+        finally:
+            finished.set()
+
+    try:
+        with (
+            mock.patch.object(manager_module, "_scan_backends", side_effect=cold_scan),
+            mock.patch("deerflow.config.memory_config.get_memory_config", side_effect=reload_config),
+            mock.patch.object(mw, "_inject", side_effect=blocking_inject),
+            mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS", 0.2),
+        ):
+            assert await asyncio.wait_for(mw.abefore_agent({}, SimpleNamespace(context={})), 0.5) is None
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+    assert "scan" in seen
+    assert ("config" in seen) is not explicit_config
+
+
+@pytest.mark.parametrize("disabled_field", [None, "enabled", "injection_enabled"], ids=["unknown_policy", "memory_disabled", "injection_disabled"])
+async def test_cold_saturated_timeout_never_starts_discovery(monkeypatch, disabled_field):
+    """An unknown policy fails closed; disabled memory needs no policy lookup."""
+    cfg = MemoryConfig(manager_class="openviking")
+    if disabled_field:
+        setattr(cfg, disabled_field, False)
+    mw = DynamicContextMiddleware(app_config=SimpleNamespace(memory=cfg))
+    executor = ThreadPoolExecutor(max_workers=1)
+    release = threading.Event()
+    try:
+        with (
+            mock.patch.object(asyncio.get_running_loop(), "_default_executor", executor),
+            mock.patch("deerflow.agents.memory.manager._scan_backends") as scan,
+            mock.patch("deerflow.config.memory_config.get_memory_config") as reload_config,
+            mock.patch.object(mw, "_inject") as inject,
+            mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS", 0.01),
+        ):
+            executor.submit(release.wait, 2)
+            call = mw.abefore_agent({}, SimpleNamespace(context={}))
+            if disabled_field is None:
+                with pytest.raises(MemoryReadError) as exc_info:
+                    await asyncio.wait_for(call, 0.25)
+                assert isinstance(exc_info.value.__cause__, TimeoutError)
+            else:
+                assert await asyncio.wait_for(call, 0.25) is None
+            scan.assert_not_called()
+            reload_config.assert_not_called()
+            inject.assert_not_called()
+    finally:
+        release.set()
+        await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)

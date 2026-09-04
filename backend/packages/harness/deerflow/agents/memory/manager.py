@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import sys
 import threading
 from abc import abstractmethod
 from pathlib import Path
@@ -175,7 +176,7 @@ class MemoryManager(BaseModel):
         cls,
         backend_config: dict[str, Any] | None,
     ) -> bool:
-        """Return the strict-read capability encoded by backend config."""
+        """Return strict-read policy using only in-memory config; do not perform I/O."""
 
         del backend_config
         return False
@@ -621,7 +622,7 @@ def _scan_backends() -> dict[str, type[MemoryManager]]:
     return registry
 
 
-def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
+def _resolve_manager_class(manager_class: str, *, allow_discovery: bool = True) -> type[MemoryManager]:
     """Resolve a ``manager_class`` config value to a concrete class.
 
     Resolution order:
@@ -636,7 +637,9 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
     is resolved eagerly at startup so it can be warmed) so the operator fixes
     ``memory.manager_class`` instead of discovering the mismatch later.
     """
-    registry = _scan_backends()
+    # Timeout preparation may only inspect already-loaded backends. Do not
+    # turn a cold registry or dotted import into event-loop file/import I/O.
+    registry = _scan_backends() if allow_discovery else (_backends_cache or {})
     if manager_class in registry:
         return registry[manager_class]
 
@@ -648,11 +651,14 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
         module_path, _, attr = manager_class.rpartition(".")
     if module_path and attr:
         try:
-            module = importlib.import_module(module_path)
+            module = importlib.import_module(module_path) if allow_discovery else sys.modules.get(module_path)
         except ImportError as e:
             dotted_error = f"cannot import module {module_path!r}: {e}"
         else:
-            cls = getattr(module, attr, None)
+            if allow_discovery:
+                cls = getattr(module, attr, None)
+            else:
+                cls = vars(module).get(attr) if module is not None else None
             if cls is None:
                 dotted_error = f"attribute {attr!r} not found in {module_path!r}"
             elif not (isinstance(cls, type) and issubclass(cls, MemoryManager)):
@@ -964,18 +970,25 @@ def get_memory_manager() -> MemoryManager:
 def memory_read_failures_are_fatal(
     manager_class: str,
     backend_config: dict[str, Any] | None,
-) -> bool:
+    *,
+    resolved_only: bool = False,
+) -> bool | None:
     """Resolve strict-read capability without constructing a new manager.
 
-    Policy resolution runs while handling a caller-owned read timeout. If the
-    backend class or configuration cannot be resolved, fail closed rather than
-    replacing the original timeout with a secondary factory/config exception.
+    With ``resolved_only``, never scan/import backends; return ``None`` when
+    the class is not already loaded. The caller can finish discovery inside
+    its bounded worker. Invalid config and full-resolution failures fail closed.
     """
 
     try:
-        return _resolve_manager_class(manager_class).read_failures_are_fatal_for_config(
-            backend_config,
-        )
+        cls = _resolve_manager_class(manager_class, allow_discovery=not resolved_only)
+    except Exception:
+        if resolved_only:
+            return None
+        logger.exception("Could not resolve memory read failure policy; treating the read timeout as fatal")
+        return True
+    try:
+        return cls.read_failures_are_fatal_for_config(backend_config)
     except Exception:
         logger.exception("Could not resolve memory read failure policy; treating the read timeout as fatal")
         return True
