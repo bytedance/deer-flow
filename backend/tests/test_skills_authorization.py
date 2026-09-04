@@ -932,3 +932,174 @@ def test_client_filter_candidates_reuse_catalog_loader(monkeypatch):
 
     assert captured["candidate_skill_names"] == ["catalog-skill"]
     assert catalog_calls["count"] >= 1
+
+
+def test_subagent_chain_arms_skill_activate_check(monkeypatch):
+    """build_subagent_runtime_middlewares forwards skill_authorization into the
+    subagent chain's SkillActivationMiddleware (a delegated task is a plain
+    HumanMessage, so /skill-name in task text reaches the activation path)."""
+    import deerflow.authz.skill_filter as skill_filter_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+    from deerflow.authz.skill_filter import resolve_skill_authorization
+
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+    provider = _rbac_provider({"user": {"skills": {"allow": "*"}}})
+    monkeypatch.setattr(skill_filter_module, "resolve_authorization_provider", lambda config: provider)
+
+    resolved = resolve_skill_authorization(_context(), app_config)
+    assert resolved is not None
+
+    middlewares = build_subagent_runtime_middlewares(
+        app_config=app_config,
+        model_name=None,
+        lazy_init=True,
+        available_skills={"demo-skill"},
+        user_id="user-123",
+        authorization_provider=provider,
+        skill_authorization=resolved,
+    )
+
+    activation = [m for m in middlewares if isinstance(m, SkillActivationMiddleware)]
+    assert len(activation) == 1
+    assert activation[0]._skill_authorization is resolved
+
+
+def test_subagent_executor_resolves_skill_authorization_for_chain(monkeypatch):
+    """SubagentExecutor._create_agent passes a resolved ResolvedSkillAuthorization
+    into build_subagent_runtime_middlewares, built from the executor identity."""
+    import importlib
+    import sys
+    from types import SimpleNamespace
+
+    import deerflow.authz.skill_filter as skill_filter_module
+    from deerflow.authz.skill_filter import ResolvedSkillAuthorization
+
+    # tests/conftest.py injects a MagicMock for deerflow.subagents.executor to
+    # break a production circular import; load the real module for this test
+    # (same pattern as tests/test_delegation_ledger_live.py).
+    sys.modules.pop("deerflow.subagents.executor", None)
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentExecutor = executor_module.SubagentExecutor
+
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+    provider = _rbac_provider({"user": {"skills": {"allow": "*"}}})
+    monkeypatch.setattr(skill_filter_module, "resolve_authorization_provider", lambda config: provider)
+    monkeypatch.setattr(executor_module, "create_chat_model", lambda **kw: object())
+    monkeypatch.setattr(executor_module, "resolve_subagent_model_name", lambda *a, **kw: "m")
+
+    captured = {}
+
+    def _capture_builder(**kwargs):
+        captured["skill_authorization"] = kwargs.get("skill_authorization")
+        return []
+
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.tool_error_handling_middleware.build_subagent_runtime_middlewares",
+        _capture_builder,
+    )
+
+    executor = SubagentExecutor.__new__(SubagentExecutor)
+    executor.config = SimpleNamespace(name="sub", skills=None)
+    executor.model_name = "m"
+    executor.app_config = app_config
+    executor._resolved_app_config = app_config
+    executor._available_skill_names = None
+    executor.extensions = None
+    executor.user_id = "user-123"
+    executor.user_role = "user"
+    executor.oauth_provider = None
+    executor.oauth_id = None
+    executor.channel_user_id = None
+    executor.is_internal = False
+    executor.authz_attributes = None
+    executor.tools = []
+
+    executor._create_agent(tools=[])
+
+    wired = captured["skill_authorization"]
+    assert isinstance(wired, ResolvedSkillAuthorization)
+    assert wired.provider is provider
+
+
+def test_client_skill_surface_uses_one_effective_user(monkeypatch):
+    """The filter, the candidate pre-load, and the catalog all resolve the same
+    effective user — a request whose configurable carries no user_id must not
+    fall back to the process-global skill bucket while the middleware loads
+    user-scoped storage (per-user custom skills would then be filtered out)."""
+    from langchain_core.runnables import RunnableConfig
+
+    from deerflow.client import DeerFlowClient
+
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+    monkeypatch.setattr(
+        "deerflow.authz.skill_filter.resolve_authorization_provider",
+        lambda config: _rbac_provider({"user": {"skills": {"allow": "*"}}}),
+    )
+    monkeypatch.setattr(
+        "deerflow.authz.tool_filter.resolve_authorization_provider",
+        lambda config: _rbac_provider({"user": {"tools": {"allow": "*"}}}),
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.agent.resolve_authorization_provider",
+        lambda config: _rbac_provider({"user": {"models": {"allow": "*"}}}),
+    )
+
+    catalog_calls = []
+
+    def _catalog_loader(app_config, **kw):
+        catalog_calls.append(kw.get("user_id"))
+        return [SimpleNamespace(name="catalog-skill")]
+
+    monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", _catalog_loader)
+
+    import deerflow.authz.skill_filter as skill_filter_module
+
+    captured = {}
+    _original_filter = skill_filter_module.filter_available_skills_by_authorization
+
+    def _filter_spy(available_skills, **kwargs):
+        captured["user_id"] = kwargs.get("user_id")
+        return _original_filter(available_skills, **kwargs)
+
+    monkeypatch.setattr(skill_filter_module, "filter_available_skills_by_authorization", _filter_spy)
+    monkeypatch.setattr("deerflow.client.create_chat_model", lambda **kw: object())
+    monkeypatch.setattr("deerflow.client.create_agent", lambda **kw: object())
+    monkeypatch.setattr("deerflow.client.build_middlewares", lambda *a, **kw: [])
+    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled: []))
+    monkeypatch.setattr(
+        "deerflow.client.build_skill_search_setup",
+        lambda skills, *, enabled, container_base_path: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),
+    )
+    monkeypatch.setattr(
+        "deerflow.client.assemble_deferred_tools",
+        lambda tools, *, enabled: ([], SimpleNamespace(deferred_names=frozenset())),
+    )
+    monkeypatch.setattr("deerflow.client.build_mcp_routing_middleware", lambda *a, **kw: None)
+    monkeypatch.setattr("deerflow.client.get_mcp_routing_hints_prompt_section", lambda *a, **kw: "")
+    monkeypatch.setattr("deerflow.client.apply_prompt_template", lambda **kw: "")
+    monkeypatch.setattr("deerflow.client.get_thread_state_schema", lambda *a, **kw: object())
+    monkeypatch.setattr("deerflow.client.normalize_middleware_state_schemas", lambda schemas, mode, freq: [])
+    # No user_id in configurable: the effective id must come from here.
+    monkeypatch.setattr("deerflow.client.get_effective_user_id", lambda: "user-123")
+
+    client = DeerFlowClient.__new__(DeerFlowClient)
+    client._app_config = app_config
+    client._agent_name = "default"
+    client._available_skills = None
+    client._checkpoint_channel_mode = "full"
+    client._checkpoint_snapshot_frequency = None
+    client._middlewares = []
+    client._agent = None
+    client._agent_config_key = None
+    client._checkpointer = object()
+
+    client._ensure_agent(RunnableConfig(configurable={"user_role": "user"}))
+
+    # The filter, the candidate pre-load, and the catalog all used the
+    # context-scoped effective user, never the global bucket.
+    assert captured["user_id"] == "user-123"
+    assert catalog_calls and all(call == "user-123" for call in catalog_calls)

@@ -320,15 +320,23 @@ class DeerFlowClient:
         # result is a local used for assembly only.
         from deerflow.authz.skill_filter import filter_available_skills_by_authorization, resolve_skill_authorization
 
+        # One effective identity for the whole skill surface: the filter's
+        # candidate universe, the candidate pre-load's cache bucket, and the
+        # middleware's user-scoped storage must all resolve the same user, or
+        # per-user custom skills visible to the middleware would be missing
+        # from the filtered set (and vice versa). Resolved before anything
+        # consumes a user id below.
+        effective_user_id = cfg.get("user_id") or get_effective_user_id()
+
         skill_authorization = resolve_skill_authorization(cfg, self._app_config)
         # Resolve the filter's candidate names through the cached catalog
-        # loader (same source as ``skills_list`` below) instead of letting the
-        # filter rescan storage on every build; only relevant when no
-        # agent-level allowlist is set.
+        # loader (same source and same user bucket as ``skills_list`` below)
+        # instead of letting the filter rescan storage on every build; only
+        # relevant when no agent-level allowlist is set.
         candidate_skill_names = None
         if self._available_skills is None and skill_authorization is not None:
             try:
-                candidate_skill_names = [s.name for s in get_enabled_skills_for_config(self._app_config, user_id=cfg.get("user_id"))]
+                candidate_skill_names = [s.name for s in get_enabled_skills_for_config(self._app_config, user_id=effective_user_id)]
             except Exception:
                 logger.warning("Failed to pre-load enabled skills for authorization candidates", exc_info=True)
                 # Leave None: the filter resolves candidates itself and applies
@@ -338,7 +346,7 @@ class DeerFlowClient:
             self._available_skills,
             context=cfg,
             app_config=self._app_config,
-            user_id=cfg.get("user_id"),
+            user_id=effective_user_id,
             candidate_skill_names=candidate_skill_names,
             authorization=skill_authorization,
         )
@@ -365,7 +373,9 @@ class DeerFlowClient:
 
         # Add framework-provided tools before authorization so Layer 1 sees
         # every capability that can become model-visible.
-        skills_list = get_enabled_skills_for_config(self._app_config)
+        # Same effective user as the filter/candidates above so the catalog
+        # shares the per-user cache bucket and the same skill universe.
+        skills_list = get_enabled_skills_for_config(self._app_config, user_id=effective_user_id)
         if available_skills is not None:
             skills_list = [s for s in skills_list if s.name in available_skills]
         skill_setup = build_skill_search_setup(
@@ -396,8 +406,6 @@ class DeerFlowClient:
             top_k=self._app_config.tool_search.auto_promote_top_k,
         )
         mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=deferred_setup.deferred_names)
-
-        effective_user_id = cfg.get("user_id") or get_effective_user_id()
 
         kwargs: dict[str, Any] = {
             # attach_tracing=False because ``stream()`` injects tracing

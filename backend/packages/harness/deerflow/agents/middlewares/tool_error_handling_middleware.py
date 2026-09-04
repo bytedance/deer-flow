@@ -351,6 +351,7 @@ def build_subagent_runtime_middlewares(
     available_skills: set[str] | None = None,
     user_id: str | None = None,
     authorization_provider=None,
+    skill_authorization=None,
     extensions=None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
@@ -390,6 +391,7 @@ def build_subagent_runtime_middlewares(
             app_config=app_config,
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
+            skill_authorization=skill_authorization,
         )
     )
     middlewares.append(

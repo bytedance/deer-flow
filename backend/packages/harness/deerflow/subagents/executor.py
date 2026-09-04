@@ -736,6 +736,15 @@ class SubagentExecutor:
         authz_provider = getattr(self, "_authz_provider", None)
         if authz_provider is not None:
             middleware_kwargs["authorization_provider"] = authz_provider
+        # Phase 3 (Layer 2): arm the runtime ``skill:activate`` check on the
+        # subagent chain too — a delegated task is a plain HumanMessage, so
+        # task text containing /skill-name reaches the activation middleware.
+        # Resolved from the same identity the Layer 1 filter uses.
+        from deerflow.authz.skill_filter import resolve_skill_authorization
+
+        skill_authorization = resolve_skill_authorization(self._skill_authz_context(), app_config)
+        if skill_authorization is not None:
+            middleware_kwargs["skill_authorization"] = skill_authorization
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
@@ -899,18 +908,9 @@ class SubagentExecutor:
         from deerflow.authz.skill_filter import filter_available_skills_by_authorization
 
         resolved_app_config = self.app_config or get_app_config()
-        authz_context = {
-            "user_id": self.user_id,
-            "user_role": self.user_role,
-            "oauth_provider": self.oauth_provider,
-            "oauth_id": self.oauth_id,
-            "channel_user_id": self.channel_user_id,
-            "is_internal": self.is_internal,
-            "authz_attributes": self.authz_attributes,
-        }
         allowed = filter_available_skills_by_authorization(
             allowed,
-            context=authz_context,
+            context=self._skill_authz_context(),
             app_config=resolved_app_config,
             user_id=self.user_id,
             candidate_skill_names=[s.name for s in all_skills],
@@ -919,6 +919,19 @@ class SubagentExecutor:
         if allowed is not None:
             return [s for s in all_skills if s.name in allowed]
         return all_skills
+
+    def _skill_authz_context(self) -> dict[str, Any]:
+        """Identity mapping shared by the Layer 1 filter and the runtime
+        ``skill:activate`` check wired into the subagent middleware chain."""
+        return {
+            "user_id": self.user_id,
+            "user_role": self.user_role,
+            "oauth_provider": self.oauth_provider,
+            "oauth_id": self.oauth_id,
+            "channel_user_id": self.channel_user_id,
+            "is_internal": self.is_internal,
+            "authz_attributes": self.authz_attributes,
+        }
 
     async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
         """Build the initial state for agent execution.
