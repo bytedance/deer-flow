@@ -7,6 +7,11 @@
 #   `DEER_FLOW_CONFIG_PATH` to point at a specific config file.
 # - Runtime state defaults to `.deer-flow` under the project root. Override it
 #   with `DEER_FLOW_HOME` when you need a different writable data directory.
+# - Set `DEER_FLOW_DATE_TIMEZONE` to an IANA timezone name (e.g. `Asia/Shanghai`)
+#   when the conversation date injected into agents should follow a zone other
+#   than the server's local timezone. It is read at runtime by the date-context
+#   middlewares (not a config-schema field), so it can be set on a container
+#   without mounting a `config.yaml`.
 # - Environment variables are available for all field values. Example: `api_key: $OPENAI_API_KEY`
 # - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
 
@@ -15,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 39
+config_version: 40
 
 # ============================================================================
 # Logging
@@ -1333,7 +1338,8 @@ sandbox:
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
-# On macOS: Automatically prefers Apple Container if available, falls back to Docker
+# On macOS: Prefers Apple Container when available, but keeps Docker while this
+# sandbox prefix still has managed Docker containers to reconcile after a mode change
 # On other platforms: Uses Docker
 # Uncomment to use:
 # sandbox:
@@ -1359,6 +1365,23 @@ sandbox:
 #
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
+#
+#   # Optional: outbound network policy for locally managed Docker sandboxes.
+#   # open keeps the current behavior. isolated denies all outbound traffic.
+#   # allowlist permits the listed HTTP/HTTPS domains; denied public domains can
+#   # optionally be approved from the Human Input card. Restricted modes require
+#   # Docker Engine 28+ and are not supported by Apple Container or provisioner mode.
+#   # Private, loopback, link-local, multicast, and cloud metadata addresses are always denied.
+#   network:
+#     mode: allowlist                    # open | isolated | allowlist (default: open)
+#     allow_domains:
+#       - pypi.org
+#       - files.pythonhosted.org
+#       - registry.npmjs.org
+#       - github.com
+#     approval: prompt                  # deny | prompt
+#     temporary_grant_ttl: 300          # 30-3600 seconds
+#     proxy_image: ghcr.io/bytedance/deer-flow-sandbox-network-proxy:latest
 #
 #   # Optional: Override whether the sandbox already sees the gateway's
 #   # thread workspace/uploads/outputs through shared mounts.
