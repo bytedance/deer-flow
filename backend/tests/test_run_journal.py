@@ -950,6 +950,36 @@ class TestCallerBucketing:
         assert j._lead_agent_tokens == 15
         assert j._llm_call_count == 1
 
+    @pytest.mark.anyio
+    async def test_dedup_same_run_id_persists_single_message(self, journal_setup):
+        """A re-fired on_llm_end for one run_id must persist the message once.
+
+        LangChain can deliver on_llm_end more than once for the same run_id.
+        Token accounting already dedups on that; the durable llm.ai.response
+        row must be deduped on the same premise, or count_messages and message
+        pagination (which read append-only rows without dedup) inflate.
+        """
+        j, store = journal_setup
+        run_id = uuid4()
+        response = _make_llm_response("Answer")
+        j.on_llm_end(response, run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(response, run_id=run_id, parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+        messages = await store.list_messages("t1")
+        assert [m["event_type"] for m in messages] == ["llm.ai.response"]
+        assert await store.count_messages("t1") == 1
+        # The run summary counts the message exactly once as well.
+        assert j._msg_count == 1
+
+    @pytest.mark.anyio
+    async def test_distinct_run_ids_each_persist_a_message(self, journal_setup):
+        """The dedup guard is per run_id and must not drop distinct responses."""
+        j, store = journal_setup
+        j.on_llm_end(_make_llm_response("First"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        j.on_llm_end(_make_llm_response("Second"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+        assert await store.count_messages("t1") == 2
+
     def test_first_no_usage_second_with_usage(self, journal_setup):
         """First callback with no usage must not block second callback with usage for same run_id."""
         j, _ = journal_setup

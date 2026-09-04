@@ -476,18 +476,24 @@ class RunJournal(BaseCallbackHandler):
                 self._seen_llm_starts.add(rid)
 
             # Message event: checkpoint-aligned llm.ai.response payload.
-            self._put(
-                event_type=LLM_AI_RESPONSE_EVENT.event_type,
-                category=LLM_AI_RESPONSE_EVENT.category,
-                content=message.model_dump(),
-                metadata={
-                    "caller": caller,
-                    "usage": usage_dict,
-                    "latency_ms": latency_ms,
-                    "llm_call_index": call_index,
-                },
-            )
+            # LangChain may re-fire on_llm_end for the same run_id (the token
+            # accounting below dedups on that exact premise). The event store is
+            # append-only and count_messages/list_messages read raw rows, so
+            # re-persisting the response would leave a duplicate llm.ai.response
+            # in the durable feed. Gate it by the same per-run_id guard that
+            # already dedups the run summary so a replayed callback is a no-op.
             if rid not in self._counted_message_llm_run_ids:
+                self._put(
+                    event_type=LLM_AI_RESPONSE_EVENT.event_type,
+                    category=LLM_AI_RESPONSE_EVENT.category,
+                    content=message.model_dump(),
+                    metadata={
+                        "caller": caller,
+                        "usage": usage_dict,
+                        "latency_ms": latency_ms,
+                        "llm_call_index": call_index,
+                    },
+                )
                 self._record_message_summary(message, caller=caller)
 
             # Token accumulation (dedup by langchain run_id to avoid double-counting
