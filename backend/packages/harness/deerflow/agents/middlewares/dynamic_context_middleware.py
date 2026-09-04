@@ -45,7 +45,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.context import aload_memory_context, load_memory_context
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY
 from deerflow.runtime.secret_context import DYNAMIC_MEMORY_CONTEXT_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.utils.messages import (
@@ -282,7 +282,7 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     @staticmethod
     def _latest_genuine_user_message(messages: list, context: dict) -> tuple[int, HumanMessage, str] | None:
-        raw_ids = context.get(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY)
+        raw_ids = context.get(CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY, context.get(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY))
         pre_existing_ids = {strip_injected_user_message_id_suffix(str(message_id)) for message_id in raw_ids if message_id} if isinstance(raw_ids, (frozenset, set, list, tuple)) else set()
         for index in reversed(range(len(messages))):
             message = messages[index]

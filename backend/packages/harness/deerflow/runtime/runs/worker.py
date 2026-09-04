@@ -52,7 +52,7 @@ from deerflow.runtime.checkpoint_state import (
     graph_state_schema,
     graph_writable_channels,
 )
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -194,6 +194,7 @@ def _release_run_scoped_references(
     internal_context_keys = {
         "__run_journal",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+        CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY,
     }
     try:
         from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
@@ -524,6 +525,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
     frozenset(
         {
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+            CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
         }
     )
@@ -794,6 +796,7 @@ async def run_agent(
     # earlier runs on the same thread — without it, one stale fallback in
     # history would mark every subsequent run on this thread as ``error``.
     pre_existing_message_ids: set[str] = set()
+    recall_boundary_message_ids: set[str] | None = None
 
     # Bound agent graph accessor + captured pre-run rollback point; assigned
     # inside the try block so the finally rollback path can fork the pre-run
@@ -1113,6 +1116,12 @@ async def run_agent(
                     thread_id=thread_id,
                     run_id=run_id,
                 )
+                if mode == "full" and config.get("configurable", {}).get("checkpoint_id"):
+                    # Replay can reuse a human ID from the abandoned head.
+                    # Recall must compare against the selected checkpoint, but
+                    # rollback, audit and delegation retain their existing boundary.
+                    recall_snapshot = await accessor.aget(selected_checkpoint_config)
+                    recall_boundary_message_ids = _collect_pre_existing_message_ids(recall_snapshot.values)
             if resumed_messages is not None:
                 # The graph now starts from the selected state, so the
                 # current-run message boundary is that state, not the head we
@@ -1122,6 +1131,7 @@ async def run_agent(
                 runnable_configs.append(initial_runnable_config)
 
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
+        runtime_ctx[CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids if recall_boundary_message_ids is None else recall_boundary_message_ids)
         _install_runtime_context(config, runtime_ctx)
 
         # Capture the effective (resolved) model name from the agent's metadata.

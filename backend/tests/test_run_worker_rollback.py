@@ -22,7 +22,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.thread_state import merge_artifacts, merge_message_writes
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager
@@ -604,19 +604,20 @@ def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_co
     assert config["context"]["app_config"] is app_config
 
 
-def test_install_runtime_context_overrides_internal_pre_existing_message_ids():
-    config = {"context": {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"spoofed"}}}
+@pytest.mark.parametrize("key", [CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY])
+def test_install_runtime_context_overrides_internal_message_ids(key):
+    config = {"context": {key: {"spoofed"}}}
 
     _install_runtime_context(
         config,
         {
             "thread_id": "record-thread",
             "run_id": "run-1",
-            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset({"old-ai"}),
+            key: frozenset({"old-ai"}),
         },
     )
 
-    assert config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"old-ai"})
+    assert config["context"][key] == frozenset({"old-ai"})
 
 
 def test_install_runtime_context_removes_caller_sandbox_execution_identities():
@@ -1340,6 +1341,7 @@ async def test_run_agent_threads_pre_existing_message_ids_into_runtime_context()
 
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
             captured["pre_existing_message_ids"] = config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY]
+            captured["recall_boundary_message_ids"] = config["context"][CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY]
             yield {"messages": []}
 
     def factory(*, config):
@@ -1356,6 +1358,7 @@ async def test_run_agent_threads_pre_existing_message_ids_into_runtime_context()
     )
 
     assert captured["pre_existing_message_ids"] == frozenset({"h1", "a1"})
+    assert captured["recall_boundary_message_ids"] == captured["pre_existing_message_ids"]
 
 
 @pytest.mark.anyio
@@ -2334,12 +2337,13 @@ def test_build_runtime_context_caller_cannot_override_thread_id_or_run_id():
     assert ctx["agent_name"] == "ok"
 
 
-def test_build_runtime_context_ignores_caller_pre_existing_message_ids():
-    caller_context = {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"spoofed"}}
+@pytest.mark.parametrize("key", [CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY])
+def test_build_runtime_context_ignores_caller_message_ids(key):
+    caller_context = {key: {"spoofed"}}
 
     ctx = _build_runtime_context("thread-1", "run-1", caller_context)
 
-    assert CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY not in ctx
+    assert key not in ctx
 
 
 def test_build_runtime_context_ignores_caller_sandbox_execution_identities():

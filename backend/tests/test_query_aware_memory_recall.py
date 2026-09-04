@@ -24,7 +24,7 @@ from langgraph.graph.message import add_messages
 from deerflow.agents.memory.context import aload_memory_context, load_memory_context
 from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
 from deerflow.runtime.secret_context import DYNAMIC_MEMORY_CONTEXT_KEY
@@ -72,7 +72,7 @@ async def _model_call(middleware, request, *, use_async):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("case", ["ordinary", "card", "first-turn-swap", "regenerate", "edit", "continuation", "swapped-continuation", "hidden-context", "summary"])
+@pytest.mark.parametrize("case", ["ordinary", "card", "first-turn-swap", "regenerate", "first-regenerate", "swapped-first-regenerate", "edit", "continuation", "swapped-continuation", "hidden-context", "summary"])
 async def test_turn_recall_targets_only_current_genuine_input(monkeypatch, use_async, case):
     manager = SimpleNamespace(supports_query_aware_context=True, get_context=Mock(return_value="recalled"), aget_context=AsyncMock(return_value="recalled"))
     monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
@@ -95,8 +95,13 @@ async def test_turn_recall_targets_only_current_genuine_input(monkeypatch, use_a
         current = messages.pop()
         pre_existing = set()
     elif case in {"regenerate", "edit"}:
-        # Replay starts from the selected pre-user checkpoint, not the abandoned head.
-        current = current.model_copy(update={"id": "replayed-user", "content": "regenerated question" if case == "regenerate" else "edited question"})
+        current = current.model_copy(update={"id": "current" if case == "regenerate" else "fresh-edited-user", "content": "regenerated question" if case == "regenerate" else "edited question"})
+    elif case in {"first-regenerate", "swapped-first-regenerate"}:
+        messages = []
+        pre_existing = set()
+        if case == "swapped-first-regenerate":
+            messages = DynamicContextMiddleware._make_reminder_and_user_messages(current, "date", reminder_date="2026-09-04")
+            current = messages.pop()
     elif case == "swapped-continuation":
         messages = [old.model_copy(update={"id": "old__user"})]
     elif case in {"hidden-context", "summary"}:
@@ -104,6 +109,11 @@ async def test_turn_recall_targets_only_current_genuine_input(monkeypatch, use_a
     if case not in {"continuation", "swapped-continuation"}:
         messages.append(current)
     context = {"user_id": "alice", "thread_id": "thread-1", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset(pre_existing)}
+    if case in {"regenerate", "first-regenerate", "swapped-first-regenerate"}:
+        # Full-mode replay keeps the original ID and the shared head boundary.
+        # Only recall receives the boundary of the checkpoint being replayed.
+        context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing | {"current__user"})
+        context[CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY] = frozenset(pre_existing)
     request = _request(messages, context=context)
     prepared = await _model_call(middleware, request, use_async=use_async)
     recalled = [message for message in prepared.messages if message.additional_kwargs.get("dynamic_turn_memory")]
