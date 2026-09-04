@@ -1206,6 +1206,15 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["checked"] is False
 
+    def test_runner_backslash_negation_is_unprovable_before_posix_tokenization(self):
+        """PowerShell preserves the separator in ``tests\\security``, while
+        POSIX ``shlex`` consumes it and could hide that the required target was
+        excluded from the recorded run."""
+        executions = [_bash_execution(r"pytest tests/security tests/unit --ignore tests\security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
     @pytest.mark.parametrize("target", ("%TEMP%", "%USERPROFILE%/fake"))
     def test_cd_with_cmd_environment_expansion_is_unprovable(self, target):
         executions = [_bash_execution(f"cd {target} && pytest tests/", output_tail="3 passed")]
@@ -1225,6 +1234,19 @@ class TestTestsPassedLeaf:
             "outputs_path": "D:/ws/thread/user-data/outputs",
         }
         executions = [_bash_execution("cd D:/tmp/fake && pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=thread_data, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    @pytest.mark.parametrize("target", ("FileSystem::C:/tmp", "External:/tmp"))
+    def test_cd_to_powershell_provider_or_psdrive_path_is_unprovable(self, target):
+        """Provider-qualified and named-PSDrive paths are absolute in
+        PowerShell but look relative to the POSIX path normalizer."""
+        thread_data = {
+            "workspace_path": "D:/ws/thread/user-data/workspace",
+            "outputs_path": "D:/ws/thread/user-data/outputs",
+        }
+        executions = [_bash_execution(f"cd {target} && pytest tests/", output_tail="3 passed")]
         verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=thread_data, bash_executions=executions)
 
         assert verdict["leaves"][0]["checked"] is False

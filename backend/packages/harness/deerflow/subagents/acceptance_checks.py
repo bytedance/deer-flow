@@ -468,8 +468,12 @@ _SHELL_OPERATORS = ";&|"
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _WINDOWS_DRIVE_QUALIFIED_RE = re.compile(r"^[A-Za-z]:")
 _WINDOWS_DRIVE_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:/")
+#: PowerShell paths may name a provider/PSDrive before ``:`` (for example,
+#: ``FileSystem::C:/tmp`` or ``External:/tmp``). Those forms are absolute in
+#: PowerShell but look relative to POSIX path normalization.
+_POWERSHELL_DRIVE_QUALIFIED_RE = re.compile(r"^[^/\\:]+:")
 #: ``cmd.exe`` expands paired-percent environment references before running
-#: the command. Without shell provenance, a target such as ``%TEMP%`` cannot
+#: the command. Without shell provenance, a token such as ``%TEMP%`` cannot
 #: be treated as the literal relative path seen by the POSIX parser.
 _CMD_ENV_EXPANSION_RE = re.compile(r"%[^%\r\n]+%")
 
@@ -493,6 +497,8 @@ def _normalize_cd_scope_path(path: str) -> tuple[str, bool] | None:
     resolution depends on the process's remembered directory for that drive.
     """
     slash_path = path.replace("\\", "/")
+    if _POWERSHELL_DRIVE_QUALIFIED_RE.match(slash_path) and not _WINDOWS_DRIVE_QUALIFIED_RE.match(slash_path):
+        return None
     if _WINDOWS_DRIVE_QUALIFIED_RE.match(slash_path) and not _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path):
         return None
     if not _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path):
@@ -746,27 +752,22 @@ def _shell_parse(command: str, *, posix: bool = True) -> tuple[list[list[str]], 
     return segments, ops
 
 
-def _cd_target_requires_shell_provenance(command: str) -> bool:
-    """Whether a raw ``cd`` target has shell-dependent Windows semantics.
+def _command_requires_shell_provenance(command: str) -> bool:
+    """Whether raw command tokens have shell-dependent Windows semantics.
 
     The acceptance evidence does not currently record which shell executed a
     command. Inspect a non-POSIX tokenization before the authoritative POSIX
-    parser can discard backslashes: PowerShell/cmd treat them as path
-    separators while POSIX shells treat them as escapes. Paired-percent
-    references likewise expand only under cmd.exe. Either spelling therefore
-    fails closed instead of certifying a test run from an unknown directory.
+    parser can discard backslashes anywhere in the candidate command: PowerShell
+    and native Windows runners preserve them as path separators while POSIX
+    shells treat them as escapes. Paired-percent references likewise expand
+    only under cmd.exe. Either spelling therefore fails closed instead of
+    certifying a test run whose arguments depend on an unknown shell.
     """
     parsed = _shell_parse(command, posix=False)
     if parsed is None:
         return "\\" in command or bool(_CMD_ENV_EXPANSION_RE.search(command))
     segments, _ops = parsed
-    for segment in segments:
-        stripped = _strip_env_assignments(segment)
-        if not stripped or os.path.basename(stripped[0].strip("'\"")) != "cd":
-            continue
-        if any("\\" in target or _CMD_ENV_EXPANSION_RE.search(target) for target in stripped[1:]):
-            return True
-    return False
+    return any("\\" in token or _CMD_ENV_EXPANSION_RE.search(token) for segment in segments for token in segment)
 
 
 def _strip_env_assignments(tokens: list[str]) -> list[str]:
@@ -1170,7 +1171,7 @@ def _commands_match(criterion_command: str, executed_command: str, *, executed_s
     """
     expected_parsed = _shell_parse(criterion_command)
     actual_parsed = _shell_parse(executed_command)
-    needs_shell_provenance = _cd_target_requires_shell_provenance(criterion_command) or _cd_target_requires_shell_provenance(executed_command)
+    needs_shell_provenance = _command_requires_shell_provenance(criterion_command) or _command_requires_shell_provenance(executed_command)
     if expected_parsed is None or actual_parsed is None:
         # Malformed shell: only exact normalized equality survives.
         expected_norm = _normalize_command(criterion_command)
