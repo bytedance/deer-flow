@@ -129,8 +129,12 @@ _HTML_TYPE6_TAGS = (
     "track",
     "ul",
 )
+# CommonMark type-6 covers *closing* tags of the listed elements too:
+# `</div>` alone on a line is a type-6 opener, and types 1-6 interrupt an
+# open paragraph (type 7 cannot) — misreading a closing tag as type 7
+# would let the fence behind it open real code and preserve reasoning.
 _HTML_TYPE6_OPEN_RE = re.compile(
-    r"^ {0,3}<(" + "|".join(_HTML_TYPE6_TAGS) + r")(?:[ \t]|/?>|$)",
+    r"^ {0,3}</?(" + "|".join(_HTML_TYPE6_TAGS) + r")(?:[ \t]|/?>|$)",
     re.IGNORECASE,
 )
 _HTML_TYPE1_CLOSE_RE = re.compile(r"</(script|pre|style|textarea)>", re.IGNORECASE)

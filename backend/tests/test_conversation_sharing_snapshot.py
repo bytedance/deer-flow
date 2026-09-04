@@ -1515,6 +1515,8 @@ def test_strip_invalid_html_openers_do_not_open_blocks_all_types():
         ("type5-invalid", "<![cdata[x", "]]>", False),
         ("type6", "<div>", "", True),
         ("type6-invalid", "<div=x>", "", False),
+        ("type6-close", "</div>", "", True),
+        ("type6-close-invalid", "</div=x>", "", False),
         ("type7", "<span>", "", True),
         ("type7-invalid", "<span =foo>", "", False),
     )
@@ -1525,3 +1527,17 @@ def test_strip_invalid_html_openers_do_not_open_blocks_all_types():
             assert f"secret-{label}" in out, (label, out)
         else:
             assert f"secret-{label}" not in out, (label, out)
+
+
+def test_strip_closing_type6_tags_interrupt_paragraphs():
+    """A closing block tag (``</div>``) alone on a line is a type-6 opener,
+    and CommonMark types 1-6 interrupt an open paragraph — type 7 cannot.
+    Misreading the closing tag as non-interrupting type 7 kept the
+    paragraph open, let the fence behind it open real code, and preserved
+    the private reasoning in the anonymous snapshot."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    attack = "paragraph\n</div>\n```\n<think>secret-close-type6</think>\n```"
+    assert "secret-close-type6" not in strip(attack)
