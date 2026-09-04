@@ -167,6 +167,8 @@ token_usage:
 
 **配置**：`config.yaml` 中的 `tool_search.enabled: true`。
 
+对于 `create_deerflow_agent`，`@Next` 或 `@Prev` 锚点必须指向这个较小链中实际存在的中间件；否则使用完整中间件列表中的锚点会解析失败。
+
 ## 摘要压缩配置详解
 
 `SummarizationMiddleware` 是长时序任务中影响最大的中间件之一。完整配置参考如下：

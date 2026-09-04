@@ -179,6 +179,8 @@ When tool search is enabled, this middleware hides deferred tool schemas from th
 
 **Configuration**: `tool_search.enabled: true` in `config.yaml`.
 
+For `create_deerflow_agent`, an `@Next` or `@Prev` anchor must name a middleware that this smaller chain actually contains; anchors from the full middleware list otherwise fail to resolve.
+
 ## Summarization configuration
 
 The `SummarizationMiddleware` is one of the most impactful middlewares for long-horizon tasks. Here is the full configuration reference:

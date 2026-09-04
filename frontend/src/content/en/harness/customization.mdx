@@ -56,6 +56,8 @@ Configured middleware is loaded after the built-in middleware and optional loop/
 
 Choose the registration path by ownership and placement. The fixed-slot (not deprecated) `extensions.middlewares` list is accepted in `config.yaml` and `extensions_config.json` (`config.yaml` wins) and applies to both lead and subagent pipelines. Packaged extensions registered through the top-level `plugins:` list contribute middleware at semantic extension points. Contributor code that needs committed, programmatic lead-only wiring can use `build_middlewares(..., custom_middlewares=[AuditMiddleware()])`.
 
+For `create_deerflow_agent`, an `@Next` or `@Prev` anchor must name a middleware that this smaller chain actually contains; anchors from the full middleware list otherwise fail to resolve.
+
 ## Custom tools
 
 Add new tools to the agent by registering them in `config.yaml` under `tools:`:

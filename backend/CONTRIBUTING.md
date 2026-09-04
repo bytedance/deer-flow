@@ -321,7 +321,8 @@ terminal-response, model-length, safety, and clarification tail.
 `create_deerflow_agent(extra_middleware=[...])` instead builds a smaller
 feature-based lead-agent chain; unanchored extras are placed immediately before
 `ClarificationMiddleware` (anchored extras follow their `@Next`/`@Prev`
-placement). Neither API forwards middleware to subagents.
+placement, but the anchor must be present in this smaller chain). Neither API
+forwards middleware to subagents.
 
 Choose the registration path by ownership and placement. The fixed-slot (not deprecated)
 `extensions.middlewares` list is accepted in `config.yaml` and
