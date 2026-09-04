@@ -353,11 +353,8 @@ class TestAgentConstruction:
         assert captured["model"] == {
             "name": "parent-model",
             "thinking_enabled": False,
+            "reasoning_effort": None,
             "app_config": app_config,
-            # attach_tracing=False pairs with graph-root tracing callbacks
-            # injected in _aexecute (see TestSubagentTracingWiring). Without
-            # this the subagent would emit both a model-level trace and a
-            # graph-level trace per call.
             "attach_tracing": False,
         }
         assert captured["middlewares"] == {
