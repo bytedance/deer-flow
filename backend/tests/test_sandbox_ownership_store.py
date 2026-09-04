@@ -15,6 +15,7 @@ still covers the contract.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -371,13 +372,26 @@ def test_lease_timing_rejects_finite_values_with_infinite_product():
         )
 
 
-def test_lease_timing_allows_large_finite_product():
+def test_redis_lease_timing_rejects_ttl_above_signed_64_bit_milliseconds():
+    ttl_seconds_above_limit = 2**63 / 1000
+
+    with pytest.raises(ValueError, match="signed 64-bit millisecond range"):
+        SandboxOwnershipConfig(
+            type="redis",
+            renewal_interval_seconds=ttl_seconds_above_limit / 4,
+            ttl_multiplier=4.0,
+        )
+
+
+def test_redis_lease_timing_allows_ttl_within_signed_64_bit_milliseconds():
+    max_representable_ttl_seconds = math.nextafter((2**63 - 1) / 1000, 0.0)
     config = SandboxOwnershipConfig(
-        renewal_interval_seconds=1e100,
+        type="redis",
+        renewal_interval_seconds=max_representable_ttl_seconds / 4,
         ttl_multiplier=4.0,
     )
 
-    assert compute_lease_ttl(config) == 4e100
+    assert int(compute_lease_ttl(config) * 1000) <= 2**63 - 1
 
 
 def test_owner_ids_are_unique_per_instance():

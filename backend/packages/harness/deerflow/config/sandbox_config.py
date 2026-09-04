@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
+_REDIS_MAX_TTL_MILLISECONDS = 2**63 - 1
 
 
 class SandboxOwnershipConfig(BaseModel):
@@ -49,8 +50,11 @@ class SandboxOwnershipConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_lease_ttl(self) -> "SandboxOwnershipConfig":
-        if not math.isfinite(self.renewal_interval_seconds * self.ttl_multiplier):
+        lease_ttl_seconds = self.renewal_interval_seconds * self.ttl_multiplier
+        if not math.isfinite(lease_ttl_seconds):
             raise ValueError("sandbox.ownership lease TTL must be finite")
+        if self.type == "redis" and lease_ttl_seconds * 1000 > _REDIS_MAX_TTL_MILLISECONDS:
+            raise ValueError("sandbox.ownership Redis lease TTL must fit the signed 64-bit millisecond range")
         return self
 
 
