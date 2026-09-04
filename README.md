@@ -170,20 +170,29 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
        use_responses_api: true
        output_version: responses/v1
 
-     - name: qwen3-32b-vllm
-       display_name: Qwen3 32B (vLLM)
-       use: deerflow.models.vllm_provider:VllmChatModel
-       model: Qwen/Qwen3-32B
-       api_key: $VLLM_API_KEY
-       base_url: http://localhost:8000/v1
-       supports_thinking: true
-       when_thinking_enabled:
-         extra_body:
-           chat_template_kwargs:
-             enable_thinking: true
-   ```
+- name: qwen3-32b-vllm
+        display_name: Qwen3 32B (vLLM)
+        use: deerflow.models.vllm_provider:VllmChatModel
+        model: Qwen/Qwen3-32B
+        api_key: $VLLM_API_KEY
+        base_url: http://localhost:8000/v1
+        supports_thinking: true
+        when_thinking_enabled:
+          extra_body:
+            chat_template_kwargs:
+              enable_thinking: true
 
-   OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
+      - name: sambanova-deepseek-v3.1
+        display_name: DeepSeek V3.1 (SambaNova)
+        use: deerflow.models.sambanova_provider:SambaNovaChatModel
+        model: DeepSeek-V3.1
+        api_key: $SAMBANOVA_API_KEY
+        supports_thinking: false
+    ```
+
+    OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
+
+    For SambaNova, use `deerflow.models.sambanova_provider:SambaNovaChatModel`. The adapter configures the base URL automatically. Available models and documentation are at https://docs.sambanova.ai/.
 
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
