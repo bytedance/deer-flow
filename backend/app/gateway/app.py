@@ -885,11 +885,13 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     @app.get("/health/ready", tags=["health"])
     async def readiness_check(response: Response) -> dict[str, str]:
-        """Readiness endpoint: 200 when the persistence engine is reachable.
+        """Readiness endpoint: 200 when the persistence backends are reachable.
 
-        Probes the database with a bounded ``SELECT 1`` so orchestrators can
+        Probes the ORM engine behind ``database:`` and the effective LangGraph
+        checkpointer/Store backend (legacy ``checkpointer:`` section, otherwise
+        derived from ``database:``) with bounded checks so orchestrators can
         gate on the gateway actually being ready rather than merely alive.
-        Returns 503 with ``database: unreachable`` when the probe fails.
+        Returns 503 with ``status: degraded`` when either probe fails.
         """
         status_code, payload = await readiness_payload()
         response.status_code = status_code
