@@ -528,10 +528,12 @@ class MemoryUpdateQueue:
         """Drop pending contexts for a scope without processing them.
 
         Matches ``(agent_name, user_id)`` against items still sitting in
-        ``_items``. Contexts already pulled out by an in-flight
+        ``_items``. Dropped snapshots still advance the conversation watermark
+        so a later turn cannot restore those pre-clear messages against a
+        newer generation. Contexts already pulled out by an in-flight
         :meth:`_process_queue` worker are deliberately left alone -- interrupting
-        mid-LLM-call belongs to a durable outbox, not this in-memory debounce
-        queue.
+        mid-LLM-call belongs to the durable clear-generation fence, not this
+        in-memory debounce queue.
 
         Args:
             agent_name: Canonical agent bucket to cancel. Ignored when
@@ -556,11 +558,16 @@ class MemoryUpdateQueue:
                     return True
                 return context.user_id != user_id
 
+            dropped = [context for context in self._items if not _keep(context)]
             self._items = [context for context in self._items if _keep(context)]
             removed = before - len(self._items)
             if removed and not self._items and self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+            # Consume under the lock so a concurrent add cannot re-feed the
+            # dropped snapshot before the watermark advances.
+            for context in dropped:
+                self._consume_pre_clear_feed(context)
             return removed
 
     def clear(self) -> None:

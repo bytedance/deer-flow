@@ -627,7 +627,9 @@ def test_queue_out_of_order_lock_does_not_let_older_snapshot_inherit_newer_fence
 
 def test_cancel_by_agent_drops_matching_pending_and_preserves_others() -> None:
     """#5037: deleting/clearing an agent must drop its debounce buffer only."""
-    queue = _queue()
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (0, 0)
+    queue = _queue(mock_updater)
     with patch.object(queue, "_schedule_timer"):
         queue.add(thread_id="t1", messages=["keep"], agent_name="alice", user_id="u1")
         queue.add(thread_id="t2", messages=["drop"], agent_name="bob", user_id="u1")
@@ -642,6 +644,13 @@ def test_cancel_by_agent_drops_matching_pending_and_preserves_others() -> None:
     assert queue.pending_count == 2
     assert {(c.agent_name, c.user_id) for c in queue._items} == {("alice", "u1"), ("bob", "u2")}
     existing_timer.cancel.assert_not_called()
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["drop"],
+        thread_id="t2",
+        user_id="u1",
+        agent_name="bob",
+        bypass_watermark=False,
+    )
 
 
 def test_cancel_by_agent_all_agents_for_user_cancels_timer_when_empty() -> None:
