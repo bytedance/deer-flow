@@ -447,12 +447,13 @@ def test_start_container_hardens_docker_run_by_default(monkeypatch):
 
     assert "--cap-drop=ALL" in captured_cmd
     # The shipped image's entrypoint starts as root, creates the gem user,
-    # chowns /opt/jupyter, and drops to that user via su — CHOWN/SETUID/SETGID
-    # must survive the drop or the container exits before readiness. The root
-    # nginx master also writes gem-owned logs under /var/log/nginx for the
-    # container's lifetime, which needs DAC_OVERRIDE.
+    # chowns /opt/jupyter, prepares /run/user/1000 with chmod, and drops to
+    # that user via su. CHOWN/FOWNER/SETUID/SETGID must survive the drop or
+    # the container exits before readiness. The root nginx master also writes
+    # gem-owned logs under /var/log/nginx for the container's lifetime, which
+    # needs DAC_OVERRIDE.
     cap_adds = [arg.split("=", 1)[1] for arg in captured_cmd if arg.startswith("--cap-add=")]
-    assert cap_adds == ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"]
+    assert cap_adds == ["CHOWN", "FOWNER", "SETUID", "SETGID", "DAC_OVERRIDE"]
     security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
     assert "no-new-privileges" in security_opts
     # The shipped AIO image needs seccomp=unconfined for its Chromium
@@ -957,9 +958,12 @@ def test_effective_network_target_last_name_field_wins():
     assert target("1f2a" * 16) == "1f2a" * 16  # network ID passes through
 
 
-# ── Real-image startup smoke test (docker-gated) ─────────────────────────────
-# Keep in sync with aio_sandbox_provider.DEFAULT_IMAGE.
+# ── Real-image startup smoke tests (docker-gated) ────────────────────────────
+# Keep the baseline default in sync with aio_sandbox_provider.DEFAULT_IMAGE.
 _DEFAULT_AIO_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+# Dedicated regression target for #5161. The workflow resolves this tag to an
+# immutable digest before pytest runs so the CI result records the exact image.
+_FOWNER_REGRESSION_AIO_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0"
 
 
 def _docker_daemon_available() -> bool:
@@ -970,21 +974,13 @@ def _docker_daemon_available() -> bool:
         return False
 
 
-# `live`: pulls and runs a mutable external image, so the default offline
-# suite (`make test` = `-m "not live"`) never touches the network. The
-# daemon probe happens inside the test body — never at collection time.
-@pytest.mark.live
-def test_default_image_starts_under_hardened_capabilities(monkeypatch):
-    """Real smoke test against the shipped default image — no subprocess mock.
-
-    The image's entrypoint (/opt/gem/run.sh) starts as root, creates the gem
-    account at runtime, chown -R's /opt/jupyter, and drops to that user via
-    su before starting the services. Under the default hardened argv
-    (--cap-drop=ALL + no-new-privileges) that initialization needs
-    CHOWN/SETUID/SETGID to be re-added, or the container exits (set -e)
-    before the readiness endpoint exists. Reaching readiness through the
-    real docker run proves the whole startup chain survives the hardening.
-    """
+def _assert_image_starts_under_hardened_capabilities(
+    monkeypatch,
+    *,
+    image: str,
+    sandbox_id: str,
+    failure_label: str,
+) -> None:
     from deerflow.community.aio_sandbox.backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT
     from deerflow.community.aio_sandbox.local_backend import wait_for_sandbox_ready
 
@@ -992,9 +988,7 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
         pytest.skip("requires a running Docker daemon")
 
     backend = LocalContainerBackend(
-        # Pin via this override when wiring a dedicated integration job, so
-        # the run does not depend on a mutable :latest tag.
-        image=os.environ.get("DEER_FLOW_SANDBOX_SMOKE_IMAGE", _DEFAULT_AIO_IMAGE),
+        image=image,
         base_port=18210,
         container_prefix="sandbox-smoke",
         config_mounts=[],
@@ -1002,7 +996,7 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
     )
     _clear_hardening_env(monkeypatch)
 
-    info = backend.create(thread_id="smoke", sandbox_id="caps-smoke")
+    info = backend.create(thread_id="smoke", sandbox_id=sandbox_id)
     try:
         # The production deadline, single-sourced: the sync and async
         # provider paths destroy the container after exactly this budget, so
@@ -1012,8 +1006,8 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
         ready = wait_for_sandbox_ready(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT)
         if not ready:
             # Fail diagnosably: the entrypoint's own log tells us whether the
-            # capability set is still incomplete (chown/useradd/su errors) or
-            # the services are merely slow.
+            # capability set is still incomplete (chown/chmod/useradd/su
+            # errors) or the services are merely slow.
             logs = subprocess.run(
                 ["docker", "logs", info.container_name],
                 capture_output=True,
@@ -1037,17 +1031,52 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
                 timeout=30,
             )
             tail = "\n".join((logs.stdout + logs.stderr).splitlines()[-40:]) + "\n" + (prog_logs.stdout or "")
-            pytest.fail(f"default image never became ready under the hardened capabilities: {info.sandbox_url}\n--- last 40 container log lines ---\n{tail}")
+            pytest.fail(f"{failure_label} never became ready under the hardened capabilities: {info.sandbox_url}\n--- last 40 container log lines ---\n{tail}")
         assert backend.is_alive(info)
     finally:
         backend.destroy(info)
 
 
+# `live`: pulls and runs external images, so the default offline suite
+# (`make test` = `-m "not live"`) never touches the network. The daemon probe
+# happens inside the helper — never at collection time.
+@pytest.mark.live
+def test_default_image_starts_under_hardened_capabilities(monkeypatch):
+    """Preserve real-image coverage for the configured/default AIO image.
+
+    This stays separate from the 1.11.0 regression because older images may
+    not execute the FOWNER-gated chmod added by the newer startup path.
+    """
+    _assert_image_starts_under_hardened_capabilities(
+        monkeypatch,
+        image=os.environ.get("DEER_FLOW_SANDBOX_SMOKE_IMAGE", _DEFAULT_AIO_IMAGE),
+        sandbox_id="caps-smoke-default",
+        failure_label="configured/default image",
+    )
+
+
+@pytest.mark.live
+def test_aio_1_11_image_starts_with_fowner_capability(monkeypatch):
+    """Regression smoke for #5161 against the recommended AIO 1.11.0 image.
+
+    Its entrypoint chmods /run/user/1000 after capabilities are dropped.
+    Without FOWNER that startup path exits before readiness; reaching the
+    endpoint proves the five-capability compatibility set covers the bug.
+    """
+    _assert_image_starts_under_hardened_capabilities(
+        monkeypatch,
+        image=os.environ.get("DEER_FLOW_SANDBOX_FOWNER_SMOKE_IMAGE", _FOWNER_REGRESSION_AIO_IMAGE),
+        sandbox_id="caps-smoke-fowner-1-11",
+        failure_label="AIO 1.11.0 FOWNER regression image",
+    )
+
+
 def test_start_container_preinitialized_image_can_drop_startup_caps(monkeypatch):
     """A custom, pre-initialized non-root image never runs the root handoff,
-    so CHOWN/SETUID/SETGID must not stay available for the container's
-    lifetime (chown on bind mounts, UID/GID impersonation). Opting out with
-    DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS=0 drops every capability."""
+    so CHOWN/FOWNER/SETUID/SETGID/DAC_OVERRIDE must not stay available for
+    the container's lifetime (chown/chmod on bind mounts, UID/GID
+    impersonation). Opting out with DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS=0
+    drops every capability."""
     backend = LocalContainerBackend(
         image="my-preinitialized-sandbox:latest",
         base_port=8080,
