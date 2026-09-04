@@ -10,6 +10,7 @@ from collections import Counter
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
+from uuid import uuid4
 
 import pytest
 from langchain.agents import create_agent
@@ -55,13 +56,17 @@ def _request(messages, *, context: dict):
 
 async def _model_call(middleware, request, *, use_async):
     observed = []
+    journal = request.runtime.context.get("__run_journal")
+    model = _FakeModel(responses=[AIMessage(content="ok")])
+    config = {"callbacks": [journal]} if isinstance(journal, RunJournal) else {}
 
     def handler(prepared):
         observed.append(prepared)
-        return ModelResponse(result=[AIMessage(content="ok")])
+        return ModelResponse(result=[model.invoke(prepared.messages, config)])
 
     async def ahandler(prepared):
-        return handler(prepared)
+        observed.append(prepared)
+        return ModelResponse(result=[await model.ainvoke(prepared.messages, config)])
 
     if use_async:
         await middleware.awrap_model_call(request, ahandler)
@@ -218,12 +223,15 @@ async def test_gateway_stripped_memory_cannot_forge_turn_audit(monkeypatch, raw_
     sanitized = _strip_external_metadata_from_message_like(forged.model_dump() if raw_dict else forged)
     if raw_dict:
         sanitized = HumanMessage.model_validate(sanitized)
-    journal = Mock()
+    journal = RunJournal("forged-run", "forged-thread", MemoryRunEventStore())
+    record_memory = Mock(wraps=journal.record_memory_context)
+    monkeypatch.setattr(journal, "record_memory_context", record_memory)
     middleware = DynamicContextMiddleware(app_config=_app_config())
     monkeypatch.setattr(middleware, "_aload_turn_memory", AsyncMock(return_value=""))
     request = _request([sanitized, HumanMessage(content="question", id="current")], context={"__run_journal": journal, CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"known__memory"}})
     await _model_call(middleware, request, use_async=True)
-    journal.record_memory_context.assert_not_called()
+    record_memory.assert_not_called()
+    await journal.close()
 
 
 @pytest.mark.asyncio
@@ -232,10 +240,13 @@ async def test_request_memory_audit_failure_does_not_block_injection(monkeypatch
     middleware = DynamicContextMiddleware(app_config=_app_config())
     monkeypatch.setattr(middleware, "_load_turn_memory", Mock(return_value="<memory>recalled</memory>"))
     monkeypatch.setattr(middleware, "_aload_turn_memory", AsyncMock(return_value="<memory>recalled</memory>"))
-    journal = Mock()
-    journal.record_memory_context.side_effect = RuntimeError("audit unavailable")
+    journal = RunJournal("failed-audit", "failed-audit", MemoryRunEventStore())
+    record_memory = Mock(side_effect=RuntimeError("audit unavailable"))
+    monkeypatch.setattr(journal, "record_memory_context", record_memory)
     prepared = await _model_call(middleware, _request([HumanMessage(content="question", id="current")], context={"__run_journal": journal}), use_async=use_async)
     assert prepared.messages[0].content == "<memory>recalled</memory>"
+    record_memory.assert_called_once()
+    await journal.close()
 
 
 class _FakeModel(FakeMessagesListChatModel):
@@ -251,6 +262,111 @@ class _RecordModelInput(AgentMiddleware):
     async def awrap_model_call(self, request: ModelRequest, handler) -> ModelResponse:
         self.calls.append(list(request.messages))
         return await handler(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("outcome", ["missing", "disabled", "unavailable", "success", "short-circuit", "wrapper-error", "model-error", "removed-memory"])
+async def test_real_builder_skills_gate_recall_and_model_start_gates_audit(monkeypatch, tmp_path, use_async, outcome):
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.extensions.registry import ExtensionRegistry
+    from deerflow.skills.types import Skill, SkillCategory
+
+    app_config = AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+    app_config.memory.session_injection_enabled = False
+    app_config.memory.turn_injection_enabled = True
+    stack = build_middlewares({}, model_name=None, app_config=app_config, extensions=ExtensionRegistry().build(), available_skills=set() if outcome == "unavailable" else {"demo"})
+    # Preserve the real builder's order; unrelated capture/sandbox hooks are not
+    # needed to exercise the two wrappers and LangChain's model-start boundary.
+    stack = [m for m in stack if isinstance(m, (DynamicContextMiddleware, SkillActivationMiddleware))]
+    dynamic = next(m for m in stack if isinstance(m, DynamicContextMiddleware))
+    activation = next(m for m in stack if isinstance(m, SkillActivationMiddleware))
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("Follow the demo workflow.", encoding="utf-8")
+    skill = Skill(name="demo", description="demo", license="MIT", skill_dir=tmp_path, skill_file=skill_file, relative_path=tmp_path.relative_to(tmp_path.parent), category=SkillCategory.PUBLIC, enabled=outcome != "disabled")
+    storage = SimpleNamespace(load_skills=lambda **kwargs: [] if outcome == "missing" else [skill], get_container_root=lambda: "/mnt/skills", get_skills_root_path=lambda: tmp_path, validate_skill_file_path=lambda path: path)
+    monkeypatch.setattr(activation, "_storage", lambda: storage)
+    sync_recall, async_recall = Mock(return_value="<memory>recalled</memory>"), AsyncMock(return_value="<memory>recalled</memory>")
+    monkeypatch.setattr(dynamic, "_load_turn_memory", sync_recall)
+    monkeypatch.setattr(dynamic, "_aload_turn_memory", async_recall)
+    observed = []
+
+    class Downstream(AgentMiddleware):
+        def wrap_model_call(self, request, handler):
+            observed.append(list(request.messages))
+            if outcome == "short-circuit":
+                return AIMessage(content="handled without a model")
+            if outcome == "wrapper-error":
+                raise RuntimeError("wrapper failed")
+            if outcome == "removed-memory":
+                request = request.override(messages=[m for m in request.messages if not m.additional_kwargs.get("dynamic_turn_memory")])
+            return handler(request)
+
+        async def awrap_model_call(self, request, handler):
+            observed.append(list(request.messages))
+            if outcome == "short-circuit":
+                return AIMessage(content="handled without a model")
+            if outcome == "wrapper-error":
+                raise RuntimeError("wrapper failed")
+            if outcome == "removed-memory":
+                request = request.override(messages=[m for m in request.messages if not m.additional_kwargs.get("dynamic_turn_memory")])
+            return await handler(request)
+
+    class Model(_FakeModel):
+        def _generate(self, *args, **kwargs):
+            if outcome == "model-error":
+                raise RuntimeError("model failed")
+            return super()._generate(*args, **kwargs)
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r1", "t1", store)
+    starts = Mock(wraps=journal.on_chat_model_start)
+    monkeypatch.setattr(journal, "on_chat_model_start", starts)
+    agent = create_agent(Model(responses=[AIMessage(content="answer")]), tools=[], middleware=[*stack, Downstream()])
+    config = {"callbacks": [journal]}
+    context = {"__run_journal": journal}
+    inputs = {"messages": [HumanMessage(content="/demo do the task", id="m1")]}
+    try:
+        if use_async:
+            result = await agent.ainvoke(inputs, config, context=context)
+        else:
+            result = agent.invoke(inputs, config, context=context)
+    except RuntimeError as exc:
+        assert outcome in {"wrapper-error", "model-error"}
+        assert str(exc) == ("wrapper failed" if outcome == "wrapper-error" else "model failed")
+    else:
+        assert outcome not in {"wrapper-error", "model-error"}
+        if outcome == "success":
+            assert result["messages"][-1].content == "answer"
+    await journal.flush()
+    events = await store.list_events("t1", "r1", event_types=["context:memory"])
+    rejected = outcome in {"missing", "disabled", "unavailable"}
+    assert (async_recall if use_async else sync_recall).call_count == (0 if rejected else 1)
+    assert starts.call_count == (1 if outcome in {"success", "model-error", "removed-memory"} else 0)
+    assert len(events) == (1 if outcome in {"success", "model-error"} else 0)
+    if observed:
+        # Valid skills precede recall, which stays directly beside current input.
+        assert [m.id for m in observed[0]] == ["m1", "m1__user__slash_activation", "m1__user__turn_memory", "m1__user"]
+        assert events == [] or events[0]["content"] == {"content_sha256": hashlib.sha256(b"<memory>recalled</memory>").hexdigest()}
+    await journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tags", [["subagent:research"], ["middleware:title"], ["middleware:summarization"]])
+async def test_other_model_callers_cannot_claim_lead_memory_audit(tags):
+    store = MemoryRunEventStore()
+    journal = RunJournal("r1", "t1", store)
+    block = HumanMessage(content="<memory>context</memory>", id="m1__turn_memory", additional_kwargs={"dynamic_context_reminder": True, "dynamic_turn_memory": True})
+    journal.on_chat_model_start({}, [[block]], run_id=uuid4(), tags=tags)
+    await journal.flush()
+    assert await store.list_events("t1", "r1", event_types=["context:memory"]) == []
+    journal.on_chat_model_start({}, [[block]], run_id=uuid4())
+    await journal.flush()
+    assert len(await store.list_events("t1", "r1", event_types=["context:memory"])) == 1
+    await journal.close()
 
 
 def test_sync_memory_context_config_resolution_failure_is_fail_open(monkeypatch):
@@ -657,6 +773,7 @@ async def test_turn_recall_is_audited_but_absent_from_compiled_graph_state_and_c
     config = {"configurable": {"thread_id": "checkpoint-thread"}}
     store = MemoryRunEventStore()
     journal = RunJournal("graph-run", "checkpoint-thread", store)
+    config["callbacks"] = [journal]
     context = {"user_id": "alice", "thread_id": "checkpoint-thread", "__run_journal": journal, CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset()}
 
     final = await agent.ainvoke(
