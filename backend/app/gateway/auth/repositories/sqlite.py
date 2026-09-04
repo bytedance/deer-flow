@@ -20,12 +20,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
-from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
-from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME, UserRow
+from app.gateway.auth.repositories.base import AdminRoleTakenError, UserNotFoundError, UserRepository
+from deerflow.persistence.user.model import ADMIN_ROLE_INDEX_NAME, OAUTH_IDENTITY_INDEX_NAME, UserRow
 
-# ``email`` is ``mapped_column(unique=True, index=True)``, which SQLAlchemy
-# (and 0001_baseline) realise as a single UNIQUE INDEX -- not a named UNIQUE
-# constraint -- so a Postgres duplicate reports the index name here.
 _EMAIL_UNIQUE_INDEX_NAME = "ix_users_email"
 
 
@@ -132,6 +129,26 @@ def _normalize_email(email: str) -> str:
     return email.lower()
 
 
+def _is_admin_role_violation(exc: IntegrityError) -> bool:
+    """True when ``exc`` is the ``uq_users_admin_role`` partial-index violation
+    (an insert that would create a second admin row).
+
+    Uses the same driver-exception inspection as
+    :func:`_is_oauth_identity_violation`: the index name on Postgres
+    (``_driver_constraint_name``), and the column SQLite names for a
+    single-column unique index
+    (``"UNIQUE constraint failed: users.system_role"``).
+    """
+    name = _driver_constraint_name(exc)
+    if name is not None:
+        return name == ADMIN_ROLE_INDEX_NAME
+    # Require a UNIQUE failure specifically: a NOT NULL violation on the same
+    # column ("NOT NULL constraint failed: users.system_role") also names it
+    # and must NOT be classified as an admin-slot conflict.
+    message = str(exc.orig).lower()
+    return "unique constraint failed" in message and "users.system_role" in message
+
+
 class SQLiteUserRepository(UserRepository):
     """Async user repository backed by the shared SQLAlchemy engine."""
 
@@ -196,6 +213,8 @@ class SQLiteUserRepository(UserRepository):
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
+                if _is_admin_role_violation(exc):
+                    raise AdminRoleTakenError(user.email) from exc
                 # The email pre-check above already ruled out an email
                 # collision under normal (non-racing) conditions, so
                 # IntegrityErrors reaching here are usually

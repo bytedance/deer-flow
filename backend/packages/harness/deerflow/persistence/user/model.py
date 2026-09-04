@@ -28,6 +28,8 @@ from deerflow.persistence.base import Base
 # so 0018_oauth_identity_pg_partial.py keeps its own literal by
 # convention (consistent with every other revision in that package).
 OAUTH_IDENTITY_INDEX_NAME = "idx_users_oauth_identity"
+# Partial unique index enforcing the single-admin invariant (migration 0019).
+ADMIN_ROLE_INDEX_NAME = "uq_users_admin_role"
 
 
 class UserRow(Base):
@@ -83,5 +85,16 @@ class UserRow(Base):
             unique=True,
             sqlite_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
             postgresql_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
+        ),
+        # Cross-process backstop for the initialize_admin TOCTOU: the
+        # in-process asyncio.Lock only serializes within a single worker, so
+        # this partial unique index enforces at most one admin row at the DB
+        # level (mirrored in migration 0013 for legacy databases).
+        Index(
+            ADMIN_ROLE_INDEX_NAME,
+            "system_role",
+            unique=True,
+            sqlite_where=text("system_role = 'admin'"),
+            postgresql_where=text("system_role = 'admin'"),
         ),
     )
