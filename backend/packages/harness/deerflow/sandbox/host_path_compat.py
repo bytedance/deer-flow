@@ -23,7 +23,7 @@ _URL_SCHEME_ANYWHERE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 _URL_SCHEME_AT_START = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _FILE_URL_SCHEME = re.compile(r"^file://", re.IGNORECASE)
 _OPTION_COLON_PATH = re.compile(r":(?=\s*(?:file://|[A-Za-z]:|[/\\]|\.\.(?:[/\\]|$)))", re.IGNORECASE)
-_NETWORK_URL_PATH_SUFFIX = re.compile(r"(?:^|[,;\s])\s*(?:[A-Za-z]:[\\/]|[/\\]|\.\.(?:[\\/]|$))")
+_NETWORK_URL_PATH_SUFFIX = re.compile(r"(?:^|[,;\s])\s*(?:[A-Za-z]:|[\\/]|\.\.(?:[\\/]|$)|file://)", re.IGNORECASE)
 
 # Match only absolute Windows drive spellings in command text.  POSIX paths
 # remain opaque command arguments unless the caller explicitly normalizes one.

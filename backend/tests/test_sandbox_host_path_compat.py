@@ -240,6 +240,8 @@ def test_split_program_argument_does_not_hide_path_before_embedded_url() -> None
         "--input=C:\\Windows\\secret.txt,foo=http://example.test",
         "--input=https://example.test,C:\\Windows\\secret.txt",
         "--input=https://example.test,/etc/passwd",
+        "--input=https://example.test,C:Windows\\secret.txt",
+        "--input=https://example.test,file:///C:/Windows/secret.txt",
         "--input=@https://example.test,C:\\Windows\\secret.txt",
         "--x=--inner=/etc/passwd",
         "--x=foo=/etc/passwd",

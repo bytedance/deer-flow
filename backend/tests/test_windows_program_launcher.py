@@ -172,6 +172,8 @@ def test_execute_program_batch_invocation_uses_single_helper(monkeypatch) -> Non
         "--input=C:\\Windows\\secret.txt,http://example.test",
         "--input=https://example.test,C:\\Windows\\secret.txt",
         "--input=https://example.test,/etc/passwd",
+        "--input=https://example.test,C:Windows\\secret.txt",
+        "--input=https://example.test,file:///C:/Windows/secret.txt",
         "--input=@https://example.test,C:\\Windows\\secret.txt",
         "--x=--inner=/etc/passwd",
         "--x=foo=/etc/passwd",
