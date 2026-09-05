@@ -27,8 +27,8 @@ test.describe("Root path redirects into the app (full deployment)", () => {
     // Pin the behaviour the name promises: after the redirect the landing
     // hero (h1 "DeerFlow") must be gone. A bare URL assertion would pass
     // for any redirect target, including /login.
-    await expect(
-      page.getByRole("heading", { name: /deerflow/i }),
-    ).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: /deerflow/i })).toHaveCount(
+      0,
+    );
   });
 });
