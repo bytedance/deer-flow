@@ -323,6 +323,48 @@ async def test_lead_stop_runs_after_completion_hook_and_before_stream_end():
 
 
 @pytest.mark.asyncio
+async def test_completion_hook_cancellation_still_finishes_terminal_stages():
+    """#5190: a host-task cancellation inside the completion hook is a
+    BaseException, and it must not skip the stop observers, the finalizing
+    release, or the stream end frame."""
+    hook_entered = asyncio.Event()
+
+    async def _on_completed(_record):
+        hook_entered.set()
+        await asyncio.Future()  # hangs until the task is cancelled
+
+    recorder = _RunRecorder()
+    manager = RunManager()
+    record = await manager.create("thread-hook-cancel")
+    bridge = _bridge()
+
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=RunContext(
+                checkpointer=InMemorySaver(),
+                extensions=_extensions(recorder),
+                on_run_completed=_on_completed,
+            ),
+            agent_factory=lambda *, config: _OkAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    await asyncio.wait_for(hook_entered.wait(), timeout=5)
+    task.cancel("first completion cancellation")
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    assert any(event[0] == "stop" for event in recorder.events)
+    assert record.finalizing is False
+
+
+@pytest.mark.asyncio
 async def test_lead_stop_interrupt_is_deferred_until_final_cleanup():
     class _StopInterrupt(BaseException):
         pass

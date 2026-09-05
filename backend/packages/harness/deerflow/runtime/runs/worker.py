@@ -1534,6 +1534,16 @@ async def run_agent(
                     await ctx.on_run_completed(record)
                 except Exception:
                     logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
+                except BaseException as exc:
+                    # A host-task cancellation is BaseException, not Exception:
+                    # without this it escapes the hook guard and skips the stop
+                    # observers, the finalizing release, and the end frame below.
+                    if deferred_stop_interrupt is None:
+                        deferred_stop_interrupt = exc
+                    logger.warning(
+                        "Run completion hook interrupted for %s; completing cleanup first",
+                        run_id,
+                    )
 
             if task_info is not None and task_store is not None:
                 # Keep the finalizing barrier held until stop observers finish, so
@@ -1557,8 +1567,10 @@ async def run_agent(
                     )
                 except BaseException as exc:
                     # Cancellation here must not strand the finalizing barrier or
-                    # leave stream consumers waiting for the end frame.
-                    deferred_stop_interrupt = exc
+                    # leave stream consumers waiting for the end frame. First
+                    # interruption wins so the tail re-raises the original one.
+                    if deferred_stop_interrupt is None:
+                        deferred_stop_interrupt = exc
                     logger.warning(
                         "Extension task-stop notification interrupted for run %s; completing cleanup first",
                         run_id,
