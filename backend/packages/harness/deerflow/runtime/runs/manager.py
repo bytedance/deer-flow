@@ -9,6 +9,7 @@ import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -250,6 +251,10 @@ class RunManager:
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
         self._orphan_recovery_task: asyncio.Task[None] | None = None
+        # Strong references to scheduled terminal-record eviction tasks. Without
+        # these the event loop may garbage-collect a sleeping task before it
+        # fires (the StreamBridge scheduled-cleanup hazard, issue #4930).
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -877,6 +882,11 @@ class RunManager:
             record.updated_at = _now_iso()
 
         await self._persist_status(record, RunStatus.error, error=error)
+        # The run may never reach ``run_agent`` finalization (e.g. when the
+        # worker task could not be attached), so schedule eviction here. On
+        # paths that still finalize through ``run_agent``, the duplicate
+        # ``schedule_cleanup`` is a harmless no-op for fresh run ids.
+        self.schedule_cleanup(run_id)
         return True
 
     async def get_many_by_thread(
@@ -1567,8 +1577,19 @@ class RunManager:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
                 current = self._runs.get(existing.run_id)
                 if current is None:
-                    self._runs[existing.run_id] = existing
-                    self._index_run_locked(existing)
+                    # Only re-index active records owned by this worker. A
+                    # terminal record has no worker task at all, so nothing
+                    # would ever evict it. A peer-owned active record is also
+                    # taskless here: the Gateway returns at
+                    # record.idempotency_reused before attaching a worker, and
+                    # the real owner terminalizes the store row. Indexing
+                    # either would retain it for the process lifetime (the
+                    # #5009 leak, one stable-key retry at a time), and a
+                    # peer-owned record would additionally make has_inflight()
+                    # / the lease heartbeat treat a taskless record as live.
+                    if existing.status in (RunStatus.pending, RunStatus.running) and existing.owner_worker_id == self._worker_id:
+                        self._runs[existing.run_id] = existing
+                        self._index_run_locked(existing)
                     current = existing
                 current.idempotency_reused = True
                 return current
@@ -1880,6 +1901,47 @@ class RunManager:
             if record is not None:
                 self._unindex_run_locked(run_id, record.thread_id)
         logger.debug("Run record %s cleaned up", run_id)
+
+    def schedule_cleanup(self, run_id: str, *, delay: float = 300) -> asyncio.Task[None] | None:
+        """Schedule terminal-record eviction from the in-memory registries.
+
+        Terminal runs are evicted only when a RunStore backs this manager:
+        after eviction, history is still served by the store fallback in
+        ``get()`` / ``list_by_thread()``. Without a store, eviction would
+        erase the run's history entirely, so a store-less manager keeps the
+        previous retain-forever behaviour and this returns ``None``.
+
+        Note the gate is ``store is not None``, not "durable": the production
+        Gateway (``app/gateway/deps.py``) always wires a store —
+        ``RunRepository`` for SQL backends, ``MemoryRunStore`` for
+        ``database.backend=memory`` — so eviction is active in every real
+        deployment, including the memory backend. There, eviction frees the
+        heavyweight ``RunRecord`` (finished task, abort event, stream state)
+        even though ``MemoryRunStore`` itself retains the row for the process
+        lifetime; it bounds the in-memory record registries rather than the
+        store's own history.
+
+        The returned task (``None`` above) is kept strongly referenced so it
+        cannot be garbage-collected mid-delay, and :meth:`shutdown` cancels
+        any eviction tasks that are still pending.
+
+        Callers must invoke this only after the run has reached a terminal
+        status and all persistence/finalization for it has completed.
+        """
+        if self._store is None:
+            return None
+        task = asyncio.create_task(self.cleanup(run_id, delay=delay), context=Context())
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_task_done)
+        return task
+
+    def _cleanup_task_done(self, task: asyncio.Task[None]) -> None:
+        """Drop the finished eviction task and surface unexpected failures."""
+        self._cleanup_tasks.discard(task)
+        if task.cancelled():
+            return
+        if (exc := task.exception()) is not None:
+            logger.warning("Run record eviction task failed", exc_info=exc)
 
     # ------------------------------------------------------------------
     # Lease heartbeat
@@ -2216,6 +2278,20 @@ class RunManager:
                 timeout,
             )
 
+    async def _cancel_pending_cleanups(self) -> None:
+        """Cancel and await terminal-record eviction tasks on shutdown.
+
+        Eviction only pops in-memory records, so there is nothing to persist:
+        cancellation leaves the durable store rows untouched. Evictions
+        scheduled after this point by a worker task that settles late are
+        cancelled when the event loop closes.
+        """
+        tasks = [task for task in self._cleanup_tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def shutdown(self, *, timeout: float = 5.0) -> None:
         """Cancel and bounded-await all in-flight runs on process shutdown.
 
@@ -2263,6 +2339,7 @@ class RunManager:
 
         if not inflight:
             await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
+            await self._cancel_pending_cleanups()
             return
 
         tasks = [record.task for record in inflight]
@@ -2315,6 +2392,7 @@ class RunManager:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
         logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
         await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
+        await self._cancel_pending_cleanups()
 
 
 class CancelOutcome(StrEnum):

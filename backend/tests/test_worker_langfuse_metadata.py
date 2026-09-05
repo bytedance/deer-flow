@@ -68,6 +68,9 @@ class _FakeRunManager:
     async def cleanup(self, *_args, **_kwargs) -> None:
         return None
 
+    def schedule_cleanup(self, *_args, **_kwargs) -> None:
+        return None
+
 
 class _FakeBridge:
     def __init__(self) -> None:

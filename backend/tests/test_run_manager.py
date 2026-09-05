@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import sqlite3
+from contextvars import ContextVar
 from typing import Any
 
 import pytest
@@ -669,6 +670,171 @@ async def test_cleanup(manager: RunManager):
 
     await manager.cleanup(run_id, delay=0)
     assert await manager.get(run_id) is None
+
+
+@pytest.mark.anyio
+async def test_schedule_cleanup_without_store_retains_record(manager: RunManager):
+    """Memory-only mode must keep the previous retain-forever behaviour.
+
+    Eviction would erase the run's history entirely (no store fallback), so
+    ``schedule_cleanup`` is a no-op without a backing store.
+    """
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.success)
+
+    assert manager.schedule_cleanup(record.run_id, delay=0) is None
+    assert await manager.get(record.run_id) is record
+    assert manager._cleanup_tasks == set()
+
+
+@pytest.mark.anyio
+async def test_schedule_cleanup_with_store_evicts_and_prunes_thread_index(manager_with_store: RunManager):
+    """With a backing store, terminal records are evicted after the delay.
+
+    Both registries must be pruned in lockstep, and history must remain
+    readable through the store fallback afterwards.
+    """
+    mgr = manager_with_store
+    record = await mgr.create("thread-1")
+    await mgr.set_status(record.run_id, RunStatus.success)
+
+    task = mgr.schedule_cleanup(record.run_id, delay=0.01)
+    assert task is not None
+    await asyncio.wait_for(task, timeout=5)
+
+    assert record.run_id not in mgr._runs
+    assert "thread-1" not in mgr._runs_by_thread
+
+    hydrated = await mgr.get(record.run_id)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.success
+    assert hydrated.store_only is True
+
+
+@pytest.mark.anyio
+async def test_schedule_cleanup_does_not_inherit_request_context(manager_with_store: RunManager, monkeypatch: pytest.MonkeyPatch):
+    """Cleanup tasks must not retain request-scoped context variables."""
+    mgr = manager_with_store
+    record = await mgr.create("thread-1")
+    await mgr.set_status(record.run_id, RunStatus.success)
+    request_marker: ContextVar[str | None] = ContextVar("request_marker", default=None)
+    observed_markers: list[str | None] = []
+    original_cleanup = mgr.cleanup
+
+    async def observe_cleanup(run_id: str, *, delay: float = 300) -> None:
+        observed_markers.append(request_marker.get())
+        await original_cleanup(run_id, delay=delay)
+
+    monkeypatch.setattr(mgr, "cleanup", observe_cleanup)
+    token = request_marker.set("request-value")
+    try:
+        task = mgr.schedule_cleanup(record.run_id, delay=0)
+        assert task is not None
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        request_marker.reset(token)
+
+    assert observed_markers == [None]
+
+
+@pytest.mark.anyio
+async def test_shutdown_cancels_pending_cleanup_tasks(manager_with_store: RunManager):
+    """Shutdown must cancel eviction tasks that are still mid-delay."""
+    mgr = manager_with_store
+    record = await mgr.create("thread-1")
+    await mgr.set_status(record.run_id, RunStatus.success)
+
+    task = mgr.schedule_cleanup(record.run_id, delay=3600)
+    assert task is not None
+
+    await mgr.shutdown(timeout=0.1)
+    assert task.cancelled()
+    assert mgr._cleanup_tasks == set()
+    # The record is never evicted, so reads stay in-memory.
+    assert await mgr.get(record.run_id) is not None
+
+
+@pytest.mark.anyio
+async def test_idempotent_reuse_after_cleanup_keeps_terminal_record_store_only(manager_with_store: RunManager):
+    """A stable-key retry after eviction must not re-index a terminal record.
+
+    The Gateway returns immediately for an idempotent reuse, so no worker
+    finalization would ever schedule cleanup for the re-hydrated record —
+    indexing a terminal record here would retain it for the process lifetime
+    (the #5009 leak, one stable-key retry at a time).
+    """
+    mgr = manager_with_store
+    record = await mgr.create_or_reject("thread-1", idempotency_key="stable-key")
+    await mgr.set_status(record.run_id, RunStatus.success)
+    await mgr.cleanup(record.run_id, delay=0)  # the PR's delayed eviction
+    assert record.run_id not in mgr._runs
+    assert "thread-1" not in mgr._runs_by_thread
+
+    reused = await mgr.create_or_reject("thread-1", idempotency_key="stable-key")
+    assert reused.run_id == record.run_id
+    assert reused.idempotency_reused is True
+    assert reused.status == RunStatus.success
+    # Terminal history stays store-only: no re-entry into the in-memory indexes.
+    assert record.run_id not in mgr._runs
+    assert "thread-1" not in mgr._runs_by_thread
+    # History remains readable through the store fallback.
+    assert (await mgr.get(record.run_id)) is not None
+
+
+@pytest.mark.anyio
+async def test_idempotent_reuse_still_indexes_active_records(manager_with_store: RunManager):
+    """Active (pending/running) records must remain trackable on reuse."""
+    mgr = manager_with_store
+    record = await mgr.create_or_reject("thread-1", idempotency_key="active-key")
+    # Simulate losing the in-memory registry while the store row is pending.
+    mgr._runs.clear()
+    mgr._runs_by_thread.clear()
+
+    reused = await mgr.create_or_reject("thread-1", idempotency_key="active-key")
+    assert reused.run_id == record.run_id
+    assert reused.idempotency_reused is True
+    assert reused.status == RunStatus.pending
+    # Active records are re-indexed so cancel()/has_inflight() can see them.
+    assert reused.run_id in mgr._runs
+    assert "thread-1" in mgr._runs_by_thread
+
+
+@pytest.mark.anyio
+async def test_idempotent_reuse_does_not_index_foreign_active_records():
+    """A peer worker must not retain a taskless active record in its indexes."""
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+    record = await owner.create_or_reject("thread-1", idempotency_key="peer-key")
+
+    reused = await peer.create_or_reject("thread-1", idempotency_key="peer-key")
+
+    assert reused.run_id == record.run_id
+    assert reused.idempotency_reused is True
+    assert reused.owner_worker_id == "worker-a"
+    assert reused.run_id not in peer._runs
+    assert "thread-1" not in peer._runs_by_thread
+    assert await peer.has_inflight("thread-1") is False
+
+
+@pytest.mark.anyio
+async def test_fail_start_if_pending_schedules_cleanup_only_with_store():
+    """Spawn-failure terminalization schedules eviction only when store-backed."""
+    store_mgr = RunManager(store=MemoryRunStore())
+    record = await store_mgr.create("thread-1")
+    assert await store_mgr.fail_start_if_pending(record.run_id, error="no worker") is True
+    assert record.status == RunStatus.error
+
+    scheduled = list(store_mgr._cleanup_tasks)
+    assert len(scheduled) == 1
+    for task in scheduled:
+        task.cancel()
+    await asyncio.gather(*scheduled, return_exceptions=True)
+
+    memory_mgr = RunManager()
+    memory_record = await memory_mgr.create("thread-1")
+    assert await memory_mgr.fail_start_if_pending(memory_record.run_id, error="no worker") is True
+    assert memory_mgr._cleanup_tasks == set()
 
 
 @pytest.mark.anyio
