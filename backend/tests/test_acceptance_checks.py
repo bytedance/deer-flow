@@ -1162,6 +1162,79 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["holds"] is True
 
+    def test_crlf_execution_with_test_command_last_still_matches(self):
+        """A normal Windows CRLF command record has the same boundaries as
+        its LF equivalent and must not require shell provenance."""
+        executions = [_bash_execution("cd backend\r\npytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_bare_carriage_return_is_unprovable_before_powershell_line_split(self):
+        """PowerShell treats a standalone CR as a command boundary, while a
+        POSIX parser may absorb it as whitespace and attribute a forged
+        passing summary to the preceding test run."""
+        executions = [_bash_execution("pytest tests/security\rWrite-Output '3 passed'", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    @pytest.mark.parametrize("separator", ("\v", "\f", "\x85", "\u00a0", "\u2028", "\u2029"))
+    def test_powershell_only_whitespace_cannot_hide_runner_arguments(self, separator):
+        """PowerShell separates arguments on these characters, while POSIX
+        shlex can absorb them into one apparently harmless token."""
+        command = f"pytest tests/security tests/unit{separator}--ignore{separator}tests/security"
+        executions = [_bash_execution(command, output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_cmd_single_quote_cannot_hide_a_control_operator(self):
+        """cmd.exe does not quote ``&`` with single quotes, even though POSIX
+        shlex would hide the operator inside one argument."""
+        executions = [_bash_execution("pytest tests/security '& echo 3 passed'", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_cmd_single_quotes_cannot_change_matched_runner_argv(self):
+        """POSIX removes ordinary single quotes, while cmd.exe passes them
+        through as part of the runner argument."""
+        executions = [_bash_execution("pytest 'tests/security'", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_cmd_single_quotes_in_criterion_are_unprovable(self):
+        executions = [_bash_execution("pytest tests/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest 'tests/security'"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_cmd_single_quotes_in_preceding_cd_are_unprovable(self):
+        """A quoted POSIX ``cd`` target is not the same path under cmd.exe,
+        so it cannot establish the runner's working directory."""
+        executions = [_bash_execution("cd '/mnt/user-data/workspace' && pytest tests/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(
+            ["tests_passed:pytest tests/security"],
+            thread_data=THREAD_DATA,
+            bash_executions=executions,
+        )
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_shared_whitespace_and_double_quotes_remain_verifiable(self):
+        executions = [_bash_execution('pytest\t"tests/security" -q', output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_apostrophe_inside_double_quotes_remains_verifiable(self):
+        executions = [_bash_execution('pytest "tests/O\'Brien" -q', output_tail="3 passed")]
+        verdict = check_acceptance_criteria(['tests_passed:pytest "tests/O\'Brien"'], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
     def test_multiline_background_operator_stays_unprovable(self):
         """A trailing ``&`` at end of a line still separates (and backgrounds)
         the next line's command."""

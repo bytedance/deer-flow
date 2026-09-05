@@ -61,6 +61,7 @@ import posixpath
 import re
 import shlex
 import stat
+import unicodedata
 from collections.abc import Callable, Mapping
 from typing import Any, TypedDict
 
@@ -900,6 +901,84 @@ def _shell_parse(command: str, *, posix: bool = True) -> tuple[list[list[str]], 
     return segments, ops
 
 
+def _has_shell_ambiguous_whitespace(command: str) -> bool:
+    """Whether whitespace can split differently across supported shells.
+
+    ASCII space, tab, LF, and CRLF are shared separators. PowerShell also
+    separates on bare CR, vertical tab, form feed, NEL, and Unicode separator
+    characters, while Python's POSIX ``shlex`` can retain them inside a token.
+    """
+    command_without_crlf = command.replace("\r\n", "\n")
+    return any(character in "\r\v\f\x85" or (character != " " and unicodedata.category(character) in {"Zs", "Zl", "Zp"}) for character in command_without_crlf)
+
+
+def _has_cmd_control_operator_in_single_quotes(command: str) -> bool:
+    """Whether POSIX single quotes hide cmd.exe control syntax.
+
+    Cmd does not use single quotes for grouping, so metacharacters within them
+    remain active there. Ordinary single-quoted text stays verifiable for the
+    POSIX execution path. Shell-specific ways to escape quotes are already
+    rejected by the other provenance checks below.
+    """
+    in_double_quotes = False
+    in_single_quotes = False
+    for character in command:
+        if character == '"':
+            in_double_quotes = not in_double_quotes
+        elif character == "'" and not in_double_quotes:
+            in_single_quotes = not in_single_quotes
+        elif in_single_quotes and character in "&|<>()":
+            return True
+    return False
+
+
+def _has_unquoted_single_quote(text: str) -> bool:
+    """Whether *text* contains a single quote outside double quotes.
+
+    The raw ``posix=False`` token stream retains surrounding quotes. Cmd.exe
+    passes a POSIX single quote to the child process instead of using it for
+    grouping, so such a token cannot be compared with its quote-stripped
+    POSIX form without knowing which shell executed it.
+    """
+    in_double_quotes = False
+    for character in text:
+        if character == '"':
+            in_double_quotes = not in_double_quotes
+        elif character == "'" and not in_double_quotes:
+            return True
+    return False
+
+
+def _raw_segment_has_unquoted_single_quote(segment: list[str]) -> bool:
+    return any(_has_unquoted_single_quote(token) for token in segment)
+
+
+def _matched_span_has_ambiguous_single_quotes(
+    expected_raw: list[list[str]],
+    actual_raw: list[list[str]],
+    actual: list[list[str]],
+    *,
+    start: int,
+    span: int,
+    thread_data: Mapping[str, Any] | None,
+) -> bool:
+    """Whether cmd.exe single-quote semantics can change a candidate match.
+
+    Every expected segment and the matching actual span define the invocation
+    being certified, so a POSIX single quote in any of them is ambiguous.
+    Before the span, only segments accepted as provably silent can contribute
+    to a successful match; a quoted ``cd`` or assignment can change the state
+    in which the runner executes and therefore also requires shell provenance.
+    Non-silent prefixes remain governed by output-attribution checks, preserving
+    authoritative failure results such as ``echo '12 passed'; make test``.
+    """
+    if any(_raw_segment_has_unquoted_single_quote(segment) for segment in expected_raw):
+        return True
+    if any(_raw_segment_has_unquoted_single_quote(segment) for segment in actual_raw[start : start + span]):
+        return True
+    return any(_raw_segment_has_unquoted_single_quote(actual_raw[index]) and _is_silent_segment(actual[index], thread_data) for index in range(start))
+
+
 def _command_requires_shell_provenance(command: str) -> bool:
     """Whether raw command tokens have shell-dependent Windows semantics.
 
@@ -909,12 +988,24 @@ def _command_requires_shell_provenance(command: str) -> bool:
     and native Windows runners preserve them as path separators while POSIX
     shells treat them as escapes. Cmd percent/bang references and ``^``, a
     leading tilde or Bash brace expression, and PowerShell splatting/array
-    expressions can all rewrite the native argv differently. ``#`` starts a comment for
-    the POSIX parser but is an ordinary argument to cmd.exe. Any of these
+    expressions can all rewrite the native argv differently. ``#`` starts a
+    comment for the POSIX parser but is an ordinary argument to cmd.exe. Cmd
+    also does not treat single quotes as quoting, so cmd control syntax hidden
+    inside POSIX single quotes is unsafe. PowerShell recognizes more separators
+    than POSIX ``shlex``, including bare carriage returns and Unicode separator
+    characters; normal CRLF line endings remain unambiguous. Any of these
     spellings therefore fail closed instead of certifying a test run whose
     arguments depend on an unknown shell.
     """
-    if "#" in command or "^" in command or _CMD_DELAYED_ENV_EXPANSION_RE.search(command) or _BASH_BRACE_EXPANSION_RE.search(command) or _POWERSHELL_ARRAY_EXPRESSION_RE.search(command):
+    if (
+        _has_shell_ambiguous_whitespace(command)
+        or _has_cmd_control_operator_in_single_quotes(command)
+        or "#" in command
+        or "^" in command
+        or _CMD_DELAYED_ENV_EXPANSION_RE.search(command)
+        or _BASH_BRACE_EXPANSION_RE.search(command)
+        or _POWERSHELL_ARRAY_EXPRESSION_RE.search(command)
+    ):
         return True
     parsed = _shell_parse(command, posix=False)
     if parsed is None:
@@ -1337,17 +1428,25 @@ def _commands_match(
     """
     expected_parsed = _shell_parse(criterion_command)
     actual_parsed = _shell_parse(executed_command)
+    expected_raw_parsed = _shell_parse(criterion_command, posix=False)
+    actual_raw_parsed = _shell_parse(executed_command, posix=False)
     needs_shell_provenance = _command_requires_shell_provenance(criterion_command) or _command_requires_shell_provenance(executed_command)
     if expected_parsed is None or actual_parsed is None:
         # Malformed shell: only exact normalized equality survives.
         expected_norm = _normalize_command(criterion_command)
         if not expected_norm or expected_norm != _normalize_command(executed_command):
             return "no_match"
-        return "unprovable" if needs_shell_provenance else "match"
+        has_ambiguous_single_quote = _has_unquoted_single_quote(criterion_command) or _has_unquoted_single_quote(executed_command)
+        return "unprovable" if needs_shell_provenance or has_ambiguous_single_quote else "match"
     expected, expected_ops = expected_parsed
     actual, ops = actual_parsed
     if not expected or not actual or len(expected) > len(actual):
         return "no_match"
+    raw_segments_align = expected_raw_parsed is not None and actual_raw_parsed is not None and len(expected_raw_parsed[0]) == len(expected) and len(actual_raw_parsed[0]) == len(actual)
+    if not raw_segments_align and (_has_unquoted_single_quote(criterion_command) or _has_unquoted_single_quote(executed_command)):
+        needs_shell_provenance = True
+    expected_raw = expected_raw_parsed[0] if raw_segments_align and expected_raw_parsed is not None else []
+    actual_raw = actual_raw_parsed[0] if raw_segments_align and actual_raw_parsed is not None else []
     span = len(expected)
     saw_unprovable = False
     windows_path_context = _thread_uses_windows_paths(thread_data)
@@ -1374,7 +1473,14 @@ def _commands_match(
             saw_unprovable = True
             continue
         if _span_attributable(ops[:start], ops[start : start + span - 1], ops[start + span - 1 :], executed_success):
-            if needs_shell_provenance:
+            if needs_shell_provenance or _matched_span_has_ambiguous_single_quotes(
+                expected_raw,
+                actual_raw,
+                actual,
+                start=start,
+                span=span,
+                thread_data=thread_data,
+            ):
                 saw_unprovable = True
                 continue
             return "match"
