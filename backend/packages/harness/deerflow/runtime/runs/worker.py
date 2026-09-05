@@ -25,8 +25,8 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Callable, Coroutine, Mapping
+from contextlib import AbstractAsyncContextManager
 from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -73,6 +73,7 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
@@ -90,8 +91,7 @@ from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
 
-_checkpoint_locks_guard = threading.Lock()
-_checkpoint_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+_checkpoint_locks = AsyncKeyedLockTable[str]()
 
 # Completed LangGraph runs can leave callback Contexts and AsyncPregelLoop
 # instances in unreachable reference cycles. They are collectable, but a busy
@@ -229,22 +229,9 @@ def _release_run_scoped_references(
             runtime_context.pop(key, None)
 
 
-@asynccontextmanager
-async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
+def _checkpoint_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]:
     """Serialize checkpoint mutations for one thread without blocking goal commands."""
-    loop = asyncio.get_running_loop()
-    with _checkpoint_locks_guard:
-        locks = _checkpoint_locks_by_loop.get(loop)
-        if locks is None:
-            locks = {}
-            _checkpoint_locks_by_loop[loop] = locks
-        lock = locks.get(thread_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            locks[thread_id] = lock
-
-    async with lock:
-        yield
+    return _checkpoint_locks.hold(thread_id)
 
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
@@ -1169,7 +1156,7 @@ async def run_agent(
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
-            file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
+            file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
                     if len(lg_modes) == 1 and not stream_subgraphs:
