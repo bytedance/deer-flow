@@ -128,12 +128,15 @@ def _subagent_release_policy(
     enabled: bool,
     max_concurrent: int,
     max_total: int,
+    allowed_subagents: list[str] | None = None,
 ) -> dict[str, object]:
     """Delegation limits as the run will actually enforce them.
 
     The per-type turn/timeout caps are read here rather than left implicit
     because a subagent config edit changes what the lead agent can spend
-    without changing anything visible in the lead's own configuration.
+    without changing anything visible in the lead's own configuration. The
+    caller allowlist is the same immutable snapshot used by prompt rendering
+    and task execution, so the descriptor cannot advertise broader access.
     """
     policy: dict[str, object] = {
         "enabled": enabled,
@@ -147,7 +150,14 @@ def _subagent_release_policy(
 
     from deerflow.subagents import get_available_subagent_names, get_subagent_config
 
-    type_allowlist = sorted(set(get_available_subagent_names(app_config=app_config)))
+    type_allowlist = sorted(
+        set(
+            get_available_subagent_names(
+                app_config=app_config,
+                allowed_subagents=allowed_subagents,
+            )
+        )
+    )
     runtime_limits: dict[str, object] = {}
     for name in type_allowlist:
         subagent_config = get_subagent_config(name, app_config=app_config)
@@ -1211,6 +1221,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                 enabled=subagent_enabled,
                 max_concurrent=max_concurrent_subagents,
                 max_total=max_total_subagents,
+                allowed_subagents=allowed_subagents,
             ),
             "deferred_tools": {
                 "enabled": resolved_app_config.tool_search.enabled,
