@@ -185,6 +185,16 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
    OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
 
+   Gemini models served through an OpenAI-compatible gateway may require their
+   function-call thought signatures to be replayed on the next request. For
+   those endpoints, use DeerFlow's compatibility provider instead:
+
+   ```yaml
+   use: deerflow.models.patched_gemini:PatchedChatOpenAI
+   ```
+
+   This preserves signatures returned by the gateway without generating or modifying them.
+
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
    The setup wizard includes a Z.AI GLM-5.3-Flash profile. Because that model requires thinking and only accepts its own restricted effort levels, the compatibility profile keeps thinking enabled for every foreground and background call and temporarily suppresses DeerFlow's generic effort selector. See `config.example.yaml` for the equivalent manual configuration.
