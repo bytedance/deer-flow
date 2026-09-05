@@ -395,7 +395,7 @@ Phase 1 最低验证要求：
   从 config 解析全部技能名并过滤。RBAC provider 的 `_RESOURCE_POLICY_KEYS` 已包含
   `"skill": "skills"`，无需 schema 变更。对 test mock（SimpleNamespace app_config）安全：
   使用 `getattr` + `is not True` 防御。
-- **证据：** `tests/test_skills_authorization.py`（38 tests，2026-09-04 扩充）覆盖 disabled/RBAC allow/deny/
+- **证据：** `tests/test_skills_authorization.py`（45 tests，2026-09-04 两轮扩充）覆盖 disabled/RBAC allow/deny/
   wildcard/empty/provider-error-fail-closed-fail-open/internal-caller 场景，generic filter，
   候选集解析错误的 fail-closed/fail-open + 空配置无 bypass 回归，以及 Layer 2：动作级
   deny 阻断激活（lead 中间件单测 + client 装配接线 + subagent 链接线）、provider 异常
@@ -528,7 +528,7 @@ Phase 1 最低验证要求：
   不在 `DurableContextMiddleware` gate（时序上晚于 `SkillToolPolicyMiddleware` 读 state，
   依赖 hook 顺序）；不在装配期过滤 catalog（会把 `<skill_index>` 可见性折叠进激活语义，
   且需 N 次 authorize 调用；运行期过滤每次 ≤ MAX_RESULTS 次）。
-- **证据：** `tests/test_skills_authorization.py` 38 tests（describe 动作门控 + provider
+- **证据：** `tests/test_skills_authorization.py` 45 tests（describe 动作门控 + provider
   错误 fail-closed/open + 禁用时全量；read 盖章拒绝/放行 + `extract_skills` 无告警跳过；
   lead/subagent 链 stamping 接线；distinct-instance 工厂回归——`_load_skills` 与
   `_create_agent` 共享一个实例且仅解析一次）+ `test_authorization_enforcement.py`
@@ -537,6 +537,47 @@ Phase 1 最低验证要求：
 - **兼容性：** `authorization.enabled: false` 时三处 gate 均 no-op；`build_skill_search_setup` /
   `build_describe_skill_tool` / `ToolErrorHandlingMiddleware` / 两个 runtime builder 的新
   参数均默认 `None`；bootstrap 允许路径与 deferred 关闭路径行为不变。
+
+### 2026-09-04（第二轮）— PR #4541 持久化条目复授权与异步 provider API
+
+- **背景：** review 第五轮发现两个缺口：① `skill_context` 跨 run 持久——条目在盖章时
+  授权过，但下一轮被 `SkillToolPolicyMiddleware`（allowed-tools）与
+  `_in_context_secret_sources()`（秘密绑定）直接消费，不再查 `skill:activate`；provider
+  从允许翻转为拒绝后，旧条目仍在施加策略与绑定秘密。② `skill_activation_allowed()`
+  只调同步 `provider.authorize()`——异步执行路径因此用错 API：盖章在 event loop 上
+  同步调用、slash 激活与 describe 在 worker 线程同步调用；loop-affine provider 永远
+  收不到 `aauthorize()`，同步调用可能阻塞或失败，把允许错成 fail-closed 拒绝、把拒绝
+  错成 fail-open 放行。
+- **决策（异步助手）：** `skill_filter.skill_activation_allowed_async()` 与同步版同语义
+  （同 fail-closed/open），经 `await provider.aauthorize()`，镜像
+  `authorize_sandbox_execution_async` 的既有模式。
+- **决策（决策预计算模式）：** 异步 hook 在 event loop 上预计算
+  `activation_decisions: dict[name, bool]`（slash 目标名 + 持久化条目名，一次批量
+  aauthorize），传入 to_thread 中的阻塞处理函数；处理函数查映射，未覆盖的名字回退
+  同步检查（同步路径的正确 API）。三处落地：`SkillActivationMiddleware.awrap_model_call`
+  （决策贯穿激活与秘密绑定）、`ToolErrorHandlingMiddleware.awrap_tool_call`（`_amaybe_stamp`
+  先 await 决策再盖章）、`SkillToolPolicyMiddleware.awrap_model_call` / `awrap_tool_call`
+  （条目名 + slash 来源名预计算）。
+- **决策（describe 双实现）：** `describe_skill` 用 `StructuredTool.from_function`
+  同时挂同步函数与 coroutine——`invoke`（测试/同步链）走 `authorize()`，
+  `ainvoke`（异步 agent 执行）在 loop 上 `await aauthorize()`。
+- **决策（持久化条目复授权）：** 两个消费点在使用前复授权：
+  `_in_context_secret_sources` 对每个解析后的条目查动作决策，拒绝则跳过（不绑定秘密）；
+  `SkillToolPolicyMiddleware._active_skills_for_paths` 对每个解析后的技能查动作决策，
+  拒绝则 `continue`（与 disabled / 出 allowlist 的技能同等跳过；全部被拒时沿用既有
+  "no active reference authorized → fail-closed builtins" 语义）。`skill_authorization`
+  新传入 `SkillToolPolicyMiddleware`（lead `build_middlewares` 与 subagent builder 两处）。
+- **否决方案：** 不在 `DurableContextMiddleware` 渲染时复授权（消费点直接读 state，
+  渲染层过滤不覆盖 policy/secret 读取）；不在条目上缓存决策（持久化条目的正确缓存
+  粒度是"每次消费时重查"，与 live registry 复验同一模式）。
+- **证据：** `tests/test_skills_authorization.py` 45 tests：allow→deny-next-run 双回归
+  （秘密绑定断源、allowed-tools 部分拒绝不株连、全拒 fail-closed builtins）、
+  `_AsyncOnlyProvider`（同步 API 恒失败、aauthorize 可用）驱动四条异步路径断言
+  （激活、盖章允许/拒绝、describe、tool policy——允许场景下正确接线保留技能声明，
+  错回退同步 API 则 fail-closed 丢声明）。六项突变（两个复授权 gate + 四处异步预计算）
+  逐一还原均有测试失败。
+- **兼容性：** 同步 hook 路径行为不变（决策映射仅异步构造）；`SkillToolPolicyMiddleware`
+  新参数默认 `None`；`describe_skill` 对 `invoke` 调用方（既有测试）保持同步语义。
 
 ### 新记录模板
 

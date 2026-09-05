@@ -68,6 +68,29 @@ def skill_activation_allowed(
         return not authorization.fail_closed
 
 
+async def skill_activation_allowed_async(
+    authorization: ResolvedSkillAuthorization | None,
+    skill_name: str,
+) -> bool:
+    """Async counterpart of :func:`skill_activation_allowed`.
+
+    Uses ``provider.aauthorize()`` so loop-affine custom providers (clients
+    bound to the running event loop) receive the async API on async execution
+    paths, mirroring ``authorize_sandbox_execution_async``. Same decision
+    semantics and fail-closed / fail-open policy as the sync version.
+    """
+    if authorization is None:
+        return True
+    try:
+        decision = await authorization.provider.aauthorize(AuthzRequest(principal=authorization.principal, resource="skill", action="activate", target=skill_name))
+        if not isinstance(decision, AuthzDecision):
+            raise TypeError("AuthorizationProvider.aauthorize must return AuthzDecision")
+        return decision.allow
+    except Exception:
+        logger.warning("Authorization provider failed while checking skill:activate for '%s'", skill_name, exc_info=True)
+        return not authorization.fail_closed
+
+
 def resolve_skill_authorization(
     context: Mapping[str, Any],
     app_config: AppConfig,

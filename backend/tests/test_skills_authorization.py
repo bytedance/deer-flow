@@ -10,6 +10,7 @@ Covers Layer 1 enforcement:
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from deerflow.authz.enforcement import filter_resources_by_authorization
@@ -632,6 +633,8 @@ class _ActionAwareProvider:
 
     def __init__(self, *, denied_activate: set[str]):
         self.denied_activate = denied_activate
+        self.sync_calls: list[str] = []
+        self.async_calls: list[str] = []
 
     def filter_resources(self, principal, resource, candidates):
         return list(candidates)
@@ -639,6 +642,17 @@ class _ActionAwareProvider:
     def authorize(self, request):
         from deerflow.authz.provider import AuthzDecision
 
+        if request.resource == "skill" and request.action == "activate":
+            self.sync_calls.append(request.target)
+        if request.resource == "skill" and request.action == "activate" and request.target in self.denied_activate:
+            return AuthzDecision(allow=False)
+        return AuthzDecision(allow=True)
+
+    async def aauthorize(self, request):
+        from deerflow.authz.provider import AuthzDecision
+
+        if request.resource == "skill" and request.action == "activate":
+            self.async_calls.append(request.target)
         if request.resource == "skill" and request.action == "activate" and request.target in self.denied_activate:
             return AuthzDecision(allow=False)
         return AuthzDecision(allow=True)
@@ -647,6 +661,41 @@ class _ActionAwareProvider:
 class _RaisingAuthorizeProvider(_ActionAwareProvider):
     def authorize(self, request):
         raise RuntimeError("provider blew up")
+
+    async def aauthorize(self, request):
+        raise RuntimeError("provider blew up")
+
+
+class _AsyncOnlyProvider:
+    """Loop-affine provider: the sync API is the wrong one and always fails.
+
+    Models a provider whose clients are bound to the running event loop —
+    ``authorize()`` from a worker thread or the loop itself is unsupported,
+    while ``aauthorize()`` works. Async paths must use the async API; if they
+    fall back to the sync call, fail-closed denies (or fail-open admits) with
+    the wrong semantics.
+    """
+
+    name = "async-only"
+
+    def __init__(self, *, denied_activate: set[str] = set()):
+        self.denied_activate = denied_activate
+        self.async_calls: list[str] = []
+
+    def filter_resources(self, principal, resource, candidates):
+        return list(candidates)
+
+    def authorize(self, request):
+        raise RuntimeError("sync authorize() is not supported by this provider")
+
+    async def aauthorize(self, request):
+        from deerflow.authz.provider import AuthzDecision
+
+        if request.resource == "skill" and request.action == "activate":
+            self.async_calls.append(request.target)
+        if request.resource == "skill" and request.action == "activate" and request.target in self.denied_activate:
+            return AuthzDecision(allow=False)
+        return AuthzDecision(allow=True)
 
 
 def _resolved_skill_authorization(provider, *, fail_closed: bool):
@@ -1379,3 +1428,306 @@ def test_subagent_executor_shares_one_skill_authorization_instance(monkeypatch):
     assert layer2 is layer1
     # One resolve per assembly even though the factory returns distinct objects.
     assert len(resolved_providers) == 1
+
+
+# ── Re-authorization of persisted skill_context entries (review round 5) ──
+
+
+def test_in_context_secret_sources_reauthorize_persisted_entries(tmp_path, monkeypatch):
+    """[P1 regression] An entry stamped while activation was allowed must stop
+    binding secrets on the next run once the provider denies skill:activate —
+    skill_context persists across runs; the decision does not."""
+    provider = _ActionAwareProvider(denied_activate={"demo-skill"})
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = _middleware_for(
+        tmp_path,
+        monkeypatch,
+        ["demo-skill"],
+        available_skills={"demo-skill"},
+        skill_authorization=resolved,
+    )
+
+    def _make_skill_with_secrets(name: str):
+        made = middleware._storage().load_skills(enabled_only=True)
+        skill = next(s for s in made if s.name == name)
+        object.__setattr__(skill, "required_secrets", [SimpleNamespace(name="API_KEY", optional=False)])
+        object.__setattr__(skill, "secrets_autonomous", True)
+        return skill
+
+    skill = _make_skill_with_secrets("demo-skill")
+    container_root = middleware._storage().get_container_root()
+    registry = {posixpath_normpath(skill.get_container_file_path(container_root)): skill}
+    request = SimpleNamespace(state={"skill_context": [{"name": "demo-skill", "path": skill.get_container_file_path(container_root)}]})
+
+    # Run 1: activation allowed -> the persisted entry binds its secrets.
+    provider.denied_activate = set()
+    sources = middleware._in_context_secret_sources(request, registry)
+    assert [name for name, _ in sources] == ["demo-skill"]
+
+    # Run 2 (deny-next-run): same persisted entry, provider now denies.
+    provider.denied_activate = {"demo-skill"}
+    sources = middleware._in_context_secret_sources(request, registry)
+    assert sources == []
+
+
+def test_tool_policy_reauthorizes_persisted_entries(monkeypatch, tmp_path):
+    """[P1 regression] allow-read-then-deny-next-run for allowed-tools: the
+    persisted entry no longer applies its declaration once skill:activate is
+    denied; an allowed skill keeps applying (partial deny does not poison)."""
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+
+    provider = _ActionAwareProvider(denied_activate=set())
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+
+    skills = {}
+    for name, allowed_tools in (("demo-skill", ("bash",)), ("ok-skill", ("web_search",))):
+        skill_dir = tmp_path / name
+        skill_dir.mkdir(exist_ok=True)
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("# x", encoding="utf-8")
+        from deerflow.skills.types import Skill as SkillObject
+        from deerflow.skills.types import SkillCategory
+
+        skills[name] = SkillObject(
+            name=name,
+            description="d",
+            license=None,
+            skill_dir=skill_dir,
+            skill_file=skill_file,
+            relative_path=Path(name),
+            category=SkillCategory.CUSTOM,
+            enabled=True,
+            allowed_tools=allowed_tools,
+        )
+
+    container_root = "/mnt/skills"
+    registry_entries = list(skills.values())
+
+    def _registry_path(skill):
+        return posixpath_normpath(skill.get_container_file_path(container_root))
+
+    paths = [_registry_path(skills["demo-skill"]), _registry_path(skills["ok-skill"])]
+
+    monkeypatch.setattr(
+        SkillToolPolicyMiddleware,
+        "_storage",
+        lambda self: SimpleNamespace(
+            load_skills=lambda *, enabled_only: registry_entries,
+            get_container_root=lambda: container_root,
+        ),
+    )
+
+    middleware = SkillToolPolicyMiddleware(
+        available_skills={"demo-skill", "ok-skill"},
+        slash_source_owner_token="test-token",
+        skill_authorization=resolved,
+    )
+    # Both allowed: the union of both declarations applies.
+    provider.denied_activate = set()
+    allowed = middleware._allowed_names_for_paths(tuple(paths))
+    assert "bash" in allowed and "web_search" in allowed
+
+    # Deny-next-run for demo-skill only: its declaration stops applying, the
+    # still-allowed skill's declaration keeps applying.
+    provider.denied_activate = {"demo-skill"}
+    allowed = middleware._allowed_names_for_paths(tuple(paths))
+    assert "bash" not in allowed
+    assert "web_search" in allowed
+
+    # All denied: no active reference survives -> fail closed to builtins.
+    provider.denied_activate = {"demo-skill", "ok-skill"}
+    allowed = middleware._allowed_names_for_paths(tuple(paths))
+    from deerflow.skills.tool_policy import ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES
+
+    assert allowed == set(ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES)
+
+
+# ── Async provider API on async execution paths (review round 5) ──────
+
+
+def test_async_activation_path_uses_aauthorize(tmp_path, monkeypatch):
+    """awrap_model_call resolves skill:activate with aauthorize() on the loop —
+    a loop-affine provider whose sync API always fails still activates."""
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = _middleware_for(
+        tmp_path,
+        monkeypatch,
+        ["demo-skill"],
+        available_skills={"demo-skill"},
+        skill_authorization=resolved,
+    )
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            clone = _Request(**updates)
+            return clone
+
+    request = _Request(
+        messages=[HumanMessage(content="/demo-skill hi")],
+        state={},
+        runtime=None,
+    )
+    captured = {}
+
+    async def _handler(prepared):
+        captured["messages"] = list(prepared.messages)
+        return SimpleNamespace(ok=True)
+
+    result = asyncio.run(middleware.awrap_model_call(request, _handler))
+
+    assert getattr(result, "ok", False)
+    # aauthorize answered; the failing sync authorize() was never consulted.
+    assert provider.async_calls == ["demo-skill"]
+    assert len(captured["messages"]) == 2  # activation reminder + original
+    assert any(is_slash_activation_reminder(m) for m in captured["messages"])
+
+
+def test_async_stamp_path_uses_aauthorize():
+    """awrap_tool_call's skill-read stamp awaits aauthorize() — a loop-affine
+    provider still yields an entry (not a fail-closed denial marker)."""
+    import asyncio
+
+    from deerflow.agents.middlewares.skill_context import SKILL_CONTEXT_DENIED_KEY, SKILL_CONTEXT_ENTRY_KEY
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = ToolErrorHandlingMiddleware(app_config=_make_app_config(), skill_authorization=resolved)
+
+    request, message = _read_call_and_message("/mnt/skills/public/demo-skill/SKILL.md")
+
+    async def _run():
+        return await middleware._amaybe_stamp(message, request)
+
+    stamped = asyncio.run(_run())
+    assert provider.async_calls == ["demo-skill"]
+    assert SKILL_CONTEXT_ENTRY_KEY in stamped.additional_kwargs
+    assert SKILL_CONTEXT_DENIED_KEY not in stamped.additional_kwargs
+
+
+def test_async_stamp_path_denies_via_aauthorize():
+    import asyncio
+
+    from deerflow.agents.middlewares.skill_context import SKILL_CONTEXT_DENIED_KEY, SKILL_CONTEXT_ENTRY_KEY
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+
+    provider = _AsyncOnlyProvider(denied_activate={"demo-skill"})
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = ToolErrorHandlingMiddleware(app_config=_make_app_config(), skill_authorization=resolved)
+
+    request, message = _read_call_and_message("/mnt/skills/public/demo-skill/SKILL.md")
+
+    async def _run():
+        return await middleware._amaybe_stamp(message, request)
+
+    stamped = asyncio.run(_run())
+    assert provider.async_calls == ["demo-skill"]
+    assert SKILL_CONTEXT_ENTRY_KEY not in stamped.additional_kwargs
+    assert stamped.additional_kwargs.get(SKILL_CONTEXT_DENIED_KEY) is True
+
+
+def test_describe_async_uses_aauthorize():
+    """describe_skill's async invocation gates on aauthorize()."""
+    import asyncio
+
+    provider = _AsyncOnlyProvider(denied_activate={"demo-skill"})
+    tool = _describe_setup_for(provider, skills=("demo-skill", "other-skill"))
+
+    async def _run():
+        return await tool.ainvoke({"args": {"name": "select:demo-skill,other-skill"}, "name": "describe_skill", "type": "tool_call", "id": "async-call"})
+
+    result = asyncio.run(_run())
+    content = result.update["messages"][0].content
+    assert "other-skill" in content
+    assert "demo-skill" not in content
+    assert sorted(provider.async_calls) == ["demo-skill", "other-skill"]
+
+
+def test_async_tool_policy_uses_aauthorize(monkeypatch, tmp_path):
+    """SkillToolPolicyMiddleware's async hooks re-authorize persisted entries
+    with aauthorize() — the loop-affine provider's decision is respected."""
+    import asyncio
+
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    # aauthorize ALLOWS demo-skill: with correct wiring the skill's
+    # declaration applies ("bash" kept). If the async hook wrongly fell back to
+    # the sync API, the provider error would fail-closed and drop "bash".
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# x", encoding="utf-8")
+    skill = SkillObject(
+        name="demo-skill",
+        description="d",
+        license=None,
+        skill_dir=skill_dir,
+        skill_file=skill_dir / "SKILL.md",
+        relative_path=Path("demo-skill"),
+        category=SkillCategory.CUSTOM,
+        enabled=True,
+        allowed_tools=("bash",),
+    )
+    container_root = "/mnt/skills"
+    skill_path = posixpath_normpath(skill.get_container_file_path(container_root))
+
+    monkeypatch.setattr(
+        SkillToolPolicyMiddleware,
+        "_storage",
+        lambda self: SimpleNamespace(
+            load_skills=lambda *, enabled_only: [skill],
+            get_container_root=lambda: container_root,
+        ),
+    )
+
+    middleware = SkillToolPolicyMiddleware(
+        available_skills={"demo-skill"},
+        slash_source_owner_token="test-token",
+        skill_authorization=resolved,
+    )
+    request = SimpleNamespace(state={"skill_context": [{"name": "demo-skill", "path": skill_path}]})
+
+    async def _run():
+        return await middleware._collect_activation_decisions(request)
+
+    decisions = asyncio.run(_run())
+    assert decisions == {"demo-skill": True}
+
+    # End to end through the async hook: the aauthorize-granted entry applies.
+    class _ToolsRequest(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _ToolsRequest(**updates)
+
+    async def _identity(prepared):
+        return prepared
+
+    tools_request = _ToolsRequest(state=request.state, tools=[SimpleNamespace(name="bash"), SimpleNamespace(name="read_file")], runtime=None)
+    filtered = asyncio.run(middleware.awrap_model_call(tools_request, _identity))
+
+    kept = [getattr(t, "name", None) for t in filtered.tools]
+    assert kept == ["bash", "read_file"]
+
+
+def posixpath_normpath(path: str) -> str:
+    import posixpath
+
+    return posixpath.normpath(path)
+
+
+def is_slash_activation_reminder(message) -> bool:
+    from deerflow.agents.middlewares.skill_activation_middleware import is_slash_skill_activation_reminder
+
+    return is_slash_skill_activation_reminder(message)

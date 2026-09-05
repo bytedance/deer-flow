@@ -111,7 +111,7 @@ class SkillActivationMiddleware(AgentMiddleware):
         self._slash_source_owner_token = slash_source_owner_token
         self._skill_authorization = skill_authorization
 
-    def _activation_allowed(self, skill_name: str) -> bool:
+    def _activation_allowed(self, skill_name: str, *, activation_decisions: dict[str, bool] | None = None) -> bool:
         """Action-scoped ``skill:activate`` check for explicit slash activation.
 
         ``_available_skills`` is the Layer 1 *visibility* set (filter_resources,
@@ -122,10 +122,75 @@ class SkillActivationMiddleware(AgentMiddleware):
         disabled) allows — membership in the visibility set already decided.
         Delegates to the shared ``skill_activation_allowed`` so the slash path,
         ``describe_skill``, and the skill-file-load path cannot drift.
+
+        *activation_decisions* carries decisions precomputed on the event loop
+        via ``aauthorize()`` by ``awrap_model_call``: the threaded handler then
+        consults them instead of calling the synchronous ``authorize()`` (wrong
+        API for loop-affine providers). Names absent from the map fall back to
+        the synchronous check, which is the correct API for the sync
+        ``wrap_model_call`` path.
         """
+        if activation_decisions is not None and skill_name in activation_decisions:
+            return activation_decisions[skill_name]
         from deerflow.authz.skill_filter import skill_activation_allowed
 
         return skill_activation_allowed(self._skill_authorization, skill_name)
+
+    async def _collect_activation_decisions(self, names) -> dict[str, bool] | None:
+        """Precompute ``skill:activate`` decisions on the event loop.
+
+        Async middleware paths offload the blocking handler (skill-tree reads)
+        to a worker thread, but the provider decision belongs on the loop with
+        ``aauthorize()``. Collects every candidate name the handler may need —
+        the slash target and the persisted ``skill_context`` entries — so one
+        batch of awaits covers both the activation and secret-binding gates.
+        ``None`` means authorization is disabled (nothing to precompute).
+        """
+        if self._skill_authorization is None:
+            return None
+        candidates = {name for name in names if isinstance(name, str) and name}
+        if not candidates:
+            return None
+        from deerflow.authz.skill_filter import skill_activation_allowed_async
+
+        decisions: dict[str, bool] = {}
+        for name in sorted(candidates):
+            decisions[name] = await skill_activation_allowed_async(self._skill_authorization, name)
+        return decisions
+
+    def _candidate_activation_names(self, request: ModelRequest) -> list[str]:
+        """Skill names the handler may need an ``skill:activate`` decision for.
+
+        Loop-safe (no storage I/O): the slash reference is parsed straight from
+        the latest real user message; the persisted entry names come from
+        ``skill_context`` state. Both mirror the lookups the threaded handler
+        performs, so the precomputed map covers them.
+        """
+        names: list[str] = []
+        messages = list(request.messages)
+        for index in range(len(messages) - 1, -1, -1):
+            if _is_user_activation_target(messages[index]):
+                content = get_original_user_content_text(messages[index].content, messages[index].additional_kwargs)
+                reference = parse_slash_skill_reference(content)
+                if reference is not None:
+                    names.append(reference.name)
+                break
+        state = getattr(request, "state", None) or {}
+        try:
+            entries = state.get("skill_context") or []
+        except AttributeError:
+            entries = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+            else:
+                path = entry.get("path")
+                if isinstance(path, str) and path:
+                    names.append(posixpath.basename(posixpath.dirname(path)))
+        return names
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {
@@ -163,7 +228,7 @@ class SkillActivationMiddleware(AgentMiddleware):
             raise FileNotFoundError(resolved_file)
         return resolved_file.read_text(encoding="utf-8")
 
-    def _resolve_activation(self, text: str) -> _ActivationResolution | None:
+    def _resolve_activation(self, text: str, *, activation_decisions: dict[str, bool] | None = None) -> _ActivationResolution | None:
         reference = parse_slash_skill_reference(text)
         if reference is None:
             return None
@@ -177,7 +242,7 @@ class SkillActivationMiddleware(AgentMiddleware):
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is installed but disabled. Enable it before using slash activation.")
         if self._available_skills is not None and reference.name not in self._available_skills:
             return _ActivationResolution(failure_message=f"Skill `/{reference.name}` is not available for this agent.")
-        if not self._activation_allowed(reference.name):
+        if not self._activation_allowed(reference.name, activation_decisions=activation_decisions):
             # Visible in the Layer 1 set but denied by the action-scoped
             # skill:activate policy — same user-facing message as the
             # membership denial so the reason is not leaked.
@@ -291,7 +356,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         """
         return isinstance(run_context, dict) and run_context.get(_SLASH_SKILL_ACTIVATION_RUN_KEY) == run_key
 
-    def _find_activation_target(self, messages: list, *, run_context: dict | None = None) -> tuple[int, HumanMessage, _ActivationResolution, str] | None:
+    def _find_activation_target(self, messages: list, *, run_context: dict | None = None, activation_decisions: dict[str, bool] | None = None) -> tuple[int, HumanMessage, _ActivationResolution, str] | None:
         if not messages:
             return None
 
@@ -316,7 +381,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return None
 
         content = get_original_user_content_text(target.content, target.additional_kwargs)
-        resolution = self._resolve_activation(content)
+        resolution = self._resolve_activation(content, activation_decisions=activation_decisions)
         if resolution is None:
             return None
         return target_index, target, resolution, run_key
@@ -344,9 +409,9 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         except Exception:
             logger.warning("Failed to record slash skill activation audit event", exc_info=True)
 
-    def _prepare_model_request(self, request: ModelRequest, *, hook: str) -> tuple[ModelRequest | AIMessage | None, _Activation | None]:
+    def _prepare_model_request(self, request: ModelRequest, *, hook: str, activation_decisions: dict[str, bool] | None = None) -> tuple[ModelRequest | AIMessage | None, _Activation | None]:
         run_context = self._run_context(request)
-        target_and_resolution = self._find_activation_target(list(request.messages), run_context=run_context)
+        target_and_resolution = self._find_activation_target(list(request.messages), run_context=run_context, activation_decisions=activation_decisions)
         if target_and_resolution is None:
             return None, None
 
@@ -382,15 +447,15 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         messages.insert(target_index, activation_msg)
         return request.override(messages=messages), activation
 
-    def _handle_model_request(self, request: ModelRequest, *, hook: str) -> ModelRequest | AIMessage:
-        prepared, activation = self._prepare_model_request(request, hook=hook)
+    def _handle_model_request(self, request: ModelRequest, *, hook: str, activation_decisions: dict[str, bool] | None = None) -> ModelRequest | AIMessage:
+        prepared, activation = self._prepare_model_request(request, hook=hook, activation_decisions=activation_decisions)
         if isinstance(prepared, AIMessage):
             return prepared
         effective = prepared if prepared is not None else request
-        self._resolve_secret_bindings(effective, activation, hook=hook)
+        self._resolve_secret_bindings(effective, activation, hook=hook, activation_decisions=activation_decisions)
         return effective
 
-    def _resolve_secret_bindings(self, request: ModelRequest, activation: _Activation | None, *, hook: str) -> None:
+    def _resolve_secret_bindings(self, request: ModelRequest, activation: _Activation | None, *, hook: str, activation_decisions: dict[str, bool] | None = None) -> None:
         """Recompute the per-run secret injection set (binding point A+, #3861/#3914).
 
         Sources, unioned on every model call:
@@ -443,7 +508,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 slash_skill = self._resolve_registry_skill(registry, slash_path, require_autonomous=False)
                 if slash_skill is not None:
                     sources.append((slash_skill.name, tuple(slash_skill.required_secrets)))
-                sources.extend(self._in_context_secret_sources(request, registry))
+                sources.extend(self._in_context_secret_sources(request, registry, activation_decisions=activation_decisions))
 
         injected: dict[str, str] = {}
         bound_skills: set[str] = set()
@@ -536,13 +601,16 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return None
         return skill
 
-    def _in_context_secret_sources(self, request: ModelRequest, registry: dict[str, Skill]) -> list[tuple[str, tuple[SecretRequirement, ...]]]:
+    def _in_context_secret_sources(self, request: ModelRequest, registry: dict[str, Skill], *, activation_decisions: dict[str, bool] | None = None) -> list[tuple[str, tuple[SecretRequirement, ...]]]:
         """Map ``ThreadState.skill_context`` entries to declared-secret sources.
 
         Entries are references to skills the model actually loaded in this
         thread. Each is re-validated against the live registry so a skill that
         was disabled, uninstalled, opted out, or removed from the agent's
-        allowlist after being read stops binding immediately.
+        allowlist after being read stops binding immediately. The
+        ``skill:activate`` decision is re-checked here as well: ``skill_context``
+        persists across runs, and an entry stamped under an earlier policy must
+        not keep binding secrets after the provider starts denying activation.
         """
         state = getattr(request, "state", None) or {}
         try:
@@ -557,6 +625,8 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 continue
             skill = self._resolve_registry_skill(registry, entry.get("path"), require_autonomous=True)
             if skill is None or skill.name in seen:
+                continue
+            if not self._activation_allowed(skill.name, activation_decisions=activation_decisions):
                 continue
             seen.add(skill.name)
             sources.append((skill.name, tuple(skill.required_secrets)))
@@ -611,7 +681,13 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse | AIMessage:
-        prepared = await asyncio.to_thread(self._handle_model_request, request, hook="awrap_model_call")
+        # Resolve the skill:activate decisions on the event loop with the
+        # provider's async API, then hand them to the worker thread: the
+        # blocking handler (skill-tree reads) keeps its to_thread offload while
+        # loop-affine providers still receive aauthorize() — a synchronous
+        # authorize() from the thread is the wrong API for them.
+        activation_decisions = await self._collect_activation_decisions(self._candidate_activation_names(request))
+        prepared = await asyncio.to_thread(self._handle_model_request, request, hook="awrap_model_call", activation_decisions=activation_decisions)
         if isinstance(prepared, AIMessage):
             return prepared
         return await handler(prepared)

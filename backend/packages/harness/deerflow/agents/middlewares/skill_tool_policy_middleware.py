@@ -56,6 +56,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         app_config: AppConfig | None = None,
         user_id: str | None = None,
         slash_source_owner_token: str,
+        skill_authorization=None,
     ) -> None:
         super().__init__()
         if not isinstance(slash_source_owner_token, str) or not slash_source_owner_token:
@@ -64,7 +65,54 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         self._app_config = app_config
         self._user_id = user_id
         self._slash_source_owner_token = slash_source_owner_token
+        self._skill_authorization = skill_authorization
         self._decision_owner_token = secrets.token_urlsafe(24)
+
+    def _activation_allowed(self, skill_name: str, *, activation_decisions: dict[str, bool] | None = None) -> bool:
+        """Action-scoped ``skill:activate`` decision for one skill name.
+
+        Persisted ``skill_context`` entries were authorized when they were
+        stamped, but the policy may have changed since — every entry is
+        re-authorized before its allowed-tools declaration is applied.
+        *activation_decisions* carries decisions precomputed on the event loop
+        via ``aauthorize()`` (async hooks); names absent from the map fall back
+        to the synchronous check, which is the correct API for the sync hooks.
+        """
+        if self._skill_authorization is None:
+            return True
+        if activation_decisions is not None and skill_name in activation_decisions:
+            return activation_decisions[skill_name]
+        from deerflow.authz.skill_filter import skill_activation_allowed
+
+        return skill_activation_allowed(self._skill_authorization, skill_name)
+
+    async def _collect_activation_decisions(self, request: ModelRequest | ToolCallRequest) -> dict[str, bool] | None:
+        """Precompute ``skill:activate`` decisions on the event loop (async hooks).
+
+        The policy resolution itself runs in a worker thread (storage reads),
+        but the provider decision belongs on the loop with ``aauthorize()``.
+        Candidates are the persisted ``skill_context`` entry names — the same
+        entries ``_active_skills_for_paths`` will re-authorize.
+        """
+        if self._skill_authorization is None:
+            return None
+        names = {name for name in self._entry_names(request) if isinstance(name, str) and name}
+        # The slash source (when present) is the policy's dominant path — its
+        # skill goes through the same re-authorization, so precompute its name
+        # too; otherwise the async path would fall back to the sync provider
+        # call from the worker thread.
+        context = getattr(getattr(request, "runtime", None), "context", None)
+        slash_path = read_slash_skill_source_path(context, owner_token=self._slash_source_owner_token)
+        if isinstance(slash_path, str) and slash_path:
+            names.add(posixpath.basename(posixpath.dirname(slash_path)))
+        if not names:
+            return None
+        from deerflow.authz.skill_filter import skill_activation_allowed_async
+
+        decisions: dict[str, bool] = {}
+        for name in sorted(names):
+            decisions[name] = await skill_activation_allowed_async(self._skill_authorization, name)
+        return decisions
 
     def _storage(self) -> SkillStorage:
         if self._user_id is not None:
@@ -73,13 +121,9 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             return get_or_new_skill_storage(app_config=self._app_config)
         return get_or_new_skill_storage()
 
-    def _active_policy(self, request: ModelRequest | ToolCallRequest) -> _PolicySignature:
-        context = getattr(getattr(request, "runtime", None), "context", None)
-        slash_path = read_slash_skill_source_path(context, owner_token=self._slash_source_owner_token)
-        if slash_path is not None:
-            return _POLICY_SOURCE_SLASH, (slash_path,)
-
-        paths: list[str] = []
+    @staticmethod
+    def _skill_context_entries(request: ModelRequest | ToolCallRequest) -> list:
+        """Persisted ``skill_context`` entries from agent state (possibly empty)."""
         state = getattr(request, "state", None)
         if state is None:
             state = {}
@@ -93,14 +137,39 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         if not isinstance(entries, (list, tuple)):
             logger.warning("Invalid skill_context shape for skill tool policy: %s", type(entries).__name__)
             entries = []
-        for entry in entries:
+        return list(entries)
+
+    @classmethod
+    def _entry_names(cls, request: ModelRequest | ToolCallRequest) -> list[str]:
+        """Skill names of the persisted entries (stamped name, else path-derived)."""
+        names: list[str] = []
+        for entry in cls._skill_context_entries(request):
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+            else:
+                path = entry.get("path")
+                if isinstance(path, str) and path:
+                    names.append(posixpath.basename(posixpath.dirname(path)))
+        return names
+
+    def _active_policy(self, request: ModelRequest | ToolCallRequest) -> _PolicySignature:
+        context = getattr(getattr(request, "runtime", None), "context", None)
+        slash_path = read_slash_skill_source_path(context, owner_token=self._slash_source_owner_token)
+        if slash_path is not None:
+            return _POLICY_SOURCE_SLASH, (slash_path,)
+
+        paths: list[str] = []
+        for entry in self._skill_context_entries(request):
             if isinstance(entry, dict) and isinstance(entry.get("path"), str):
                 paths.append(entry["path"])
         if paths:
             return _POLICY_SOURCE_SKILL_CONTEXT, tuple(paths)
         return _POLICY_SOURCE_PASSIVE, ()
 
-    def _active_skills_for_paths(self, paths: tuple[str, ...]) -> tuple[list[Skill], bool]:
+    def _active_skills_for_paths(self, paths: tuple[str, ...], *, activation_decisions: dict[str, bool] | None = None) -> tuple[list[Skill], bool]:
         if not paths:
             return [], False
 
@@ -128,6 +197,13 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             if self._available_skills is not None and skill.name not in self._available_skills:
                 logger.warning("Active skill is outside the agent allowlist for allowed-tools policy: %s", path)
                 continue
+            # Phase 3: skill_context persists across runs — an entry stamped
+            # under an earlier policy must not keep applying its allowed-tools
+            # declaration after the provider starts denying activation (same
+            # skip-and-continue treatment as a disabled or unallowlisted skill).
+            if not self._activation_allowed(skill.name, activation_decisions=activation_decisions):
+                logger.info("Active skill is denied by the skill:activate policy for allowed-tools policy: %s", path)
+                continue
             if skill.name in seen:
                 continue
             seen.add(skill.name)
@@ -137,8 +213,8 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             return [], True
         return active, False
 
-    def _allowed_names_for_paths(self, paths: tuple[str, ...]) -> set[str] | None:
-        active_skills, policy_failed = self._active_skills_for_paths(paths)
+    def _allowed_names_for_paths(self, paths: tuple[str, ...], *, activation_decisions: dict[str, bool] | None = None) -> set[str] | None:
+        active_skills, policy_failed = self._active_skills_for_paths(paths, activation_decisions=activation_decisions)
         if policy_failed:
             return set(ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES)
         allowed = allowed_tool_names_for_skills(active_skills)
@@ -192,6 +268,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest | ToolCallRequest,
         *,
         policy: _PolicySignature | None = None,
+        activation_decisions: dict[str, bool] | None = None,
     ) -> set[str] | None:
         resolved_policy = self._active_policy(request) if policy is None else policy
         _, paths = resolved_policy
@@ -199,7 +276,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         decision = self._read_policy_decision(context, resolved_policy)
         if decision is not _MISSING_POLICY_DECISION:
             return decision
-        return self._allowed_names_for_paths(paths)
+        return self._allowed_names_for_paths(paths, activation_decisions=activation_decisions)
 
     def _filter_model_request(
         self,
@@ -207,10 +284,14 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         *,
         policy: _PolicySignature | None = None,
         refresh_decision: bool = False,
+        activation_decisions: dict[str, bool] | None = None,
     ) -> ModelRequest:
         resolved_policy = self._active_policy(request) if policy is None else policy
         _, paths = resolved_policy
-        allowed = self._allowed_names_for_paths(paths) if refresh_decision else self._allowed_names(request, policy=resolved_policy)
+        if refresh_decision:
+            allowed = self._allowed_names_for_paths(paths, activation_decisions=activation_decisions)
+        else:
+            allowed = self._allowed_names(request, policy=resolved_policy, activation_decisions=activation_decisions)
         if refresh_decision:
             self._store_policy_decision(request, resolved_policy, allowed)
         if allowed is None:
@@ -325,11 +406,17 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         if not paths:
             self._store_policy_decision(request, policy, None)
             return await handler(request)
+        # Resolve the skill:activate re-authorization decisions on the event
+        # loop (aauthorize) and hand them to the worker thread below — the
+        # blocking policy resolution keeps its to_thread offload while
+        # loop-affine providers still receive the async API.
+        activation_decisions = await self._collect_activation_decisions(request)
         filtered = await asyncio.to_thread(
             self._filter_model_request,
             request,
             policy=policy,
             refresh_decision=True,
+            activation_decisions=activation_decisions,
         )
         return await handler(filtered)
 
@@ -357,7 +444,8 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         policy = self._active_policy(request)
         if not policy[1]:
             return await handler(request)
-        allowed = await asyncio.to_thread(self._allowed_names, request, policy=policy)
+        activation_decisions = await self._collect_activation_decisions(request)
+        allowed = await asyncio.to_thread(self._allowed_names, request, policy=policy, activation_decisions=activation_decisions)
         blocked = self._blocked_tool_message(request, allowed=allowed)
         if blocked is not None:
             return blocked

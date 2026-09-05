@@ -563,6 +563,10 @@ def build_middlewares(
             app_config=resolved_app_config,
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
+            # Persisted skill_context entries are re-authorized against the
+            # skill:activate decision before their allowed-tools apply (the
+            # policy may have changed since the entry was stamped).
+            skill_authorization=skill_authorization,
         )
     )
 
