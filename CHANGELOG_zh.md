@@ -13,6 +13,16 @@
 
 ### ⚠ 不兼容变更（Breaking Changes）
 
+- **网关：** 现在会无条件签发请求 trace id，且每个 Gateway HTTP 响应都会携带
+  `X-Trace-Id` header。此前二者均受 `logging.enhance.enabled` 控制；该配置现在
+  **仅控制日志输出**——即日志记录是否包含 `trace_id` 字段及其格式。此 header
+  无法关闭；使用默认 `enabled: false` 的安装在升级后也会开始收到它。定时任务、
+  MCP 任务通知 run、IM 渠道消息以及内嵌 `DeerFlowClient` 都会为每个工作单元绑定
+  一个 id，因此此前没有 trace id 的 run 记录、checkpoint 元数据和 Langfuse trace
+  现在也会包含它。run 请求的 `metadata` 或 `config.context` 中提供的
+  `deerflow_trace_id` 现在会被忽略并覆盖，以确保响应 header、日志和持久化 run
+  保持一致；如需跨服务固定关联 id，请发送 `X-Trace-Id` 请求 header。`logging`
+  仍需重启后生效。未新增或移除任何配置键。([#5119])
 - **技能：** 沙箱现在将 `/mnt/skills` 保留给“仅启用项”的托管投影视图。
   `DEER_FLOW_HOST_SKILLS_PATH` 与 `SKILLS_HOST_PATH` 不再使用；Docker/AIO 和
   hostPath 部署会从 `DEER_FLOW_HOST_BASE_DIR` 推导投影路径。指向 `/mnt/skills`
@@ -66,6 +76,13 @@
 
 ### 新增
 
+#### 认证
+- **认证：** 新增用于程序化 API 访问的个人访问令牌（PAT）：
+  `POST/GET/DELETE /api/v1/auth/pats` 用于管理令牌（仅展示一次，以 SHA-256
+  摘要存储）；默认拒绝的路由策略只允许会话/run 生命周期路由，并进一步受令牌的
+  `threads`/`runs` scope 限制；任何具有取消能力的请求维度（`?action=`、
+  `multitask_strategy`）还额外要求 `runs:cancel`。([#5041])
+
 #### 智能体与运行时
 - **中间件：** 新增 `TokenBudgetMiddleware`，强制单个 run 的 token 预算，在主智
   能体与子智能体之间累加共享。([#3412])
@@ -83,6 +100,9 @@
 - **文件：** 文件工具引入确定性的“写前读”版本门控，避免覆盖并发编辑。([#3912])
 - **网关：** 感知缓存的成本核算将 token 成本归因到缓存 / 未缓存路径；Redis stream
   桥接启用分布式事件流；并向用户暴露手动上下文压缩。([#3920]、[#3191]、[#3969])
+- **网关：** 可通过 `stream_bridge.heartbeat_interval_seconds` 配置 stream bridge
+  的心跳间隔（默认 15 秒），使位于激进 proxy 空闲超时之后的部署可以统一调节 SSE、
+  `/wait` 和内部订阅者。([#5017])
 - **运行时：** 双模式 checkpoint 存储（基于 LangGraph `DeltaChannel`）将长调研 /
   编码 run 的会话存储从 O(N²) 降至近线性。([#4292])
 - **智能体：** 配置声明的主智能体中间件，让部署方无需修改运行时链即可加入自定义
@@ -100,6 +120,12 @@
 - **运行时：** 每次工具调用都会携带由运行时签发且可防篡改的工具回执；有界回执账本
   会注入模型上下文，使智能体能在报告中引用执行证据。默认通过新的 `verification`
   配置节启用。([#4659])
+- **子智能体：** 子智能体委派现在可验证，并按 RFC #4651 分层实现：每份子智能体
+  报告都必须引用工具回执（例如 `[r3 write_file]`），并为每个交付物附上可验证
+  handle；主智能体会将这些引用与子智能体的实际执行记录交叉核对，`task` 委派的
+  `acceptance_criteria` 也会在父侧确定性检查（文件是否存在/非空、记录的测试命令
+  退出状态），无法判定的项目会报告为 UNVERIFIED，而不是静默通过。([#5076]、
+  [#5090]、[#5109])
 - **澄清：** 人工输入卡片支持结构化表单字段，智能体可精确请求所需信息。([#4406])
 - **子智能体：** 内置子智能体会接收当前日期上下文锚点，使相对日期任务与主智能体
   直接处理时表现一致。([#4797])
@@ -132,6 +158,8 @@
 - **技能：** 按用户的自定义技能隔离，并配合沙箱挂载。([#3889])
 
 - **技能：** 选中一个技能后技能列表会重新打开，便于连续附加多个技能。([#4639])
+- **技能：** 可直接从“技能”设置页安装本地 `.skill` archive，并复用现有的按用户
+  installer 和安全扫描。([#5039])
 
 #### 模型与集成
 - **社区工具：** 新增网络检索 / 抓取引擎——GroundRoute、Crawl4AI（`web_fetch`）与
@@ -150,6 +178,15 @@
   会在写入前校验，成功切换后撤销旧 OAuth token。([#4703])
 - **ACP：** 支持 MiniMax Code (`mcode acp`) 作为原生外部编码智能体；ACP thought
   chunk 不再拼接进工具结果。([#4846])
+- **模型：** 新增 Z.AI GLM-5.3-Flash profile，保持 thinking 始终开启并停止通用
+  reasoning-effort 转发，因为该模型会拒绝关闭 thinking，且只接受自身定义的 effort
+  值。([#5074])
+- **社区工具：** 新增 Serply（支持 news 与 scholar 垂直搜索）和腾讯云 WSA 网络
+  搜索 provider，并为 DDGS、Brave、Tavily 与 SearXNG 提供统一的原生时间范围过滤
+  （日/周/月/年）。([#5023]、[#5057]、[#5099])
+- **知识库：** 新增可选的只读 RAGFlow 检索，通过已配置的 RAGFlow dataset 暴露
+  `knowledge_search(query)` 智能体工具，并提供 dataset ID allowlist，以及错误路径
+  中的凭据和 dataset ID 脱敏。([#4955])
 
 #### MCP
 - **MCP：** 新增持久任务运行时：长时工具任务通过持久 driver 跨 Gateway 重启继续，
@@ -158,6 +195,12 @@
   凭据在 Gateway API 响应中脱敏。([#4868])
 - **MCP：** 新增按 server 的 `tool_name_prefix`，让已自行命名空间化工具的 server
   保留原始工具名；默认行为不变。([#4624])
+- **MCP：** “设置 > 工具”现在可以通过定向 Gateway endpoint 新增、编辑和删除 MCP
+  server；复制粘贴 JSON 的工作流会保留高级字段和已脱敏的 secret placeholder。
+  ([#5022])
+- **MCP：** 共享 HTTP/SSE server 可通过 `headers_from_context` 将请求作用域的
+  secret 映射为 header：调用方在 `config.context.secrets` 中提供每次请求的值，
+  配置只存储键名，缺失值默认拒绝。([#5010])
 
 #### 渠道
 - **渠道：** 把 IM 的 `channel_user_id` 以 `DEERFLOW_CHANNEL_USER_ID` 暴露给沙箱
@@ -194,6 +237,8 @@
 - **沙箱：** K8s provisioner 模式新增可选的 lark-cli 凭据 broker sidecar，将 Lark
   应用密钥与 OAuth token 移出沙箱文件系统；沙箱只看到转发命令的 shim。默认关闭。
   ([#4501])
+- **沙箱：** E2B mount 上传的 wall-clock deadline 可通过
+  `mount_upload_deadline_seconds` 配置（默认 120 秒）。([#4876])
 
 #### 扩展与插件
 - **扩展：** 新增 out-of-tree Python 扩展系统，可贡献中间件、任务生命周期与系统模型
@@ -226,7 +271,13 @@
 - **前端：** 澄清卡片待处理时仍可输入并发送回复。([#4530])
 - **建议：** 可通过 `suggestions.max_suggestions` 配置后续建议数量（默认 3）。([#4533])
 - **Artifact：** 可在 artifact 面板中内联编辑文本 artifact。([#4596])
+- **Artifact：** Markdown artifact 可在新窗口 reader 中以渲染形式打开（并提供
+  “查看源文件”和“下载”fallback）；一次 run 中展示的所有文件也可根据该 run 的
+  投递回执打包下载为 zip。([#5056]、[#5117])
 - **前端：** 自定义智能体聊天支持 Browser Live。([#4719])
+- **前端：** 新增长会话大纲：超过 5 个用户回合后，紧凑侧边菜单会列出会话中的问题，
+  支持跳转并跟踪当前章节。([#5025])
+- **前端：** 定时任务可复制为可编辑草稿，保留配置但不带 run 历史。([#5064])
 - **会话：** 分支会话自动使用 `Title (2)`、`Title (3)` 等编号区分标题，最近会话
   列表以树形连接线展示父子关系。([#4983])
 
@@ -538,12 +589,14 @@
 - **记忆：** 自定义智能体 bootstrap 事实限定到所选智能体 bucket。([#4804])
 - **Artifact：** Windows 支持原子保存；读取响应提供 SHA-256 ETag，使普通 HTTP LAN
   等无 `crypto.subtle` 环境也能预览和编辑。([#4629]、[#4865])
-- **前端：** 长 run 前后保持会话顺序稳定，用户消息不再重复或落到自身步骤之后。([#4620]、[#4660])
+- **前端：** 长 run 前后保持会话顺序稳定，用户消息不再重复或落到自身步骤之后，
+  mid-run 页面重载后回合步骤也不再出现在触发该 run 的用户消息之前。([#4620]、
+  [#4660]、[#4834])
 - **前端：** HTML artifact 注入 base href 时不再把 `<header>` 误判为 `<head>`。([#4625])
 - **前端：** 落地页案例通过公开只读 `/showcase/` 路由打开。([#4635])
 - **前端：** 聊天页按置顶状态排序。([#4643])
 - **前端：** Markdown inline code 中的 `<think>` 保持原样，并恢复纯 reasoning 回合的复制按钮。([#4647])
-- **前端：** 模型加载失败时显示工作区错误 banner 与重试操作。([#4840])
+- **前端：** 模型加载失败时显示工作区错误 banner 与重试操作。([#4840]、[#5021])
 - **前端：** 后续回合流式输出时仍保留已完成助手消息的复制等操作。([#4844])
 - **前端：** Browser Live 重连成功后保持新连接，不再立即拆除并再次重连。([#4951])
 - **前端：** 复制 Lark 授权链接时复用 clipboard fallback。([#4767])
@@ -569,6 +622,74 @@
 - **Docker：** 加固本地与容器启动：`make up` 等待健康检查，允许缺失 `.env`，生产
   环境可写 extensions 配置，运行数据不进入构建上下文，日志命令正确解析 checkout，
   默认回环 origin 可完成 dev setup hydration。([#4658]、[#4806]、[#4852]、[#4853]、[#4956]、[#4959])
+- **网关：** 为持久化消息标记服务端权威的 feed 位置，避免历史超过一页且触发上下文
+  压缩后，较早的用户消息消失或跳到步骤流中间。([#4696])
+- **Lark：** 托管凭据切换时，先清除旧应用的 OAuth 数据再写入替换项，从而保留新
+  app secret，后续浏览器授权不再解析到空的 `client_secret`。([#4820])
+- **消息：** 移除旧版 `<uploaded_files>` 标签处理：后端将 #4174 之前的写法视为
+  普通内容，仅剥离 `<current_uploads>`；前端继续剥离旧标签，确保历史会话仍能干净
+  渲染。([#4826])
+- **技能：** 在写入门控处拒绝空的 `SKILL.md` description，与 loader 的既有要求
+  保持一致；编辑自定义技能时，空 description 不再先写入一个随后被 loader 拒绝、
+  从而破坏磁盘技能的文件。([#4867])
+- **沙箱：** 将 `bash`、`ls`、`glob`、`grep`、`read_file`、`write_file`、
+  `str_replace` 和 `task` 面向模型的 `description` 参数统一改为可选（默认空），
+  provider 省略该参数时不再在执行前被拒绝。([#4878])
+- **沙箱：** 限制 Windows 命令执行：host 命令在新进程组中运行，超时后通过
+  `taskkill /T /F` 终止，避免子进程使调用一直保持打开；输出继续使用现有的
+  10 MiB 有界捕获。([#4946])
+- **沙箱：** 将 Windows MSYS 路径转换排除限定到安全的虚拟路径前缀，不再全局
+  禁用转换，使依赖正常路径转换的 host-native CLI launcher 恢复工作。([#5003])
+- **技能：** app config 热重载后重新构建按用户的技能存储，避免其继续绑定到旧配置
+  实例中的路径。([#4972])
+- **技能：** 解析可移植的 `allowed-tools` scalar 时感知括号，使 `Bash(tvly *)`
+  这类条目保持完整；未匹配括号会被拒绝而非静默拆分，参数限定条目保持字面含义，
+  不会扩大访问范围。([#4984])
+- **智能体：** 规范化 `Command` 结果中返回的 `ToolMessage`，错误 payload 不再默认
+  获得成功回执，工具进度追踪也能正确识别。([#4977])
+- **MCP：** `get_session` 在 eviction 期间被取消时拆除 in-flight session owner，
+  避免调用方取消后泄漏 owner task 或超时后仍保持挂起。([#5008])
+- **MCP：** 普通 stdio 工具在 transport 断开后可重新连接：仅当失败的 pooled
+  session 仍在注册时将其淘汰，原始错误照常返回且不自动重放，后续重试会启动新的
+  子进程。([#5018])
+- **MCP：** 持久 MCP 任务轮询发生协议超时时保留 pooled stdio session——408
+  并非断开——使任务状态得以保留，下一次轮询不再报告 `task_not_found`。([#5027])
+- **MCP：** 在配置边界拒绝无法作为 HTTP header value 传输的凭据（尾部换行或空白、
+  非 ASCII），避免 transport 异常回显完整值并将 secret 泄漏到模型上下文、
+  checkpoint 和 trace。([#5066])
+- **子智能体：** poller 意外退出时清理后台任务条目，提交失败时移除 PENDING registry
+  条目，避免失败或崩溃的轮询泄漏条目，或让子智能体在无人管理的情况下继续运行。
+  ([#5069])
+- **子智能体：** 在提交失败路径停止僵尸 PENDING registry 条目，并直接根据 waiter
+  长度计算容量快照中的 queued 数量，避免遍历被其他线程并发修改的 deque。([#5086])
+- **渠道：** 将 `ChannelStore` 读取与 mutation 同步，`get_thread_id()`/
+  `list_entries()` 不再触发 `dictionary changed size during iteration`。([#5083])
+- **Discord：** 强引用 ack-reaction task，并在关闭时将其 drain，避免 GC 静默丢弃
+  reaction 或在重启周期之间固定住 channel。([#5049])
+- **Buzz：** 将 seen-event 持久化移出事件循环，使用合并的原子写入；写入过程中有
+  新事件时保留 dirty generation，并在关闭时等待最终 flush。([#5103])
+- **流式传输：** subscriber 使用过期 cursor 重连到空或已 drain 的 stream 时，
+  `MemoryStreamBridge._make_gap` 不再触发 `IndexError`。([#5047])
+- **上传：** dedupe 文件名时在 UTF-8 code point 边界截断 stem，使其保持在 255-byte
+  上限内；两个仅 dedupe suffix 不同的最大长度文件现在都能成功上传，不再导致整个
+  batch 失败。([#5059])
+- **前端：** 格式化结构化上传错误详情（FastAPI validation issue、对象、数组），
+  不再显示 `[object Object]`。([#5071])
+- **前端：** 无需重载即可在当前聊天 header、document title、搜索结果和 metadata
+  cache 之间同步重命名后的会话标题。([#5045])
+- **前端：** 将已选模型名称限制在 selector button 宽度内，过长名称会在 composer
+  和 sidecar 中显示省略号，而不再溢出。([#5050])
+- **前端：** 长子任务卡片标题截断为单行并提供 tooltip；当委派模型省略
+  `description` 而回退到完整 prompt 时，不再撑破聊天布局。([#5136])
+- **开发：** 所有平台的前端开发服务器默认使用 Webpack
+  （`DEER_FLOW_DEV_BUNDLER=turbo` 可重新启用 Turbopack），避免 Turbopack 在
+  macOS 上泄漏 PostCSS worker、在 Windows 上发生 runtime panic。([#5036]、[#5133])
+- **脚本：** 使用显式 interpreter（`bash scripts/...`）运行仓库 shell script，
+  避免 zip/tarball 下载、`core.fileMode=false` 或非 POSIX 文件系统导致 executable
+  bit 丢失后，`make docker-start` 等命令以 `Permission denied` 失败。([#5031])
+- **依赖：** 改为依赖重命名后的 `tenki` package，而非已从 PyPI 移除的
+  `tenki-sandbox`（import 仍为 `tenki_sandbox`），使干净 checkout 能在
+  `make dev`/`uv sync` 时正常解析依赖。([#5087])
 
 ### 性能优化
 
@@ -582,6 +703,13 @@
 - **前端：** 不再在每个流式 chunk 上重新推导消息内容。([#4441])
 - **沙箱：** `read_file` 只从沙箱读取请求的行范围，不再先获取整个文件。([#3824])
 - **浏览器：** Browser Live 进度帧改用 JPEG 编码，减小传输负载。([#4836])
+- **中间件：** 通过 `wrap_model_call` 注入 `view_image` 内容，而非使用进入 checkpoint
+  的隐藏消息，避免每张已查看图片最多 20 MB 的 base64 数据同时存在于两个
+  checkpoint 中，也避免中断的 run 遗留该 payload。([#5014])
+- **前端：** 在流式 chunk 之间缓存已稳定消息的 copy-data 推导结果，不再让每个
+  chunk 都为每条已稳定消息重新计算 toolbar/copy 文本。([#5095])
+- **运行时：** 限制终态 run 结束后的 Gateway 内存，阻止 GC 后的低水位随已完成
+  session 持续上升。([#5112])
 
 ### 安全
 
@@ -614,6 +742,28 @@
   平台（含 Windows）遇到漂移的投影命名空间都会 fail closed。([#4825]、[#4830])
 - **脚本：** support bundle 中任意位置的 secret-shaped key（如 `db_pass`、
   `signing_key`）都会脱敏。([#4242])
+- **沙箱：** MCP 来源的工具结果现在会通过与内置网络工具相同的信任边界进行净化，
+  恶意或被攻陷的 MCP server 无法再向模型传入伪造的 `<system-reminder>` 或用户输入
+  边界标签。([#4839])
+- **沙箱：** 加固本地 Docker sandbox container：sandbox host 非 loopback 时，
+  发布端口默认绑定 Docker bridge gateway 而非 `0.0.0.0`
+  （`DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0` 可恢复广泛绑定）；使用 Docker 默认
+  seccomp profile 替代无条件 `seccomp=unconfined`
+  （`DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED=1` 可重新启用）；container 还会丢弃
+  所有 capability、启用 `no-new-privileges` 并使用有界资源。([#4986])
+- **鉴权：** 在无状态 stream/wait endpoint 上强制 run-create 权限
+  （`runs:create`）；创建、更新、恢复和手动触发定时任务 mutation 时，同时要求
+  `threads:write` 与 `runs:create`。([#5030])
+- **鉴权：** 复用持久化 sandbox 前重新检查授权策略，使被撤销的
+  `sandbox:execute` grant 在下一次 sandbox-backed 回合立即生效，而不会随缓存的
+  sandbox 继续存活。([#5006])
+- **技能：** 在 sandbox 文件系统层强制 Custom Agent 技能 allowlist：显式 `skills`
+  策略会生成签名的按用户/会话技能视图，带 shell 或文件工具的 Custom Agent 不再能
+  读取策略排除的技能。([#5077])
+- **run：** GET stream join 上的取消/回滚 action 现在返回
+  `405 Method Not Allowed`——取消后继续 stream 应使用 POST——关闭 safe method 上
+  被 CSRF middleware 有意豁免的状态变更；不带 action 的 GET join 保持不变。
+  ([#5092])
 
 ### 文档
 
@@ -647,6 +797,16 @@
 - **依赖：** 升级 `cryptography` 49.0.0 -> 50.0.0、`postcss` 8.4.31 -> 8.5.25、
   `h2` 4.3.0 -> 4.4.1、两个 `langgraph-checkpoint-*` 3.1.0 -> 3.1.1，以及
   `nanoid` 5.1.6 -> 5.1.16。([#4681]、[#4683]、[#4737]、[#4738]、[#4747]、[#4748])
+- **基准：** 在 `backend/scripts/benchmark/deermem_eviction/` 下新增可复现的混合
+  memory eviction 评测，为 #4789 策略提供按构造实现 blind 的确定性 grader。
+  ([#4810])
+- **基准：** 在 checkpoint benchmark 中同时测量 Postgres checkpoint/blob/write
+  的存储增长，并与内存和 SQLite 对照。([#5051])
+- **测试：** 将 `tests/blocking_io/` 从 `make test` 中排除；专用的
+  `make test-blocking-io` suite（及其 CI workflow）仍是该目录的 owner。([#5105])
+- **重构：** 在五个远程 sandbox provider 间共享 sandbox identity 推导和 acquire
+  serialization（RFC #4741），替换五张会随进程生命周期无限增长的 provider 专用
+  lock table；每个 provider 的 golden vector 保证推导出的 id 逐字节一致。([#5089])
 
 
 ## [2.0.0] — 2026-06-15
@@ -1639,3 +1799,66 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#4983]: https://github.com/bytedance/deer-flow/pull/4983
 [#4987]: https://github.com/bytedance/deer-flow/pull/4987
 [#4998]: https://github.com/bytedance/deer-flow/pull/4998
+[#4696]: https://github.com/bytedance/deer-flow/pull/4696
+[#4810]: https://github.com/bytedance/deer-flow/pull/4810
+[#4820]: https://github.com/bytedance/deer-flow/pull/4820
+[#4826]: https://github.com/bytedance/deer-flow/pull/4826
+[#4834]: https://github.com/bytedance/deer-flow/pull/4834
+[#4839]: https://github.com/bytedance/deer-flow/pull/4839
+[#4867]: https://github.com/bytedance/deer-flow/pull/4867
+[#4876]: https://github.com/bytedance/deer-flow/pull/4876
+[#4878]: https://github.com/bytedance/deer-flow/pull/4878
+[#4946]: https://github.com/bytedance/deer-flow/pull/4946
+[#4955]: https://github.com/bytedance/deer-flow/pull/4955
+[#4972]: https://github.com/bytedance/deer-flow/pull/4972
+[#4977]: https://github.com/bytedance/deer-flow/pull/4977
+[#4984]: https://github.com/bytedance/deer-flow/pull/4984
+[#4986]: https://github.com/bytedance/deer-flow/pull/4986
+[#5003]: https://github.com/bytedance/deer-flow/pull/5003
+[#5006]: https://github.com/bytedance/deer-flow/pull/5006
+[#5008]: https://github.com/bytedance/deer-flow/pull/5008
+[#5010]: https://github.com/bytedance/deer-flow/pull/5010
+[#5014]: https://github.com/bytedance/deer-flow/pull/5014
+[#5017]: https://github.com/bytedance/deer-flow/pull/5017
+[#5018]: https://github.com/bytedance/deer-flow/pull/5018
+[#5021]: https://github.com/bytedance/deer-flow/pull/5021
+[#5022]: https://github.com/bytedance/deer-flow/pull/5022
+[#5023]: https://github.com/bytedance/deer-flow/pull/5023
+[#5025]: https://github.com/bytedance/deer-flow/pull/5025
+[#5027]: https://github.com/bytedance/deer-flow/pull/5027
+[#5030]: https://github.com/bytedance/deer-flow/pull/5030
+[#5031]: https://github.com/bytedance/deer-flow/pull/5031
+[#5036]: https://github.com/bytedance/deer-flow/pull/5036
+[#5039]: https://github.com/bytedance/deer-flow/pull/5039
+[#5041]: https://github.com/bytedance/deer-flow/pull/5041
+[#5045]: https://github.com/bytedance/deer-flow/pull/5045
+[#5047]: https://github.com/bytedance/deer-flow/pull/5047
+[#5049]: https://github.com/bytedance/deer-flow/pull/5049
+[#5050]: https://github.com/bytedance/deer-flow/pull/5050
+[#5051]: https://github.com/bytedance/deer-flow/pull/5051
+[#5056]: https://github.com/bytedance/deer-flow/pull/5056
+[#5057]: https://github.com/bytedance/deer-flow/pull/5057
+[#5059]: https://github.com/bytedance/deer-flow/pull/5059
+[#5064]: https://github.com/bytedance/deer-flow/pull/5064
+[#5066]: https://github.com/bytedance/deer-flow/pull/5066
+[#5069]: https://github.com/bytedance/deer-flow/pull/5069
+[#5071]: https://github.com/bytedance/deer-flow/pull/5071
+[#5074]: https://github.com/bytedance/deer-flow/pull/5074
+[#5076]: https://github.com/bytedance/deer-flow/pull/5076
+[#5077]: https://github.com/bytedance/deer-flow/pull/5077
+[#5083]: https://github.com/bytedance/deer-flow/pull/5083
+[#5086]: https://github.com/bytedance/deer-flow/pull/5086
+[#5087]: https://github.com/bytedance/deer-flow/pull/5087
+[#5089]: https://github.com/bytedance/deer-flow/pull/5089
+[#5090]: https://github.com/bytedance/deer-flow/pull/5090
+[#5092]: https://github.com/bytedance/deer-flow/pull/5092
+[#5095]: https://github.com/bytedance/deer-flow/pull/5095
+[#5099]: https://github.com/bytedance/deer-flow/pull/5099
+[#5103]: https://github.com/bytedance/deer-flow/pull/5103
+[#5105]: https://github.com/bytedance/deer-flow/pull/5105
+[#5109]: https://github.com/bytedance/deer-flow/pull/5109
+[#5112]: https://github.com/bytedance/deer-flow/pull/5112
+[#5117]: https://github.com/bytedance/deer-flow/pull/5117
+[#5119]: https://github.com/bytedance/deer-flow/pull/5119
+[#5133]: https://github.com/bytedance/deer-flow/pull/5133
+[#5136]: https://github.com/bytedance/deer-flow/pull/5136

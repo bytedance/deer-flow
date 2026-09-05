@@ -96,6 +96,40 @@ class SandboxProvider(ABC):
         """
         pass
 
+    def sandbox_network_mode(self) -> str:
+        """Return the provider's effective outbound network mode."""
+        return "open"
+
+    def sandbox_network_temporary_grant_ttl(self) -> int:
+        return 300
+
+    def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
+        """Claim the oldest unsurfaced trusted-proxy event for a sandbox.
+
+        Providers without a managed network policy use the empty default.
+        """
+        del sandbox_id
+        return []
+
+    async def consume_network_policy_events_async(self, sandbox_id: str) -> list[dict[str, object]]:
+        return await asyncio.to_thread(self.consume_network_policy_events, sandbox_id)
+
+    def deny_pending_network_policy_events(self, sandbox_id: str) -> bool:
+        """Atomically deny all unsurfaced trusted-proxy events for a sandbox."""
+        del sandbox_id
+        return False
+
+    async def deny_pending_network_policy_events_async(self, sandbox_id: str) -> bool:
+        return await asyncio.to_thread(self.deny_pending_network_policy_events, sandbox_id)
+
+    def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        """Apply a user decision to one trusted-proxy event."""
+        del sandbox_id, request_id, decision
+        return False
+
+    async def decide_network_policy_request_async(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        return await asyncio.to_thread(self.decide_network_policy_request, sandbox_id, request_id, decision)
+
 
 _default_sandbox_provider: SandboxProvider | None = None
 # Guards every read and write of `_default_sandbox_provider`. The singleton is
@@ -113,6 +147,12 @@ _default_sandbox_provider: SandboxProvider | None = None
 # self-deadlock such a provider and would block every concurrent `get()` during a
 # slow teardown. Keeping callbacks off the lock avoids both.
 _provider_lock = threading.Lock()
+
+
+def get_initialized_sandbox_provider() -> SandboxProvider | None:
+    """Return the provider only when another lifecycle path initialized it."""
+    with _provider_lock:
+        return _default_sandbox_provider
 
 
 def get_sandbox_provider(**kwargs) -> SandboxProvider:
@@ -178,6 +218,9 @@ def reset_sandbox_provider() -> None:
         provider = _default_sandbox_provider
         _default_sandbox_provider = None
     if provider is not None:
+        from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+        discard_sandbox_lease_manager(provider)
         provider.reset()
 
 
@@ -195,6 +238,9 @@ def shutdown_sandbox_provider() -> None:
         provider = _default_sandbox_provider
         _default_sandbox_provider = None
     if provider is not None and hasattr(provider, "shutdown"):
+        from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+        discard_sandbox_lease_manager(provider)
         provider.shutdown()
 
 
@@ -211,4 +257,9 @@ def set_sandbox_provider(provider: SandboxProvider) -> None:
     """
     global _default_sandbox_provider
     with _provider_lock:
+        previous = _default_sandbox_provider
         _default_sandbox_provider = provider
+    if previous is not None and previous is not provider:
+        from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+        discard_sandbox_lease_manager(previous)

@@ -180,6 +180,9 @@ class DelegationEntry(TypedDict):
     # RFC #4651 PR2: parent-side citation-check verdict (advisory execution
     # evidence), stamped at task write-back; absent on legacy history.
     receipt_verdict: NotRequired[dict]
+    # RFC #4651 PR4: deterministic acceptance-checklist verdict, same
+    # provenance as receipt_verdict.
+    acceptance_verdict: NotRequired[dict]
     created_at: str
 
 

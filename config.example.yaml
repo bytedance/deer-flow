@@ -7,6 +7,11 @@
 #   `DEER_FLOW_CONFIG_PATH` to point at a specific config file.
 # - Runtime state defaults to `.deer-flow` under the project root. Override it
 #   with `DEER_FLOW_HOME` when you need a different writable data directory.
+# - Set `DEER_FLOW_DATE_TIMEZONE` to an IANA timezone name (e.g. `Asia/Shanghai`)
+#   when the conversation date injected into agents should follow a zone other
+#   than the server's local timezone. It is read at runtime by the date-context
+#   middlewares (not a config-schema field), so it can be set on a container
+#   without mounting a `config.yaml`.
 # - Environment variables are available for all field values. Example: `api_key: $OPENAI_API_KEY`
 # - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
 
@@ -15,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 38
+config_version: 40
 
 # ============================================================================
 # Logging
@@ -23,8 +28,10 @@ config_version: 38
 # Log level for deerflow modules (debug/info/warning/error)
 log_level: info
 
-# Request trace correlation for Gateway logs, HTTP response headers, and
-# Langfuse metadata. Disabled by default to preserve existing HTTP/log output.
+# Trace ids are always issued and always returned in the `X-Trace-Id` response
+# header; this block controls log output only — whether records carry a
+# `trace_id` field, and in which format. Off by default because enabling it
+# changes the log format. Restart required (see reload_boundary.py).
 logging:
   enhance:
     enabled: false
@@ -100,8 +107,12 @@ max_recursion_limit: 1000
 # Two token fields look similar but mean different things:
 # - `max_tokens` is the per-call OUTPUT cap passed to the provider.
 # - `context_window` is a positive integer for the total context capacity
-#   (prompt + completion) and drives the real-time "% context used" indicator
-#   in the chat UI.
+#   (prompt + completion). It drives the real-time "% context used" indicator
+#   in the chat UI and feeds the model's langchain profile, which fraction-based
+#   summarization triggers (`summarization.trigger: [{type: fraction, ...}]`)
+#   resolve their thresholds from. Third-party OpenAI-compatible models carry no
+#   built-in profile, so without `context_window` a fraction trigger degrades
+#   (dropped with a warning) instead of crashing the agent build.
 # Leave `context_window` unset if the provider limit is unknown; the percentage
 # will not render. Verify configured values against the provider's model docs.
 #
@@ -1327,7 +1338,8 @@ sandbox:
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)
-# On macOS: Automatically prefers Apple Container if available, falls back to Docker
+# On macOS: Prefers Apple Container when available, but keeps Docker while this
+# sandbox prefix still has managed Docker containers to reconcile after a mode change
 # On other platforms: Uses Docker
 # Uncomment to use:
 # sandbox:
@@ -1353,6 +1365,23 @@ sandbox:
 #
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
+#
+#   # Optional: outbound network policy for locally managed Docker sandboxes.
+#   # open keeps the current behavior. isolated denies all outbound traffic.
+#   # allowlist permits the listed HTTP/HTTPS domains; denied public domains can
+#   # optionally be approved from the Human Input card. Restricted modes require
+#   # Docker Engine 28+ and are not supported by Apple Container or provisioner mode.
+#   # Private, loopback, link-local, multicast, and cloud metadata addresses are always denied.
+#   network:
+#     mode: allowlist                    # open | isolated | allowlist (default: open)
+#     allow_domains:
+#       - pypi.org
+#       - files.pythonhosted.org
+#       - registry.npmjs.org
+#       - github.com
+#     approval: prompt                  # deny | prompt
+#     temporary_grant_ttl: 300          # 30-3600 seconds
+#     proxy_image: ghcr.io/bytedance/deer-flow-sandbox-network-proxy:latest
 #
 #   # Optional: Override whether the sandbox already sees the gateway's
 #   # thread workspace/uploads/outputs through shared mounts.
@@ -1758,7 +1787,14 @@ summarization:
     # Uncomment to also trigger when message count reaches 50
     # - type: messages
     #   value: 50
-    # Uncomment to trigger when 80% of model's max input tokens is reached
+    # Uncomment to trigger when 80% of model's max input tokens is reached.
+    # The percentage resolves from the SUMMARY model's declared `context_window`
+    # (summarization.model_name when set, else the run's own model): declare it
+    # on that models entry — third-party OpenAI-compatible models carry no
+    # built-in profile. Without it the fraction clause is dropped with a warning
+    # and any remaining absolute clauses keep working. If a separate summary
+    # model with a larger window is configured, prefer absolute `tokens`
+    # thresholds sized for the run model instead.
     # - type: fraction
     #   value: 0.8
 
@@ -2720,6 +2756,19 @@ authorization:
 # auth:
 #   local:
 #     allow_registration: false
+#     # Login throttling per client IP (in-process, per worker). Raise
+#     # max_login_attempts when many users share one egress IP (corporate
+#     # proxy / NAT) so shared-IP lockouts don't block the whole office;
+#     # lower it for a stricter posture (minimum 2 — one failed attempt must
+#     # never lock an IP, or a single typo would block the shared egress).
+#     # Defaults preserve the historical hardcoded policy (5 failures /
+#     # 5 minutes). Live-read per login, so a config reload applies without
+#     # a Gateway restart: lowering lockout_seconds releases an active lock
+#     # early and tightening max_login_attempts keeps already-counted
+#     # failures; a raised lockout_seconds extends a still-active lock but
+#     # never resurrects one that already expired.
+#     # max_login_attempts: 5
+#     # lockout_seconds: 300
 #
 #   oidc:
 #     enabled: true

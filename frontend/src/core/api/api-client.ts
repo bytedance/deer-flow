@@ -12,7 +12,7 @@ import {
 import type { AgentThreadState } from "../threads/types";
 
 import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
-import { sanitizeRunStreamOptions } from "./stream-mode";
+import { forceChatRunStreamOptions } from "./stream-mode";
 
 /**
  * SDK ``onRequest`` hook that mints the ``X-CSRF-Token`` header from the
@@ -340,7 +340,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
   // this return value with `for await`, so run creation still starts on first
   // iteration rather than when `runs.stream()` is called.
   client.runs.stream = async function* (threadId, assistantId, payload) {
-    const sanitizedPayload = sanitizeRunStreamOptions(payload);
+    const sanitizedPayload = forceChatRunStreamOptions(payload);
     const originalOnRunCreated = sanitizedPayload?.onRunCreated;
     let runId: string | undefined;
     const initialStream = originalRunStream(threadId, assistantId, {
@@ -402,7 +402,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       clearReconnectRun(threadId, runId);
       return;
     }
-    const sanitizedOptions = sanitizeRunStreamOptions(options);
+    const sanitizedOptions = forceChatRunStreamOptions(options);
     yield* handleInactiveRunStream({
       threadId,
       expectedRunId: () => runId,

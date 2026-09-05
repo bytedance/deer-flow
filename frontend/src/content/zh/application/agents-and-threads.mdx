@@ -23,6 +23,8 @@ DeerFlow 允许你创建多个具有不同专业领域的自定义 Agent。每�
 
 ### 创建自定义 Agent
 
+以下两种方式都要求在 `config.yaml` 中设置 `agents_api.enabled: true`。管理 API 默认关闭，并且只应在可信边界内开放。
+
 <Steps>
 
 #### 通过界面
@@ -39,7 +41,7 @@ DeerFlow 允许你创建多个具有不同专业领域的自定义 Agent。每�
 curl -X POST http://localhost:8001/api/agents \
   -H "Content-Type: application/json" \
   -d '{
-    "display_name": "数据分析师",
+    "name": "data-analyst",
     "description": "专业的数据分析和可视化",
     "skills": ["data-analysis", "chart-visualization"]
   }'
@@ -47,18 +49,17 @@ curl -X POST http://localhost:8001/api/agents \
 
 </Steps>
 
-### Agent 名称和 Slug
+### Agent 名称
 
-创建 Agent 时，`display_name` 对用户显示，系统内部使用自动派生的 ASCII `slug`（`name` 字段）来标识 Agent。
+创建 Agent 时，需要提供在每位用户范围内唯一的 ASCII `name`。该名称用于 API、路由和文件路径，必须匹配 `^[A-Za-z0-9-]+$`，后端会以小写形式存储它。
 
-- `display_name`：对用户显示的任意字符串（例如 "数据分析师"）
-- `name`（slug）：用于 API 和文件路径的 ASCII 标识符（例如 `data-analyst`）
-
-如果派生的 slug 与现有 Agent 冲突，`/api/agents/check` 端点会建议一个唯一的替代名称。
+创建 Agent 前，可以调用 `/api/agents/check?name={name}` 验证名称并检查它是否可用。
 
 ### Agent 存储
 
-自定义 Agent 配置存储在 `backend/agents/{name}/config.yaml` 中。你可以直接编辑这些文件——更改在下次 Agent 调用时自动加载。
+使用默认的 `agent_storage.backend: file` 时，自定义 Agent 配置按用户存储在 `{base_dir}/users/{user_id}/agents/{name}/config.yaml` 中，其中 `{base_dir}` 是 `DEER_FLOW_HOME`（默认值为 `backend/.deer-flow`）。旧的 `{base_dir}/agents/{name}/` 布局仅作为尚未执行 `backend/scripts/migrate_user_isolation.py` 的安装的只读回退路径。使用 `agent_storage.backend: db` 时，定义会改为存储在共享 SQL 数据库中；它要求 `database.backend: sqlite` 或 `database.backend: postgres`。使用 `backend/scripts/migrate_agents_to_db.py` 迁移已有的文件后端定义。
+
+使用文件后端时，你可以直接编辑这些文件；更改会在下一次 Agent 调用时自动加载，无需重启。
 
 ## 线程生命周期
 
