@@ -1,9 +1,11 @@
 """Tests for RunManager."""
 
 import asyncio
+import itertools
 import logging
 import re
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -616,8 +618,18 @@ async def test_cancel_not_inflight(manager: RunManager):
 
 
 @pytest.mark.anyio
-async def test_list_by_thread(manager: RunManager):
+async def test_list_by_thread(manager: RunManager, monkeypatch: pytest.MonkeyPatch):
     """Same thread should return multiple runs."""
+    # Advance the fake clock 1ms per call so r2 gets a strictly newer
+    # created_at than r1 even on hosts with coarse wall-clock granularity
+    # (Windows timestamps can repeat across consecutive creates).
+    base = datetime.now(UTC)
+    calls = itertools.count()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.manager._now_iso",
+        lambda: (base + timedelta(milliseconds=next(calls))).isoformat(),
+    )
+
     r1 = await manager.create("thread-1")
     r2 = await manager.create("thread-1")
     await manager.create("thread-2")
