@@ -252,14 +252,8 @@ make test-live
 PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
 ```
 
-Direct pytest collection or execution of `tests/test_client_live.py` remains
-skipped unless `DEER_FLOW_RUN_LIVE_TESTS=1` is set. Do not add that opt-in to
-default CI workflows.
-
-Pytest marker expressions are evaluated while test modules are imported, even
-when an enclosing class is skipped. Guard POSIX-only APIs such as `os.geteuid()`
-with an `os.name` short circuit so the offline suite can still collect on
-Windows development machines.
+Keep live tests opt-in via `DEER_FLOW_RUN_LIVE_TESTS=1`; guard POSIX-only
+markers with `os.name` for Windows collection.
 
 Jina request-failure logging tests set a dummy API key so the separate once-per-process
 missing-key warning cannot make assertions depend on test order or shard placement.

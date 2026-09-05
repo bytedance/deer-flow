@@ -1223,6 +1223,16 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["checked"] is False
 
+    def test_mismatched_posix_and_raw_segments_are_unprovable(self):
+        """A tokenizer disagreement must fail closed instead of indexing a
+        raw segment list that could not be produced."""
+        executions = [_bash_execution('cd foo";"bar && pytest tests/', output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+
     def test_shared_whitespace_and_double_quotes_remain_verifiable(self):
         executions = [_bash_execution('pytest\t"tests/security" -q', output_tail="3 passed")]
         verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)

@@ -1443,7 +1443,7 @@ def _commands_match(
     if not expected or not actual or len(expected) > len(actual):
         return "no_match"
     raw_segments_align = expected_raw_parsed is not None and actual_raw_parsed is not None and len(expected_raw_parsed[0]) == len(expected) and len(actual_raw_parsed[0]) == len(actual)
-    if not raw_segments_align and (_has_unquoted_single_quote(criterion_command) or _has_unquoted_single_quote(executed_command)):
+    if not raw_segments_align:
         needs_shell_provenance = True
     expected_raw = expected_raw_parsed[0] if raw_segments_align and expected_raw_parsed is not None else []
     actual_raw = actual_raw_parsed[0] if raw_segments_align and actual_raw_parsed is not None else []
