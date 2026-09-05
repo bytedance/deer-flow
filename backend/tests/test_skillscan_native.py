@@ -15,11 +15,13 @@ from hypothesis import strategies as st
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.skillscan import StaticScanBlockedError, enforce_static_scan, scan_archive_preflight, scan_skill_dir
 from deerflow.skills.skillscan.orchestrator import (
+    _PYTHON_CLIENT_IMPORT_PATHS,
     _PYTHON_CLIENT_SINK_METHODS,
     _collect_python_aliases,
-    _collect_python_import_targets,
     _find_client_handle_heuristic_sink,
     _find_client_handle_sink,
+    _python_client_import_targets,
+    _record_client_import_targets,
 )
 
 _FINDING_FIELDS = {"rule_id", "severity", "file", "line", "message", "remediation", "evidence"}
@@ -1228,6 +1230,23 @@ def test_python_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
     assert _scan_reports_client_exfil(tmp_path, source) is False
 
 
+def test_python_relative_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
+    """A bare relative import binds its name without a resolvable module; the handle it replaces is still gone.
+
+    `from . import s` names no path for `s`, so a binding rule that only records resolvable paths
+    would keep the earlier Session handle alive, attribute `s.post` to it, and hard-block a file the
+    base revision accepted. The warning channel may still report it: what a relative import binds
+    is unprovable, so the coarse rule keeps `s` a candidate -- at `HIGH`, never blocking.
+    """
+    source = "import os\nimport requests\n\ns = requests.Session()\nfrom . import s\ns.post(host, json=dict(os.environ))\n"
+
+    result = _scan_skill_source(tmp_path, source)
+
+    assert result["blocked"] is False
+    assert all(finding["rule_id"] != "python-env-dump-exfil" for finding in result["findings"])
+    assert [finding["severity"] for finding in _client_exfil_heuristic_findings(result)] == ["HIGH"]
+
+
 # Every case issue #4296 declares the blocking client-handle chain gives up, paired with whether the
 # non-blocking heuristic covers it. One list drives both tests: the blocking signal must stay silent
 # on all of them, so adding a declared false negative forces an explicit decision about the warning
@@ -1419,6 +1438,8 @@ def test_python_client_exfil_heuristic_requires_a_constructor_supported_method(t
         ("import http.client as hc\n", {"hc": "http.client"}),
         ("from http.client import HTTPSConnection\n", {"HTTPSConnection": "http.client.HTTPSConnection"}),
         ("import os.path\nimport os\n", {"os": "os"}),
+        # A bare relative import binds a name but resolves to no path, so the map has nothing to say.
+        ("from . import s\n", {}),
     ],
 )
 def test_python_import_aliases_are_keyed_by_the_bound_name(source: str, expected: dict[str, str]) -> None:
@@ -1456,17 +1477,47 @@ def test_python_client_exfil_heuristic_recognizes_every_client_import_spelling(t
     assert result["blocked"] is False
 
 
+def _client_import_targets(source: str) -> dict[str, set[str]]:
+    targets: dict[str, set[str]] = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            _record_client_import_targets(node, targets)
+    return targets
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
-        ("if flag:\n    import requests as clientlib\nelse:\n    import pathlib as clientlib\n", {"clientlib": {"requests", "pathlib"}}),
+        # Both arms survive, so the constructor is proven whichever arm the runtime takes.
+        ("if flag:\n    import requests as clientlib\nelse:\n    import pathlib as clientlib\n", {"clientlib": {"requests"}}),
         ("import http.client\nfrom http.client import HTTPSConnection\n", {"http": {"http"}, "HTTPSConnection": {"http.client.HTTPSConnection"}}),
-        ("def build():\n    import requests as lib\n\nimport json as lib\n", {"lib": {"requests", "json"}}),
+        ("def build():\n    import requests as lib\n\nimport json as lib\n", {"lib": {"requests"}}),
+        # A name is recorded for every import that binds it, path or no path: presence is what
+        # proves a receiver is spelled as an import rather than constructed in the file.
+        ("import pathlib as web\nfrom . import local\n", {"web": set(), "local": set()}),
     ],
 )
-def test_python_import_targets_keep_every_path_a_name_may_hold(source: str, expected: dict[str, set[str]]) -> None:
-    """The collapsed map keeps one path per name; this one keeps all of them, keyed by the same rule."""
-    assert _collect_python_import_targets(ast.parse(source)) == expected
+def test_python_client_import_targets_keep_every_constructor_reaching_path(source: str, expected: dict[str, set[str]]) -> None:
+    """The collapsed map keeps one path per name; this one keeps every path that can still reach a constructor."""
+    assert _client_import_targets(source) == expected
+
+
+def test_python_client_import_targets_are_bounded_by_the_constructor_table() -> None:
+    """Alias-target cardinality, not node count, is what made resolution quadratic.
+
+    Thousands of unrelated imports sharing one alias must leave that alias with nothing to expand,
+    so a deep attribute call on it costs one string build per hop rather than one per import. Only
+    prefixes of a constructor path are ever retained, and expansion drops a path as soon as it can
+    no longer reach one.
+    """
+    source = "".join(f"import library{i} as mod\n" for i in range(4000)) + "import requests as mod\nimport http.client\n"
+    targets = _client_import_targets(source)
+
+    assert targets == {"mod": {"requests"}, "http": {"http"}}
+    assert all(path in _PYTHON_CLIENT_IMPORT_PATHS for paths in targets.values() for path in paths)
+    assert _python_client_import_targets(ast.parse("mod.a.b.c.d.other").body[0].value, targets) == frozenset()
+    assert _python_client_import_targets(ast.parse("mod.Session").body[0].value, targets) == {"requests.Session"}
+    assert _python_client_import_targets(ast.parse("http.client.HTTPSConnection").body[0].value, targets) == {"http.client.HTTPSConnection"}
 
 
 @pytest.mark.parametrize(
