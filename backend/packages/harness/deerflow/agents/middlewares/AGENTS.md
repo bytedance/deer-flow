@@ -48,7 +48,7 @@ it to that middleware's declaration in the same change.
    observer classifies raw→visible transforms from facts rather than by sniffing
    output wording.
 4. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves identity via `resolve_runtime_user_id(runtime)`, including Gateway runtime context and standalone LangGraph Server auth, then falls back to the request ContextVar / `"default"`
-5. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation (lead agent only); upload existence checks use the same runtime-resolved user bucket as thread-data creation
+5. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation (lead agent only); upload existence checks use the same runtime-resolved user bucket as thread-data creation. Auto-convert companions and the historical sidecar are documented in [FILE_UPLOAD.md](../../../../../docs/FILE_UPLOAD.md).
 6. **SandboxMiddleware** - Acquires sandbox, stores `sandbox_id` in state. The
    lead runtime normally owns the thread's physical Agent-skill projection;
    delegated subagents and the prompt-only bootstrap agent are non-owners, so

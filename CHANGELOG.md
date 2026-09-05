@@ -458,6 +458,7 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **uploads:** Surface the converted Markdown companion in `<current_uploads>` and `list_uploaded_files`, and forward `markdown_file` from the frontend, so the agent can `read_file` UTF-8 text instead of the binary original. Outline line numbers now refer to that companion path. Convert-time `.deer-flow-companions.json` keeps collision-renamed mappings (`a.pdf` → `a_1.md`) for historical listing after summarization. Companion identity is a private hard-link pin (not a reusable inode number), so an in-place sandbox edit stays attached while a delete-and-recreate under the same name — including Linux inode reuse — is stale and is not deleted with the original. Sidecar reads are no-follow and byte/entry-capped. Conversion writes with temp+`os.replace` so a symlink planted after `O_CREAT|O_EXCL` reservation cannot escape the uploads directory. Re-uploading the same original removes an unmodified previous companion and keeps an edited one. Sidecar writes and post-delete sidecar cleanup are advisory: they log a warning instead of 500/rolling back files already stored. The sidecar lock lives beside `user-data` (outside sandbox mounts), is opened with no-follow semantics so a planted symlink is not followed with Gateway privileges, and uses a bounded non-blocking flock so a held lock cannot stall the shared file-IO pool. Companion `.md` names are reserved with `O_CREAT|O_EXCL` against the uploads directory (not just the current request), so a later `notes.docx` cannot overwrite an earlier `notes.md`, and a later `a.pdf` cannot collapse `a.docx` → `a.md`. ([#4981], related [#3750])
 - **gateway:** Stop persisting a caller-supplied `deerflow_trace_id` on the run
   record. `body.metadata` reaches both the live run config, which the run
   worker restamps, and the run record echoed verbatim by the runs API; only the
@@ -1839,6 +1840,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3730]: https://github.com/bytedance/deer-flow/pull/3730
 [#3733]: https://github.com/bytedance/deer-flow/pull/3733
 [#3740]: https://github.com/bytedance/deer-flow/pull/3740
+[#3750]: https://github.com/bytedance/deer-flow/issues/3750
 [#3753]: https://github.com/bytedance/deer-flow/pull/3753
 [#3760]: https://github.com/bytedance/deer-flow/pull/3760
 [#3764]: https://github.com/bytedance/deer-flow/pull/3764
@@ -2114,6 +2116,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4516]: https://github.com/bytedance/deer-flow/pull/4516
 [#4611]: https://github.com/bytedance/deer-flow/issues/4611
 [#4745]: https://github.com/bytedance/deer-flow/pull/4745
+[#4981]: https://github.com/bytedance/deer-flow/issues/4981
 [#4574]: https://github.com/bytedance/deer-flow/issues/4574
 [#4577]: https://github.com/bytedance/deer-flow/pull/4577
 [#4623]: https://github.com/bytedance/deer-flow/pull/4623

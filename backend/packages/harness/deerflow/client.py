@@ -66,6 +66,7 @@ from deerflow.subagents.capacity import configure_subagent_execution_capacity
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, bind_trace_id, ensure_trace_id, generate_trace_id, get_current_trace_id, reset_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+from deerflow.uploads.companion_map import record_companion_mapping
 from deerflow.uploads.manager import (
     claim_unique_filename,
     delete_file_safe,
@@ -73,6 +74,8 @@ from deerflow.uploads.manager import (
     ensure_uploads_dir,
     get_uploads_dir,
     list_files_in_dir,
+    release_reserved_filename,
+    reserve_unique_filename,
     upload_artifact_url,
     upload_virtual_path,
 )
@@ -1591,35 +1594,49 @@ class DeerFlowClient:
                     info["original_filename"] = src_path.name
 
                 if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
-                    # Reserve companion .md name before convert so two stems
-                    # that collapse to the same .md (or a prior .md upload)
-                    # cannot silently overwrite each other.
+                    # Reserve companion .md exclusively so two stems that
+                    # collapse to the same .md — or a .md left by an earlier
+                    # upload_files call — cannot silently overwrite each other.
                     provisional_md_name = Path(dest_name).with_suffix(".md").name
-                    unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
+                    unique_md_name = reserve_unique_filename(uploads_dir, provisional_md_name, seen_names)
                     md_output = dest.with_name(unique_md_name)
+                    md_path = None
                     try:
-                        if conversion_pool is not None:
-                            md_path = conversion_pool.submit(_convert_in_thread, dest, md_output).result()
-                        else:
-                            md_path = asyncio.run(convert_file_to_markdown(dest, output_path=md_output))
-                    except Exception:
-                        logger.warning(
-                            "Failed to convert %s to markdown",
-                            src_path.name,
-                            exc_info=True,
-                        )
-                        md_path = None
+                        try:
+                            if conversion_pool is not None:
+                                md_path = conversion_pool.submit(_convert_in_thread, dest, md_output).result()
+                            else:
+                                md_path = asyncio.run(convert_file_to_markdown(dest, output_path=md_output))
+                        except Exception:
+                            logger.warning(
+                                "Failed to convert %s to markdown",
+                                src_path.name,
+                                exc_info=True,
+                            )
+                            md_path = None
 
-                    if md_path is not None:
-                        info["markdown_file"] = md_path.name
-                        info["markdown_path"] = str(uploads_dir / md_path.name)
-                        info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
-                        info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                    else:
-                        # Conversion failed and wrote nothing, so release the
-                        # claim; holding it would rename a later same-stem
-                        # upload against a name nothing occupies.
-                        seen_names.discard(unique_md_name)
+                        if md_path is not None:
+                            info["markdown_file"] = md_path.name
+                            info["markdown_path"] = str(uploads_dir / md_path.name)
+                            info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
+                            info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                            # Sidecar is advisory: the companion is already on disk and
+                            # stem fallback still resolves it for this session. Do not
+                            # fail the whole upload (this path has no rollback).
+                            try:
+                                record_companion_mapping(uploads_dir, dest_name, md_path.name)
+                            except (OSError, ValueError):
+                                logger.warning(
+                                    "Failed to record companion mapping for %s",
+                                    dest_name,
+                                    exc_info=True,
+                                )
+                    finally:
+                        if md_path is None:
+                            # Convert returned None, raised, or was cancelled.
+                            # Holding the empty reservation would rename a later
+                            # same-stem upload against a name nothing occupies.
+                            release_reserved_filename(uploads_dir, unique_md_name, seen_names)
 
                 uploaded_files.append(info)
         finally:

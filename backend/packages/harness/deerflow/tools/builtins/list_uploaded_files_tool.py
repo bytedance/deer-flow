@@ -19,8 +19,9 @@ from deerflow.agents.middlewares.input_sanitization_middleware import neutralize
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
-from deerflow.uploads.manager import is_upload_staging_file
-from deerflow.utils.file_outline import extract_outline_for_file
+from deerflow.uploads.companion_map import load_companion_entries, mapped_companion_names
+from deerflow.uploads.manager import is_upload_hidden_file
+from deerflow.utils.file_outline import extract_outline_for_file, resolve_converted_markdown_path
 
 logger = logging.getLogger(__name__)
 
@@ -114,19 +115,24 @@ def _list_uploaded_files_impl(
     # Collect historical files (sorted by mtime descending).
     # Skip .md files that are conversion artifacts (have a same-stem non-.md sibling).
     candidates: list[tuple[float, Path, int]] = []
+    companion_entries: dict = {}
     try:
         # Collect file entries once to build the name set and iterate.
-        entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not e.is_symlink() and not is_upload_staging_file(e.name)]
-        all_names: set[str] = {e.name for e in entries}
+        dir_entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not e.is_symlink() and not is_upload_hidden_file(e.name)]
+        all_names: set[str] = {e.name for e in dir_entries}
+        companion_entries = load_companion_entries(uploads_dir)
+        known_companions = mapped_companion_names(uploads_dir, companion_entries)
 
-        for entry in entries:
+        for entry in dir_entries:
             if entry.name in current_run_filenames:
                 continue
-            # Skip .md files that are conversion artifacts of another file.
-            # Known limitation: if a user manually uploads both report.pdf and
-            # report.md, the .md is hidden as a "conversion artifact".  This is
-            # acceptable for the MVP — triggering this requires uploading files
-            # whose stems collide with converted documents, which is rare.
+            # Skip conversion artifacts: sidecar-mapped companions first, then
+            # the legacy same-stem heuristic for threads that predate the map.
+            # Known limitation of the stem heuristic: if a user manually uploads
+            # both report.pdf and report.md, the .md is hidden as a
+            # "conversion artifact".  This is acceptable for the MVP.
+            if entry.name in known_companions:
+                continue
             if entry.name.endswith(".md"):
                 stem = entry.name[:-3]  # remove ".md"
                 non_md_siblings = {n for n in all_names if n != entry.name and Path(n).stem == stem}
@@ -157,10 +163,19 @@ def _list_uploaded_files_impl(
             "path": neutralize_untrusted_tags(f"/mnt/user-data/uploads/{filename}"),
             "extension": neutralize_untrusted_tags(file_path.suffix),
         }
+        companion = resolve_converted_markdown_path(file_path, entries=companion_entries)
+        if companion is not None and companion.name != filename:
+            file_info["markdown_file"] = neutralize_untrusted_tags(companion.name)
+            file_info["markdown_path"] = neutralize_untrusted_tags(f"/mnt/user-data/uploads/{companion.name}")
 
         should_include_outline = outline_for_all or filename in outline_filenames
         if should_include_outline:
-            outline, preview = extract_outline_for_file(file_path)
+            outline, preview = extract_outline_for_file(
+                file_path,
+                md_path=companion,
+                companion_name=companion.name if companion is not None else None,
+                entries=companion_entries,
+            )
             if outline:
                 file_info["outline"] = [{**entry, "title": neutralize_untrusted_tags(entry["title"])} if "title" in entry else entry for entry in outline]
             if preview:
@@ -191,7 +206,7 @@ def list_uploaded_files(
     include_outline: Annotated[
         bool | list[str],
         "Control which files get their document outline (headings/preview) returned. "
-        "False (default): no outline for any file — just filename, size, and path. "
+        "False (default): no outline for any file — just filename, size, path, and converted-text companion when one exists. "
         "True: include outline/preview for every .md-convertible file. "
         'list of filenames: include outline/preview only for those specific files (e.g. ["report.md", "data.csv"]).',
     ] = False,

@@ -17,6 +17,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
+from deerflow.uploads.companion_map import forget_companion_mappings, record_companion_mapping
 from deerflow.uploads.manager import (
     UPLOAD_STAGING_PREFIX,
     UPLOAD_STAGING_SUFFIX,
@@ -29,6 +30,8 @@ from deerflow.uploads.manager import (
     get_uploads_dir,
     list_files_in_dir,
     normalize_filename,
+    release_reserved_filename,
+    reserve_unique_filename,
     upload_artifact_url,
     upload_virtual_path,
     validate_upload_destination,
@@ -168,7 +171,17 @@ def _get_upload_limits(app_config: AppConfig) -> UploadLimits:
     )
 
 
-def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
+def _cleanup_uploaded_paths(
+    paths: list[os.PathLike[str] | str],
+    companion_pairs: dict[Path, list[tuple[str, str]]] | None = None,
+) -> None:
+    """Delete paths written by a rejected request, then roll back their mappings.
+
+    *companion_pairs* maps an uploads directory to the ``(original, companion)``
+    pairs this request recorded there. Rollback is scoped to those exact pairs
+    so a pre-existing entry that happens to share a companion name survives —
+    deleting by name alone would drop an unrelated historical mapping.
+    """
     for path in reversed(paths):
         try:
             os.unlink(path)
@@ -176,6 +189,14 @@ def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
             pass
         except Exception:
             logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
+
+    for uploads_dir, pairs in (companion_pairs or {}).items():
+        if not pairs:
+            continue
+        try:
+            forget_companion_mappings(uploads_dir, pairs)
+        except Exception:
+            logger.warning("Failed to roll back companion mappings in %s", uploads_dir, exc_info=True)
 
 
 def _prepare_upload_destination(uploads_dir: os.PathLike[str] | str, display_filename: str) -> _UploadTempFile:
@@ -328,6 +349,10 @@ async def upload_files(
     sandbox_uploads = uploads_dir
     uploaded_files = []
     written_paths = []
+    # (original, companion) pairs this request recorded, keyed by uploads dir.
+    # Populated only after record_companion_mapping succeeds, so a rollback
+    # removes exactly the mappings this request created.
+    recorded_companions: dict[Path, list[tuple[str, str]]] = {}
     sandbox_sync_targets = []
     skipped_files = []
     total_size = 0
@@ -403,34 +428,50 @@ async def upload_files(
 
                 file_ext = file_path.suffix.lower()
                 if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
-                    # Reserve the companion .md name in this request's seen set
-                    # before writing so conversion cannot silently truncate another
-                    # uploaded or derived file (same invariant as form-part dedupe).
+                    # Reserve the companion .md exclusively so conversion cannot
+                    # truncate another uploaded or derived file — including one
+                    # left by an earlier request (seen_filenames is request-scoped).
                     provisional_md_name = Path(safe_filename).with_suffix(".md").name
-                    unique_md_name = claim_unique_filename(provisional_md_name, seen_filenames)
+                    unique_md_name = await run_file_io(reserve_unique_filename, uploads_dir, provisional_md_name, seen_filenames)
                     md_output = file_path.with_name(unique_md_name)
-                    md_path = await convert_file_to_markdown(file_path, output_path=md_output)
-                    if md_path:
-                        written_paths.append(md_path)
-                        md_virtual_path = upload_virtual_path(md_path.name)
+                    md_path = None
+                    try:
+                        md_path = await convert_file_to_markdown(file_path, output_path=md_output)
+                        if md_path:
+                            written_paths.append(md_path)
+                            md_virtual_path = upload_virtual_path(md_path.name)
 
-                        if sync_to_sandbox:
-                            sandbox_sync_targets.append((md_path, md_virtual_path))
+                            if sync_to_sandbox:
+                                sandbox_sync_targets.append((md_path, md_virtual_path))
 
-                        file_info["markdown_file"] = md_path.name
-                        file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
-                        file_info["markdown_virtual_path"] = md_virtual_path
-                        file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                    else:
-                        # Conversion failed and wrote nothing, so release the claim;
-                        # holding it would rename a later same-stem upload against
-                        # a name nothing occupies.
-                        seen_filenames.discard(unique_md_name)
+                            file_info["markdown_file"] = md_path.name
+                            file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
+                            file_info["markdown_virtual_path"] = md_virtual_path
+                            file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                            try:
+                                await run_file_io(record_companion_mapping, uploads_dir, safe_filename, md_path.name)
+                            except (OSError, ValueError):
+                                # Sidecar is advisory: the companion is already on
+                                # disk and stem fallback still resolves it. Do not
+                                # 500 / roll back files this request already wrote.
+                                logger.warning(
+                                    "Failed to record companion mapping for %s",
+                                    safe_filename,
+                                    exc_info=True,
+                                )
+                            else:
+                                recorded_companions.setdefault(uploads_dir, []).append((safe_filename, md_path.name))
+                    finally:
+                        if md_path is None:
+                            # Convert returned None, raised, or was cancelled.
+                            # Unlink here (sync) so a CancelledError cannot skip an
+                            # awaited run_file_io and leave a 0-byte name occupied.
+                            release_reserved_filename(uploads_dir, unique_md_name, seen_filenames)
 
                 uploaded_files.append(file_info)
 
             except HTTPException as e:
-                await run_file_io(_cleanup_uploaded_paths, written_paths)
+                await run_file_io(_cleanup_uploaded_paths, written_paths, recorded_companions)
                 raise e
             except UnsafeUploadPathError as e:
                 logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
@@ -438,7 +479,7 @@ async def upload_files(
                 continue
             except Exception as e:
                 logger.error(f"Failed to upload {file.filename}: {e}")
-                await run_file_io(_cleanup_uploaded_paths, written_paths)
+                await run_file_io(_cleanup_uploaded_paths, written_paths, recorded_companions)
                 raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
 
         # Uploaded files are created with 0o600 permissions (owner read/write only).

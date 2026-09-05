@@ -6,6 +6,7 @@ on demand via the ``list_uploaded_files`` tool.
 
 import logging
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import NotRequired, override
 
@@ -18,8 +19,9 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.uploads.manager import is_upload_staging_file
-from deerflow.utils.file_outline import extract_outline_for_file
+from deerflow.uploads.companion_map import CompanionEntry, load_companion_entries
+from deerflow.uploads.manager import is_upload_hidden_file
+from deerflow.utils.file_outline import extract_outline_for_file, resolve_converted_markdown_path
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
@@ -88,13 +90,19 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
         lines.append(f"- {neutralize_untrusted_tags(file['filename'])} ({size_str})")
         lines.append(f"  Path: {neutralize_untrusted_tags(file['path'])}")
+        markdown_path = file.get("markdown_path")
+        if isinstance(markdown_path, str) and markdown_path:
+            lines.append(f"  Converted text: {neutralize_untrusted_tags(markdown_path)}")
         if file.get("selection_reason") == "query_match":
             lines.append("  Selected because: matched the current query.")
         outline = file.get("outline") or []
         if outline:
             truncated = outline[-1].get("truncated", False)
             visible = [e for e in outline if not e.get("truncated")]
-            lines.append("  Document outline (use `read_file` with line ranges to read sections):")
+            if markdown_path:
+                lines.append("  Document outline (line numbers refer to the converted text; use `read_file` on that path):")
+            else:
+                lines.append("  Document outline (use `read_file` with line ranges to read sections):")
             for entry in visible:
                 lines.append(f"    L{entry['line']}: {neutralize_untrusted_tags(entry['title'])}")
             if truncated:
@@ -150,7 +158,8 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             lines.append("")
 
         lines.append("To work with these files:")
-        lines.append("- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.")
+        lines.append("- If a file lists Converted text, call `read_file` on that path. `read_file` cannot open binary originals such as .pdf or .xlsx.")
+        lines.append("- Otherwise read from the listed Path first — use the outline line numbers and `read_file` to locate relevant sections.")
         lines.append("- Use `grep` to search for keywords when you are not sure which section to look at")
         lines.append("  (e.g. `grep(pattern='revenue', path='/mnt/user-data/uploads/')`).")
         lines.append("- Use `glob` to find files by name pattern")
@@ -160,12 +169,19 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         return "\n".join(lines)
 
-    def _files_from_kwargs(self, message: HumanMessage, uploads_dir: Path | None = None) -> list[dict] | None:
+    def _files_from_kwargs(
+        self,
+        message: HumanMessage,
+        uploads_dir: Path | None = None,
+        *,
+        entries: Mapping[str, CompanionEntry] | None = None,
+    ) -> list[dict] | None:
         """Extract file info from message additional_kwargs.files.
 
         The frontend sends uploaded file metadata in additional_kwargs.files
         after a successful upload. Each entry has: filename, size (bytes),
-        path (virtual path), status.
+        path (virtual path), status, and optionally markdown_file (the
+        converted UTF-8 companion basename).
 
         Args:
             message: The human message to inspect.
@@ -184,18 +200,27 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if not isinstance(f, dict):
                 continue
             filename = f.get("filename") or ""
-            if not filename or Path(filename).name != filename or is_upload_staging_file(filename):
+            if not filename or Path(filename).name != filename or is_upload_hidden_file(filename):
                 continue
             if uploads_dir is not None and not (uploads_dir / filename).is_file():
                 continue
-            files.append(
-                {
-                    "filename": filename,
-                    "size": int(f.get("size") or 0),
-                    "path": f"/mnt/user-data/uploads/{filename}",
-                    "extension": Path(filename).suffix,
-                }
-            )
+            entry = {
+                "filename": filename,
+                "size": int(f.get("size") or 0),
+                "path": f"/mnt/user-data/uploads/{filename}",
+                "extension": Path(filename).suffix,
+            }
+            if uploads_dir is not None:
+                requested = f.get("markdown_file")
+                companion = resolve_converted_markdown_path(
+                    uploads_dir / filename,
+                    companion_name=requested if isinstance(requested, str) else None,
+                    entries=entries,
+                )
+                if companion is not None and companion.name != filename:
+                    entry["markdown_file"] = companion.name
+                    entry["markdown_path"] = f"/mnt/user-data/uploads/{companion.name}"
+            files.append(entry)
         return files if files else None
 
     @override
@@ -227,9 +252,11 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             except RuntimeError:
                 pass
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=resolve_runtime_user_id(runtime)) if thread_id else None
+        has_file_metadata = bool((last_message.additional_kwargs or {}).get("files"))
+        companion_entries = load_companion_entries(uploads_dir) if uploads_dir is not None and has_file_metadata else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
-        new_files = self._files_from_kwargs(last_message, uploads_dir) or []
+        new_files = self._files_from_kwargs(last_message, uploads_dir, entries=companion_entries) or []
         if not new_files:
             if (last_message.additional_kwargs or {}).get("files"):
                 logger.info(
@@ -247,7 +274,14 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if uploads_dir:
             for file in context_files:
                 phys_path = uploads_dir / file["filename"]
-                outline, preview = extract_outline_for_file(phys_path)
+                companion_name = file.get("markdown_file")
+                md_path = uploads_dir / companion_name if isinstance(companion_name, str) else None
+                outline, preview = extract_outline_for_file(
+                    phys_path,
+                    companion_name=companion_name if isinstance(companion_name, str) else None,
+                    md_path=md_path,
+                    entries=companion_entries,
+                )
                 file["outline"] = outline
                 file["outline_preview"] = preview
 

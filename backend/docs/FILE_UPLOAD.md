@@ -110,7 +110,7 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
 
-转换后的 Markdown 文件会保存在同一目录下，文件名为原文件名 + `.md` 扩展名。
+转换后的 Markdown 文件会保存在同一目录下。通常名为原 stem + `.md`；若该名已被占用（同一次请求里的 `a.docx` + `a.pdf`，或目录里已有更早的 `notes.md` / `a.md`），则会写成 `a_1.md` 这样的唯一名，并通过上传响应的 `markdown_file` 返回。companion 名用 `O_CREAT|O_EXCL|O_NOFOLLOW` 原子占位，所以跨请求也不会覆盖已有文件。转换通过同目录临时文件 + `os.replace` 写出，不会跟随占位被换成的 symlink，因此不能写出 uploads 目录外。转换返回失败、抛错或中途取消时会释放这个空占位，避免留下 0 字节 `.md` 永久占名。Gateway / `DeerFlowClient` 还会把「原文件 → companion」写进同目录的隐藏 sidecar（`.deer-flow-companions.json`），这样 `list_uploaded_files` 在压缩历史之后仍能把 `a.pdf` 指到 `a_1.md`，而不会误用旁边的 `a.md`。sidecar 写入是建议性的：companion 已经落盘后，映射失败只记 warning，不会让整次上传 500，也不会回滚本请求已写入的文件。sidecar 锁（`.deer-flow-companions.lock`）放在 `user-data` 旁边的 thread 目录里（沙箱挂载 / `/mnt/user-data` 都碰不到），用 no-follow 打开并校验为独占普通文件；flock 有界非阻塞，拿不到就跳过这次映射写入，避免沙箱或另一进程握锁把 Gateway 文件 IO 线程占死。sidecar 读取同样 no-follow，并限制字节数和条目数，避免沙箱把映射文件换成超大 JSON 撑爆 Gateway。写出 sidecar 前按同一上限（256KiB / 2048 条）从最旧条目裁剪并 unpin，避免写出超限后下次 load 把整表当成空映射。sidecar 同时记录 companion 转换时的指纹（size / mtime / inode）和私有 hard-link 身份钉：原地编辑（`echo >>`、`write_file`、`str_replace`）保持 inode，映射仍然有效；Linux 在 `unlink` 后会立刻复用 inode 号，所以单靠 `(st_dev, st_ino)` 不能区分「原地编辑」和「删后同名重建」——身份钉把转换时的 inode 钉在沙箱看不到的目录里（生产布局在 `user-data` 旁边的 `.deer-flow-companion-ids/`），替换文件即使复用了号码也不会被当成 companion，也不会随原文件被 `delete_file_safe` 删掉。没有身份钉的旧版 size/mtime 行仍把原地编辑视为失效。重新上传同一个原文件时，若旧 companion 仍是未改过的转换产物则删除它；若用户已原地改过或条目已失效，则保留该文件。删除 mapped companion 时先把该目录项原子 rename 到隔离路径，再核对移走后的 inode 与身份钉；对不上则恢复，避免沙箱在原文件 unlink 之后占用同名的文件被删掉。删除接口在原文件（以及可能的 companion）已经 unlink 之后，sidecar 元数据清理失败只记 warning，不再把已成功的删除报成 500。其中复用重命名 companion 名字（如 `a_1.md`）的新文件会按普通用户文件展示，而与原文件同 stem 的 `.md`（如 `report.pdf` 旁的 `report.md`）仍会被同 stem 启发式规则隐藏（已知限制）。
 
 默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
 
@@ -128,27 +128,33 @@ The following files were uploaded in this message:
 
 - document.pdf (1.2 MB)
   Path: /mnt/user-data/uploads/document.pdf
+  Converted text: /mnt/user-data/uploads/document.md
+  Document outline (line numbers refer to the converted text; use `read_file` on that path):
+    L1: Introduction
 
 To work with these files:
-- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.
+- If a file lists Converted text, call `read_file` on that path. `read_file` cannot open binary originals such as .pdf or .xlsx.
+- Otherwise read from the listed Path first — use the outline line numbers and `read_file` to locate relevant sections.
 - Use `grep` to search for keywords when you are not sure which section to look at.
 - Use `glob` to find files by name pattern.
 </current_uploads>
 ```
 
 以前轮次上传的文件不会在每次请求中重复注入。Agent 可按需调用
-`list_uploaded_files` 查询历史上传；如果已知文件名，也可直接使用
-`read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
+`list_uploaded_files` 查询历史上传；该工具仍会隐藏作为转换产物的
+companion `.md` 行和 sidecar 本身，但会在原文件条目上返回 `markdown_file` /
+`markdown_path`（优先读 sidecar，没有映射时才回退到同 stem 的 `.md`）。
+`list_uploaded_files` 和 `UploadsMiddleware` 每个目录每次调用只读一次 sidecar，
+已解析的 companion 路径直接交给 outline，不再按文件重复打开 JSON。
+如果已知文件名，也可直接使用 `read_file` 或 `grep`
+访问 `/mnt/user-data/uploads/` 下的文件。
 
 ### 使用上传的文件
 
 Agent 在沙箱中运行，使用虚拟路径访问文件。Agent 可以直接使用 `read_file` 工具读取上传的文件：
 
 ```python
-# 读取原始 PDF（如果支持）
-read_file(path="/mnt/user-data/uploads/document.pdf")
-
-# 读取转换后的 Markdown（推荐）
+# 二进制原件无法用 read_file 打开；使用 Converted text 路径
 read_file(path="/mnt/user-data/uploads/document.md")
 ```
 
@@ -221,12 +227,15 @@ print(response.json())
 ```
 backend/.deer-flow/threads/
 └── {thread_id}/
+    ├── .deer-flow-companions.lock   # 在沙箱挂载之外：sidecar 写锁
+    ├── .deer-flow-companion-ids/    # 在沙箱挂载之外：companion inode 身份钉
     └── user-data/
         └── uploads/
             ├── document.pdf          # 原始文件
             ├── document.md           # 转换后的 Markdown
             ├── presentation.pptx
             ├── presentation.md
+            ├── .deer-flow-companions.json  # 隐藏：原文件 → companion 映射
             └── ...
 ```
 
