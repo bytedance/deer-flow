@@ -279,6 +279,65 @@ container or Pod, not the host machine.
 This integration is retrieval-only. Dataset creation, uploads, parsing, and
 deletion remain in RAGFlow and are not exposed as Agent tools or DeerFlow APIs.
 
+### LightRAG Knowledge Retrieval
+
+LightRAG integration is disabled by default. It is an alternative provider for
+the same read-only `knowledge_search` tool: an operator picks RAGFlow or
+LightRAG by which entry appears in the `tools:` list — the two entries share
+one name, and on duplicate names DeerFlow keeps the **first** configured
+entry, so configure exactly one. Requires LightRAG v1.4.8 or newer, where the
+data-retrieval endpoint first shipped. DeerFlow does not persist any index
+metadata; LightRAG stays the sole source of truth, and the deployment's
+single indexed workspace is always searched.
+
+```yaml
+tool_groups:
+  - name: knowledge
+
+tools:
+  - name: knowledge_search
+    group: knowledge
+    use: deerflow.community.lightrag.tools:knowledge_search_tool
+    base_url: http://localhost:9621
+    api_key: $LIGHTRAG_API_KEY
+    mode: mix
+    timeout: 30
+    top_k: 60
+    chunk_top_k: 8
+    max_chars_per_chunk: 800
+    max_total_chars: 8000
+```
+
+The tool is opt-in through the normal `tools:` list. Retrieval uses LightRAG's
+`POST /query/data` endpoint, which performs no LLM generation and returns
+structured entities, relationships, chunks, and references; DeerFlow keeps the
+chunks — the document text the selected mode already ranked as relevant — and
+formats them as citation-numbered text, dropping the graph objects to stay
+compact and keep the citation shape shared with the RAGFlow provider. `mode`
+selects the retrieval strategy (`naive`, `local`, `global`, `hybrid`, or
+`mix`; default `mix`, matching the LightRAG API's own `QueryRequest` default;
+`bypass` is rejected because it skips the index entirely). `top_k` bounds the
+entities retrieved in `local` mode or relationships in `global` mode, and the
+optional `chunk_top_k` bounds the text chunks retrieved and kept after
+reranking; both are capped at 1000 by the LightRAG server. Short queries that
+fail LightRAG's minimum-length validation surface the server's readable
+message. `max_chars_per_chunk` / `max_total_chars` bound the model-visible
+output size.
+
+`api_key` is optional because LightRAG may run without authentication. Only
+omit it for loopback or trusted-network deployments — a network-exposed
+LightRAG must have authentication enabled, and then the key is sent as the
+`X-API-Key` header and redacted from every model-visible error and from
+server logs. Blank values are treated as unauthenticated. `base_url` must not
+contain embedded username or password information, and for Docker or
+Kubernetes it must be reachable from the Gateway container or Pod.
+
+Internal identifiers (chunk IDs and the response-local reference IDs) are
+never exposed to the Agent; citations use the operator-readable `file_path`.
+This integration is retrieval-only. Document insertion, indexing, and graph
+mutation remain in LightRAG and are not exposed as Agent tools or DeerFlow
+APIs.
+
 ### Tool Groups
 
 Organize tools into logical groups:

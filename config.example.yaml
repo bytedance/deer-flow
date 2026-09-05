@@ -746,6 +746,28 @@ tools:
   #   max_chars_per_chunk: 800
   #   max_total_chars: 8000
 
+  # LightRAG knowledge retrieval (read-only). Alternative provider for the same
+  # knowledge_search tool; uncomment this entry instead of the RAGFlow one —
+  # duplicate names keep the first entry, so configure exactly one. Requires
+  # LightRAG v1.4.8+ (data-retrieval endpoint). Searches the deployment's
+  # single indexed workspace through the data retrieval endpoint (no LLM
+  # generation inside LightRAG). `api_key` is optional; only omit it for
+  # loopback/trusted-network servers — when auth is enabled the key is sent as
+  # the X-API-Key header. `mode` picks the retrieval strategy: naive, local,
+  # global, hybrid, or mix (default mix, matching LightRAG's own default).
+  # Internal chunk and reference identifiers never reach the model.
+  # - name: knowledge_search
+  #   group: knowledge
+  #   use: deerflow.community.lightrag.tools:knowledge_search_tool
+  #   base_url: http://localhost:9621  # Docker: use a backend-reachable URL
+  #   api_key: $LIGHTRAG_API_KEY  # Omit only for unauthenticated trusted servers
+  #   mode: mix
+  #   timeout: 30
+  #   top_k: 60
+  #   chunk_top_k: 8  # Optional; omit to use the server default
+  #   max_chars_per_chunk: 800
+  #   max_total_chars: 8000
+
   # Web search tool (uses DuckDuckGo, no API key required)
   - name: web_search
     group: web
