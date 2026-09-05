@@ -211,14 +211,30 @@ class MCPSessionPool:
             # up holding an unmanaged session.
             loop = asyncio.get_running_loop()
             task = asyncio.current_task()
+            promoted_evicted: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]] = []
             with self._lock:
                 still_ours = self._inflight.get(key) == (loop, ready, task, close_evt)
                 if still_ours:
                     self._inflight.pop(key)
+                    # Different keys can finish initialization concurrently.
+                    # They may all pass the earlier capacity check while no
+                    # session is registered, so enforce the cap again at the
+                    # single owner-controlled commit point.
+                    while len(self._entries) >= self.MAX_SESSIONS:
+                        oldest_key, (_, ent_loop, ent_task, ent_close) = next(iter(self._entries.items()))
+                        self._entries.pop(oldest_key)
+                        promoted_evicted.append((ent_loop, ent_task, ent_close))
                     self._entries[key] = (session, loop, task, close_evt)
                     if not ready.done():
                         ready.set_result(session)
             if still_ours:
+                # Signal every victim before awaiting any teardown so this
+                # owner cannot strand a removed session if it is cancelled.
+                for ent_loop, _ent_task, ent_close in promoted_evicted:
+                    self._signal_close(ent_loop, ent_close)
+                for ent_loop, ent_task, ent_close in promoted_evicted:
+                    if ent_loop is loop and not ent_loop.is_closed():
+                        await self._shutdown(ent_close, ent_task)
                 logger.info("Created persistent MCP session for %s/%s", key[0], key[1])
             elif not ready.done():
                 ready.set_exception(asyncio.CancelledError("MCP session pool was closed while the session was being created"))
@@ -402,8 +418,8 @@ class MCPSessionPool:
                         self._inflight.pop(key)
             raise
 
-        # Phase 4: the commit inside the owner task already promoted the
-        # creation into a registered entry; nothing left to decide here.
+        # Phase 4: the owner task already promoted the initialized session and
+        # enforced capacity in the same commit critical section.
         return session
 
     # ------------------------------------------------------------------
