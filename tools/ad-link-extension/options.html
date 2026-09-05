@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="utf-8">
+    <title>DeerFlow Ad Link 設定</title>
+    <style>
+      body { max-width: 640px; margin: 32px auto; padding: 0 20px; font: 16px system-ui, sans-serif; }
+      label { display: block; margin: 16px 0 6px; font-weight: 600; }
+      input, textarea { box-sizing: border-box; width: 100%; padding: 8px; }
+      textarea { min-height: 90px; }
+      button { margin-top: 20px; padding: 9px 18px; }
+      #status { color: #176b2c; }
+    </style>
+  </head>
+  <body>
+    <h1>DeerFlow Ad Link</h1>
+    <p>API Key 只放在 DeerFlow 後端，不要貼在這裡。</p>
+    <label for="apiBaseUrl">DeerFlow Gateway URL</label>
+    <input id="apiBaseUrl" type="url" placeholder="http://localhost:8001">
+    <label for="affiliateId">Affiliates.One aff_uniq_id</label>
+    <input id="affiliateId" type="text" placeholder="例如：mytracking">
+    <label><input id="enabled" type="checkbox"> 啟用自動轉換</label>
+    <label for="excludedDomains">排除網域（每行一個）</label>
+    <textarea id="excludedDomains" placeholder="nike.com"></textarea>
+    <label for="excludedUrls">排除完整網址（每行一個）</label>
+    <textarea id="excludedUrls"></textarea>
+    <button id="save" type="button">儲存設定</button>
+    <span id="status"></span>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>
