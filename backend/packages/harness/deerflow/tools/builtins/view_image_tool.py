@@ -68,6 +68,7 @@ def view_image_tool(
         image_path: Absolute /mnt/user-data virtual path or configured local-mount path to the image file. On Windows LocalSandbox, a configured host spelling is also accepted. Common formats supported: jpg, jpeg, png, webp, gif.
     """
     from deerflow.sandbox.exceptions import SandboxError
+    from deerflow.sandbox.security import uses_local_sandbox_provider
     from deerflow.sandbox.tools import (
         ensure_sandbox_initialized,
         get_thread_data,
@@ -79,8 +80,9 @@ def view_image_tool(
 
     thread_data = get_thread_data(runtime)
     local_runtime = is_local_sandbox(runtime)
+    local_provider = local_runtime or uses_local_sandbox_provider()
     try:
-        if local_runtime:
+        if local_provider:
             image_path = normalize_local_tool_path(image_path)
     except (PermissionError, SandboxError):
         # Host-path normalization can fail before a virtual path is available;
@@ -89,7 +91,7 @@ def view_image_tool(
             update={"messages": [ToolMessage("Error: Image path is not allowed", tool_call_id=tool_call_id)]},
         )
 
-    if not _is_allowed_image_virtual_path(image_path, allow_custom_mount=local_runtime):
+    if not _is_allowed_image_virtual_path(image_path, allow_custom_mount=local_provider):
         return Command(
             update={
                 "messages": [
@@ -103,7 +105,7 @@ def view_image_tool(
 
     try:
         validate_local_tool_path(image_path, thread_data, read_only=True)
-        if local_runtime:
+        if local_provider:
             from deerflow.sandbox.tools import _is_custom_mount_path
 
             if _is_custom_mount_path(image_path):

@@ -24,6 +24,18 @@ Date-update format:
     <system-reminder>
     <current_date>2026-05-09, Saturday</current_date>
     </system-reminder>
+
+By default the injected date follows the server's local timezone. Set the
+``DEER_FLOW_DATE_TIMEZONE`` environment variable to an IANA timezone name (for
+example ``Asia/Shanghai``) when the host clock runs UTC but the conversation
+date should follow another zone. Invalid values log a warning and fall back to
+the server-local timezone.
+
+The knob is deliberately an environment variable rather than a config field:
+it is read directly by both date-context middlewares at injection time, so an
+operator can point a container at another zone without mounting a config.yaml,
+and the lead and built-in-subagent paths can never drift apart on which zone
+they render.
 """
 
 from __future__ import annotations
@@ -31,10 +43,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
+import posixpath
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, tzinfo
 from typing import TYPE_CHECKING, override
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
@@ -76,8 +91,101 @@ __all__ = [
 ]
 
 
+_DATE_TIMEZONE_ENV = "DEER_FLOW_DATE_TIMEZONE"
+
+
+def _date_timezone() -> tzinfo | None:
+    """Resolve the configured IANA timezone for injected dates, or None for server-local."""
+    raw = os.environ.get(_DATE_TIMEZONE_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        return ZoneInfo(raw)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        # Only configuration-shaped failures degrade to server-local. A
+        # BlockingError-style guard (blocking-I/O regression suite) or any
+        # unrelated exception must propagate instead of being misread as an
+        # invalid timezone name.
+        logger.warning("Invalid %s=%r; falling back to the server-local timezone", _DATE_TIMEZONE_ENV, raw)
+        return None
+
+
+def _server_local_timezone_name() -> str | None:
+    """IANA key of the server's local zone, or ``None`` when not resolvable.
+
+    ``datetime.now().astimezone().tzinfo`` is always a plain fixed-offset
+    ``datetime.timezone`` (an abbreviation such as ``CST`` is ambiguous and
+    DST-churns), never a ``zoneinfo.ZoneInfo`` carrying an IANA key. The key is
+    instead read from the platform: the ``TZ`` environment variable when it
+    names a real zone, or the ``/etc/localtime`` symlink target on
+    Linux/macOS. Only the symlink's *direct* target is read (``os.readlink``),
+    not a fully resolved path: on macOS ``/etc/localtime`` points into
+    ``/var/db/timezone/zoneinfo/`` whose own directory symlink resolves to a
+    versioned path (``.../tz/<version>/zoneinfo/...``) that would defeat any
+    fixed prefix list. The zone key is whatever follows the last ``/zoneinfo/``
+    segment. Hosts with no symlink (Windows, stripped containers) return
+    ``None``.
+    """
+    tz_env = os.environ.get("TZ", "").strip()
+    if tz_env:
+        try:
+            return ZoneInfo(tz_env).key
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            pass
+    try:
+        target = os.readlink("/etc/localtime")
+    except OSError:
+        return None
+    if not target.startswith("/"):
+        target = posixpath.normpath(posixpath.join("/etc", target))
+    zoneinfo_marker = "/zoneinfo/"
+    marker_index = target.rfind(zoneinfo_marker)
+    if marker_index == -1:
+        return None
+    key = target[marker_index + len(zoneinfo_marker) :]
+    if not key or key.startswith("/") or ".." in key:
+        return None
+    return key
+
+
+def _server_local_utc_offset_minutes() -> int:
+    """Current UTC offset of the server's local zone, in minutes."""
+    offset = datetime.now().astimezone().utcoffset()
+    return int(offset.total_seconds() // 60) if offset is not None else 0
+
+
+def _effective_date_timezone_name() -> str:
+    """Stable label of the timezone the injected date actually follows.
+
+    A configured, valid ``DEER_FLOW_DATE_TIMEZONE`` is reported by its IANA
+    key; without one, the server-local zone is reported by its resolved IANA
+    key when the platform exposes it. When no IANA key is recoverable the
+    declaration falls back to a ``server-local(±HH:MM)`` sentinel carrying the
+    current UTC offset - never a bare abbreviation, which would be ambiguous
+    (``CST`` is shared by China, US Central, and Cuba) and would churn across
+    DST. Declaring the effective zone (never a bare ``probed``) lets the
+    assembly descriptor tell deployments that anchor the injected date
+    differently apart.
+    """
+    tz = _date_timezone()
+    if tz is not None:
+        key = getattr(tz, "key", None)
+        if isinstance(key, str) and key:
+            return key
+        return "UTC"
+    local_key = _server_local_timezone_name()
+    if local_key is not None:
+        return local_key
+    offset_minutes = _server_local_utc_offset_minutes()
+    sign = "+" if offset_minutes >= 0 else "-"
+    offset_minutes = abs(offset_minutes)
+    return f"server-local({sign}{offset_minutes // 60:02d}:{offset_minutes % 60:02d})"
+
+
 def _format_current_date() -> str:
-    return datetime.now().strftime("%Y-%m-%d, %A")
+    tz = _date_timezone()
+    now = datetime.now(tz) if tz is not None else datetime.now()
+    return now.strftime("%Y-%m-%d, %A")
 
 
 def _format_current_date_reminder(current_date: str) -> str:
@@ -163,6 +271,10 @@ class SubagentDateContextMiddleware(AgentMiddleware):
     model call without coupling the two runtime paths.
     """
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        """The injected date's effective timezone is this middleware's behaviour identity."""
+        return {"current_date_timezone": _effective_date_timezone_name()}
+
     @staticmethod
     def _inject() -> dict:
         current_date = _format_current_date()
@@ -185,8 +297,24 @@ class SubagentDateContextMiddleware(AgentMiddleware):
         return self._inject()
 
     @override
-    async def abefore_agent(self, state, runtime: Runtime) -> dict:
-        return self._inject()
+    async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
+        # _inject() can resolve DEER_FLOW_DATE_TIMEZONE through ZoneInfo,
+        # which reads the OS zone database (or the tzdata wheel) on a cold
+        # cache. SubagentDateContextMiddleware runs on the async subagent path,
+        # where no assembly observer necessarily warmed that resolution first,
+        # so the injection is offloaded like DynamicContextMiddleware does (see
+        # #3402) to keep filesystem work off the event loop.
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._inject),
+                timeout=_INJECT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "SubagentDateContextMiddleware: date injection timed out (%.1fs); skipping for this run",
+                _INJECT_TIMEOUT_SECONDS,
+            )
+            return None
 
 
 class DynamicContextMiddleware(AgentMiddleware):
@@ -221,6 +349,10 @@ class DynamicContextMiddleware(AgentMiddleware):
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        """Declare the injected date's effective timezone for assembly identity."""
+        return {"current_date_timezone": _effective_date_timezone_name()}
 
     def _build_full_reminder(self, runtime: Runtime | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).

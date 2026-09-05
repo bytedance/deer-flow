@@ -12,6 +12,7 @@ from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -772,6 +773,7 @@ class SubagentExecutor:
         parent_model: str | None = None,
         sandbox_state: SandboxState | None = None,
         thread_data: ThreadDataState | None = None,
+        uploaded_files: list[dict[str, Any]] | None = None,
         thread_id: str | None = None,
         trace_id: str | None = None,
         user_id: str | None = None,
@@ -799,6 +801,9 @@ class SubagentExecutor:
             parent_model: The parent agent's model name for inheritance.
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
+            uploaded_files: Snapshot of files uploaded in the parent's current
+                run. Seeded into the child graph state so ``list_uploaded_files``
+                can exclude them from historical-upload results.
             thread_id: Thread ID for sandbox operations.
             trace_id: Trace ID from parent for distributed tracing.
             user_id: User ID captured from the parent tool's runtime context.
@@ -845,6 +850,7 @@ class SubagentExecutor:
             self.model_name = None
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
+        self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.thread_id = thread_id
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
@@ -1256,11 +1262,15 @@ class SubagentExecutor:
             "messages": messages,
         }
 
-        # Pass through sandbox and thread data from parent
+        # Pass through the parent runtime state that tools need. Each child
+        # receives fresh containers so graph writes never mutate the snapshot
+        # held by another execution.
         if self.sandbox_state is not None:
             state["sandbox"] = self.sandbox_state
         if self.thread_data is not None:
             state["thread_data"] = self.thread_data
+        if self.uploaded_files is not None:
+            state["uploaded_files"] = deepcopy(self.uploaded_files)
 
         return state, final_tools, deferred_setup
 

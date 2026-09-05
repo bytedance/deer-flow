@@ -59,25 +59,35 @@ class AioSandbox(Sandbox):
     #: the next — recorded bash evidence cannot prove a clean environment.
     persistent_shell_sessions = True
 
-    def __init__(self, id: str, base_url: str, home_dir: str | None = None):
+    def __init__(
+        self,
+        id: str,
+        base_url: str,
+        home_dir: str | None = None,
+        request_headers: dict[str, str] | None = None,
+    ):
         """Initialize the AIO sandbox.
 
         Args:
             id: Unique identifier for this sandbox instance.
             base_url: URL of the sandbox API (e.g., http://localhost:8080).
             home_dir: Home directory inside the sandbox. If None, will be fetched from the sandbox.
+            request_headers: Trusted control-plane headers required by a local
+                relay. These are never injected into sandbox commands.
         """
         super().__init__(id)
         self._base_url = base_url
+        client_kwargs = {
+            "base_url": base_url,
+            "timeout": 600,
+        }
+        if request_headers:
+            client_kwargs["headers"] = dict(request_headers)
         if sandbox_http_trust_env(base_url):
-            self._client = AioSandboxClient(base_url=base_url, timeout=600)
+            self._client = AioSandboxClient(**client_kwargs)
         else:
             direct_client = httpx.Client(timeout=600, follow_redirects=True, trust_env=False)
-            self._client = AioSandboxClient(
-                base_url=base_url,
-                timeout=600,
-                httpx_client=direct_client,
-            )
+            self._client = AioSandboxClient(**client_kwargs, httpx_client=direct_client)
         self._home_dir = home_dir
         self._lock = threading.Lock()
         self._scope_registry_lock = threading.Lock()

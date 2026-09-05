@@ -204,6 +204,33 @@ def test_view_image_tool_reads_image_from_custom_mount(tmp_path) -> None:
     assert result.update["viewed_images"]["/root/chart.png"]["actual_path"] == str(image_path)
 
 
+def test_view_image_custom_mount_lazy_initializes_local_provider(tmp_path) -> None:
+    from base64 import b64decode
+
+    from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+
+    image_path = tmp_path / "chart.png"
+    image_path.write_bytes(b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="))
+    mount = VolumeMountConfig(host_path=str(tmp_path), container_path="/root", read_only=True)
+    runtime = SimpleNamespace(
+        state={"thread_data": _POSIX_THREAD_DATA},
+        context={"thread_id": "thread-1"},
+        config={},
+    )
+    with (
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=[mount]),
+        patch("deerflow.sandbox.security.uses_local_sandbox_provider", return_value=True),
+        patch("deerflow.sandbox.tools.ensure_sandbox_initialized") as acquire,
+        patch("deerflow.sandbox.tools.validate_local_tool_path"),
+        patch("deerflow.sandbox.tools._is_custom_mount_path", return_value=True),
+    ):
+        acquire.return_value = LocalSandbox("local", [PathMapping("/root", str(tmp_path), True)])
+        result = view_image_tool.func(runtime, "/root/chart.png", "call-lazy-custom-image")
+
+    assert _message_content(result) == "Successfully read image"
+    acquire.assert_called_once_with(runtime)
+
+
 def test_view_image_user_data_does_not_acquire_sandbox() -> None:
     runtime = _runtime()
     with (

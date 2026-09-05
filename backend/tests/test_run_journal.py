@@ -1306,7 +1306,8 @@ class TestChatModelStartHumanMessage:
         assert not any(e["event_type"] == "llm.human.input" for e in events)
 
     @pytest.mark.anyio
-    async def test_hidden_human_input_response_is_captured(self, journal_setup):
+    @pytest.mark.parametrize("source", ["ask_clarification", "sandbox_network"])
+    async def test_hidden_human_input_response_is_captured(self, journal_setup, source):
         """Hidden HumanInputCard replies are user-authored and must survive compaction."""
         from langchain_core.messages import HumanMessage
 
@@ -1315,7 +1316,7 @@ class TestChatModelStartHumanMessage:
             content='For your clarification "Which environment?", my answer is: staging',
             additional_kwargs={
                 "hide_from_ui": True,
-                "human_input_response": self._human_input_response(),
+                "human_input_response": self._human_input_response(source=source),
             },
         )
         j.on_chat_model_start({}, [[hidden_response]], run_id=uuid4(), tags=["lead_agent"])
