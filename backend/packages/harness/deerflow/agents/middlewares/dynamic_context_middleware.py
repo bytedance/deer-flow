@@ -53,7 +53,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
@@ -345,14 +345,24 @@ class DynamicContextMiddleware(AgentMiddleware):
     day see the corrected date in history and skip re-injection.
     """
 
-    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None):
+    def __init__(
+        self,
+        agent_name: str | None = None,
+        *,
+        app_config: AppConfig | None = None,
+        memory_enabled: bool = True,
+    ):
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config
+        self._memory_enabled = memory_enabled
 
     def release_policy_parameters(self) -> dict[str, object]:
-        """Declare the injected date's effective timezone for assembly identity."""
-        return {"current_date_timezone": _effective_date_timezone_name()}
+        """Declare memory and date behavior for assembly identity."""
+        return {
+            "current_date_timezone": _effective_date_timezone_name(),
+            "memory_enabled": self._memory_enabled,
+        }
 
     def _build_full_reminder(self, runtime: Runtime | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
@@ -364,7 +374,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
+        injection_enabled = self._memory_enabled and (self._app_config.memory.injection_enabled if self._app_config else True)
         memory_context = (
             _get_memory_context(
                 self._agent_name,
@@ -383,6 +393,18 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     def _build_date_update_reminder(self) -> str:
         return _format_current_date_reminder(_format_current_date())
+
+    def _disabled_memory_removals(self, messages: list) -> list[RemoveMessage]:
+        """Remove only frozen memory messages owned by this middleware."""
+        if self._memory_enabled:
+            return []
+
+        removals: list[RemoveMessage] = []
+        for message in messages:
+            message_id = str(message.id or "")
+            if isinstance(message, HumanMessage) and message_id.endswith("__memory") and is_dynamic_context_reminder(message):
+                removals.append(RemoveMessage(id=message_id))
+        return removals
 
     @staticmethod
     def _make_reminder_and_user_messages(
@@ -451,6 +473,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         messages = list(state.get("messages", []))
         if not messages:
             return None
+        memory_removals = self._disabled_memory_removals(messages)
 
         current_date = _format_current_date()
         last_date = _last_injected_date(messages)
@@ -475,7 +498,7 @@ class DynamicContextMiddleware(AgentMiddleware):
             # the stale first message as if it were the current turn.
             target_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
             if target_idx is None:
-                return None
+                return {"messages": memory_removals} if memory_removals else None
             date_reminder, memory_block = self._build_full_reminder(runtime)
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into last HumanMessage id=%r",
@@ -483,20 +506,20 @@ class DynamicContextMiddleware(AgentMiddleware):
                 messages[target_idx].id,
             )
             result_msgs = self._make_reminder_and_user_messages(messages[target_idx], date_reminder, memory_block, reminder_date=current_date)
-            return {"messages": result_msgs}
+            return {"messages": [*memory_removals, *result_msgs]}
 
         if last_date == current_date:
             # ── Same day: nothing to do ──────────────────────────────────────────
-            return None
+            return {"messages": memory_removals} if memory_removals else None
 
         # ── Midnight crossed: inject date-update reminder as a SystemMessage ──
         last_human_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
         if last_human_idx is None:
-            return None
+            return {"messages": memory_removals} if memory_removals else None
 
         result_msgs = self._make_reminder_and_user_messages(messages[last_human_idx], self._build_date_update_reminder(), reminder_date=current_date)
         logger.info("DynamicContextMiddleware: midnight crossing detected — injected date update before current turn")
-        return {"messages": result_msgs}
+        return {"messages": [*memory_removals, *result_msgs]}
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
@@ -506,6 +529,11 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
+        # The opt-out cleanup is an in-memory ownership check and must not be
+        # coupled to the time-boxed date/memory injection worker. Even if that
+        # worker times out, stale recalled memory must be gone before the next
+        # model call.
+        memory_removals = self._disabled_memory_removals(list(state.get("messages", [])))
         # _inject() performs synchronous file I/O (memory JSON loading) and
         # potentially blocking network calls (tiktoken encoding download on
         # first use).  Offload to a thread so the event loop is never blocked
@@ -528,7 +556,7 @@ class DynamicContextMiddleware(AgentMiddleware):
                 _INJECT_TIMEOUT_SECONDS,
             )
             self._record_effective_memory(state, None, runtime)
-            return None
+            return {"messages": memory_removals} if memory_removals else None
         self._record_effective_memory(state, result, runtime)
         return result
 
@@ -566,6 +594,9 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     def _record_effective_memory(self, state, update: dict | None, runtime: Runtime) -> None:
         """Attach the effective hidden memory block to the current run ledger."""
+        if not self._memory_enabled:
+            return
+
         context = getattr(runtime, "context", None)
         journal = context.get("__run_journal") if isinstance(context, dict) else None
         if journal is None:

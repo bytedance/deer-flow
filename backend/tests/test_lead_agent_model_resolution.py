@@ -183,6 +183,51 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
     }
 
 
+def test_make_lead_agent_applies_custom_agent_memory_opt_out(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    app_config.memory = MemoryConfig(enabled=True, mode="tool")
+    captured: dict[str, object] = {"memory_tool_appends": 0}
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(
+        lead_agent_module,
+        "load_agent_config",
+        lambda name, *, user_id=None: AgentConfig(name=name, memory_enabled=False),
+    )
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
+
+    def _build_middlewares(*args, **kwargs):
+        captured["middleware_memory_enabled"] = kwargs.get("memory_enabled")
+        return []
+
+    def _apply_prompt_template(**kwargs):
+        captured["prompt_memory_enabled"] = kwargs.get("memory_enabled")
+        return "system prompt"
+
+    def _append_memory_tools(_tools):
+        captured["memory_tool_appends"] = int(captured["memory_tool_appends"]) + 1
+
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", _build_middlewares)
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", _apply_prompt_template)
+    monkeypatch.setattr(lead_agent_module, "_append_memory_tools_without_name_conflicts", _append_memory_tools)
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+
+    lead_agent_module._make_lead_agent(
+        {"configurable": {"agent_name": "stateless-worker"}},
+        app_config=app_config,
+    )
+
+    assert captured == {
+        "memory_tool_appends": 0,
+        "middleware_memory_enabled": False,
+        "prompt_memory_enabled": False,
+    }
+
+
 def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
     middleware_calls: list[dict[str, object]] = []
@@ -642,6 +687,33 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     assert isinstance(middlewares[-3], ModelLengthFinishReasonMiddleware)
     assert isinstance(middlewares[-2], SafetyFinishReasonMiddleware)
     assert isinstance(middlewares[-1], ClarificationMiddleware)
+
+
+def test_build_middlewares_custom_agent_memory_opt_out_keeps_dynamic_date_only(monkeypatch):
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    summarization_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_create_summarization_middleware",
+        lambda **kwargs: summarization_kwargs.update(kwargs) or None,
+    )
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="safe-model",
+        agent_name="stateless-worker",
+        memory_enabled=False,
+        app_config=app_config,
+    )
+
+    dynamic_context = next(middleware for middleware in middlewares if isinstance(middleware, DynamicContextMiddleware))
+    assert dynamic_context._memory_enabled is False
+    assert summarization_kwargs["skip_memory_flush"] is True
+    assert not any(isinstance(middleware, MemoryMiddleware) for middleware in middlewares)
 
 
 def test_build_middlewares_prefers_startup_execution_capacity_after_reload(monkeypatch):

@@ -436,3 +436,77 @@ async def test_compact_thread_context_threads_selected_model_to_factory(monkeypa
     # 3. No request model, no agent → default.
     await compact_thread_context(_FakeAccessor({"messages": messages}), "thread-1", app_config=app_config, user_id="user-1")
     assert captured["run_model_name"] == "default-model"
+
+
+@pytest.mark.asyncio
+async def test_manual_compaction_skips_memory_flush_for_opted_out_agent(monkeypatch):
+    """The /compact path must honor the Custom Agent's complete memory opt-out."""
+    import deerflow.config.agents_config as agents_config
+
+    config_reads: list[tuple[str, str | None]] = []
+
+    def _load_agent_config(name, *, user_id=None):
+        config_reads.append((name, user_id))
+        return SimpleNamespace(model="agent-model", memory_enabled=False)
+
+    monkeypatch.setattr(
+        agents_config,
+        "load_agent_config",
+        _load_agent_config,
+    )
+    app_config = _model_app_config("default-model", "agent-model", "requested-model")
+    captured: dict[str, object] = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return _FakeCompactionMiddleware()
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", _capture)
+    messages = [HumanMessage(content="old"), AIMessage(content="answer"), HumanMessage(content="new")]
+
+    result = await compact_thread_context(
+        _FakeAccessor({"messages": messages}),
+        "thread-1",
+        app_config=app_config,
+        user_id="user-1",
+        agent_name="stateless-worker",
+        model_name="requested-model",
+    )
+
+    assert result.compacted is True
+    assert captured["run_model_name"] == "requested-model"
+    assert captured["skip_memory_flush"] is True
+    assert config_reads == [("stateless-worker", "user-1")]
+
+
+@pytest.mark.asyncio
+async def test_manual_compaction_fails_closed_when_agent_policy_cannot_load(monkeypatch):
+    """An unreadable Custom Agent config must not authorize a durable write."""
+    import deerflow.config.agents_config as agents_config
+
+    def _raise(*_args, **_kwargs):
+        raise OSError("agent config unavailable")
+
+    monkeypatch.setattr(agents_config, "load_agent_config", _raise)
+    app_config = _model_app_config("default-model", "requested-model")
+    captured: dict[str, object] = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return _FakeCompactionMiddleware()
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", _capture)
+    messages = [HumanMessage(content="old"), AIMessage(content="answer"), HumanMessage(content="new")]
+
+    result = await compact_thread_context(
+        _FakeAccessor({"messages": messages}),
+        "thread-1",
+        app_config=app_config,
+        user_id="user-1",
+        agent_name="stateless-worker",
+        model_name="requested-model",
+    )
+
+    assert result.compacted is True
+    assert captured["run_model_name"] == "requested-model"
+    assert captured["skip_memory_flush"] is True

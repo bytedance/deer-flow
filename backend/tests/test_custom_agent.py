@@ -659,8 +659,8 @@ class TestAgentsAPI:
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
 
-    def test_update_agent_preserves_hand_authored_github_block(self, agent_client):
-        """A hand-authored ``github:`` block on disk must survive PATCH.
+    def test_update_agent_preserves_hand_authored_non_managed_fields(self, agent_client):
+        """Hand-authored ``github:`` and ``memory_enabled`` fields must survive PATCH.
 
         The HTTP route does not expose ``github`` as an editable field
         (and rightly so — the GitHub App credentials and binding triggers
@@ -692,6 +692,7 @@ class TestAgentsAPI:
                 }
             ],
         }
+        config_data["memory_enabled"] = False
         config_file.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
 
         # PATCH only the description.
@@ -701,6 +702,7 @@ class TestAgentsAPI:
         # github: block must survive verbatim.
         reloaded = yaml.safe_load(config_file.read_text())
         assert reloaded["description"] == "new desc"
+        assert reloaded["memory_enabled"] is False
         assert reloaded["github"] == {
             "installation_id": 99999,
             "bot_login": "github-agent-bot",
