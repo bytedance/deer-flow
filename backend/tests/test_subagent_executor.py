@@ -85,12 +85,16 @@ def _setup_executor_classes():
     original_executor = sys.modules.get("deerflow.subagents.executor")
     original_audit_context = sys.modules.get("deerflow.agents.middlewares.audit_context")
     original_tool_search = sys.modules.get("deerflow.tools.builtins.tool_search")
+    original_sandbox_provider = sys.modules.get("deerflow.sandbox.sandbox_provider")
+    original_sandbox_overwrite = sys.modules.get("deerflow.sandbox.overwrite")
 
     # Preload real executor dependencies before replacing their parent packages
     # with cycle-breaking test doubles. Keeping the concrete leaf modules in
     # sys.modules makes this fixture independent of test collection order.
     audit_context_module = importlib.import_module("deerflow.agents.middlewares.audit_context")
     tool_search_module = importlib.import_module("deerflow.tools.builtins.tool_search")
+    sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
 
     # Remove mocked executor if exists (from conftest.py)
     if "deerflow.subagents.executor" in sys.modules:
@@ -106,6 +110,8 @@ def _setup_executor_classes():
     sys.modules["deerflow.skills.storage"] = storage_module
     sys.modules["deerflow.agents.middlewares.audit_context"] = audit_context_module
     sys.modules["deerflow.tools.builtins.tool_search"] = tool_search_module
+    sys.modules["deerflow.sandbox.sandbox_provider"] = sandbox_provider_module
+    sys.modules["deerflow.sandbox.overwrite"] = sandbox_overwrite_module
 
     # Import real classes inside fixture
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -158,6 +164,14 @@ def _setup_executor_classes():
         sys.modules["deerflow.tools.builtins.tool_search"] = original_tool_search
     else:
         sys.modules.pop("deerflow.tools.builtins.tool_search", None)
+    if original_sandbox_provider is not None:
+        sys.modules["deerflow.sandbox.sandbox_provider"] = original_sandbox_provider
+    else:
+        sys.modules.pop("deerflow.sandbox.sandbox_provider", None)
+    if original_sandbox_overwrite is not None:
+        sys.modules["deerflow.sandbox.overwrite"] = original_sandbox_overwrite
+    else:
+        sys.modules.pop("deerflow.sandbox.overwrite", None)
 
 
 # Helper classes that wrap real classes for testing
