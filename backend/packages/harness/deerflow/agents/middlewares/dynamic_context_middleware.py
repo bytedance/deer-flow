@@ -345,10 +345,21 @@ class DynamicContextMiddleware(AgentMiddleware):
     day see the corrected date in history and skip re-injection.
     """
 
-    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None):
+    def __init__(
+        self,
+        agent_name: str | None = None,
+        *,
+        app_config: AppConfig | None = None,
+        memory_enabled: bool = True,
+    ):
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config
+        self._memory_enabled = memory_enabled
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        """Declare the per-agent memory policy used by this middleware."""
+        return {"memory_enabled": self._memory_enabled}
 
     def release_policy_parameters(self) -> dict[str, object]:
         """Declare the injected date's effective timezone for assembly identity."""
@@ -364,7 +375,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
+        injection_enabled = self._memory_enabled and (self._app_config.memory.injection_enabled if self._app_config else True)
         memory_context = (
             _get_memory_context(
                 self._agent_name,
@@ -566,6 +577,9 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     def _record_effective_memory(self, state, update: dict | None, runtime: Runtime) -> None:
         """Attach the effective hidden memory block to the current run ledger."""
+        if not self._memory_enabled:
+            return
+
         context = getattr(runtime, "context", None)
         journal = context.get("__run_journal") if isinstance(context, dict) else None
         if journal is None:

@@ -118,6 +118,27 @@ def test_memory_included_when_present():
     assert msgs[2].content == "Hi"
 
 
+def test_memory_opt_out_keeps_date_reminder_without_reading_memory():
+    mw = _make_middleware(memory_enabled=False)
+    state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
+
+    with (
+        mock.patch(
+            "deerflow.agents.lead_agent.prompt._get_memory_context",
+            side_effect=AssertionError("disabled custom agent must not read memory"),
+        ),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime())
+
+    assert result is not None
+    assert len(result["messages"]) == 2
+    assert isinstance(result["messages"][0], SystemMessage)
+    assert "<current_date>2026-05-08, Friday</current_date>" in result["messages"][0].content
+    assert result["messages"][1].content == "Hi"
+
+
 def test_memory_lookup_uses_runtime_user_id():
     mw = _make_middleware()
     state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}

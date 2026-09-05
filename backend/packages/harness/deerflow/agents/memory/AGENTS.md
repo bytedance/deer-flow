@@ -72,6 +72,12 @@ Tool-mode injection includes only shared summaries.
 Tool mode leaves agent facts behind `memory_search`.
 `memory.injection_enabled: false` disables the complete injected block.
 
+Per-user lead-agent Custom Agents may set `memory_enabled: false` in their own
+`config.yaml`. This is a complete per-agent opt-out: dynamic context remains
+date-only, passive capture is not installed, tool mode exposes no memory tools
+or tool guidance, and the global memory configuration remains unchanged for
+other agents. Omission defaults to the existing enabled behavior.
+
 #### DeerMem storage contract
 
 `FileMemoryStorage` owns canonical storage and the retrieval adapter.

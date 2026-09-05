@@ -215,6 +215,9 @@ class AgentConfig(BaseModel):
     # Per-agent reasoning-effort default for models that support it. None = do
     # not override (a request-supplied reasoning_effort still wins over this).
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Disable every memory path for stateless execution-oriented agents while
+    # preserving the global memory configuration for all other agents.
+    memory_enabled: bool = True
     # Optional binding to GitHub repositories so this agent can respond to
     # webhook events from the gateway dispatcher. None means "no GitHub
     # integration", which is the case for every existing agent.

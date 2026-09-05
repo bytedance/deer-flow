@@ -1015,8 +1015,11 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
 
 
-def _build_memory_tool_section(*, app_config: AppConfig | None = None) -> str:
+def _build_memory_tool_section(*, app_config: AppConfig | None = None, memory_enabled: bool = True) -> str:
     """Build tool-mode memory guidance for the static system prompt."""
+    if not memory_enabled:
+        return ""
+
     try:
         if app_config is None:
             from deerflow.config.memory_config import get_memory_config
@@ -1056,6 +1059,7 @@ def apply_prompt_template(
     skill_names: frozenset[str] | None = None,
     allowed_subagents: list[str] | None = None,
     subagent_execution_capacity: int | None = None,
+    memory_enabled: bool = True,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = (
@@ -1138,7 +1142,7 @@ def apply_prompt_template(
         else "- Skill First: Always load the relevant skill before starting **complex** tasks.\n"
     )
 
-    memory_tool_section = _build_memory_tool_section(app_config=app_config)
+    memory_tool_section = _build_memory_tool_section(app_config=app_config, memory_enabled=memory_enabled)
 
     # Build and return the fully static system prompt.
     # Memory and current date are injected per-turn via DynamicContextMiddleware
