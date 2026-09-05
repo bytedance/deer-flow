@@ -1332,10 +1332,24 @@ def _lark_hardening_lock(user_id: str, paths: Paths):
 
 @contextmanager
 def _lark_credential_lock(user_id: str):
-    """Serialize credential replacement for one user across threads/processes."""
-    root = _lark_cli_credential_root(user_id)
-    root.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = root.parent / f".{INTEGRATION_ID}.credentials.lock"
+    """Serialize credential replacement for one user across threads/processes.
+
+    On Windows the advisory lock file is anchored directly under the trusted
+    ``paths.base_dir`` (mirroring :func:`_lark_hardening_lock`), because the per-user
+    chain is only validated by the handle-relative walker *after* this lock is taken —
+    writing a lock file beneath an unverified ancestor (e.g. a junction at
+    ``integrations``) would itself be a pathname write before reparse validation. POSIX
+    keeps the original location under the per-user ``integrations`` directory.
+    """
+    paths = get_paths()
+    user_dir = paths.user_dir(user_id)  # validates user_id
+    if os.name == "nt":
+        paths.base_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = paths.base_dir / f".{INTEGRATION_ID}.{user_dir.name}.credentials.lock"
+    else:
+        root = user_dir / "integrations" / INTEGRATION_ID
+        root.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = root.parent / f".{INTEGRATION_ID}.credentials.lock"
     with _exclusive_install_lock(lock_path, _lark_credential_thread_lock(user_id)):
         yield
 

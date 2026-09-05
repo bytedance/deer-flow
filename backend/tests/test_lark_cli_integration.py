@@ -1650,6 +1650,44 @@ def test_windows_credential_tree_rejects_reparse_ancestor(monkeypatch, tmp_path)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires a real NTFS junction")
+def test_public_config_flow_rejects_ancestor_junction_before_credential_lock_write(monkeypatch, tmp_path) -> None:
+    """A public config entry rejects an ancestor junction before the credential lock writes outside.
+
+    ``start_lark_config`` takes the per-user credential-operation lock, then reaches
+    ``ensure()`` (via the flow-generation advance), which validates the ancestor chain. The
+    credential-operation lock must be anchored under the trusted base_dir so it never writes a
+    lock file beneath an unverified ancestor — otherwise ``outside/.lark-cli.credentials.lock``
+    would be created through the junction before ``ensure()`` rejects it.
+    """
+    _patch_paths(monkeypatch, tmp_path / "home")
+    base = tmp_path / "home"
+    alice = base / "users" / "alice"
+    alice.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    integrations = alice / "integrations"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(integrations), str(outside)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    lock_file = outside / ".lark-cli.credentials.lock"
+    lock_file.write_bytes(b"")  # sentinel: detects a write to the old credential-lock path
+    try:
+        with pytest.raises(ValueError, match="reparse"):
+            lark_cli.start_lark_config("alice")
+        # The junction ancestor was rejected before the credential root was used, and the
+        # credential-operation lock never opened the external lock file (opening an empty
+        # a+b file under the old path would have written a b"\0" byte).
+        assert not (outside / "lark-cli").exists()
+        assert lock_file.read_bytes() == b""
+    finally:
+        if integrations.exists():
+            os.rmdir(integrations)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires a real NTFS junction")
 def test_windows_credential_tree_swap_blocked_by_exclusive_parent(monkeypatch, tmp_path) -> None:
     """An exclusive directory handle blocks a child swap mid-walk.
 
@@ -1970,6 +2008,8 @@ def test_save_lark_app_config_rehardens_files_written_by_cli(monkeypatch, tmp_pa
     def _run_init(*, app_id, app_secret, brand, env):
         config_file = Path(env["LARKSUITE_CLI_CONFIG_DIR"]) / "config.json"
         config_file.write_text('{"appSecret":"secret"}', encoding="utf-8")
+        if os.name != "nt":
+            config_file.chmod(0o644)  # simulate a permissive CLI-written file
 
     monkeypatch.setattr(lark_cli, "_run_lark_config_init", _run_init)
 
@@ -1978,6 +2018,8 @@ def test_save_lark_app_config_rehardens_files_written_by_cli(monkeypatch, tmp_pa
     config_file = lark_cli.lark_cli_config_dir("alice") / "config.json"
     assert config_file.exists()
     assert "alice" in rehardened, "a CLI-written config file must be re-hardened"
+    if os.name != "nt":
+        assert stat.S_IMODE(config_file.stat().st_mode) == 0o600, "POSIX re-harden must tighten the file mode"
 
 
 def test_validate_lark_app_credentials_surfaces_cli_probe_rejection(monkeypatch, tmp_path) -> None:
@@ -2022,12 +2064,16 @@ def test_run_lark_config_init_surfaces_cli_probe_rejection(monkeypatch) -> None:
 def test_lark_cli_json_rehardens_auth_files_written_by_cli(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
     rehardened: list[str] = []
+    orig_ensure = lark_cli.ensure_lark_cli_credential_tree
 
     def _spy_ensure(user_id, *, paths=None):
         # Record-only: this is an orchestration contract (the CLI writes files then
-        # re-hardens). The real ACL behavior is covered by the native Windows ACL
-        # regressions, so we do not run the identity probe here.
+        # re-hardens). On POSIX run the real walker so the tightened mode is observable;
+        # on Windows the native ACL regressions cover the real behavior (and the identity
+        # probe must not be intercepted by the CLI subprocess fake).
         rehardened.append(user_id)
+        if os.name != "nt":
+            return orig_ensure(user_id, paths=paths)
 
     monkeypatch.setattr(lark_cli, "ensure_lark_cli_credential_tree", _spy_ensure)
     # The env is built without the credential subsystem so the identity probe
@@ -2045,6 +2091,8 @@ def test_lark_cli_json_rehardens_auth_files_written_by_cli(monkeypatch, tmp_path
         token_file = Path(kwargs["env"]["LARKSUITE_CLI_DATA_DIR"]) / "auth.json"
         token_file.parent.mkdir(parents=True, exist_ok=True)
         token_file.write_text('{"token":"secret"}', encoding="utf-8")
+        if os.name != "nt":
+            token_file.chmod(0o644)  # simulate a permissive CLI-written file
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="{}", stderr="")
 
     monkeypatch.setattr(lark_cli.subprocess, "run", _run)
@@ -2054,6 +2102,8 @@ def test_lark_cli_json_rehardens_auth_files_written_by_cli(monkeypatch, tmp_path
     token_file = lark_cli.lark_cli_data_dir("alice") / "auth.json"
     assert token_file.exists()
     assert "alice" in rehardened, "a CLI-written auth file must be re-hardened"
+    if os.name != "nt":
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600, "POSIX re-harden must tighten the file mode"
 
 
 def test_lark_cli_env_from_runtime_uses_container_paths_for_sandbox_lark_commands():
