@@ -884,10 +884,10 @@ test.describe("Side chat", () => {
       model_name: "fast-model",
       thinking_enabled: false,
       is_plan_mode: false,
-      subagent_enabled: false,
       reasoning_effort: "minimal",
       thread_id: MOCK_SIDECAR_THREAD_ID,
     });
+    expect(streamBody?.context).not.toHaveProperty("subagent_enabled");
 
     const messages = streamBody?.input?.messages ?? [];
     expect(messages[0]?.additional_kwargs).toMatchObject({

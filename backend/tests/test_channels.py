@@ -3604,6 +3604,24 @@ class TestResolveRunParamsUserId:
         _, _, tg_ctx = manager._resolve_run_params(tg_msg, "thread-2")
         assert tg_ctx["channel_name"] == "telegram"
 
+    def test_default_channel_context_leaves_subagent_setting_unset(self):
+        """Channel defaults must not override a custom agent's delegation default."""
+        manager = self._manager()
+        msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="42", text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert "subagent_enabled" not in run_context
+
+    def test_explicit_channel_subagent_setting_is_preserved(self):
+        manager = self._manager()
+        manager._default_session["context"] = {"subagent_enabled": False}
+        msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="42", text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["subagent_enabled"] is False
+
     @pytest.mark.parametrize(
         "kwargs",
         [

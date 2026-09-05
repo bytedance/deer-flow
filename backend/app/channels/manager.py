@@ -69,7 +69,6 @@ DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "thinking_enabled": True,
     "is_plan_mode": False,
-    "subagent_enabled": False,
 }
 STREAM_UPDATE_MIN_INTERVAL_SECONDS = 1.0
 STREAM_UPDATE_MIN_CHARS = 60  # flush immediately when this many chars accumulate

@@ -91,7 +91,7 @@ class TestClientInit:
     def test_default_params(self, client):
         assert client._model_name is None
         assert client._thinking_enabled is True
-        assert client._subagent_enabled is False
+        assert client._subagent_enabled is None
         assert client._plan_mode is False
         assert client._agent_name is None
         assert client._available_skills is None
@@ -1100,6 +1100,57 @@ class TestExtractText:
 
 
 class TestEnsureAgent:
+    def test_uses_custom_agent_subagent_defaults_when_request_omits_them(self, client):
+        client._agent_name = "researcher"
+        config = client._get_runnable_config("t1")
+        assert "subagent_enabled" not in config["configurable"]
+
+        agent_config = SimpleNamespace(
+            subagent_enabled=True,
+            max_concurrent_subagents=2,
+            allowed_subagents=None,
+        )
+        with (
+            patch("deerflow.client.load_agent_config", return_value=agent_config) as mock_load_agent_config,
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]) as mock_get_tools,
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "u1"})
+
+        mock_load_agent_config.assert_called_once_with("researcher", user_id="u1")
+        mock_get_tools.assert_called_once_with(model_name="test-model", subagent_enabled=True)
+        assert mock_apply_prompt.call_args.kwargs["subagent_enabled"] is True
+        assert mock_apply_prompt.call_args.kwargs["max_concurrent_subagents"] == 2
+        assert config["configurable"]["subagent_enabled"] is True
+        assert config["configurable"]["max_concurrent_subagents"] == 2
+
+    def test_explicit_subagent_disable_overrides_custom_agent_default(self, client):
+        client._agent_name = "researcher"
+        config = client._get_runnable_config("t1", subagent_enabled=False)
+        agent_config = SimpleNamespace(
+            subagent_enabled=True,
+            max_concurrent_subagents=2,
+            allowed_subagents=None,
+        )
+        with (
+            patch("deerflow.client.load_agent_config", return_value=agent_config),
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]) as mock_get_tools,
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config)
+
+        mock_get_tools.assert_called_once_with(model_name="test-model", subagent_enabled=False)
+
     def test_authorization_filters_framework_tools_and_reuses_provider(self, client, mock_app_config):
         from deerflow.authz.provider import AuthzDecision, AuthzReason
 
@@ -1241,6 +1292,7 @@ class TestEnsureAgent:
         config = client._get_runnable_config("t1")
 
         with (
+            patch("deerflow.client.load_agent_config", return_value=None),
             patch("deerflow.client.create_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
             patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
@@ -1351,15 +1403,20 @@ class TestEnsureAgent:
 
     def test_reuses_agent_same_config(self, client):
         """_ensure_agent does not recreate if config key unchanged."""
-        mock_agent = MagicMock()
-        client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None, None, None, "full", 10, None)
-
         config = client._get_runnable_config("t1")
-        client._ensure_agent(config)
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config)
+            client._ensure_agent(config)
 
-        # Should still be the same mock — no recreation
-        assert client._agent is mock_agent
+        assert mock_create_agent.call_count == 1
 
     def test_recreates_agent_when_subagent_limits_change(self, client):
         """Subagent limit changes alter prompt/middleware and must invalidate the cached agent."""
