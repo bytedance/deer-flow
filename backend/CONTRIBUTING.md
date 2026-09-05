@@ -165,8 +165,8 @@ feat: add support for Claude 3.5 model
 - Update model factory to handle Claude-specific settings
 - Add tests for new model
 ```
-
 Prefix types:
+
 - `feat:` - New feature
 - `fix:` - Bug fix
 - `docs:` - Documentation
@@ -284,21 +284,56 @@ class MyMiddleware(AgentMiddleware[AgentState]):
     """Middleware description."""
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        """Runs before each model call. Return a dict of state updates, or None."""
+        """Run before each model call."""
+        print(f"Model input contains {len(state.get('messages', []))} messages")
         return None
 
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        """Runs after each model call. Inspect or modify the result."""
+        """Run after each model call."""
+        messages = state.get("messages", [])
+        last_message = messages[-1] if messages else None
+        print(f"Last message type: {type(last_message).__name__ if last_message else 'none'}")
         return None
 ```
 
-2. Register via `custom_middlewares` when building the agent:
+Lifecycle hooks can return a dictionary of state updates, which LangChain merges
+into the agent state, or `None` when they only observe state.
 
-```python
-middlewares = build_middlewares(
-    config, model_name, custom_middlewares=[MyMiddleware()], ...
-)
+2. Register the zero-argument middleware class in `config.yaml`:
+
+```yaml
+extensions:
+  middlewares:
+    - deerflow.agents.middlewares.my_middleware:MyMiddleware
 ```
+
+Configured middleware runs after the built-in middleware and optional loop/token
+guards. On the lead-agent pipeline, it runs before the terminal-response,
+model-length, safety, and clarification tail; subagents have no
+terminal-response, model-length, or clarification stage, so configured middleware is
+followed by the optional safety guard, `DurableContextMiddleware`, optional
+`SummarizationMiddleware`, then `SubagentDateContextMiddleware` and
+`SystemMessageCoalescingMiddleware`. Treat middleware class paths as trusted
+operator configuration because loading one executes Python code.
+Embedded callers can instead use `DeerFlowClient(middlewares=[...])`, which
+builds the full lead-agent chain and places middleware before its
+terminal-response, model-length, safety, and clarification tail.
+`create_deerflow_agent(extra_middleware=[...])` instead builds a smaller
+feature-based lead-agent chain; unanchored extras are placed immediately before
+`ClarificationMiddleware` (anchored extras follow their `@Next`/`@Prev`
+placement, but the anchor must be present in this smaller chain). Neither API
+forwards middleware to subagents.
+
+Choose the registration path by ownership and placement. The fixed-slot (not deprecated)
+`extensions.middlewares` list is accepted in `config.yaml` and
+`extensions_config.json` (`config.yaml` wins) and applies to both lead and
+subagent pipelines. Packaged extensions registered through the top-level
+`plugins:` list contribute middleware at semantic extension points. Contributor
+code that needs committed, programmatic lead-only wiring can use
+`build_middlewares(..., custom_middlewares=[MyMiddleware()])` at the
+`build_middlewares` call in
+`packages/harness/deerflow/agents/lead_agent/agent.py` (reached through
+`make_lead_agent`).
 
 ### Adding New API Endpoints
 
