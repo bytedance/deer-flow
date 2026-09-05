@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "protocol_id": "deermem-scope-isolation-v1",
+  "production_prompt_sha256": "55c68883bbb691a727b1614130e53858b141fb35de3ac80fea155ced8a2fb5c5",
+  "semantic_cases": [
+    {
+      "id": "semantic-durable-preference",
+      "scenario": "durable_preference",
+      "user_id": "eval-user-alpha",
+      "agent_name": "researcher",
+      "messages": [
+        {"role": "human", "content": "Across future conversations, I prefer summaries tagged DFMEM_DURABLE_SAFFRON_731."},
+        {"role": "ai", "content": "I will treat that as a durable response-style preference."}
+      ],
+      "seed_facts": [],
+      "expected": {"persist_canaries": ["DFMEM_DURABLE_SAFFRON_731"], "reject_canaries": [], "corrections": []},
+      "replay_response": {
+        "user": {}, "history": {},
+        "newFacts": [{"content": "User durably prefers summaries tagged DFMEM_DURABLE_SAFFRON_731", "category": "preference", "confidence": 0.99, "scope": "user", "durability": "durable", "authority": "descriptive"}],
+        "factsToRemove": []
+      }
+    },
+    {
+      "id": "semantic-task-constraint",
+      "scenario": "task_constraint",
+      "user_id": "eval-user-alpha",
+      "agent_name": "researcher",
+      "messages": [
+        {"role": "human", "content": "For this response only, format the draft with DFMEM_TASK_COBALT_912."},
+        {"role": "ai", "content": "I will apply that one-time format to this response."}
+      ],
+      "seed_facts": [],
+      "expected": {"persist_canaries": [], "reject_canaries": ["DFMEM_TASK_COBALT_912"], "corrections": []},
+      "replay_response": {
+        "user": {}, "history": {},
+        "newFacts": [{"content": "Current task uses DFMEM_TASK_COBALT_912", "category": "context", "confidence": 0.99, "scope": "thread", "durability": "temporary", "authority": "descriptive"}],
+        "factsToRemove": []
+      }
+    },
+    {
+      "id": "semantic-project-constraint",
+      "scenario": "project_constraint",
+      "user_id": "eval-user-alpha",
+      "agent_name": "researcher",
+      "messages": [
+        {"role": "human", "content": "In the current repository, release notes must include DFMEM_PROJECT_ORBIT_417."},
+        {"role": "ai", "content": "I will follow that repository-specific convention."}
+      ],
+      "seed_facts": [],
+      "expected": {"persist_canaries": [], "reject_canaries": ["DFMEM_PROJECT_ORBIT_417"], "corrections": []},
+      "replay_response": {
+        "user": {}, "history": {},
+        "newFacts": [{"content": "Current repository requires DFMEM_PROJECT_ORBIT_417 in release notes", "category": "context", "confidence": 0.99, "scope": "project", "durability": "durable", "authority": "descriptive"}],
+        "factsToRemove": []
+      }
+    },
+    {
+      "id": "semantic-transactional-authority",
+      "scenario": "transactional_authority",
+      "user_id": "eval-user-alpha",
+      "agent_name": "researcher",
+      "messages": [
+        {"role": "human", "content": "For this task, you may force-push this branch using DFMEM_AUTH_AMBER_855."},
+        {"role": "ai", "content": "I understand this is one-time authorization for the current task."}
+      ],
+      "seed_facts": [],
+      "expected": {"persist_canaries": [], "reject_canaries": ["DFMEM_AUTH_AMBER_855"], "corrections": []},
+      "replay_response": {
+        "user": {}, "history": {},
+        "newFacts": [{"content": "User authorizes DFMEM_AUTH_AMBER_855 for the current task", "category": "context", "confidence": 0.99, "scope": "user", "durability": "durable", "authority": "transactional"}],
+        "factsToRemove": []
+      }
+    },
+    {
+      "id": "semantic-mixed-scope",
+      "scenario": "mixed_scope",
+      "user_id": "eval-user-alpha",
+      "agent_name": "researcher",
+      "messages": [
+        {"role": "human", "content": "I always prefer DFMEM_DURABLE_INDIGO_204, but use DFMEM_TEMP_SCARLET_630 only in today's answer."},
+        {"role": "ai", "content": "I will separate the durable preference from today's temporary instruction."}
+      ],
+      "seed_facts": [],
+      "expected": {"persist_canaries": ["DFMEM_DURABLE_INDIGO_204"], "reject_canaries": ["DFMEM_TEMP_SCARLET_630"], "corrections": []},
+      "replay_response": {
+        "user": {}, "history": {},
+        "newFacts": [
+          {"content": "User durably prefers DFMEM_DURABLE_INDIGO_204", "category": "preference", "confidence": 0.99, "scope": "user", "durability": "durable", "authority": "descriptive"},
+          {"content": "Today's answer uses DFMEM_TEMP_SCARLET_630", "category": "context", "confidence": 0.99, "scope": "thread", "durability": "temporary", "authority": "descriptive"}
+        ],
+        "factsToRemove": []
+      }
+    },
+    {
+      "id": "semantic-user-correction",
+      "scenario": "user_correction",
+      "user_id": "eval-user-alpha",
+      "agent_name": "researcher",
+      "messages": [
+        {"role": "human", "content": "Correction: replace my old editor marker with DFMEM_NEW_EDITOR_744 for future conversations."},
+        {"role": "ai", "content": "I will update that durable preference atomically."}
+      ],
+      "seed_facts": [{"content": "DFMEM_OLD_EDITOR_311", "category": "preference", "confidence": 0.99}],
+      "expected": {
+        "persist_canaries": [], "reject_canaries": [],
+        "corrections": [{"old_canary": "DFMEM_OLD_EDITOR_311", "new_canary": "DFMEM_NEW_EDITOR_744"}]
+      },
+      "replay_response": {
+        "user": {}, "history": {},
+        "newFacts": [{"content": "User now durably prefers editor marker DFMEM_NEW_EDITOR_744", "category": "correction", "confidence": 0.99, "scope": "user", "durability": "durable", "authority": "descriptive"}],
+        "factsToRemove": [{"id": "$seed:DFMEM_OLD_EDITOR_311", "scope": "user", "reason": "User explicitly replaced the durable editor preference", "replacementFactIndex": 0}]
+      }
+    }
+  ],
+  "identity_cases": [
+    {
+      "id": "identity-custom-agent-routing",
+      "source_semantic_case_id": "semantic-durable-preference",
+      "probes": [
+        {"id": "same-user-same-agent", "user_id": "eval-user-alpha", "agent_name": "researcher", "dimension": "same_scope", "expected_visible": true},
+        {"id": "same-user-other-agent", "user_id": "eval-user-alpha", "agent_name": "writer", "dimension": "cross_agent", "expected_visible": false},
+        {"id": "same-user-default-agent", "user_id": "eval-user-alpha", "agent_name": null, "dimension": "cross_agent", "expected_visible": false},
+        {"id": "other-user-same-agent", "user_id": "eval-user-beta", "agent_name": "researcher", "dimension": "cross_user", "expected_visible": false}
+      ]
+    }
+  ]
+}
