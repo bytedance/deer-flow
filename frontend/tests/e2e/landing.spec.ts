@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { DEMO_THREAD_IDS } from "@/core/threads/static-demo";
+
 import { mockLangGraphAPI } from "./utils/mock-api";
 
 test.describe("Landing page", () => {
@@ -30,7 +32,9 @@ test.describe("Landing page", () => {
     });
   }
 
-  test("Get Started link navigates to workspace", async ({ page }) => {
+  test("Get Started link navigates to workspace", async ({
+    page,
+  }, testInfo) => {
     mockLangGraphAPI(page);
 
     await page.goto("/");
@@ -38,8 +42,15 @@ test.describe("Landing page", () => {
     const getStarted = page.getByRole("link", { name: /get started/i });
     await getStarted.click();
 
-    // Should redirect to /workspace/chats/new
-    await page.waitForURL("**/workspace/chats/new");
-    await expect(page).toHaveURL(/\/workspace\/chats\/new/);
+    if (testInfo.project.name === "static-website") {
+      // In static mode `/workspace` redirects to the demo thread, not /chats/new.
+      await expect(page).toHaveURL(
+        new RegExp(`/workspace/chats/${DEMO_THREAD_IDS[0]}$`),
+      );
+    } else {
+      // Full deployment: `/` redirects into the app, Get Started opens a new chat.
+      await page.waitForURL("**/workspace/chats/new");
+      await expect(page).toHaveURL(/\/workspace\/chats\/new/);
+    }
   });
 });

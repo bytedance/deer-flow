@@ -19,6 +19,8 @@ const withNextra = nextra({});
 
 /** @type {import("next").NextConfig} */
 const config = {
+  distDir:
+    process.env.PLAYWRIGHT_STATIC_WEBSITE === "1" ? ".next-static" : ".next",
   output:
     process.env.NEXT_CONFIG_BUILD_OUTPUT === "standalone"
       ? "standalone"
