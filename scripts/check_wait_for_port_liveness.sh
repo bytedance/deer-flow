@@ -26,9 +26,15 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WAIT="$ROOT/scripts/wait-for-port.sh"
 
+# PIDs are assigned further down, and early-failure paths (missing Python, a
+# failing case 1) exit before reaching them: initialize both before installing
+# the trap, and kill only assigned PIDs, so `set -u` cannot abort the trap and
+# skip the temporary-directory cleanup.
+dead_pid=""
+slow_pid=""
 TMP="$(mktemp -d)"
 # kill: on Windows, rm would block on files a still-running child keeps open
-trap 'kill $dead_pid $slow_pid 2>/dev/null; rm -rf "$TMP"' EXIT
+trap 'kill ${dead_pid:+"$dead_pid"} ${slow_pid:+"$slow_pid"} 2>/dev/null; rm -rf "$TMP"' EXIT
 
 fail() {
     echo "::error::$1" >&2
