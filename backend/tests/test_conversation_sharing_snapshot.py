@@ -2312,3 +2312,34 @@ def test_underscore_delimiter_flank_cannot_shield_workspace_routes():
     assert neutralize("/workspace/chats/id_https://a/SECRET") == "[private artifact omitted]://a/SECRET"
     # Emphasis-flanked routes still cut (pinned round-12 shape).
     assert neutralize(f"__/workspace/chats/{'a' * 64}__") == "__[private artifact omitted]"
+
+
+def test_underscore_id_bytes_do_not_terminate_the_reference_cut():
+    """Underscores are legal thread-id bytes and must not truncate the cut.
+
+    ``THREAD_ID_PATTERN`` allows ``_`` inside ids, but the probe branch's
+    phrase walk treated ``_`` as a Markdown terminator, so a bare reference
+    was cut at its first underscore and everything after it — most of the
+    id, plus any query string — published verbatim.
+    """
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    # The id tail after the last underscore used to survive byte-for-byte.
+    assert neutralize("api/threads/secret_tail_after_underscore_xyz123") == "[private artifact omitted]"
+    # The query string after an underscore-bearing id leaked with it.
+    assert neutralize("/api/threads/abc_def?x=1") == "[private artifact omitted]"
+    # Path structure continues through the id (control: hyphens already did).
+    assert neutralize("get /api/threads/abc_def/uploads/report.pdf now") == "get [private artifact omitted] now"
+    # A trailing underscore run before whitespace can close real emphasis
+    # (no id bytes leak — punctuation residue only), so it stays public.
+    assert neutralize("see /api/threads/abc_def__ end") == "see [private artifact omitted]__ end"
+
+    # Public text keeps its own punctuation and its own emphasis markers:
+    # a separated underscore after a complete reference is public prose.
+    assert neutralize("see /api/threads/abc now _emphasis_ next") == "see [private artifact omitted] now _emphasis_ next"
+    assert neutralize("download /api/threads/abc.") == "download [private artifact omitted]."
+    # Underscores in public content are untouched when no private phrase exists.
+    assert neutralize("C:\\Users\\bob_name\\report and snake_case stay") == "C:\\Users\\bob_name\\report and snake_case stay"
+    assert neutralize("[my_label_](https://example.com/a_b)") == "[my_label_](https://example.com/a_b)"
+    # The mount-name boundary keeps rejecting underscore-extended siblings.
+    assert neutralize("files live under mnt/user-data_extra/x") == "files live under mnt/user-data_extra/x"

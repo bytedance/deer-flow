@@ -1347,6 +1347,11 @@ _WORKSPACE_TEXT_TOKEN_RE = re.compile(r"[^\s<>\"]+")
 _WORKSPACE_HTTP_RE = re.compile(r"https?://", re.IGNORECASE)
 _WORKSPACE_LITERAL_HTTP_AUTHORITY_RE = re.compile(r"https?://[^/?#\s<>\"]+", re.IGNORECASE)
 _WORKSPACE_REFERENCE_TRAILING_PUNCTUATION = _REFERENCE_TRAILING_PUNCTUATION.replace("_", "")
+# Trailing trim for reference *cuts* mirrors the workspace variant: ``_`` is
+# a legal thread-id byte, so a glued underscore run at a cut end is id data
+# (or intraword literal text CommonMark can never turn into emphasis) — not
+# a public sentence boundary to preserve.
+_REFERENCE_CUT_TRAILING_PUNCTUATION = _REFERENCE_TRAILING_PUNCTUATION.replace("_", "")
 _API_THREAD_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/(?:langgraph/)?threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
 _API_RUN_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/(?:langgraph/)?runs/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
 _MNT_USER_DATA_RE = re.compile(r"(?<![\w.\-])mnt/user-data(?![\w.\-])", re.IGNORECASE)
@@ -1596,6 +1601,20 @@ def _phrase_end(value: str, end: int) -> int:
         if char in "/?#":
             end += 1
             continue
+        if char == "_":
+            # An underscore run is id data only when glued to a following
+            # id byte: CommonMark forbids intraword ``_`` emphasis, so
+            # ``secret_tail`` can never be a public emphasis boundary and
+            # cuts with the phrase. A run followed by punctuation or
+            # whitespace can delimit real emphasis (``x_,_``) and stays
+            # public — mirroring the workspace route's flank rule.
+            probe = end + 1
+            while probe < n and value[probe] == "_":
+                probe += 1
+            if probe < n and (value[probe].isalnum() or value[probe] == "-"):
+                end = probe
+                continue
+            break
         if char in _REFERENCE_CUT_TERMINATORS or char.isspace():
             break
         end += 1
@@ -2168,7 +2187,7 @@ def _collect_edits(text: str, normalized: str, spans: list[tuple[int, int]], edi
             if not _is_private_reference(value, include_workspace=False):
                 return
             end = _phrase_end(value, 0)
-            kept = _trim_reference_punctuation(value[:end])
+            kept = value.rstrip(_REFERENCE_CUT_TRAILING_PUNCTUATION)
             begin, stop = original_span(match.start(), match.start() + len(kept))
             if not conservative_gaps and (
                 # As-written fallback: only cover tokens the resolved pass
@@ -2186,7 +2205,7 @@ def _collect_edits(text: str, normalized: str, spans: list[tuple[int, int]], edi
         for start, end in segments:
             # Trailing sentence punctuation is kept out of the cut so the
             # public text keeps its own ``.``/``,``/``)`` after the marker.
-            kept = _trim_reference_punctuation(value[start:end])
+            kept = value[start:end].rstrip(_REFERENCE_CUT_TRAILING_PUNCTUATION)
             if not kept:
                 continue
             stop_index = match.start() + start + len(kept)
