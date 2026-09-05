@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from deerflow.skills.slash import RESERVED_SLASH_SKILL_NAMES
+
 
 @dataclass(frozen=True)
 class Command:
@@ -75,7 +77,7 @@ def build_registry(skills: list[dict]) -> list[Command]:
         if not skill.get("enabled", False):
             continue
         name = skill.get("name")
-        if not name or name in _BUILTIN_NAMES:
+        if not name or name in _BUILTIN_NAMES or name in RESERVED_SLASH_SKILL_NAMES:
             continue
         commands.append(Command(name=name, description=skill.get("description", "") or "", category="skill"))
     return commands
@@ -122,7 +124,7 @@ def resolve(text: str, skills: list[str] | None = None) -> Resolution:
     if name in _BUILTIN_NAMES:
         return Resolution(kind="builtin", name=name, args=args)
 
-    if skills and name in skills:
+    if skills and name in skills and name not in RESERVED_SLASH_SKILL_NAMES:
         return Resolution(kind="skill", name=name, args=args)
 
     return Resolution(kind="unknown", name=name, args=args)
