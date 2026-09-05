@@ -17,7 +17,7 @@ import posixpath
 import re
 import stat
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -70,6 +70,12 @@ _SPECS = [
     RuleSpec("python-shell-exec", "CRITICAL", "Python shell execution primitive is used in a skill file.", "Use subprocess with a fixed argument list and shell=False, or remove shell execution."),
     RuleSpec("python-sensitive-exfil", "CRITICAL", "Python code reads a sensitive path and uses an outbound network sink in the same file.", "Remove the sensitive read or network sink, and keep credential access outside skills."),
     RuleSpec("python-env-dump-exfil", "CRITICAL", "Python code reads the process environment in bulk and uses an outbound network sink in the same file.", "Avoid bulk environment reads and never send environment data over the network."),
+    RuleSpec(
+        "python-client-exfil-heuristic",
+        "HIGH",
+        "Python code reads sensitive data and calls an HTTP client method that the blocking client-handle signal cannot attribute to a client.",
+        "Confirm the client call does not send sensitive data; provable instance-client exfiltration is blocked outright.",
+    ),
     RuleSpec("python-reverse-shell", "CRITICAL", "Python code matches a reverse-shell shape.", "Remove reverse-shell behavior from the skill."),
     RuleSpec("python-dynamic-import", "HIGH", "Python dynamically imports a non-literal module.", "Use explicit imports or a constrained allowlist."),
     RuleSpec("python-subprocess", "HIGH", "Python invokes subprocess without shell=True.", "Review subprocess usage and keep arguments fixed and minimal."),
@@ -420,6 +426,11 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_for_node("python-sensitive-path-read", rel_path, sensitive_node, "sensitive path read"))
     if has_env_dump and has_network_sink:
         findings.append(_finding_for_node("python-env-dump-exfil", rel_path, env_node or network_node, "environment dump + network sink"))
+    if (has_sensitive_read or has_env_dump) and not has_network_sink:
+        # A cheap prefilter only: these flags come from the unrestricted walk above, so they are a
+        # superset of what the heuristic accepts. It recomputes both under its own lazy-node
+        # exclusion, because a payload the runtime never evaluates must not satisfy the rule.
+        findings.extend(_scan_python_client_heuristic(rel_path, tree, aliases))
     return findings
 
 
@@ -650,15 +661,32 @@ def _is_outbound_url(value: str) -> bool:
     return bool(value.startswith(("http://", "https://")) and (_http_host(value) or "") not in _LOCAL_HTTP_HOSTS)
 
 
+def _python_import_bindings(node: ast.Import | ast.ImportFrom) -> Iterator[tuple[str, str | None]]:
+    """Yield `(bound name, imported path)` for every name one import statement binds.
+
+    `import http.client` binds `http`, not `http.client`, and no identifier can spell a dotted key,
+    so the entry has to sit under the bound root or nothing ever looks it up. A bare relative import
+    (`from . import s`) still binds its name but names no resolvable module, so its path is `None`:
+    consumers that map names to paths skip it, while consumers that invalidate whatever a name held
+    before must not. Every import map in this module derives from this one rule so they cannot
+    disagree on what a spelling binds.
+    """
+    for alias in node.names:
+        if alias.name == "*":
+            continue
+        if isinstance(node, ast.Import):
+            name = alias.asname or alias.name.split(".")[0]
+            yield name, alias.name if alias.asname else name
+        else:
+            yield alias.asname or alias.name, f"{node.module}.{alias.name}" if node.module else None
+
+
 def _collect_python_aliases(tree: ast.AST) -> dict[str, str]:
+    """File-global import map, one path per bound name; a later import of the same name wins."""
     aliases: dict[str, str] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                aliases[alias.asname or alias.name] = alias.name
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            for alias in node.names:
-                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            aliases.update((name, path) for name, path in _python_import_bindings(node) if path is not None)
     return aliases
 
 
@@ -778,14 +806,24 @@ _PYTHON_CLIENT_SPECS = {
     "aiohttp.ClientSession": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options"}), async_context=True),
 }
 _PYTHON_CLIENT_CONSTRUCTORS = frozenset(_PYTHON_CLIENT_SPECS)
+_PYTHON_CLIENT_CONSTRUCTOR_NAMES = frozenset(constructor.rsplit(".", 1)[1] for constructor in _PYTHON_CLIENT_CONSTRUCTORS)
+# Every dotted prefix of a constructor path (`http`, `http.client`, `requests`, ...): the only import
+# paths that can still lead to a constructor, so the only ones the heuristic ever retains.
+_PYTHON_CLIENT_IMPORT_PATHS = frozenset(constructor.rsplit(".", depth)[0] for constructor in _PYTHON_CLIENT_CONSTRUCTORS for depth in range(constructor.count(".") + 1))
 _PYTHON_CLIENT_SINK_METHODS = frozenset().union(*(spec.methods for spec in _PYTHON_CLIENT_SPECS.values()))
 _PYTHON_CLIENT_ANALYSIS_BUDGET = 100_000
+# The heuristic pass below copies no scope state, so its limit is a plain node cap rather than the
+# charge-per-copy budget above. Kept independent so tuning one signal cannot silently move the other.
+_PYTHON_CLIENT_HEURISTIC_BUDGET = 50_000
 _PYTHON_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 _PYTHON_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 _PYTHON_MATCH_CAPTURE_NODES = (ast.MatchAs, ast.MatchStar, ast.MatchMapping)
 # Statements whose parts do not all run, or run an unknown number of times. Their bodies are
 # analyzed from a copy and every name they bind is dropped afterwards.
 _PYTHON_BRANCHING_NODES = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.Match)
+# PEP 695 type syntax is evaluated lazily -- an alias value or a type-parameter bound never runs on
+# import -- so both client passes skip it rather than report egress that cannot happen.
+_PYTHON_LAZILY_EVALUATED_NODES = (ast.TypeAlias, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)
 
 
 @dataclass
@@ -1202,15 +1240,12 @@ def _drop_client_bindings(scope: _ClientScope, names: set[str]) -> None:
 
 
 def _bind_client_import(node: ast.Import | ast.ImportFrom, scope: _ClientScope) -> None:
-    for alias in node.names:
-        if alias.name == "*":
-            continue
-        name = alias.asname or alias.name.split(".")[0]
+    for name, path in _python_import_bindings(node):
+        # Every import rebinds its name, so a live handle under it is gone even when the module
+        # cannot be resolved; only a resolvable path becomes a constructor alias.
         _drop_client_bindings(scope, {name})
-        if isinstance(node, ast.Import):
-            scope.aliases[name] = alias.name if alias.asname else name
-        elif node.module:
-            scope.aliases[name] = f"{node.module}.{alias.name}"
+        if path is not None:
+            scope.aliases[name] = path
 
 
 def _call_is_client_handle_sink(node: ast.Call, handles: dict[str, str]) -> bool:
@@ -1219,6 +1254,181 @@ def _call_is_client_handle_sink(node: ast.Call, handles: dict[str, str]) -> bool
         return False
     constructor = handles.get(func.value.id)
     return bool(constructor and func.attr in _PYTHON_CLIENT_SPECS[constructor].methods)
+
+
+# Non-blocking counterpart to the chain above. Issue #4296 records what that chain gives up: a name a
+# compound statement both calls and rebinds, a construction inside a branch, a walrus, and every
+# handle reached by a value rather than by a name. Staying silent there is only defensible while the
+# signal hard-blocks, because an ambiguous case costs a blocked benign skill. A warning can take the
+# opposite trade, so this pass takes it and reports the same shape at `HIGH`.
+#
+# The model is deliberately coarse -- a proven client constructor is called somewhere in the file,
+# and a method that constructor supports is called on some receiver. That is the shape PR #4265
+# measured against its precise version over 46,624 files, where both flagged exactly the same files;
+# spending path- and exception-aware machinery on the warning channel would buy the same result for
+# the cost that review already rejected once. Dropping the *name* requirement is what makes a
+# rebind, a branch, a walrus, an attribute hop, a container item, a factory return, and a
+# cross-scope flow stop mattering. The price is that an unrelated `.get(...)` in a file that also
+# builds a client and reads sensitive data matches too -- paid in a finding routed to the LLM
+# scanner for adjudication, never in a blocked install. That is the evaluation the #4265 review
+# asked for before any wider model is allowed to produce `CRITICAL` findings.
+#
+# Three syntactic anchors survive: the constructor must be spelled as a call through a proven
+# import, the sink must be spelled `<expr>.method(...)`, and the sink's receiver must not be a
+# *never-rebound* import alias -- an import proves the receiver is a module only while that alias
+# still holds one, so a name the file rebinds stays a candidate. "Proven" is read against every
+# path an import may bind the name to, not the last one: a name imported on both arms of a branch
+# holds whichever arm ran, and collapsing it would silence the branch-created client this rule
+# exists for. Only paths that can still reach a known constructor are retained, so an alias shared by
+# any number of unrelated imports costs nothing to resolve. The payload half, by contrast, is the
+# blocking rules' own signal recomputed under the lazy-node exclusion, so it resolves names exactly
+# as those rules do. A locally aliased constructor
+# (`Ctor = requests.Session`) and a detached or dynamic sink (`send = s.post`, `getattr(s, "post")`)
+# stay outside both signals. Lazily evaluated PEP 695 type syntax is skipped for sinks and payload
+# alike, for the same reason the blocking walker skips it: a value the runtime never evaluates
+# cannot satisfy the rule.
+#
+# The pass is iterative and node-budgeted, so an adversarial tree costs neither recursion nor branch
+# copies. Imports are recorded by the same walk and resolved only after it, against a map whose
+# per-name size is bounded by the constructor table, so no step of the pass does work that the
+# budget does not see. It runs only on files that already show an exfil payload and no proven sink
+# -- its cost is bounded by that gate as much as by the budget.
+
+
+@dataclass(frozen=True)
+class _ClientHeuristicHit:
+    """One heuristic sink, plus the exfil payload flags recomputed without lazily evaluated code."""
+
+    sink: ast.AST
+    sensitive_read: bool
+    env_dump: bool
+
+
+def _scan_python_client_heuristic(rel_path: str, tree: ast.AST, aliases: dict[str, str]) -> list[SecurityFinding]:
+    """Warn where the blocking client-handle chain gives up but the file still shows the exfil shape."""
+    try:
+        hit = _find_client_handle_heuristic_sink(tree, aliases, rel_path)
+    except RecursionError:
+        # Same contract as the blocking signal: an adversarially deep tree drops this best-effort
+        # finding and leaves every deterministic finding for the file in place.
+        logger.warning("SkillScan client-handle heuristic analysis hit recursion limit for %s", rel_path)
+        return []
+    if hit is None or not (hit.sensitive_read or hit.env_dump):
+        return []
+    payload = " + ".join(part for part, present in (("sensitive read", hit.sensitive_read), ("environment dump", hit.env_dump)) if present)
+    return [_finding_for_node("python-client-exfil-heuristic", rel_path, hit.sink, f"{payload} + unproven client egress")]
+
+
+def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], rel_path: str) -> _ClientHeuristicHit | None:
+    """Return the first supported client method call in a file that also constructs such a client.
+
+    `aliases` is the collapsed map the blocking rules resolve names with and serves the payload half
+    only. The constructor half resolves against every path an import may bind, recorded by this
+    walk and matched after it, so a conditional or scoped import cannot hide a client behind the one
+    that happened to be recorded last, and an import that appears after its use still counts.
+    """
+    remaining = _PYTHON_CLIENT_HEURISTIC_BUDGET
+    # Bound name -> import paths that can still reach a constructor. A name is present for every
+    # import that binds it, even with no such path, because presence alone is what proves a
+    # receiver is spelled as an import path rather than constructed in this file.
+    targets: dict[str, set[str]] = {}
+    constructor_calls: list[ast.expr] = []
+    candidates: list[tuple[str, str, ast.AST]] = []
+    rebound: set[str] = set()
+    sensitive_read = False
+    env_dump = False
+    stack: list[ast.AST] = [tree]
+    while stack:
+        if remaining <= 0:
+            # Report from the deterministic prefix already walked rather than scan an unbounded
+            # tree; under-reporting is the documented cost of every budget in this analyzer.
+            logger.warning("SkillScan client-handle heuristic analysis exhausted work budget for %s", rel_path)
+            break
+        remaining -= 1
+        node = stack.pop()
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            _record_client_import_targets(node, targets)
+        elif isinstance(node, ast.Call):
+            # A call spelled entirely as a proven import path (`requests.Session`, `environ.get`)
+            # names a module attribute rather than a value constructed at runtime, so it can be the
+            # constructor half of the pair but never the instance half. Constructor and sink names
+            # are disjoint, so a call is at most one of the two.
+            if _python_terminal_name(node.func) in _PYTHON_CLIENT_CONSTRUCTOR_NAMES:
+                constructor_calls.append(node.func)
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in _PYTHON_CLIENT_SINK_METHODS:
+                candidates.append((node.func.attr, _attribute_root_name(node.func), node))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _SENSITIVE_PATH_RE.search(node.value):
+            sensitive_read = True
+        elif isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, aliases) == "os.environ":
+            env_dump = True
+        rebound.update(_heuristic_bound_names(node))
+        for child in reversed(list(ast.iter_child_nodes(node))):
+            if isinstance(child, _PYTHON_LAZILY_EVALUATED_NODES):
+                # Skipped for sinks and payloads alike, but a `type X = ...` still binds X, and that
+                # binding is what stops X from being treated as a stable import path below.
+                rebound.update(_heuristic_bound_names(child))
+                continue
+            stack.append(child)
+    constructors = set().union(*(_python_client_import_targets(func, targets) & _PYTHON_CLIENT_CONSTRUCTORS for func in constructor_calls))
+    supported = {method for constructor in constructors for method in _PYTHON_CLIENT_SPECS[constructor].methods}
+    for method, root, node in candidates:
+        # An import path is only evidence that the receiver is a module while that alias still holds
+        # it. The import maps never invalidate an import, so a name the file rebinds --
+        # `from pathlib import Path as session` then `session = requests.Session()` -- has to stay a
+        # candidate, or the anchor would swallow the very rebind cases this rule exists to cover.
+        if method in supported and (root not in targets or root in rebound):
+            return _ClientHeuristicHit(sink=node, sensitive_read=sensitive_read, env_dump=env_dump)
+    return None
+
+
+def _record_client_import_targets(node: ast.Import | ast.ImportFrom, targets: dict[str, set[str]]) -> None:
+    """Record what one import may bind each name to, keeping only paths that can reach a constructor.
+
+    Retaining every path would let an alias shared by thousands of unrelated imports make each
+    attribute hop on it cost thousands of string builds; filtering at the prefix keeps every set
+    no larger than the constructor table, so resolution is linear in the nodes the budget charges.
+    """
+    for name, path in _python_import_bindings(node):
+        paths = targets.setdefault(name, set())
+        if path in _PYTHON_CLIENT_IMPORT_PATHS:
+            paths.add(path)
+
+
+def _python_client_import_targets(node: ast.AST, targets: dict[str, set[str]]) -> frozenset[str]:
+    """Every constructor-reaching import path an expression may name; empty unless its root is imported."""
+    if isinstance(node, ast.Name):
+        return frozenset(targets.get(node.id, ()))
+    if isinstance(node, ast.Attribute):
+        return frozenset(path for base in _python_client_import_targets(node.value, targets) if (path := f"{base}.{node.attr}") in _PYTHON_CLIENT_IMPORT_PATHS)
+    return frozenset()
+
+
+def _python_terminal_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return node.id if isinstance(node, ast.Name) else ""
+
+
+def _heuristic_bound_names(node: ast.AST) -> tuple[str, ...]:
+    """Names this node binds by anything other than an import, coarsely and without scope analysis."""
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        return (node.id,)
+    if isinstance(node, ast.arg):
+        return (node.arg,)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.TypeAlias)):
+        name = node.name
+        return (name.id,) if isinstance(name, ast.Name) else (name,)
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        return (node.name,)
+    if isinstance(node, _PYTHON_MATCH_CAPTURE_NODES):
+        return tuple(_match_capture_names(node))
+    return ()
+
+
+def _attribute_root_name(node: ast.AST) -> str:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else ""
 
 
 def _yaml_load_uses_safe_loader(node: ast.Call) -> bool:
