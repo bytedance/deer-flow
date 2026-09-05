@@ -680,10 +680,10 @@ def _stub_client_assembly(monkeypatch) -> dict[str, str]:
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kwargs: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", lambda *args, **kwargs: [])
     monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled: []))  # noqa: ARG005
-    monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config: [])  # noqa: ARG005
+    monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config, **kw: [])  # noqa: ARG005
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",
-        lambda skills, *, enabled, container_base_path: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),  # noqa: ARG005
+        lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),  # noqa: ARG005
     )
     monkeypatch.setattr(
         "deerflow.client.assemble_deferred_tools",
@@ -697,10 +697,15 @@ def _stub_client_assembly(monkeypatch) -> dict[str, str]:
     monkeypatch.setattr("deerflow.client.get_effective_user_id", lambda: "user-123")
     # ``apply_tool_authorization`` (called with the empty tool list above) still
     # resolves a provider via ``tool_filter.resolve_authorization_provider``; route
-    # it at an allow-all RBAC provider so the empty list stays empty.
+    # it at an allow-all RBAC provider so the empty list stays empty. The skill
+    # filter (added in Phase 3 Skills PR) resolves via ``skill_filter`` namespace.
     monkeypatch.setattr(
         "deerflow.authz.tool_filter.resolve_authorization_provider",
         lambda config: RbacAuthorizationProvider(roles={"user": {"tools": {"allow": "*"}}}),
+    )
+    monkeypatch.setattr(
+        "deerflow.authz.skill_filter.resolve_authorization_provider",
+        lambda config: RbacAuthorizationProvider(roles={"user": {"skills": {"allow": "*"}}}),
     )
     return captured
 

@@ -324,6 +324,45 @@ class DeerFlowClient:
         if model_name is None and self._app_config.models:
             model_name = self._app_config.models[0].name
         model_name = _authorize_model_name(model_name, context=cfg, app_config=self._app_config)
+        # Phase 3: enforce skill authorization (Layer 1) on the embedded path
+        # too, mirroring ``_make_lead_agent`` (agent.py:675). Without this, a
+        # caller building the agent via ``DeerFlowClient(available_skills=...)``
+        # bypasses the role's ``skills`` policy: ``SkillActivationMiddleware``
+        # and the catalog/prompt would see the unfiltered set. ``self._available_skills``
+        # is left untouched (it feeds the cache key at line 282); the filtered
+        # result is a local used for assembly only.
+        from deerflow.authz.skill_filter import filter_available_skills_by_authorization, resolve_skill_authorization
+
+        # One effective identity for the whole skill surface: the filter's
+        # candidate universe, the candidate pre-load's cache bucket, and the
+        # middleware's user-scoped storage must all resolve the same user, or
+        # per-user custom skills visible to the middleware would be missing
+        # from the filtered set (and vice versa). Resolved before anything
+        # consumes a user id below.
+        effective_user_id = cfg.get("user_id") or get_effective_user_id()
+
+        skill_authorization = resolve_skill_authorization(cfg, self._app_config)
+        # Resolve the filter's candidate names through the cached catalog
+        # loader (same source and same user bucket as ``skills_list`` below)
+        # instead of letting the filter rescan storage on every build; only
+        # relevant when no agent-level allowlist is set.
+        candidate_skill_names = None
+        if self._available_skills is None and skill_authorization is not None:
+            try:
+                candidate_skill_names = [s.name for s in get_enabled_skills_for_config(self._app_config, user_id=effective_user_id)]
+            except Exception:
+                logger.warning("Failed to pre-load enabled skills for authorization candidates", exc_info=True)
+                # Leave None: the filter resolves candidates itself and applies
+                # its fail-closed semantics when that resolution also fails.
+
+        available_skills = filter_available_skills_by_authorization(
+            self._available_skills,
+            context=cfg,
+            app_config=self._app_config,
+            user_id=effective_user_id,
+            candidate_skill_names=candidate_skill_names,
+            authorization=skill_authorization,
+        )
         subagent_enabled = cfg.get("subagent_enabled", False)
         from deerflow.config.subagents_config import effective_subagent_concurrency
 
@@ -347,13 +386,16 @@ class DeerFlowClient:
 
         # Add framework-provided tools before authorization so Layer 1 sees
         # every capability that can become model-visible.
-        skills_list = get_enabled_skills_for_config(self._app_config)
-        if self._available_skills is not None:
-            skills_list = [s for s in skills_list if s.name in self._available_skills]
+        # Same effective user as the filter/candidates above so the catalog
+        # shares the per-user cache bucket and the same skill universe.
+        skills_list = get_enabled_skills_for_config(self._app_config, user_id=effective_user_id)
+        if available_skills is not None:
+            skills_list = [s for s in skills_list if s.name in available_skills]
         skill_setup = build_skill_search_setup(
             skills_list,
             enabled=self._app_config.skills.deferred_discovery,
             container_base_path=self._app_config.skills.container_path,
+            skill_authorization=skill_authorization,
         )
         late_tools = []
         if skill_setup.describe_skill_tool:
@@ -379,8 +421,6 @@ class DeerFlowClient:
         )
         mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=deferred_setup.deferred_names)
 
-        effective_user_id = cfg.get("user_id") or get_effective_user_id()
-
         kwargs: dict[str, Any] = {
             # attach_tracing=False because ``stream()`` injects tracing
             # callbacks at the graph invocation root so a single embedded run
@@ -393,13 +433,14 @@ class DeerFlowClient:
                     config,
                     model_name=model_name,
                     agent_name=self._agent_name,
-                    available_skills=self._available_skills,
+                    available_skills=available_skills,
                     custom_middlewares=self._middlewares,
                     app_config=self._app_config,
                     deferred_setup=deferred_setup,
                     mcp_routing_middleware=mcp_routing_middleware,
                     user_id=effective_user_id,
                     authorization_provider=_authz_provider,
+                    skill_authorization=skill_authorization,
                     subagent_execution_capacity=subagent_execution_capacity,
                 ),
                 self._checkpoint_channel_mode,
@@ -410,7 +451,7 @@ class DeerFlowClient:
                 max_concurrent_subagents=max_concurrent_subagents,
                 max_total_subagents=max_total_subagents,
                 agent_name=self._agent_name,
-                available_skills=self._available_skills,
+                available_skills=available_skills,
                 app_config=self._app_config,
                 deferred_names=deferred_setup.deferred_names,
                 mcp_routing_hints_section=mcp_routing_hints_section,

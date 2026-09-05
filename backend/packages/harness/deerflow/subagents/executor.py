@@ -903,6 +903,11 @@ class SubagentExecutor:
         # not just the first — because the v2 contract advertises more than one
         # cap reason.
         self._stop_reason_middlewares: list[Any] = []
+        # The one skill-authorization context for this execution, resolved
+        # lazily by ``_resolve_skill_authorization`` and shared by the Layer 1
+        # filter and every runtime ``skill:activate`` check (activation
+        # middleware, describe gate, skill-read stamping).
+        self._skill_authorization: Any | None = None
         # What this subagent was assembled from, published to extension
         # observers at the end of ``_create_agent``. The prompt and skill set
         # are captured while ``_build_initial_state`` renders them because
@@ -964,6 +969,17 @@ class SubagentExecutor:
         authz_provider = getattr(self, "_authz_provider", None)
         if authz_provider is not None:
             middleware_kwargs["authorization_provider"] = authz_provider
+        # Phase 3 (Layer 2): arm the runtime ``skill:activate`` check on the
+        # subagent chain too — a delegated task is a plain HumanMessage, so
+        # task text containing /skill-name reaches the activation middleware.
+        # Resolved through the same memoized helper the Layer 1 filter used
+        # (``_resolve_skill_authorization``): provider factories are
+        # deliberately uncached, so resolving independently here could hand the
+        # runtime checks a different provider instance (and policy snapshot)
+        # than the filter that built ``_available_skill_names``.
+        skill_authorization = self._resolve_skill_authorization()
+        if skill_authorization is not None:
+            middleware_kwargs["skill_authorization"] = skill_authorization
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
@@ -1116,8 +1132,66 @@ class SubagentExecutor:
         # Filter by config.skills whitelist
         if self.config.skills is not None:
             allowed = set(self.config.skills)
+        else:
+            allowed = None
+
+        # Phase 3: enforce skill authorization (Layer 1). Filter the skill
+        # allowlist by the provider's "skill" policy so denied skills never
+        # reach the returned list (and are never turned into tools). Pass the
+        # already-loaded ``all_skills`` names as candidates so we don't pay a
+        # second ``load_skills`` round-trip inside the filter, and the memoized
+        # authorization context so the filter's provider instance is the same
+        # one the runtime ``skill:activate`` checks on this assembly use.
+        from deerflow.authz.skill_filter import filter_available_skills_by_authorization
+
+        resolved_app_config = self.app_config or get_app_config()
+        allowed = filter_available_skills_by_authorization(
+            allowed,
+            context=self._skill_authz_context(),
+            app_config=resolved_app_config,
+            # Same bucket convention as the middleware chain (self.user_id or
+            # DEFAULT_USER_ID); only consulted if candidates were not supplied.
+            user_id=self.user_id or DEFAULT_USER_ID,
+            candidate_skill_names=[s.name for s in all_skills],
+            authorization=self._resolve_skill_authorization(),
+        )
+
+        if allowed is not None:
             return [s for s in all_skills if s.name in allowed]
         return all_skills
+
+    def _resolve_skill_authorization(self):
+        """The one skill-authorization context for this execution.
+
+        Resolved once per executor assembly (executors are built per task
+        dispatch) and shared by the Layer 1 filter in ``_load_skills``, the
+        runtime ``skill:activate`` check on the activation middleware, the
+        ``describe_skill`` gate, and the skill-read stamping middleware — so
+        every layer of this assembly sees the same provider instance and
+        policy snapshot. Providers are uncached by design; resolving per layer
+        would let a custom provider observe different snapshots for visibility
+        and activation within one run.
+        """
+        resolved = getattr(self, "_skill_authorization", None)
+        if resolved is None:
+            from deerflow.authz.skill_filter import resolve_skill_authorization
+
+            resolved = resolve_skill_authorization(self._skill_authz_context(), self._get_resolved_app_config())
+            self._skill_authorization = resolved
+        return resolved
+
+    def _skill_authz_context(self) -> dict[str, Any]:
+        """Identity mapping shared by the Layer 1 filter and the runtime
+        ``skill:activate`` check wired into the subagent middleware chain."""
+        return {
+            "user_id": self.user_id,
+            "user_role": self.user_role,
+            "oauth_provider": self.oauth_provider,
+            "oauth_id": self.oauth_id,
+            "channel_user_id": self.channel_user_id,
+            "is_internal": self.is_internal,
+            "authz_attributes": self.authz_attributes,
+        }
 
     async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
         """Build the initial state for agent execution.
@@ -1152,6 +1226,7 @@ class SubagentExecutor:
             skills,
             enabled=resolved_app_config.skills.deferred_discovery,
             container_base_path=resolved_app_config.skills.container_path,
+            skill_authorization=self._resolve_skill_authorization(),
         )
 
         # Apply authorization Layer 1: filter tools before deferred assembly

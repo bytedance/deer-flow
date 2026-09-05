@@ -13,7 +13,9 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.skill_context import (
+    SKILL_CONTEXT_DENIED_KEY,
     SKILL_CONTEXT_ENTRY_KEY,
+    _skill_name_from_path,
     _tool_call_path,
     build_skill_entry_metadata_from_read,
 )
@@ -56,9 +58,10 @@ def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error:
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Convert tool exceptions into error ToolMessages so the run can continue."""
 
-    def __init__(self, *, app_config: AppConfig | None = None) -> None:
+    def __init__(self, *, app_config: AppConfig | None = None, skill_authorization=None) -> None:
         super().__init__()
         self._app_config = app_config
+        self._skill_authorization = skill_authorization
         if app_config is None:
             self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES)
             self._skills_root = DEFAULT_SKILLS_CONTAINER_PATH
@@ -93,7 +96,15 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         *,
         tool_name: str,
+        activation_allowed: bool | None = None,
     ) -> ToolMessage:
+        """Stamp the skill-read metadata for one completed read tool result.
+
+        *activation_allowed* carries a ``skill:activate`` decision already
+        resolved by the caller — the async path awaits ``aauthorize()`` on the
+        event loop before calling this. ``None`` (the sync-path default)
+        resolves the decision here with the synchronous ``authorize()``.
+        """
         if tool_name not in self._skill_read_tool_names:
             return message
         if getattr(message, "status", "success") == "error":
@@ -107,10 +118,74 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         entry = build_skill_entry_metadata_from_read(path, content, skills_root=self._skills_root)
         if entry is None:
             return message
+        # Phase 3: a completed SKILL.md read only *activates* a skill (durable
+        # skill_context entry, allowed-tools policy, autonomous secret binding)
+        # when the action-scoped ``skill:activate`` decision allows it. The
+        # catalog/visibility layer (Layer 1) may expose the file itself — the
+        # action decision is what gates the autonomous activation path the
+        # model drives through describe_skill + read_file. A denied read gets
+        # the denial marker instead of entry metadata, so extract_skills skips
+        # it without the "missing skill read metadata" warning.
+        if activation_allowed is None:
+            activation_allowed = True
+            if self._skill_authorization is not None:
+                from deerflow.authz.skill_filter import skill_activation_allowed
+
+                activation_allowed = skill_activation_allowed(self._skill_authorization, _skill_name_from_path(entry["path"]))
+        if not activation_allowed:
+            logger.info("Skill file read for '%s' did not activate it: skill:activate denied", _skill_name_from_path(entry["path"]))
+            existing = dict(message.additional_kwargs or {})
+            existing[SKILL_CONTEXT_DENIED_KEY] = True
+            message.additional_kwargs = existing
+            return message
         existing = dict(message.additional_kwargs or {})
         existing[SKILL_CONTEXT_ENTRY_KEY] = dict(entry)
         message.additional_kwargs = existing
         return message
+
+    async def _amaybe_stamp(self, result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
+        """Async twin of ``_maybe_stamp`` for ``awrap_tool_call``.
+
+        Resolves the ``skill:activate`` decision with the provider's async API
+        on the event loop — this hook runs on the loop, so a synchronous
+        ``authorize()`` here would hand loop-affine providers the wrong API.
+        """
+        if not isinstance(result, ToolMessage):
+            return result
+        tool_name = str(request.tool_call.get("name") or "")
+        if tool_name not in self._skill_read_tool_names:
+            return result
+        if getattr(result, "status", "success") == "error":
+            return result
+        # Entry resolution is cheap and non-blocking; only the provider call
+        # needs the loop. Reuse the sync resolver, then await the decision.
+        probe = self._resolve_skill_read_entry(result, request, tool_name=tool_name)
+        allowed: bool | None = None
+        if probe is not None and self._skill_authorization is not None:
+            from deerflow.authz.skill_filter import skill_activation_allowed_async
+
+            allowed = await skill_activation_allowed_async(self._skill_authorization, _skill_name_from_path(probe["path"]))
+        return self._stamp_skill_read_metadata(result, request, tool_name=tool_name, activation_allowed=allowed)
+
+    def _resolve_skill_read_entry(
+        self,
+        message: ToolMessage,
+        request: ToolCallRequest,
+        *,
+        tool_name: str,
+    ) -> dict | None:
+        """Resolve the skill_context entry a completed read would stamp, if any."""
+        if tool_name not in self._skill_read_tool_names:
+            return None
+        if getattr(message, "status", "success") == "error":
+            return None
+        content = message.content if isinstance(message.content, str) else None
+        if content is None:
+            return None
+        path = _tool_call_path(request.tool_call)
+        if path is None:
+            return None
+        return build_skill_entry_metadata_from_read(path, content, skills_root=self._skills_root)
 
     def _maybe_stamp(self, result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
         """Apply producer-bound metadata for tool results that need it."""
@@ -153,7 +228,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
         return normalize_tool_result(
-            self._maybe_stamp(result, request),
+            await self._amaybe_stamp(result, request),
             tool_call_id=str(request.tool_call.get("id") or ""),
         )
 
@@ -169,6 +244,7 @@ def _build_runtime_middlewares(
     authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
     available_skills: set[str] | None = None,
     owns_agent_skill_projection: bool = True,
+    skill_authorization=None,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
@@ -304,7 +380,7 @@ def _build_runtime_middlewares(
 
         tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
 
-    tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
+    tail.append(ToolErrorHandlingMiddleware(app_config=app_config, skill_authorization=skill_authorization))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
 
@@ -323,6 +399,7 @@ def build_lead_runtime_middlewares(
     deferred_setup: "DeferredToolSetup | None" = None,
     available_skills: set[str] | None = None,
     owns_agent_skill_projection: bool = True,
+    skill_authorization=None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
@@ -336,6 +413,7 @@ def build_lead_runtime_middlewares(
         authorization_provider=authorization_provider,
         available_skills=available_skills,
         owns_agent_skill_projection=owns_agent_skill_projection,
+        skill_authorization=skill_authorization,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
@@ -351,6 +429,7 @@ def build_subagent_runtime_middlewares(
     available_skills: set[str] | None = None,
     user_id: str | None = None,
     authorization_provider=None,
+    skill_authorization=None,
     extensions=None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
@@ -374,6 +453,7 @@ def build_subagent_runtime_middlewares(
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
         owns_agent_skill_projection=False,
+        skill_authorization=skill_authorization,
     )
 
     # Enabled/configured skills are discoverable metadata, not automatically
@@ -390,6 +470,7 @@ def build_subagent_runtime_middlewares(
             app_config=app_config,
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
+            skill_authorization=skill_authorization,
         )
     )
     middlewares.append(
@@ -398,6 +479,9 @@ def build_subagent_runtime_middlewares(
             app_config=app_config,
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
+            # Persisted skill_context entries are re-authorized against the
+            # skill:activate decision before their allowed-tools apply.
+            skill_authorization=skill_authorization,
         )
     )
 

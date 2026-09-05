@@ -388,3 +388,86 @@ def test_lead_agent_filters_all_model_visible_tools_and_reuses_provider(monkeypa
 
     assert [tool.name for tool in result["tools"]] == ["safe_tool"]
     assert captured["authorization_provider"] is not None
+
+
+@pytest.mark.parametrize(
+    "skills_allow,deferred,expected_names",
+    [
+        (["bootstrap"], True, frozenset({"bootstrap"})),
+        ([], True, frozenset()),
+        ([], False, None),
+    ],
+)
+def test_bootstrap_assembly_uses_filtered_skill_set(monkeypatch, skills_allow, deferred, expected_names):
+    """[P1 regression] The bootstrap branch must feed the authorization-filtered
+    set to ``build_middlewares`` and ``apply_prompt_template`` — not the raw
+    ``_BOOTSTRAP_SKILL_NAMES`` — and must preserve an empty ``skill_names``
+    index instead of converting it to ``None`` (a None falls through to the
+    legacy full-metadata prompt, which reloads every enabled skill from storage
+    and re-advertises the policy-denied one; a raw {"bootstrap"} set re-admits
+    it to slash activation)."""
+    config = _app_config(
+        authorization=AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"skills": {"allow": skills_allow}}}},
+            ),
+        ),
+        models=[
+            ModelConfig(
+                name="test-model",
+                display_name="Test model",
+                use="langchain_openai:ChatOpenAI",
+                model="test-model",
+            )
+        ],
+    )
+    config.skills.deferred_discovery = deferred
+
+    monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda *args, **kwargs: "test-model")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+    # Emulate the real loader's allowlist filtering so the allowed case keeps
+    # the bootstrap skill and the denied case drops it.
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_load_enabled_available_skills",
+        lambda available_skills, **kwargs: [s for s in (SimpleNamespace(name="bootstrap"), SimpleNamespace(name="other")) if available_skills is None or s.name in available_skills],
+    )
+    # Emulate the real setup mapping (bootstrap_skills -> skill_names) without
+    # depending on SkillCatalog internals; the real mapping has its own tests.
+    monkeypatch.setattr(
+        lead_agent_module,
+        "build_skill_search_setup",
+        lambda skills, *, enabled, container_base_path, skill_authorization=None: SimpleNamespace(
+            describe_skill_tool=None,
+            skill_names=frozenset(s.name for s in skills),
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "should_use_memory_tools", lambda memory_config: False)
+
+    captured: dict[str, dict] = {}
+
+    def _capture_middlewares(*args, **kwargs):
+        captured.setdefault("middlewares", kwargs)
+        return []
+
+    def _capture_prompt(**kwargs):
+        captured.setdefault("prompt", kwargs)
+        return "prompt"
+
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", _capture_middlewares)
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", _capture_prompt)
+
+    lead_agent_module._make_lead_agent({"context": {"is_bootstrap": True, "user_role": "user"}}, app_config=config)
+
+    expected_available = {"bootstrap"} if "bootstrap" in skills_allow else set()
+    assert captured["middlewares"]["available_skills"] == expected_available
+    assert captured["prompt"]["available_skills"] == expected_available
+    # The empty index must survive as a set, never round-trip through None.
+    assert captured["prompt"]["skill_names"] == expected_names
+    assert captured["prompt"]["skill_names"] is not None or expected_names is None

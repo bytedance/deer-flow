@@ -2638,17 +2638,22 @@ run_ownership:
 #     config:
 #       # A known role with no policy for a resource is unrestricted for it.
 #       # Define both `tools` and `routes` wherever access should be constrained.
+#       # `models` / `skills` govern runtime use and agent assembly (which models
+#       # an agent can run, which skills can be slash-activated/loaded), not the
+#       # management-API listing surface (those endpoints stay admin-gated).
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
+#           skills: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
+#           skills: {allow: "*"}
 #         guest:
 #           # web-only role: sandbox-dependent tools (read_file, bash, glob,
 #           # grep, write_file, ...) are omitted — with sandbox:execute denied
@@ -2658,6 +2663,7 @@ run_ownership:
 #           routes: {allow: ["threads:read", "runs:read"]}
 #           models: {allow: ["gpt-4o-mini"]}
 #           sandbox: {allow: false}  # deny sandbox execution
+#           skills: {allow: []}
 authorization:
   enabled: false
 
