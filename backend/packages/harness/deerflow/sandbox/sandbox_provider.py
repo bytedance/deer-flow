@@ -40,6 +40,24 @@ class SandboxProvider(ABC):
         """
         return await asyncio.to_thread(self.acquire, thread_id, user_id=user_id)
 
+    def admit(self, thread_id: str | None = None, *, user_id: str | None = None) -> None:
+        """Refuse an acquisition before any resource is provisioned.
+
+        The execution lease manager and the direct acquisition paths call
+        this with the arguments they are about to pass to ``acquire`` or
+        ``acquire_async``. Raise
+        :class:`~deerflow.sandbox.exceptions.SandboxAdmissionRefused` to deny;
+        the default admits everything. This is the seam for a per-user quota
+        and for a runtime that must refuse an ordinary acquisition of a thread
+        it holds under another regime. It runs before the provider spends
+        anything, so a refusal leaves nothing to release.
+        """
+        return None
+
+    async def admit_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> None:
+        """Async twin of ``admit``; override when admission performs I/O."""
+        self.admit(thread_id, user_id=user_id)
+
     def sync_agent_skills(
         self,
         sandbox_id: str,

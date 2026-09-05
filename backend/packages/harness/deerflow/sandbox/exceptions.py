@@ -25,6 +25,21 @@ class SandboxNotFoundError(SandboxError):
         self.sandbox_id = sandbox_id
 
 
+class SandboxAdmissionRefused(SandboxError):
+    """A provider refused an acquisition before provisioning anything.
+
+    Raised by ``SandboxProvider.admit`` (or its async twin) when policy denies
+    the acquisition: a per-user quota, a thread already held by an execution
+    that cannot share it, or any other admission rule. Nothing was acquired,
+    so nothing needs releasing.
+    """
+
+    def __init__(self, message: str = "Sandbox acquisition refused", reason: str | None = None):
+        details = {"reason": reason} if reason else None
+        super().__init__(message, details)
+        self.reason = reason
+
+
 class SandboxRuntimeError(SandboxError):
     """Raised when sandbox runtime is not available or misconfigured."""
 

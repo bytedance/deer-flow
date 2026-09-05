@@ -285,6 +285,7 @@ class SandboxLeaseManager:
         *,
         release_on_last: bool,
     ) -> str:
+        self._provider.admit(thread_id, user_id=user_id)
         sandbox_id = self._provider.acquire(thread_id, user_id=user_id)
         with self._metadata_lock:
             previous, release_previous = self._bind_locked(
@@ -306,6 +307,7 @@ class SandboxLeaseManager:
         *,
         release_on_last: bool,
     ) -> str:
+        await self._provider.admit_async(thread_id, user_id=user_id)
         acquire_task = asyncio.create_task(self._provider.acquire_async(thread_id, user_id=user_id))
         try:
             sandbox_id = await asyncio.shield(acquire_task)

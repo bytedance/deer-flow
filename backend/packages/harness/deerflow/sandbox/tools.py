@@ -1563,6 +1563,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     user_id = resolve_runtime_user_id(runtime)
     owner_id = sandbox_lease_owner(runtime.context)
     if owner_id is None:
+        provider.admit(thread_id, user_id=user_id)
         sandbox_id = provider.acquire(thread_id, user_id=user_id)
     else:
         sandbox_id = get_sandbox_lease_manager(provider).acquire(
@@ -1639,6 +1640,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     user_id = resolve_runtime_user_id(runtime)
     owner_id = sandbox_lease_owner(runtime.context)
     if owner_id is None:
+        await provider.admit_async(thread_id, user_id=user_id)
         sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
     else:
         sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(

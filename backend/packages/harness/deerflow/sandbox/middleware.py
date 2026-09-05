@@ -132,6 +132,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     ) -> str:
         provider = get_sandbox_provider()
         if owner_id is None:
+            provider.admit(thread_id, user_id=user_id)
             sandbox_id = provider.acquire(thread_id, user_id=user_id)
         else:
             sandbox_id = get_sandbox_lease_manager(provider).acquire(
@@ -151,6 +152,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     ) -> str:
         provider = get_sandbox_provider()
         if owner_id is None:
+            await provider.admit_async(thread_id, user_id=user_id)
             sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
         else:
             sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
