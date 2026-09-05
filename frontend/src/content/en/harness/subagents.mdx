@@ -55,7 +55,7 @@ task(
 
 The runtime then:
 
-1. Looks up the subagent configuration from the registry, applying any `config.yaml` overrides.
+1. Looks up the subagent configuration from the registry, including built-ins, `config.yaml` custom subagents, managed definitions, and the current user's Custom Agents.
 2. Creates a new agent invocation with the subagent's own prompt and tools.
 3. Runs the subagent to completion — bounded by `max_turns`, the `timeout`, and a **middleware guard chain** that mirrors the Lead Agent's (loop detection, token budget, summarization). See [Runaway guards](#runaway-guards) below.
 4. Returns the subagent's final output to the Lead Agent as the tool result.
@@ -107,7 +107,7 @@ The default Lead Agent can see every enabled runtime subagent. Each page-created
 - **No subagents**: delegation is disabled even if the request enables it.
 - **Selected subagents**: only the selected names are shown in the prompt and accepted by the `task` tool.
 
-The allowlist is copied into run metadata when a run starts and is enforced again by the `task` tool, so a client cannot bypass it by naming a hidden subagent directly. Runtime precedence is **built-in → `config.yaml` → managed**. If an operator later adds a conflicting `config.yaml` name, the managed entry remains visible in Settings with a conflict warning but is excluded from runtime discovery. Explicit `subagents.agents.<name>` overrides continue to take priority and are shown in the Settings catalog.
+The allowlist is copied into run metadata when a run starts and is enforced again by the `task` tool, so a client cannot bypass it by naming a hidden subagent directly. Runtime precedence is **built-in → `config.yaml` → managed → user-scoped Custom Agents**. User Custom Agents carry their SOUL, tool-group allowlist, skills, and model selection when invoked through `task(subagent_type=...)`. If an operator later adds a conflicting `config.yaml` name, the managed or user-scoped entry remains visible in its management surface but is excluded from runtime discovery. Explicit `subagents.agents.<name>` overrides continue to take priority and are shown in the Settings catalog.
 
 Managed definitions use the same backend selection as Custom Agents: `agent_storage.backend: file` stores one atomic JSON file per definition under `DEER_FLOW_HOME/managed-subagents/`; `agent_storage.backend: db` stores them in the shared application database for multi-instance deployments. These definitions are deployment-wide in this version, not user-scoped.
 

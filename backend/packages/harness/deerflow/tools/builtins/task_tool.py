@@ -672,9 +672,10 @@ async def task_tool(
       Routine git, build, test, or deploy operations are not sufficient reason to delegate.
 
     Additional custom subagent types may be defined in config.yaml under
-    `subagents.custom_agents`. Each custom type can have its own system prompt,
-    tools, skills, model, and timeout configuration. If an unknown subagent_type
-    is provided, the error message will list all available types.
+    `subagents.custom_agents` or by the current user's Custom Agents store.
+    Each custom type can have its own system prompt, tools, skills, model, and
+    timeout configuration. If an unknown subagent_type is provided, the error
+    message will list all available types.
 
     When to use this tool:
     - Independent tasks that materially reduce wall-clock time when run in parallel
@@ -734,10 +735,14 @@ async def task_tool(
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     allowed_subagents = metadata.get("allowed_subagents")
-    if allowed_subagents is None:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
-    else:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+    # Resolve the dispatching identity up front: user-scoped API agents are only
+    # resolvable for their owner, and the prompt/listing/config lookup must agree.
+    user_id = resolve_runtime_user_id(runtime)
+    available_subagent_names = get_available_subagent_names(
+        app_config=runtime_app_config,
+        allowed_subagents=allowed_subagents,
+        user_id=user_id,
+    )
 
     # Preserve the dedicated sandbox-policy guidance before the generic
     # registry/policy membership gate filters bash from the visible catalog.
@@ -751,7 +756,11 @@ async def task_tool(
             )
 
     # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    config = get_subagent_config(
+        subagent_type,
+        app_config=runtime_app_config,
+        user_id=user_id,
+    )
     if config is None or subagent_type not in available_subagent_names:
         if available_subagent_names:
             available = ", ".join(available_subagent_names)
@@ -780,7 +789,6 @@ async def task_tool(
     thread_id = None
     parent_model = None
     trace_id = None
-    user_id = None
     deerflow_trace_id = None
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
@@ -803,9 +811,6 @@ async def task_tool(
 
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
-
-    # Get user_id for tracing (uses standard resolution order)
-    user_id = resolve_runtime_user_id(runtime)
 
     # Propagate the authenticated runtime context so delegated tool calls are
     # evaluated by GuardrailMiddleware with the same identity/attribution as

@@ -7,7 +7,7 @@ from deerflow.tools.builtins.task_tool import task_tool
 
 
 def _build_section(monkeypatch, names: list[str] | None = None, max_concurrent: int = 3) -> str:
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: names or ["general-purpose"])
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda **_kwargs: names or ["general-purpose"])
     return prompt_module._build_subagent_section(max_concurrent)
 
 

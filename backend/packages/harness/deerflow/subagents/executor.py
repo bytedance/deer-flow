@@ -939,7 +939,45 @@ class SubagentExecutor:
         app_config = self._get_resolved_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+
+        # Enforce model authorization — prevents a user from bypassing model:use
+        # restrictions by naming a restricted model on a custom agent and dispatching
+        # it as a subagent. (P1 fix: bridges lead-agent auth check into subagent path)
+        if getattr(app_config, "authorization", None) is not None and app_config.authorization.enabled is True:
+            from deerflow.agents.lead_agent.agent import _authorize_model_name
+
+            _authz_context: dict[str, Any] = {
+                "user_role": self.user_role,
+                "oauth_provider": self.oauth_provider,
+                "oauth_id": self.oauth_id,
+                "is_internal": self.is_internal,
+                "authz_attributes": dict(self.authz_attributes),
+                "user_id": self.user_id,
+                "channel_user_id": self.channel_user_id,
+            }
+            self.model_name = _authorize_model_name(
+                self.model_name,
+                context=_authz_context,
+                app_config=app_config,
+            )
+
+        # P1/P2 fix: pass model-behavior settings from subagent config so
+        # store-backed custom agents keep the same LLM behavior as direct chats.
+        # ``thinking_enabled`` stays as the explicit create_chat_model argument;
+        # adding it to **model_kwargs would bind the parameter twice.
+        model_kwargs: dict[str, Any] = {}
+        if self.config.model_settings:
+            model_kwargs["model_overrides"] = dict(self.config.model_settings)
+        if self.config.reasoning_effort is not None:
+            model_kwargs["reasoning_effort"] = self.config.reasoning_effort
+
+        model = create_chat_model(
+            name=self.model_name,
+            thinking_enabled=self.config.thinking_enabled or False,
+            app_config=app_config,
+            attach_tracing=False,
+            **model_kwargs,
+        )
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
@@ -1043,8 +1081,9 @@ class SubagentExecutor:
                 requested_model=(self.config.model if self.config.model != "inherit" else self.parent_model),
                 effective_model=self.model_name,
                 model_config=model_config,
-                thinking_enabled=False,
-                reasoning_effort=None,
+                model_overrides=self.config.model_settings,
+                thinking_enabled=bool(self.config.thinking_enabled),
+                reasoning_effort=self.config.reasoning_effort,
                 rendered_base_prompt=self._assembled_system_prompt,
                 prompt_template_id="deerflow-subagent-v1",
                 tools=tools,

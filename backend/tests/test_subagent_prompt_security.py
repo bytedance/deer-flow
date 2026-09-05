@@ -23,7 +23,7 @@ def test_get_available_subagent_names_keeps_bash_when_allowed(monkeypatch) -> No
 
 
 def test_build_subagent_section_hides_bash_examples_when_unavailable(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose"])
 
     section = prompt_module._build_subagent_section(3)
 
@@ -36,7 +36,7 @@ def test_build_subagent_section_hides_bash_examples_when_unavailable(monkeypatch
 
 
 def test_build_subagent_section_includes_bash_when_available(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose", "bash"])
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose", "bash"])
 
     section = prompt_module._build_subagent_section(3)
 
@@ -46,14 +46,14 @@ def test_build_subagent_section_includes_bash_when_available(monkeypatch) -> Non
 
 
 def test_build_subagent_section_lists_only_caller_allowlisted_subagents(monkeypatch) -> None:
-    def available(*, allowed_subagents):
+    def available(*, allowed_subagents, **_kwargs):
         return [name for name in ["planner", "writer"] if name in allowed_subagents]
 
     monkeypatch.setattr(prompt_module, "get_available_subagent_names", available)
     monkeypatch.setattr(
         registry_module,
         "get_subagent_config",
-        lambda name, *, app_config=None: SimpleNamespace(description=f"Managed {name}"),
+        lambda name, **_kwargs: SimpleNamespace(description=f"Managed {name}"),
     )
 
     section = prompt_module._build_subagent_section(3, allowed_subagents=["planner"])
@@ -62,8 +62,32 @@ def test_build_subagent_section_lists_only_caller_allowlisted_subagents(monkeypa
     assert "**writer**" not in section
 
 
+def test_build_subagent_section_threads_user_id_to_custom_agent_lookups(monkeypatch) -> None:
+    captured = {}
+
+    def available(**kwargs):
+        captured["available"] = kwargs
+        return ["writer"]
+
+    def config(name, **kwargs):
+        captured["config"] = (name, kwargs)
+        return SimpleNamespace(description="User writer")
+
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", available)
+    monkeypatch.setattr(registry_module, "get_subagent_config", config)
+
+    section = prompt_module._build_subagent_section(3, user_id="user-1")
+
+    assert "**writer**: User writer" in section
+    assert captured["available"]["user_id"] == "user-1"
+    assert captured["config"] == (
+        "writer",
+        {"app_config": None, "user_id": "user-1"},
+    )
+
+
 def test_build_subagent_section_is_empty_for_explicit_hard_deny(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda *, allowed_subagents: allowed_subagents)
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda *, allowed_subagents, **_kwargs: allowed_subagents)
 
     assert prompt_module._build_subagent_section(3, allowed_subagents=[]) == ""
 
