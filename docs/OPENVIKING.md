@@ -155,8 +155,14 @@ boundary; peers separate memory scopes within that user.
 
 ## Retry and failure behavior
 
-- `read: fail_open` logs retrieval failures and returns no injected OpenViking
-  memory. `read: raise` propagates the retrieval failure to its DeerFlow caller.
+- `read: fail_open` logs retrieval failures and continues the turn without
+  recalled OpenViking context. `read: raise` aborts the turn when recall fails.
+  The same policy applies at DeerFlow's 5-second async injection deadline,
+  even when the worker pool is full. If configuration or backend discovery
+  has not finished by then, the unknown policy fails closed. This deadline
+  limits request waiting, not the blocking operation: an in-flight read keeps
+  its worker until the backend returns or reaches its own timeout
+  (`timeout_seconds`, 30 seconds by default).
 - `write: log_and_drop` logs capture failures without failing an already
   generated answer. `write: raise` propagates them.
 - DeerFlow stores only hashes and counters in a bounded local capture cursor

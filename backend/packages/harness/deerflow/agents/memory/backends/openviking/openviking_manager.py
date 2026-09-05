@@ -16,7 +16,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
 
-from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
+from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError, MemoryReadError
 
 from .config import OpenVikingConfig
 from .session import (
@@ -118,6 +118,13 @@ class OpenVikingMemoryManager(MemoryManager):
             user_id=user_id,
         )
 
+    @classmethod
+    def read_failures_are_fatal_for_config(
+        cls,
+        backend_config: dict[str, Any] | None,
+    ) -> bool:
+        return OpenVikingConfig.from_backend_config(backend_config).read_failure_policy == "raise"
+
     def add_nowait(
         self,
         thread_id: str,
@@ -163,7 +170,7 @@ class OpenVikingMemoryManager(MemoryManager):
         if not self._begin_operation():
             return ""
         try:
-            peer_id = self._resolve_scope(user_id, agent_name)
+            peer_id = self._resolve_read_scope(user_id, agent_name)
             retriever = copy.copy(self._retriever)
             retriever.target_uri = _memory_target_uris(peer_id)
             if thread_id:
@@ -176,9 +183,9 @@ class OpenVikingMemoryManager(MemoryManager):
             try:
                 with self._actor_peer_scope(peer_id):
                     documents = retriever.invoke(self._config.injection_query)
-            except Exception:
+            except Exception as exc:
                 if self._config.read_failure_policy == "raise":
-                    raise
+                    raise MemoryReadError("OpenViking context retrieval failed") from exc
                 logger.warning(
                     "OpenViking context retrieval failed; continuing without injected memory",
                     exc_info=True,
@@ -217,7 +224,7 @@ class OpenVikingMemoryManager(MemoryManager):
         if not query.strip() or not self._begin_operation():
             return []
         try:
-            peer_id = self._resolve_scope(user_id, agent_name)
+            peer_id = self._resolve_read_scope(user_id, agent_name)
             retriever = copy.copy(self._retriever)
             retriever.target_uri = _memory_target_uris(peer_id)
             retriever.search_mode = "find"
@@ -232,9 +239,9 @@ class OpenVikingMemoryManager(MemoryManager):
             try:
                 with self._actor_peer_scope(peer_id):
                     documents = retriever.invoke(query.strip())
-            except Exception:
+            except Exception as exc:
                 if self._config.read_failure_policy == "raise":
-                    raise
+                    raise MemoryReadError("OpenViking memory search failed") from exc
                 logger.warning(
                     "OpenViking memory search failed; returning no results",
                     exc_info=True,
@@ -452,6 +459,18 @@ class OpenVikingMemoryManager(MemoryManager):
         if resolved_user != self._config.owner_user_id:
             raise MemoryManagerError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
         return _canonical_peer_id(agent_name, self._config.default_peer_id)
+
+    def _resolve_read_scope(
+        self,
+        user_id: str | None,
+        agent_name: str | None,
+    ) -> str:
+        try:
+            return self._resolve_scope(user_id, agent_name)
+        except MemoryManagerError as exc:
+            if self._config.read_failure_policy == "raise":
+                raise MemoryReadError(str(exc)) from exc
+            raise
 
     def _actor_peer_scope(
         self,

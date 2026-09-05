@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import sys
 import threading
 from abc import abstractmethod
 from pathlib import Path
@@ -84,6 +85,10 @@ class MemoryCallbacks:
 
 class MemoryManagerError(RuntimeError):
     """Backend-neutral base error exposed at the MemoryManager boundary."""
+
+
+class MemoryReadError(MemoryManagerError):
+    """A required memory read failed, so callers must not continue without it."""
 
 
 class MemoryConflictError(MemoryManagerError):
@@ -166,6 +171,28 @@ class MemoryManager(BaseModel):
     # search. Most backends keep tool mode fully model-directed.
     requires_passive_writes_in_tool_mode: ClassVar[bool] = False
 
+    @classmethod
+    def read_failures_are_fatal_for_config(
+        cls,
+        backend_config: dict[str, Any] | None,
+    ) -> bool:
+        """Honor legacy fail_closed using only in-memory config; do not perform I/O."""
+
+        failure_policy = backend_config.get("failure_policy") if isinstance(backend_config, dict) else None
+        return isinstance(failure_policy, dict) and failure_policy.get("read") == "fail_closed"
+
+    @property
+    def read_failures_are_fatal(self) -> bool:
+        """Whether caller-owned timeouts must abort instead of degrading.
+
+        Backends that require memory context override the class-level config
+        resolver so this remains available before or after manager creation.
+        The default honors legacy ``fail_closed``; other settings are permissive
+        unless the backend overrides the config resolver.
+        """
+
+        return type(self).read_failures_are_fatal_for_config(self.backend_config)
+
     @model_validator(mode="after")
     def _check_invariants(self) -> MemoryManager:
         """Cross-field invariants every backend must satisfy at instantiation.
@@ -235,6 +262,12 @@ class MemoryManager(BaseModel):
         the returned string is injected verbatim by call sites. Format
         parameters are the backend's own private config (received via
         ``backend_config`` at construction), NOT a host config on this method.
+
+        Backends configured to tolerate read failures return an empty string.
+        Backends configured to require memory context raise
+        :class:`MemoryReadError`, which callers must propagate, and expose
+        ``read_failures_are_fatal`` so caller-owned timeouts preserve the same
+        policy before a backend call returns.
         """
 
     # ── Tier 2: management ops with defaults ────────────────────────────
@@ -590,7 +623,7 @@ def _scan_backends() -> dict[str, type[MemoryManager]]:
     return registry
 
 
-def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
+def _resolve_manager_class(manager_class: str, *, allow_discovery: bool = True) -> type[MemoryManager]:
     """Resolve a ``manager_class`` config value to a concrete class.
 
     Resolution order:
@@ -605,7 +638,9 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
     is resolved eagerly at startup so it can be warmed) so the operator fixes
     ``memory.manager_class`` instead of discovering the mismatch later.
     """
-    registry = _scan_backends()
+    # Timeout preparation may only inspect already-loaded backends. Do not
+    # turn a cold registry or dotted import into event-loop file/import I/O.
+    registry = _scan_backends() if allow_discovery else (_backends_cache or {})
     if manager_class in registry:
         return registry[manager_class]
 
@@ -617,11 +652,14 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
         module_path, _, attr = manager_class.rpartition(".")
     if module_path and attr:
         try:
-            module = importlib.import_module(module_path)
+            module = importlib.import_module(module_path) if allow_discovery else sys.modules.get(module_path)
         except ImportError as e:
             dotted_error = f"cannot import module {module_path!r}: {e}"
         else:
-            cls = getattr(module, attr, None)
+            if allow_discovery:
+                cls = getattr(module, attr, None)
+            else:
+                cls = vars(module).get(attr) if module is not None else None
             if cls is None:
                 dotted_error = f"attribute {attr!r} not found in {module_path!r}"
             elif not (isinstance(cls, type) and issubclass(cls, MemoryManager)):
@@ -928,6 +966,33 @@ def get_memory_manager() -> MemoryManager:
         _memory_manager = cls.from_config(backend_config, mode=cfg.mode, **host_hooks)
         logger.info("Memory manager resolved: %s (manager_class=%r)", cls.__name__, manager_class)
         return _memory_manager
+
+
+def memory_read_failures_are_fatal(
+    manager_class: str,
+    backend_config: dict[str, Any] | None,
+    *,
+    resolved_only: bool = False,
+) -> bool | None:
+    """Resolve strict-read capability without constructing a new manager.
+
+    With ``resolved_only``, never scan/import backends; return ``None`` when
+    the class is not already loaded. The caller can finish discovery inside
+    its bounded worker. Invalid config and full-resolution failures fail closed.
+    """
+
+    try:
+        cls = _resolve_manager_class(manager_class, allow_discovery=not resolved_only)
+    except Exception:
+        if resolved_only:
+            return None
+        logger.exception("Could not resolve memory read failure policy; treating the read timeout as fatal")
+        return True
+    try:
+        return cls.read_failures_are_fatal_for_config(backend_config)
+    except Exception:
+        logger.exception("Could not resolve memory read failure policy; treating the read timeout as fatal")
+        return True
 
 
 def reset_memory_manager() -> None:
