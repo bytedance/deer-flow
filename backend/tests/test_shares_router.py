@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -710,3 +711,175 @@ def test_share_revocation_survives_thread_id_reuse(tmp_path):
     # The new owner of the reused id sees none of the original owner's
     # share records (repository scoping is by record owner).
     assert asyncio.run(repo.list_by_thread(THREAD_A, str(USER_B.id))) == []
+
+
+def _spin_cpu(duration_iterations: int = 8_000_000) -> int:
+    """Pure-Python CPU work with no GIL release, ~0.2s on current hardware."""
+    total = 0
+    for i in range(duration_iterations):
+        total += i * i
+    return total
+
+
+def test_public_read_resanitize_runs_off_the_event_loop() -> None:
+    """A near-capacity snapshot must not starve the event loop on public reads.
+
+    The anonymous resolve path re-sanitizes the stored snapshot on every read;
+    that work is pure CPU. Running it on the loop froze every concurrent
+    request for the full sanitize duration (measured ~5s at the 2 MiB cap).
+    Pin that the loop keeps servicing tasks while sanitization runs.
+    """
+
+    def cpu_bound_resanitize(snapshot: dict) -> dict:
+        assert _spin_cpu() >= 0
+        return snapshot
+
+    async def scenario() -> int:
+        ticks = 0
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        class _Repo:
+            async def get_active_by_token_hash(self, _token_hash: bytes) -> dict:
+                return {"snapshot_json": dict(_SNAPSHOT), "title": "t", "snapshot_version": 1}
+
+        class _App:
+            state = SimpleNamespace(share_repo=_Repo())
+
+        scope: dict = {"type": "http", "headers": [], "client": ("127.0.0.1", 1), "app": _App()}
+        request = Request(scope)
+        set_app_config(_config(enabled=True))
+        try:
+            with (
+                patch.object(shares_router, "get_share_pepper_async", new=AsyncMock(return_value="pepper")),
+                patch.object(shares_router, "resanitize_share_snapshot", new=cpu_bound_resanitize),
+                patch.object(shares_router, "_public_resolve_throttled", return_value=False),
+            ):
+                task = asyncio.create_task(ticker())
+                await asyncio.sleep(0.03)
+                before = ticks
+                response = Response()
+                await shares_router.get_public_share("dfs_publicreadoffload00000", request, response)
+                during = ticks - before
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        finally:
+            reset_app_config()
+        return during
+
+    assert asyncio.run(scenario()) >= 3
+
+
+def test_snapshot_build_sanitizes_pages_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The create path's per-page sanitization must not starve the loop either."""
+
+    async def fake_scan(
+        thread_id: str,
+        *,
+        limit: int,
+        before_seq: int | None,
+        request: Request,
+        user_id: str | None,
+        raw_scan_budget: object = None,
+    ) -> tuple[list[dict], bool]:
+        if before_seq is None:
+            return (
+                [
+                    {"seq": 1, "role": "assistant", "content": "x"},
+                    {"seq": 2, "role": "assistant", "content": "y"},
+                ],
+                False,
+            )
+        return [], False
+
+    def cpu_bound_public_message(row: dict) -> dict:
+        assert _spin_cpu() >= 0
+        return {"role": "assistant", "content": row["content"]}
+
+    monkeypatch.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+    monkeypatch.setattr("app.gateway.shares.snapshot._public_message", cpu_bound_public_message)
+
+    async def scenario() -> tuple[int, dict]:
+        ticks = 0
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        from app.gateway.shares.snapshot import build_share_snapshot
+
+        task = asyncio.create_task(ticker())
+        await asyncio.sleep(0.03)
+        before = ticks
+        snapshot, _boundary = await build_share_snapshot("thread-offload", request=object(), user_id="u")
+        during = ticks - before
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        return during, snapshot
+
+    during, snapshot = asyncio.run(scenario())
+    assert during >= 3
+    assert [message["id"] for message in snapshot["messages"]] == ["m1", "m2"]
+
+
+def test_public_read_title_sanitize_runs_off_the_event_loop() -> None:
+    """A tampered stored title must not starve the loop either.
+
+    SQLite does not enforce the String(512) column bound, and the read path
+    trusts the stored row — sanitize the title in the same worker call as
+    the snapshot so a tampered multi-megabyte title cannot refreeze the
+    gateway through the field the snapshot offload forgot.
+    """
+
+    def cpu_bound_title(value: object) -> str:
+        assert _spin_cpu() >= 0
+        return "t"
+
+    async def scenario() -> int:
+        ticks = 0
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        class _Repo:
+            async def get_active_by_token_hash(self, _token_hash: bytes) -> dict:
+                return {"snapshot_json": dict(_SNAPSHOT), "title": "t", "snapshot_version": 1}
+
+        class _App:
+            state = SimpleNamespace(share_repo=_Repo())
+
+        scope: dict = {"type": "http", "headers": [], "client": ("127.0.0.1", 1), "app": _App()}
+        request = Request(scope)
+        set_app_config(_config(enabled=True))
+        try:
+            with (
+                patch.object(shares_router, "get_share_pepper_async", new=AsyncMock(return_value="pepper")),
+                patch.object(shares_router, "resanitize_share_snapshot", new=lambda snap: snap),
+                patch.object(shares_router, "sanitize_share_title", new=cpu_bound_title),
+                patch.object(shares_router, "_public_resolve_throttled", return_value=False),
+            ):
+                task = asyncio.create_task(ticker())
+                await asyncio.sleep(0.03)
+                before = ticks
+                response = Response()
+                await shares_router.get_public_share("dfs_pubtitlereadoffload00000", request, response)
+                during = ticks - before
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        finally:
+            reset_app_config()
+        return during
+
+    assert asyncio.run(scenario()) >= 3

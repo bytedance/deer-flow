@@ -11,6 +11,7 @@ disclose which condition occurred.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import UTC, datetime, timedelta
@@ -290,6 +291,14 @@ async def revoke_share(thread_id: ThreadId, share_id: str, request: Request) -> 
     return None
 
 
+def _public_share_projection(record: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Sanitize the stored title and snapshot together (pure, thread-safe)."""
+    return (
+        resanitize_share_snapshot(record.get("snapshot_json") or {}),
+        sanitize_share_title(record["title"]),
+    )
+
+
 @router.get("/shares/{share_token}", response_model=PublicShareResponse)
 async def get_public_share(share_token: str, request: Request, response: Response) -> PublicShareResponse:
     """Resolve a bearer share token into its public snapshot DTO.
@@ -318,9 +327,17 @@ async def get_public_share(share_token: str, request: Request, response: Respons
         # Never log the token itself; hash-side failures stay generic.
         logger.debug("Share token did not resolve")
         raise _public_not_found()
-    snapshot = resanitize_share_snapshot(record.get("snapshot_json") or {})
+    # Re-sanitization is pure CPU over the stored snapshot and runs on every
+    # anonymous read; at the 2 MiB rendered cap it measured ~5s, which froze
+    # the whole single-worker gateway when run on the loop. The stored title
+    # rides the same worker call: SQLite does not enforce its String(512)
+    # bound, so a tampered multi-megabyte title would otherwise refreeze the
+    # gateway through the field the snapshot offload forgot. Both helpers
+    # are pure functions, and GIL time-slicing keeps the loop servicing
+    # other requests meanwhile.
+    snapshot, title = await asyncio.to_thread(_public_share_projection, record)
     return PublicShareResponse(
-        title=sanitize_share_title(record["title"]),
+        title=title,
         snapshot_version=int(record.get("snapshot_version") or 1),
         snapshot=snapshot,
     )

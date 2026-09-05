@@ -10,6 +10,7 @@ the hidden/control filter is applied again on top.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import unicodedata
@@ -396,8 +397,12 @@ async def build_share_snapshot(
             ) from exc
         if not rows:
             break
-        page_messages = [_public_message(row) for row in rows]
-        page_messages = [message for message in page_messages if message is not None]
+        # Sanitization is pure CPU on page-sized batches; running it on the
+        # loop froze every concurrent request for the batch's full duration
+        # on near-capacity threads. A worker thread never touches shared
+        # state (`_public_message` is pure), and GIL time-slicing keeps the
+        # loop schedulable while it runs.
+        page_messages = await asyncio.to_thread(_public_page_messages, rows)
         if page_messages:
             pages.append(page_messages)
             public_messages += len(page_messages)
@@ -444,6 +449,11 @@ async def build_share_snapshot(
         },
         raw_scan_budget.max_seq,
     )
+
+
+def _public_page_messages(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sanitize one scan page to its public messages (pure, thread-safe)."""
+    return [message for message in map(_public_message, rows) if message is not None]
 
 
 def _public_message(row: dict[str, Any]) -> dict[str, Any] | None:
