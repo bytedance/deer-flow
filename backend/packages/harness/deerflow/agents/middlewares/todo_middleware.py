@@ -297,6 +297,9 @@ class TodoMiddleware(TodoListMiddleware):
         if not last_ai or _has_tool_call_intent_or_error(last_ai):
             return None
 
+        if (last_ai.additional_kwargs or {}).get("deerflow_error_fallback"):
+            return None
+
         # 3. Allow exit when all todos are completed or there are no todos.
         todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
         if not todos or all(t.get("status") == "completed" for t in todos):
