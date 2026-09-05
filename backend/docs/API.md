@@ -426,6 +426,79 @@ GET /api/models/{model_name}
 }
 ```
 
+### Conversation Sharing (#4548)
+
+This section documents the current **backend API groundwork** for read-only
+conversation snapshots. This phase does not ship the frontend Share dialog or
+an HTML page at `/share/{token}`. The create response reserves that path in its
+`share_url`, but it is not directly openable in the current frontend; the
+verifiable anonymous endpoint today is `GET /api/shares/{share_token}`.
+
+The API requires `conversation_sharing.enabled` in `config.yaml` (off by
+default) and a SQL database backend. The share-token pepper is
+environment-backed (`SHARE_TOKEN_PEPPER`); a 0600-persisted secret is generated
+locally when absent. Multi-replica deployments (Kubernetes/Helm, or multiple
+containers without a shared `DEER_FLOW_HOME` volume) must set
+`SHARE_TOKEN_PEPPER` explicitly — otherwise each replica auto-generates its own
+pepper and resolves only the tokens it minted.
+
+Owner endpoints (authenticated, strict row ownership — the thread must exist and be owned by the caller; legacy `user_id=NULL` threads cannot be shared):
+
+#### Create Share
+
+```http
+POST /api/threads/{thread_id}/shares
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "title": "Optional custom title",
+  "expires_in_days": 30,
+  "never_expires": false
+}
+```
+
+- `expires_in_days` — one of `1`, `7`, `30`; defaults to `conversation_sharing.default_expiry_days`.
+- `never_expires` — only accepted when the deployment sets `conversation_sharing.allow_no_expiry`.
+
+**Response (`201`):**
+```json
+{
+  "share_id": "…",
+  "title": "…",
+  "expires_at": "2026-09-27T10:00:00Z",
+  "created_at": "2026-08-28T10:00:00Z",
+  "share_url": "/share/dfs_…"
+}
+```
+
+`share_url` carries the raw token and is returned **exactly once**; only an
+HMAC-SHA-256 digest is stored. In this backend-only phase, extract its token for
+`GET /api/shares/{share_token}`; `/share/{token}` is reserved for the Phase 2
+public page. The snapshot is frozen at creation — later messages or edits never
+modify an existing share.
+
+#### List / Revoke
+
+```http
+GET /api/threads/{thread_id}/shares
+DELETE /api/threads/{thread_id}/shares/{share_id}
+```
+
+Listing returns management metadata (never token hashes); revocation is effective on the next public request.
+
+Public endpoint (anonymous — the token is the credential):
+
+#### Resolve Share
+
+```http
+GET /api/shares/{share_token}
+```
+
+Returns `{title, snapshot_version, snapshot}` where `snapshot` is the allowlisted public DTO (snapshot-local ids, `user`/`assistant` roles, renderable text only — no run/thread/user identifiers, no tool arguments or debug data). Invalid, revoked, and expired tokens all return the same `404`. Resolution is rate-limited per IP.
+
 ### MCP Configuration
 
 #### Get MCP Config

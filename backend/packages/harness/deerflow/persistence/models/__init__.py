@@ -21,6 +21,7 @@ from deerflow.persistence.channel_connections.model import (
     ChannelCredentialRow,
     ChannelOAuthStateRow,
 )
+from deerflow.persistence.conversation_shares.model import ConversationShareRow
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
@@ -40,6 +41,7 @@ __all__ = [
     "ChannelConversationRow",
     "ChannelCredentialRow",
     "ChannelOAuthStateRow",
+    "ConversationShareRow",
     "FeedbackRow",
     "McpTaskRow",
     "ManagedSubagentRow",

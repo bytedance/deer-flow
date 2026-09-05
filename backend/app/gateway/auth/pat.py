@@ -53,6 +53,13 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"GET", "PUT", "DELETE"}), re.compile(r"^/api/threads/[^/]+/goal$")),
     (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/state$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/(compact|history|branches)$")),
+    # Conversation sharing (#4548): create/list/revoke run under the
+    # threads:read permission with strict ownership, so a PAT holding that
+    # scope manages its own share links. The public-resolution route
+    # (/api/shares/{token}) is anonymous by design and stays off this
+    # policy — it must never become a PAT-credentialed surface.
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/shares$")),
+    (frozenset({"DELETE"}), re.compile(r"^/api/threads/[^/]+/shares/[^/]+$")),
     # Runs subtree: enumerated per implemented subroute instead of a
     # ``runs(/.*)?`` wildcard, so a route added under /runs is default-denied
     # until explicitly listed — the same no-dead-methods precision the

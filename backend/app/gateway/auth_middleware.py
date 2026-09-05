@@ -41,6 +41,12 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     # Inbound webhooks authenticate themselves via provider-specific signatures
     # (e.g. GitHub's X-Hub-Signature-256), not session cookies.
     "/api/webhooks/",
+    # Public read-only conversation shares (#4548): the high-entropy bearer
+    # token in the path is the credential, verified inside the route against
+    # the dedicated share record. The exemption covers exactly this GET
+    # surface — owner-side create/list/revoke live under the authenticated
+    # /api/threads/{thread_id}/shares routes and are never exempt.
+    "/api/shares/",
 )
 
 # Exact auth paths that are public (login/register/status check).

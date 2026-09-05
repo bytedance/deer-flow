@@ -16,6 +16,7 @@ import logging
 import re
 import uuid
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -64,6 +65,48 @@ _artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
+
+
+class _RawMessageScanLimitExceeded(RuntimeError):
+    """Raised after one sentinel row proves a raw message scan is oversized."""
+
+    def __init__(self, scanned_rows: int, limit: int) -> None:
+        super().__init__(f"raw message scan exceeded its {limit}-row limit")
+        self.scanned_rows = scanned_rows
+        self.limit = limit
+
+
+@dataclass(slots=True)
+class _RawMessageScanBudget:
+    """Shared raw-row budget for one logical scan across canonical pages."""
+
+    limit: int
+    scanned_rows: int = 0
+    # Highest raw seq observed before visibility filtering. The share
+    # snapshot's audit boundary follows raw consumption — hidden rows the
+    # pager discards still advance the scan.
+    max_seq: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.limit < 0:
+            raise ValueError("raw message scan limit must be non-negative")
+
+    def next_batch_size(self, batch_size: int) -> int:
+        # One sentinel row beyond the remaining budget distinguishes an exact,
+        # complete scan from a genuinely oversized one without walking the
+        # rest of a hidden-row-heavy thread.
+        return min(batch_size, self.limit - self.scanned_rows + 1)
+
+    def consume(self, count: int) -> None:
+        self.scanned_rows += count
+        if self.scanned_rows > self.limit:
+            raise _RawMessageScanLimitExceeded(self.scanned_rows, self.limit)
+
+    def observe(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            seq = row.get("seq")
+            if isinstance(seq, int) and (self.max_seq is None or seq > self.max_seq):
+                self.max_seq = seq
 
 
 def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
@@ -1234,6 +1277,7 @@ async def _scan_visible_thread_messages(
     include_middleware: bool,
     include_extra: bool,
     batch_size: int,
+    raw_scan_budget: _RawMessageScanBudget | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Scan raw message rows until ``limit`` visible rows survive filtering."""
     event_store = get_run_event_store(request)
@@ -1243,15 +1287,19 @@ async def _scan_visible_thread_messages(
         visible: list[dict[str, Any]] = []
         scan_after = after_seq
         while len(visible) < needed:
+            scan_batch_size = raw_scan_budget.next_batch_size(batch_size) if raw_scan_budget is not None else batch_size
             raw = await event_store.list_messages(
                 thread_id,
-                limit=batch_size,
+                limit=scan_batch_size,
                 after_seq=scan_after,
                 user_id=user_id,
             )
             if not raw:
                 break
             _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=None, scan_after=scan_after)
+            if raw_scan_budget is not None:
+                raw_scan_budget.consume(len(raw))
+                raw_scan_budget.observe(raw)
             reached_before_bound = False
             for row in raw:
                 if before_seq is not None and row["seq"] >= before_seq:
@@ -1266,7 +1314,7 @@ async def _scan_visible_thread_messages(
             if next_scan_after <= scan_after:
                 _raise_non_advancing_message_scan(thread_id=thread_id, scan_before=None, scan_after=scan_after, next_cursor=next_scan_after, row_count=len(raw))
             scan_after = next_scan_after
-            if reached_before_bound or len(raw) < batch_size:
+            if reached_before_bound or len(raw) < scan_batch_size:
                 break
         has_more = len(visible) > limit
         return visible[:limit], has_more
@@ -1274,15 +1322,19 @@ async def _scan_visible_thread_messages(
     visible_desc: list[dict[str, Any]] = []
     scan_before = before_seq
     while len(visible_desc) < needed:
+        scan_batch_size = raw_scan_budget.next_batch_size(batch_size) if raw_scan_budget is not None else batch_size
         raw = await event_store.list_messages(
             thread_id,
-            limit=batch_size,
+            limit=scan_batch_size,
             before_seq=scan_before,
             user_id=user_id,
         )
         if not raw:
             break
         _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=scan_before, scan_after=None)
+        if raw_scan_budget is not None:
+            raw_scan_budget.consume(len(raw))
+            raw_scan_budget.observe(raw)
         for row in reversed(raw):
             if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
                 continue
@@ -1293,7 +1345,7 @@ async def _scan_visible_thread_messages(
         if scan_before is not None and next_scan_before >= scan_before:
             _raise_non_advancing_message_scan(thread_id=thread_id, scan_before=scan_before, scan_after=None, next_cursor=next_scan_before, row_count=len(raw))
         scan_before = next_scan_before
-        if len(raw) < batch_size:
+        if len(raw) < scan_batch_size:
             break
     has_more = len(visible_desc) > limit
     return list(reversed(visible_desc[:limit])), has_more
@@ -1345,6 +1397,7 @@ async def _scan_thread_message_page(
     before_seq: int | None,
     request: Request,
     user_id: str | None,
+    raw_scan_budget: _RawMessageScanBudget | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Select the newest ``limit + 1`` page-eligible rows before a cursor."""
     run_mgr = get_run_manager(request)
@@ -1360,6 +1413,7 @@ async def _scan_thread_message_page(
         include_middleware=False,
         include_extra=True,
         batch_size=THREAD_MESSAGE_PAGE_SCAN_BATCH,
+        raw_scan_budget=raw_scan_budget,
     )
 
 

@@ -34,6 +34,7 @@ from app.gateway.routers import (
     models,
     runs,
     scheduled_tasks,
+    shares,
     skills,
     subagent_batches,
     subagents,
@@ -44,19 +45,27 @@ from app.gateway.routers import (
 )
 from app.gateway.trace_middleware import TraceMiddleware
 from deerflow.config import app_config as deerflow_app_config
-from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.logging_config import (
+    DEFAULT_LOG_DATE_FORMAT,
+    DEFAULT_LOG_FORMAT,
+    configure_logging,
+    install_share_token_redaction,
+)
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config
 
-# Default logging; lifespan overrides from config.yaml log_level.
+# Default logging; lifespan overrides from config.yaml log_level. Share
+# bearer tokens ride in request URLs (#4548), so redaction is installed from
+# the very first access log line — before the lifespan starts.
 logging.basicConfig(
     level=logging.INFO,
     format=DEFAULT_LOG_FORMAT,
     datefmt=DEFAULT_LOG_DATE_FORMAT,
 )
+install_share_token_redaction()
 
 logger = logging.getLogger(__name__)
 
@@ -818,6 +827,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(uploads.router)
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
+    app.include_router(shares.router)
     app.include_router(threads.router)
 
     # Scheduled tasks API is mounted at /api/scheduled-tasks
