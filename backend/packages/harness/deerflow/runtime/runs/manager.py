@@ -1578,12 +1578,15 @@ class RunManager:
                 current = self._runs.get(existing.run_id)
                 if current is None:
                     # Only re-index active records owned by this worker. A
-                    # foreign active record has no local task to finalize or
-                    # evict it, while terminal histories have no worker task at
-                    # all. Both must stay store-only: the Gateway returns
-                    # immediately for an idempotent reuse, so indexing either
-                    # would retain it for the process lifetime (the #5009 leak,
-                    # one stable-key retry at a time).
+                    # terminal record has no worker task at all, so nothing
+                    # would ever evict it. A peer-owned active record is also
+                    # taskless here: the Gateway returns at
+                    # record.idempotency_reused before attaching a worker, and
+                    # the real owner terminalizes the store row. Indexing
+                    # either would retain it for the process lifetime (the
+                    # #5009 leak, one stable-key retry at a time), and a
+                    # peer-owned record would additionally make has_inflight()
+                    # / the lease heartbeat treat a taskless record as live.
                     if existing.status in (RunStatus.pending, RunStatus.running) and existing.owner_worker_id == self._worker_id:
                         self._runs[existing.run_id] = existing
                         self._index_run_locked(existing)
