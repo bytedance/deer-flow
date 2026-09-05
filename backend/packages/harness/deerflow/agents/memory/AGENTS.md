@@ -74,9 +74,13 @@ Tool mode leaves agent facts behind `memory_search`.
 
 Per-user lead-agent Custom Agents may set `memory_enabled: false` in their own
 `config.yaml`. This is a complete per-agent opt-out: dynamic context remains
-date-only, passive capture is not installed, tool mode exposes no memory tools
-or tool guidance, and the global memory configuration remains unchanged for
-other agents. Omission defaults to the existing enabled behavior.
+date-only, passive capture is not installed, automatic and manual compaction do
+not flush summarized messages, tool mode exposes no memory tools or tool
+guidance, and the global memory configuration remains unchanged for other
+agents. On the next run after an existing agent opts out, Dynamic Context emits
+`RemoveMessage` updates for its server-tagged frozen `__memory` entries while
+retaining date reminders and real user messages. Omission defaults to the
+existing enabled behavior.
 
 #### DeerMem storage contract
 

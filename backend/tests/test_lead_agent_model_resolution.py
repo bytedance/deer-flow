@@ -694,7 +694,12 @@ def test_build_middlewares_custom_agent_memory_opt_out_keeps_dynamic_date_only(m
     from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **kwargs: None)
+    summarization_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_create_summarization_middleware",
+        lambda **kwargs: summarization_kwargs.update(kwargs) or None,
+    )
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     middlewares = lead_agent_module.build_middlewares(
@@ -707,6 +712,7 @@ def test_build_middlewares_custom_agent_memory_opt_out_keeps_dynamic_date_only(m
 
     dynamic_context = next(middleware for middleware in middlewares if isinstance(middleware, DynamicContextMiddleware))
     assert dynamic_context._memory_enabled is False
+    assert summarization_kwargs["skip_memory_flush"] is True
     assert not any(isinstance(middleware, MemoryMiddleware) for middleware in middlewares)
 
 

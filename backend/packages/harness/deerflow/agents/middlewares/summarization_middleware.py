@@ -891,7 +891,8 @@ def create_summarization_middleware(
 
     ``skip_memory_flush`` omits the ``memory_flush_hook`` that otherwise
     flushes pre-compaction messages into the durable memory queue. The lead
-    chain keeps it (research should persist); the subagent chain sets it so a
+    chain keeps it unless its Custom Agent opted out of memory; manual
+    compaction follows that same policy. The subagent chain always sets it so a
     subagent's INTERNAL turns (the "Task" human message + intermediate AI/tool
     turns) are not written into the PARENT thread's durable memory — the hook
     is keyed by ``thread_id`` and subagents share the parent's ``thread_id``

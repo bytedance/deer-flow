@@ -4,11 +4,14 @@ Verifies that memory and current date are injected as a <system-reminder> into
 the first HumanMessage exactly once per session (frozen-snapshot pattern).
 """
 
+import asyncio
 import hashlib
 from types import SimpleNamespace
 from unittest import mock
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
+from langgraph.graph.message import add_messages
 
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
@@ -137,6 +140,77 @@ def test_memory_opt_out_keeps_date_reminder_without_reading_memory():
     assert isinstance(result["messages"][0], SystemMessage)
     assert "<current_date>2026-05-08, Friday</current_date>" in result["messages"][0].content
     assert result["messages"][1].content == "Hi"
+
+
+def test_memory_opt_out_removes_frozen_checkpoint_memory_but_keeps_date():
+    """Changing an existing agent to stateless must take effect immediately.
+
+    The date reminder and original user turn remain valid framework context, but
+    a server-tagged ``__memory`` message from an earlier checkpoint must not be
+    sent to the model after the agent opts out. An untagged client message with a
+    similar ID is not middleware-owned and must be preserved.
+    """
+    date = "2026-05-08, Friday"
+    frozen_memory = HumanMessage(
+        content="<memory>User prefers Python.</memory>",
+        id="msg-1__memory",
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
+    client_message = HumanMessage(content="client data", id="client__memory")
+    state = {
+        "messages": [
+            _date_reminder_msg(date, "msg-1"),
+            frozen_memory,
+            HumanMessage(content="Hello", id="msg-1__user"),
+            client_message,
+            HumanMessage(content="Continue", id="msg-2"),
+        ]
+    }
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = date
+        result = _make_middleware(memory_enabled=False).before_agent(state, _fake_runtime())
+
+    assert result is not None
+    assert result["messages"] == [RemoveMessage(id="msg-1__memory")]
+
+    updated = add_messages(state["messages"], result["messages"])
+    assert "msg-1__memory" not in {message.id for message in updated}
+    assert next(message for message in updated if message.id == "msg-1").content.endswith(f"<current_date>{date}</current_date>\n</system-reminder>")
+    assert next(message for message in updated if message.id == "client__memory").content == "client data"
+
+
+async def _wait_forever(*_args, **_kwargs):
+    await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_memory_opt_out_async_timeout_still_removes_frozen_memory(monkeypatch):
+    """A date/injection timeout cannot delay an already-active opt-out."""
+    date = "2026-05-08, Friday"
+    state = {
+        "messages": [
+            _date_reminder_msg(date, "msg-1"),
+            HumanMessage(
+                content="<memory>User prefers Python.</memory>",
+                id="msg-1__memory",
+                additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+            ),
+            HumanMessage(content="Continue", id="msg-2"),
+        ]
+    }
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.dynamic_context_middleware.asyncio.to_thread",
+        _wait_forever,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    result = await _make_middleware(memory_enabled=False).abefore_agent(state, _fake_runtime())
+
+    assert result == {"messages": [RemoveMessage(id="msg-1__memory")]}
 
 
 def test_memory_lookup_uses_runtime_user_id():
@@ -894,7 +968,7 @@ def test_date_middlewares_declare_configured_timezone(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Asia/Shanghai")
 
     assert _declared_date_timezone_policies() == [
-        {"current_date_timezone": "Asia/Shanghai"},
+        {"current_date_timezone": "Asia/Shanghai", "memory_enabled": True},
         {"current_date_timezone": "Asia/Shanghai"},
     ]
 
@@ -903,9 +977,20 @@ def test_date_middlewares_declare_utc_timezone(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "UTC")
 
     assert _declared_date_timezone_policies() == [
-        {"current_date_timezone": "UTC"},
+        {"current_date_timezone": "UTC", "memory_enabled": True},
         {"current_date_timezone": "UTC"},
     ]
+
+
+def test_dynamic_context_release_policy_includes_memory_opt_out(monkeypatch):
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+
+    monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "UTC")
+
+    assert DynamicContextMiddleware(memory_enabled=False).release_policy_parameters() == {
+        "current_date_timezone": "UTC",
+        "memory_enabled": False,
+    }
 
 
 def test_date_middlewares_declare_resolved_local_zone_without_env(monkeypatch):
@@ -914,10 +999,13 @@ def test_date_middlewares_declare_resolved_local_zone_without_env(monkeypatch):
     from deerflow.agents.middlewares.dynamic_context_middleware import _effective_date_timezone_name
 
     monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
-    expected = {"current_date_timezone": _effective_date_timezone_name()}
-    assert expected["current_date_timezone"]
+    date_policy = {"current_date_timezone": _effective_date_timezone_name()}
+    assert date_policy["current_date_timezone"]
 
-    assert _declared_date_timezone_policies() == [expected, expected]
+    assert _declared_date_timezone_policies() == [
+        {**date_policy, "memory_enabled": True},
+        date_policy,
+    ]
 
 
 def test_date_middlewares_declare_resolved_local_zone_for_invalid_env(monkeypatch, caplog):
@@ -925,9 +1013,12 @@ def test_date_middlewares_declare_resolved_local_zone_for_invalid_env(monkeypatc
     from deerflow.agents.middlewares.dynamic_context_middleware import _effective_date_timezone_name
 
     monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Not/A_Zone")
-    expected = {"current_date_timezone": _effective_date_timezone_name()}
+    date_policy = {"current_date_timezone": _effective_date_timezone_name()}
 
-    assert _declared_date_timezone_policies() == [expected, expected]
+    assert _declared_date_timezone_policies() == [
+        {**date_policy, "memory_enabled": True},
+        date_policy,
+    ]
     assert "DEER_FLOW_DATE_TIMEZONE" in caplog.text
 
 

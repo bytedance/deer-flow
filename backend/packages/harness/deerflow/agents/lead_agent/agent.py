@@ -314,6 +314,7 @@ def _create_summarization_middleware(
     *,
     app_config: AppConfig | None = None,
     run_model_name: str | None = None,
+    skip_memory_flush: bool = False,
     extensions=None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config.
@@ -325,6 +326,7 @@ def _create_summarization_middleware(
     return create_summarization_middleware(
         app_config=app_config,
         run_model_name=run_model_name,
+        skip_memory_flush=skip_memory_flush,
         extensions=extensions,
     )
 
@@ -587,6 +589,7 @@ def build_middlewares(
     summarization_middleware = _create_summarization_middleware(
         app_config=resolved_app_config,
         run_model_name=model_name,
+        skip_memory_flush=not memory_enabled,
         extensions=resolved_extensions,
     )
     if summarization_middleware is not None:

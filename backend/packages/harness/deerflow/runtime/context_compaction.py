@@ -14,6 +14,7 @@ from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 
 logger = logging.getLogger(__name__)
+_AGENT_CONFIG_NOT_LOADED = object()
 
 
 class ContextCompactionDisabled(RuntimeError):
@@ -43,8 +44,14 @@ def _create_compaction_middleware(
     app_config: AppConfig,
     keep: tuple[str, int | float] | None,
     run_model_name: str | None = None,
+    skip_memory_flush: bool = False,
 ) -> DeerFlowSummarizationMiddleware:
-    middleware = create_summarization_middleware(app_config=app_config, keep=keep, run_model_name=run_model_name)
+    middleware = create_summarization_middleware(
+        app_config=app_config,
+        keep=keep,
+        run_model_name=run_model_name,
+        skip_memory_flush=skip_memory_flush,
+    )
     if middleware is None:
         raise ContextCompactionDisabled("Context compaction is disabled.")
     return middleware
@@ -53,10 +60,11 @@ def _create_compaction_middleware(
 def _safe_load_agent_config(agent_name: str, user_id: str | None):
     """Load a custom agent's config, returning ``None`` on any failure.
 
-    A missing / unparseable agent config must not fail compaction; the run model is a
-    best-effort optimization and the default is a safe fallback. The caller runs this
-    off the event loop via ``asyncio.to_thread``, so the strict blocking-IO detector
-    does not flag the filesystem read and the broad ``except`` here cannot mask a
+    A missing / unparseable agent config must not fail compaction. Model resolution
+    falls back to the default, while the optional memory flush fails closed because
+    an unreadable policy cannot authorize a durable write. The caller runs this off
+    the event loop via ``asyncio.to_thread``, so the strict blocking-IO detector does
+    not flag the filesystem read and the broad ``except`` here cannot mask a
     ``BlockingError`` raised on the loop.
     """
     from deerflow.config.agents_config import load_agent_config
@@ -64,7 +72,7 @@ def _safe_load_agent_config(agent_name: str, user_id: str | None):
     try:
         return load_agent_config(agent_name, user_id=user_id)
     except Exception:
-        logger.warning("Could not load agent config for %r; using the default model for summarization", agent_name, exc_info=True)
+        logger.warning("Could not load agent config for %r; using the default model and skipping memory flush", agent_name, exc_info=True)
         return None
 
 
@@ -73,6 +81,8 @@ async def _aresolve_thread_model_name(
     agent_name: str | None,
     user_id: str | None,
     app_config: AppConfig,
+    *,
+    agent_config: object = _AGENT_CONFIG_NOT_LOADED,
 ) -> str | None:
     """Resolve the model a thread should summarize with, mirroring lead resolution.
 
@@ -88,9 +98,11 @@ async def _aresolve_thread_model_name(
     default = app_config.models[0].name if getattr(app_config, "models", None) else None
     candidate = model_name
     if not candidate and agent_name:
-        agent_config = await asyncio.to_thread(_safe_load_agent_config, agent_name, user_id)
-        if agent_config and agent_config.model:
-            candidate = agent_config.model
+        if agent_config is _AGENT_CONFIG_NOT_LOADED:
+            agent_config = await asyncio.to_thread(_safe_load_agent_config, agent_name, user_id)
+        configured_model = getattr(agent_config, "model", None)
+        if configured_model:
+            candidate = configured_model
     if candidate and app_config.get_model_config(candidate):
         return candidate
     return default
@@ -109,8 +121,21 @@ async def compact_thread_context(
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint."""
     resolved_app_config = app_config or get_app_config()
-    run_model_name = await _aresolve_thread_model_name(model_name, agent_name, user_id, resolved_app_config)
-    middleware = _create_compaction_middleware(app_config=resolved_app_config, keep=keep, run_model_name=run_model_name)
+    agent_config = await asyncio.to_thread(_safe_load_agent_config, agent_name, user_id) if agent_name else None
+    run_model_name = await _aresolve_thread_model_name(
+        model_name,
+        agent_name,
+        user_id,
+        resolved_app_config,
+        agent_config=agent_config,
+    )
+    memory_enabled = not agent_name or (agent_config is not None and getattr(agent_config, "memory_enabled", True) is not False)
+    middleware = _create_compaction_middleware(
+        app_config=resolved_app_config,
+        keep=keep,
+        run_model_name=run_model_name,
+        skip_memory_flush=not memory_enabled,
+    )
 
     read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     snapshot = await accessor.aget(read_config)
