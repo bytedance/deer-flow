@@ -306,10 +306,6 @@ async def test_async_empty_stop_retries_once(monkeypatch: pytest.MonkeyPatch) ->
 @pytest.mark.parametrize(
     "message",
     [
-        AIMessage(content=" ", response_metadata={"finish_reason": "stop"}),
-        AIMessage(content="", additional_kwargs={"reasoning_content": "thinking"}, response_metadata={"finish_reason": "stop"}),
-        AIMessage(content=[{"type": "thinking", "thinking": "thinking"}], response_metadata={"finish_reason": "stop"}),
-        AIMessage(content=[{"type": "reasoning", "reasoning": "thinking"}], response_metadata={"finish_reason": "stop"}),
         AIMessage(
             content="",
             tool_calls=[{"id": "call-1", "name": "bash", "args": {}}],
@@ -333,8 +329,37 @@ def test_nonempty_or_non_stop_response_is_not_classified_as_empty(message: AIMes
     assert attempts == 1
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        AIMessage(content=" ", response_metadata={"finish_reason": "stop"}),
+        AIMessage(content="", additional_kwargs={"reasoning_content": "thinking"}, response_metadata={"finish_reason": "stop"}),
+        AIMessage(content=[{"type": "thinking", "thinking": "thinking"}], response_metadata={"finish_reason": "stop"}),
+        AIMessage(content=[{"type": "reasoning", "reasoning": "thinking"}], response_metadata={"finish_reason": "stop"}),
+    ],
+)
+def test_nonvisible_stop_response_retries_then_returns_marked_fallback(
+    message: AIMessage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    attempts = 0
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        return message
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == 2
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_reason"] == "empty_response"
+
+
 def test_empty_model_response_container_retries_before_graph_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The production ModelResponse container is classified at the same boundary."""
+    """生产环境的 ModelResponse.result 结构也必须在模型边界完成判空。"""
     middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
     attempts = 0
     monkeypatch.setattr("time.sleep", lambda _delay: None)
@@ -1027,6 +1052,48 @@ class _StreamChunkTimeoutError(Exception):
 
 
 _StreamChunkTimeoutError.__name__ = "StreamChunkTimeoutError"
+
+
+class _ReadTimeoutError(Exception):
+    pass
+
+
+_ReadTimeoutError.__name__ = "ReadTimeout"
+
+
+def test_read_timeout_is_retried_and_exhaustion_returns_marked_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    attempts = 0
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise _ReadTimeoutError("no bytes received before read deadline")
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == 2
+    assert result.additional_kwargs["error_reason"] == "transient"
+    assert result.additional_kwargs["error_type"] == "ReadTimeout"
+
+
+def test_empty_model_result_is_retried_before_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    attempts = 0
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    def handler(_request) -> ModelResponse:
+        nonlocal attempts
+        attempts += 1
+        return ModelResponse(result=[])
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == 2
+    assert result.additional_kwargs["error_reason"] == "empty_response"
 
 
 def test_classify_error_stream_chunk_timeout_is_retriable() -> None:

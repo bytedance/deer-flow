@@ -22,7 +22,7 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
-from deerflow.agents.middlewares.model_response import finish_reason, has_model_content, last_ai_message
+from deerflow.agents.middlewares.model_response import finish_reason, has_tool_call_intent, has_visible_content, last_ai_message
 from deerflow.config.app_config import AppConfig
 from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
 
@@ -43,9 +43,11 @@ class EmptyModelResponseError(RuntimeError):
 
 
 def _raise_for_empty_response(response: ModelCallResult) -> None:
-    """Convert an empty stop into a retryable error before graph persistence."""
+    """在响应写入图状态前把零内容 stop 转换为可重试错误。"""
     message = last_ai_message(response)
-    if message is None or has_model_content(message):
+    if message is None:
+        raise EmptyModelResponseError()
+    if has_visible_content(message) or has_tool_call_intent(message):
         return
     reason = finish_reason(message)
     if reason in (None, "", "stop", "end_turn"):
@@ -134,6 +136,7 @@ _BURST_PATTERNS = (
 _RETRY_BUDGET_OVERRIDES: dict[str, int] = {
     "EmptyModelResponseError": 2,
     "StreamChunkTimeoutError": 2,
+    "ReadTimeout": 2,
 }
 
 # Per-reason retry budget overrides, applied in addition to the per-exception
@@ -563,6 +566,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             "APITimeoutError",
             "APIConnectionError",
             "InternalServerError",
+            "ReadTimeout",
+            "ConnectTimeout",
+            "WriteTimeout",
+            "PoolTimeout",
+            "TimeoutException",
             "ReadError",  # httpx.ReadError: connection dropped mid-stream
             "RemoteProtocolError",  # httpx: server closed connection unexpectedly
             "StreamChunkTimeoutError",  # langchain-openai: chunk gap exceeded stream_chunk_timeout

@@ -83,21 +83,36 @@ def _make_payload_message(role: str, content: str | None = None, tool_calls: lis
     return msg
 
 
+_TOOL_SPEC = [{"type": "function", "function": {"name": "bash", "parameters": {}}}]
+
+
 def test_reasoning_content_injected_into_assistant_message():
     """reasoning_content from additional_kwargs is restored in the payload."""
-    model = _make_model()
+    model = _make_model(extra_body={"thinking": {"type": "enabled"}})
 
     human = HumanMessage(content="What is 2+2?")
     ai = AIMessage(
-        content="4",
+        content="",
         additional_kwargs={"reasoning_content": "Let me think: 2+2=4"},
+        tool_calls=[{"id": "call-1", "name": "calculator", "args": {"expression": "2+2"}}],
     )
 
     base_payload = {
+        "tools": _TOOL_SPEC,
         "messages": [
             _make_payload_message("user", "What is 2+2?"),
-            _make_payload_message("assistant", "4"),
-        ]
+            _make_payload_message(
+                "assistant",
+                None,
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "calculator", "arguments": '{"expression":"2+2"}'},
+                    }
+                ],
+            ),
+        ],
     }
 
     with patch.object(type(model).__bases__[0], "_get_request_payload", return_value=base_payload):
@@ -107,6 +122,7 @@ def test_reasoning_content_injected_into_assistant_message():
 
     assistant_msg = next(m for m in payload["messages"] if m["role"] == "assistant")
     assert assistant_msg["reasoning_content"] == "Let me think: 2+2=4"
+    assert assistant_msg["content"] == ""
 
 
 def test_no_reasoning_content_is_noop():
@@ -133,7 +149,6 @@ def test_no_reasoning_content_is_noop():
 
 
 def test_thinking_tool_call_without_reasoning_gets_empty_placeholder():
-    """Thinking-mode tool turns require an empty reasoning placeholder."""
     model = _make_model(extra_body={"thinking": {"type": "enabled"}})
     human = HumanMessage(content="Check the repository")
     ai = AIMessage(
@@ -168,7 +183,7 @@ def test_thinking_tool_call_without_reasoning_gets_empty_placeholder():
 
 
 def test_disabled_thinking_tool_call_does_not_invent_reasoning_placeholder():
-    """Disabled thinking must not expand the provider payload shape."""
+    """关闭思考时不为原本不存在的 reasoning_content 扩展协议形状。"""
     model = _make_model(extra_body={"thinking": {"type": "disabled"}})
     ai = AIMessage(
         content="",
@@ -202,20 +217,35 @@ def test_disabled_thinking_tool_call_does_not_invent_reasoning_placeholder():
 
 def test_reasoning_content_multi_turn():
     """All assistant turns each get their own reasoning_content."""
-    model = _make_model()
+    model = _make_model(extra_body={"thinking": {"type": "enabled"}})
 
     human1 = HumanMessage(content="Step 1?")
-    ai1 = AIMessage(content="A1", additional_kwargs={"reasoning_content": "Thought1"})
+    ai1 = AIMessage(
+        content="",
+        additional_kwargs={"reasoning_content": "Thought1"},
+        tool_calls=[{"id": "call-1", "name": "lookup", "args": {}}],
+    )
     human2 = HumanMessage(content="Step 2?")
     ai2 = AIMessage(content="A2", additional_kwargs={"reasoning_content": "Thought2"})
 
     base_payload = {
+        "tools": _TOOL_SPEC,
         "messages": [
             _make_payload_message("user", "Step 1?"),
-            _make_payload_message("assistant", "A1"),
+            _make_payload_message(
+                "assistant",
+                None,
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            ),
             _make_payload_message("user", "Step 2?"),
             _make_payload_message("assistant", "A2"),
-        ]
+        ],
     }
 
     with patch.object(type(model).__bases__[0], "_get_request_payload", return_value=base_payload):
@@ -230,19 +260,34 @@ def test_reasoning_content_multi_turn():
 
 def test_positional_fallback_when_count_differs():
     """Falls back to positional matching when payload/original message counts differ."""
-    model = _make_model()
+    model = _make_model(extra_body={"thinking": {"type": "enabled"}})
 
     human = HumanMessage(content="hi")
-    ai = AIMessage(content="hello", additional_kwargs={"reasoning_content": "My reasoning"})
+    ai = AIMessage(
+        content="",
+        additional_kwargs={"reasoning_content": "My reasoning"},
+        tool_calls=[{"id": "call-1", "name": "lookup", "args": {}}],
+    )
 
     # Simulate count mismatch: payload has 3 messages, original has 2
     extra_system = _make_payload_message("system", "You are helpful.")
     base_payload = {
+        "tools": _TOOL_SPEC,
         "messages": [
             extra_system,
             _make_payload_message("user", "hi"),
-            _make_payload_message("assistant", "hello"),
-        ]
+            _make_payload_message(
+                "assistant",
+                None,
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            ),
+        ],
     }
 
     with patch.object(type(model).__bases__[0], "_get_request_payload", return_value=base_payload):
@@ -252,3 +297,45 @@ def test_positional_fallback_when_count_differs():
 
     assistant_msg = next(m for m in payload["messages"] if m["role"] == "assistant")
     assert assistant_msg["reasoning_content"] == "My reasoning"
+
+
+def test_thinking_does_not_replay_reasoning_for_assistant_without_tool_calls():
+    model = _make_model(extra_body={"thinking": {"type": "enabled"}})
+    human = HumanMessage(content="continue")
+    ai = AIMessage(content="local response")
+    base_payload = {
+        "tools": _TOOL_SPEC,
+        "messages": [
+            _make_payload_message("assistant", "local response"),
+            _make_payload_message("user", "continue"),
+        ],
+    }
+
+    with patch.object(type(model).__bases__[0], "_get_request_payload", return_value=base_payload):
+        with patch.object(model, "_convert_input") as mock_convert:
+            mock_convert.return_value = MagicMock(to_messages=lambda: [ai, human])
+            payload = model._get_request_payload([ai, human])
+
+    assistant_msg = next(m for m in payload["messages"] if m["role"] == "assistant")
+    assert "reasoning_content" not in assistant_msg
+
+
+def test_legacy_fallback_assistant_is_removed_before_deepseek_replay():
+    model = _make_model(extra_body={"thinking": {"type": "enabled"}})
+    fallback = AIMessage(
+        content="temporary provider error",
+        additional_kwargs={"deerflow_error_fallback": True},
+    )
+    human = HumanMessage(content="retry")
+    base_payload = {
+        "tools": _TOOL_SPEC,
+        "messages": [_make_payload_message("user", "retry")],
+    }
+
+    with patch.object(type(model).__bases__[0], "_get_request_payload", return_value=base_payload):
+        with patch.object(model, "_convert_input") as mock_convert:
+            mock_convert.return_value = MagicMock(to_messages=lambda: [fallback, human])
+            payload = model._get_request_payload([fallback, human])
+
+    assert payload["messages"] == base_payload["messages"]
+    assert not any(message.get("role") == "assistant" for message in payload["messages"])

@@ -1112,6 +1112,48 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
     assert captured.get("reasoning_effort") == "minimal"
 
 
+@pytest.mark.parametrize(
+    ("runtime_effort", "expected_effort"),
+    [
+        (None, "high"),
+        ("low", "low"),
+    ],
+)
+def test_runtime_reasoning_effort_merges_with_profile_without_duplicate_kwarg(
+    monkeypatch,
+    runtime_effort,
+    expected_effort,
+):
+    model = ModelConfig(
+        name="deepseek-reasoner",
+        display_name="DeepSeek Reasoner",
+        description=None,
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        model="deepseek-reasoner",
+        reasoning_effort="high",
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        supports_vision=False,
+    )
+    cfg = _make_app_config([model])
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+
+    factory_module.create_chat_model(
+        name="deepseek-reasoner",
+        thinking_enabled=True,
+        reasoning_effort=runtime_effort,
+    )
+
+    assert captured["reasoning_effort"] == expected_effort
+
+
 # ---------------------------------------------------------------------------
 # stream_chunk_timeout default injection (issue #3189)
 # ---------------------------------------------------------------------------

@@ -78,21 +78,20 @@ class PatchedChatDeepSeek(ChatDeepSeek):
         Overrides the parent method to inject reasoning_content from
         additional_kwargs into assistant messages in the payload.
         """
-        # Get the original messages before conversion
         original_messages = self._convert_input(input_).to_messages()
+        request_messages = [message for message in original_messages if not (isinstance(message, AIMessage) and (message.additional_kwargs or {}).get("deerflow_error_fallback"))]
 
         # Call parent to get the base payload
-        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        payload = super()._get_request_payload(request_messages, stop=stop, **kwargs)
 
         request_thinking_enabled = _thinking_enabled(
             payload,
             kwargs,
             {"extra_body": getattr(self, "extra_body", None)},
         )
-
         restore_assistant_payloads(
             payload.get("messages", []),
-            original_messages,
+            request_messages,
             lambda payload_msg, orig_msg: _restore_deepseek_assistant_payload(
                 payload_msg,
                 orig_msg,
