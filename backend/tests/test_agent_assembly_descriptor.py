@@ -181,15 +181,20 @@ class TestLeadAgentAssembly:
         assert assembly.descriptor.effective_model
         assert assembly.descriptor.fingerprint
 
-    def test_descriptor_hashes_the_same_scoped_prompt_passed_to_the_graph(self, monkeypatch):
+    def test_descriptor_uses_the_same_scoped_prompt_and_subagents_as_the_graph(self, monkeypatch):
         from deerflow_extension_api import canonical_hash
 
         from deerflow.agents.lead_agent import agent as lead_agent_module
         from deerflow.agents.lead_agent.agent import assemble_lead_agent
         from deerflow.config.agents_config import AgentConfig
+        from deerflow.config.subagents_config import CustomSubagentConfig
         from deerflow.extensions import bind_agent_build_extensions
 
-        self._isolate_from_the_ambient_config(monkeypatch)
+        app_config = self._isolate_from_the_ambient_config(monkeypatch)
+        app_config.subagents.custom_agents["researcher"] = CustomSubagentConfig(
+            description="Research a focused topic",
+            system_prompt="Research the assigned topic.",
+        )
         agent_config = AgentConfig(name="custom", allowed_subagents=["general-purpose"])
         monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name, *, user_id=None: agent_config)
 
@@ -215,6 +220,27 @@ class TestLeadAgentAssembly:
         assert prompt_calls[0]["allowed_subagents"] == ["general-purpose"]
         assert assembly.graph["system_prompt"] == "allowed_subagents=['general-purpose']"
         assert assembly.descriptor.base_prompt_hash == canonical_hash(assembly.graph["system_prompt"])
+        subagent_policy = assembly.descriptor.effective_policies["subagents"]
+        assert subagent_policy["type_allowlist"] == ["general-purpose"]
+        assert list(subagent_policy["runtime_limits"]) == ["general-purpose"]
+
+        app_config.subagents.custom_agents["researcher"] = CustomSubagentConfig(
+            description="Research a focused topic",
+            system_prompt="Research the assigned topic.",
+            timeout_seconds=1800,
+        )
+        with bind_agent_build_extensions(self._extensions_with_an_agent_assembly_observer()):
+            after_unrelated_change = assemble_lead_agent(
+                {
+                    "configurable": {
+                        "thread_id": "t-scoped-prompt",
+                        "agent_name": "custom",
+                        "subagent_enabled": True,
+                    }
+                }
+            )
+
+        assert after_unrelated_change.descriptor.fingerprint == assembly.descriptor.fingerprint
 
     def test_observers_receive_the_descriptor(self, monkeypatch):
         from deerflow.agents.lead_agent.agent import assemble_lead_agent
