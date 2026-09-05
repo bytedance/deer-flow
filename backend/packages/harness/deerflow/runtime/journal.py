@@ -22,6 +22,7 @@ import logging
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
@@ -51,6 +52,14 @@ logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification", "sandbox_network"})
+
+
+@dataclass
+class _PendingLlmResponse:
+    llm_run_id: str
+    events: list[dict]
+    messages: list[AnyMessage]
+    caller: str
 
 
 def _should_persist_human_input_message(message: BaseMessage) -> bool:
@@ -243,6 +252,7 @@ class RunJournal(BaseCallbackHandler):
 
         # Write buffer
         self._buffer: list[dict] = []
+        self._pending_llm_response: _PendingLlmResponse | None = None
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
         self._pending_progress_task: asyncio.Task[None] | None = None
         self._pending_progress_delayed = False
@@ -267,6 +277,7 @@ class RunJournal(BaseCallbackHandler):
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
+        self._llm_response_callers: dict[str, str] = {}
         self._memory_context_recorded = False
         self._tool_promotion_claim_lock = threading.Lock()
         self._claimed_tool_promotions: set[str] = set()
@@ -433,7 +444,16 @@ class RunJournal(BaseCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
+        if self._closed:
+            return
+
         messages: list[AnyMessage] = []
+        response_events: list[dict] = []
+        should_schedule_progress = False
+        rid = str(run_id)
+        callback_caller = self._identify_caller(tags)
+        is_canonical_callback = rid not in self._counted_message_llm_run_ids
+        caller = self._llm_response_callers.get(rid, callback_caller)
         logger.debug("on_llm_end %s: tags=%s", run_id, tags)
         for generation in response.generations:
             for gen in generation:
@@ -443,11 +463,10 @@ class RunJournal(BaseCallbackHandler):
                     logger.warning(f"on_llm_end {run_id}: generation has no message attribute: {gen}")
 
         for message in messages:
-            caller = self._identify_caller(tags)
-            self._remember_current_run_tool_calls(message, caller=caller)
+            if is_canonical_callback:
+                self._remember_current_run_tool_calls(message, caller=caller)
 
             # Latency
-            rid = str(run_id)
             start = self._llm_start_times.pop(rid, None)
             latency_ms = int((time.monotonic() - start) * 1000) if start else None
 
@@ -455,7 +474,7 @@ class RunJournal(BaseCallbackHandler):
             usage = getattr(message, "usage_metadata", None)
             usage_dict = dict(usage) if usage else {}
             additional_kwargs = getattr(message, "additional_kwargs", None) or {}
-            if isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
+            if is_canonical_callback and isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
                 self._had_llm_error_fallback = True
                 detail = additional_kwargs.get("error_detail")
                 reason = additional_kwargs.get("error_reason")
@@ -475,20 +494,19 @@ class RunJournal(BaseCallbackHandler):
                 call_index = self._llm_call_index
                 self._seen_llm_starts.add(rid)
 
-            # Message event: checkpoint-aligned llm.ai.response payload.
-            self._put(
-                event_type=LLM_AI_RESPONSE_EVENT.event_type,
-                category=LLM_AI_RESPONSE_EVENT.category,
-                content=message.model_dump(),
-                metadata={
-                    "caller": caller,
-                    "usage": usage_dict,
-                    "latency_ms": latency_ms,
-                    "llm_call_index": call_index,
-                },
+            response_events.append(
+                self._make_event(
+                    event_type=LLM_AI_RESPONSE_EVENT.event_type,
+                    category=LLM_AI_RESPONSE_EVENT.category,
+                    content=message.model_dump(),
+                    metadata={
+                        "caller": caller,
+                        "usage": usage_dict,
+                        "latency_ms": latency_ms,
+                        "llm_call_index": call_index,
+                    },
+                )
             )
-            if rid not in self._counted_message_llm_run_ids:
-                self._record_message_summary(message, caller=caller)
 
             # Token accumulation (dedup by langchain run_id to avoid double-counting
             # when the callback fires more than once for the same response)
@@ -519,10 +537,18 @@ class RunJournal(BaseCallbackHandler):
                         per_call_model = response_metadata.get("model_name") or response_metadata.get("model")
                     self._record_model_usage(per_call_model, input_tk, output_tk, total_tk, self._extract_cache_read(usage_dict))
 
-                    self._schedule_progress_flush()
+                    should_schedule_progress = True
 
         if messages:
-            self._counted_message_llm_run_ids.add(str(run_id))
+            self._queue_llm_response_events(
+                str(run_id),
+                response_events,
+                messages,
+                caller=caller,
+            )
+
+        if should_schedule_progress:
+            self._schedule_progress_flush()
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._llm_start_times.pop(str(run_id), None)
@@ -661,20 +687,106 @@ class RunJournal(BaseCallbackHandler):
             if self._should_reconcile_tool_message(message):
                 self._persist_tool_result_message(message)
 
+    def _make_event(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> dict:
+        return {
+            "thread_id": self.thread_id,
+            "run_id": self.run_id,
+            "event_type": event_type,
+            "category": category,
+            "content": content,
+            "metadata": metadata or {},
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+
+    def _commit_pending_llm_response(self) -> None:
+        pending = self._pending_llm_response
+        if pending is None:
+            return
+        self._pending_llm_response = None
+        self._buffer.extend(pending.events)
+        for message in pending.messages:
+            self._record_message_summary(message, caller=pending.caller)
+
+    @staticmethod
+    def _has_positive_usage(events: list[dict]) -> bool:
+        for event in events:
+            usage = event["metadata"].get("usage")
+            if not isinstance(usage, Mapping):
+                continue
+            for key in ("input_tokens", "output_tokens", "total_tokens"):
+                try:
+                    if int(usage.get(key) or 0) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        return False
+
+    @staticmethod
+    def _merge_response_event_usage(canonical_events: list[dict], replay_events: list[dict]) -> None:
+        """Enrich canonical generation events with only replayed usage fields."""
+        for canonical, replay in zip(canonical_events, replay_events, strict=False):
+            replay_metadata = replay.get("metadata")
+            if isinstance(replay_metadata, Mapping):
+                replay_usage = replay_metadata.get("usage")
+                if isinstance(replay_usage, Mapping):
+                    canonical["metadata"]["usage"] = dict(replay_usage)
+
+            canonical_content = canonical.get("content")
+            replay_content = replay.get("content")
+            if isinstance(canonical_content, dict) and isinstance(replay_content, Mapping) and "usage_metadata" in replay_content:
+                replay_content_usage = replay_content.get("usage_metadata")
+                canonical_content["usage_metadata"] = dict(replay_content_usage) if isinstance(replay_content_usage, Mapping) else replay_content_usage
+
+    def _flush_if_threshold_reached(self) -> None:
+        pending_count = len(self._pending_llm_response.events) if self._pending_llm_response is not None else 0
+        if len(self._buffer) + pending_count >= self._flush_threshold:
+            self._flush_sync()
+
+    def _queue_llm_response_events(
+        self,
+        llm_run_id: str,
+        events: list[dict],
+        messages: list[AnyMessage],
+        *,
+        caller: str,
+    ) -> None:
+        """Queue one logical response and merge usage into its canonical callback."""
+        if self._closed:
+            return
+
+        has_usage = self._has_positive_usage(events)
+        pending = self._pending_llm_response
+        if pending is not None and pending.llm_run_id == llm_run_id:
+            if has_usage:
+                # The first callback's generation set, messages, caller, and
+                # non-usage payload are canonical. A provider's immediate
+                # replay may enrich only corresponding usage fields.
+                self._merge_response_event_usage(pending.events, events)
+                self._commit_pending_llm_response()
+                self._flush_if_threshold_reached()
+            return
+        if llm_run_id in self._counted_message_llm_run_ids:
+            return
+
+        # A different event is the ordering boundary for an earlier no-usage
+        # callback. Commit it before accepting this response.
+        self._commit_pending_llm_response()
+        self._flush_if_threshold_reached()
+
+        self._counted_message_llm_run_ids.add(llm_run_id)
+        self._llm_response_callers[llm_run_id] = caller
+        self._pending_llm_response = _PendingLlmResponse(llm_run_id, events, messages, caller)
+        if has_usage:
+            self._commit_pending_llm_response()
+        self._flush_if_threshold_reached()
+        # Some providers immediately re-fire on_llm_end with usage filled in.
+        # Defer an incomplete copy until the next event or flush.
+
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
         if self._closed:
             return
-        self._buffer.append(
-            {
-                "thread_id": self.thread_id,
-                "run_id": self.run_id,
-                "event_type": event_type,
-                "category": category,
-                "content": content,
-                "metadata": metadata or {},
-                "created_at": datetime.now(UTC).isoformat(),
-            }
-        )
+        self._commit_pending_llm_response()
+        self._buffer.append(self._make_event(event_type=event_type, category=category, content=content, metadata=metadata))
         if len(self._buffer) >= self._flush_threshold:
             self._flush_sync()
 
@@ -686,6 +798,7 @@ class RunJournal(BaseCallbackHandler):
         stay in the buffer and are flushed later by the async ``flush()``
         call in the worker's ``finally`` block.
         """
+        self._commit_pending_llm_response()
         if not self._buffer:
             return
         # Skip if a flush is already in flight — avoids concurrent writes
@@ -929,6 +1042,7 @@ class RunJournal(BaseCallbackHandler):
         """Force flush remaining buffer. Called in worker's finally block."""
         if self._closed:
             return
+        self._commit_pending_llm_response()
         if self._pending_flush_tasks:
             await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
         while self._pending_progress_task is not None:
@@ -968,6 +1082,7 @@ class RunJournal(BaseCallbackHandler):
         self._store = None
         self._progress_reporter = None
         self._buffer.clear()
+        self._pending_llm_response = None
         self._pending_flush_tasks.clear()
         self._pending_progress_task = None
         self._pending_progress_delayed = False
@@ -976,6 +1091,7 @@ class RunJournal(BaseCallbackHandler):
         self._counted_llm_run_ids.clear()
         self._counted_external_source_ids.clear()
         self._counted_message_llm_run_ids.clear()
+        self._llm_response_callers.clear()
         self._llm_start_times.clear()
         self._seen_llm_starts.clear()
         self._current_run_tool_call_names.clear()
