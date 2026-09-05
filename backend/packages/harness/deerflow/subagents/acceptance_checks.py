@@ -55,10 +55,13 @@ the async caller offloads the whole check with ``asyncio.to_thread``.
 
 from __future__ import annotations
 
+import ntpath
 import os
+import posixpath
 import re
 import shlex
 import stat
+import unicodedata
 from collections.abc import Callable, Mapping
 from typing import Any, TypedDict
 
@@ -464,6 +467,26 @@ def _check_file_leaf(
 _SHELL_OPERATORS = ";&|"
 #: Leading ``VAR=value`` assignments are environment setup, not the executable.
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_WINDOWS_DRIVE_QUALIFIED_RE = re.compile(r"^[A-Za-z]:")
+_WINDOWS_DRIVE_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:/")
+_WINDOWS_UNC_ABSOLUTE_RE = re.compile(r"^//[^/]+/[^/]+(?:/|$)")
+#: PowerShell paths may name a provider/PSDrive before ``:`` (for example,
+#: ``FileSystem::C:/tmp`` or ``External:/tmp``). Those forms are absolute in
+#: PowerShell but look relative to POSIX path normalization.
+_POWERSHELL_DRIVE_QUALIFIED_RE = re.compile(r"^[^/\\:]+:")
+#: ``cmd.exe`` expands paired-percent environment references before running
+#: the command. Without shell provenance, a token such as ``%TEMP%`` cannot
+#: be treated as the literal relative path seen by the POSIX parser.
+_CMD_ENV_EXPANSION_RE = re.compile(r"%[^%\r\n]+%")
+_CMD_DELAYED_ENV_EXPANSION_RE = re.compile(r"![^!\r\n]+!")
+#: Shells supported by ``LocalSandbox`` do not agree on these expansion
+#: forms. Bash expands ``{a,b}``/``{1..3}``, while PowerShell enumerates
+#: ``@(...)`` and parenthesized comma expressions into multiple native
+#: arguments. The evidence currently records no shell kind, so matching must
+#: reject them before a POSIX parser can turn each expression into one
+#: apparently harmless token.
+_BASH_BRACE_EXPANSION_RE = re.compile(r"\{[^{}\r\n]*(?:,|\.\.)[^{}\r\n]*\}")
+_POWERSHELL_ARRAY_EXPRESSION_RE = re.compile(r"@\s*\(|\([^()\r\n]*,[^()\r\n]*\)")
 
 
 def _carries_summary_shape(text: str) -> bool:
@@ -472,6 +495,58 @@ def _carries_summary_shape(text: str) -> bool:
     subagent-chosen strings — a ``cd`` argument, a ``CDPATH`` value — must
     not be allowed to lend the recorded tail a summary shape."""
     return bool(_TEST_PASS_SHAPE_RE.search(text) or _TEST_FAIL_SHAPE_RE.search(text) or _TEST_ZERO_SHAPE_RE.search(text))
+
+
+def _normalize_cd_scope_path(path: str) -> tuple[str, bool] | None:
+    """Normalize a ``cd`` path and retain Windows-absolute provenance.
+
+    ``posixpath.normpath`` drops the slash from a bare Windows drive root and
+    collapses traversal above that root into a relative-looking path. Handle
+    drive-qualified absolute and UNC paths component by component so those
+    spellings remain absolute, and fail closed when ``..`` would cross the
+    drive or share root. Drive-relative forms such as ``C:tmp`` also fail
+    closed because their resolution depends on the process's remembered
+    directory for that drive.
+    """
+    slash_path = path.replace("\\", "/")
+    if slash_path.startswith(("//?/", "//./")):
+        # Win32 device namespaces can alias ordinary drive/UNC paths, but the
+        # lexical checker has no filesystem provenance to resolve them.
+        return None
+    if _POWERSHELL_DRIVE_QUALIFIED_RE.match(slash_path) and not _WINDOWS_DRIVE_QUALIFIED_RE.match(slash_path):
+        return None
+    if _WINDOWS_DRIVE_QUALIFIED_RE.match(slash_path) and not _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path):
+        return None
+    if _WINDOWS_UNC_ABSOLUTE_RE.match(slash_path):
+        unc_parts = slash_path[2:].split("/")
+        share_root = unc_parts[:2]
+        parts: list[str] = []
+        for part in unc_parts[2:]:
+            if not part or part == ".":
+                continue
+            if part == "..":
+                if not parts:
+                    return None
+                parts.pop()
+            else:
+                parts.append(part)
+        normalized = "//" + "/".join((*share_root, *parts))
+        return normalized, True
+    if not _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path):
+        return posixpath.normpath(slash_path), False
+
+    parts: list[str] = []
+    for part in slash_path[3:].split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+        else:
+            parts.append(part)
+    normalized = slash_path[:2] + "/" + "/".join(parts)
+    return normalized, True
 
 
 def _cd_target_in_scope(target: str, thread_data: Mapping[str, Any] | None) -> bool:
@@ -492,16 +567,38 @@ def _cd_target_in_scope(target: str, thread_data: Mapping[str, Any] | None) -> b
     """
     if not target or target == "-" or target.startswith("~"):
         return False
-    normalized = os.path.normpath(target.replace("\\", "/"))
-    if normalized.startswith("/"):
+    if ".." in target.replace("\\", "/").split("/"):
+        # Lexical cleanup is not proof of containment: the OS follows a
+        # directory symlink before resolving the following ``..`` component.
+        return False
+    # After shell-dependent spellings have failed closed, keep deterministic
+    # POSIX lexical semantics even when this checker itself runs on Windows.
+    normalized_target = _normalize_cd_scope_path(target)
+    if normalized_target is None:
+        return False
+    normalized, is_windows_absolute = normalized_target
+    if _thread_uses_windows_paths(thread_data) and normalized.startswith("/") and not is_windows_absolute:
+        # ``/mnt/...`` is absolute under Bash but drive-rooted under
+        # PowerShell. Without the executing shell, a Windows workspace cannot
+        # prove that the virtual POSIX spelling stayed inside its data root.
+        return False
+    if normalized.startswith("/") or is_windows_absolute:
         roots = [VIRTUAL_PATH_PREFIX]
         for key in ("workspace_path", "outputs_path", "uploads_path"):
             value = (thread_data or {}).get(key)
             if isinstance(value, str) and value:
                 roots.append(value)
         for root in roots:
-            normalized_root = os.path.normpath(root.replace("\\", "/"))
-            if normalized == normalized_root or normalized.startswith(normalized_root + "/"):
+            normalized_root_result = _normalize_cd_scope_path(root)
+            if normalized_root_result is None:
+                continue
+            normalized_root, root_is_windows_absolute = normalized_root_result
+            use_windows_comparison = is_windows_absolute and root_is_windows_absolute
+            candidate_for_comparison = ntpath.normcase(normalized) if use_windows_comparison else normalized
+            root_for_comparison = ntpath.normcase(normalized_root) if use_windows_comparison else normalized_root
+            separator = "\\" if use_windows_comparison else "/"
+            root_prefix = root_for_comparison if root_for_comparison.endswith(separator) else root_for_comparison + separator
+            if candidate_for_comparison == root_for_comparison or candidate_for_comparison.startswith(root_prefix):
                 return True
         return False
     return ".." not in normalized.split("/")
@@ -589,26 +686,135 @@ def _negated_value(token: str) -> str:
     return token
 
 
-def _negation_overlaps(criterion_token: str, negated_value: str) -> bool:
+def _thread_uses_windows_paths(thread_data: Mapping[str, Any] | None) -> bool:
+    """Whether the thread roots establish Windows filesystem semantics."""
+    for key in ("workspace_path", "outputs_path", "uploads_path"):
+        value = (thread_data or {}).get(key)
+        if not isinstance(value, str):
+            continue
+        slash_path = value.replace("\\", "/")
+        if _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path) or _WINDOWS_UNC_ABSOLUTE_RE.match(slash_path):
+            return True
+    return False
+
+
+def _selection_path_parts(value: str) -> tuple[str, str | None]:
+    """Split a runner selection into its filesystem path and pytest nodeid."""
+    path, marker, nodeid = value.partition("::")
+    return path, nodeid if marker else None
+
+
+def _has_parent_path_component(value: str) -> bool:
+    path, _nodeid = _selection_path_parts(value)
+    return ".." in path.replace("\\", "/").split("/")
+
+
+def _uses_windows_selection_semantics(value: str, *, windows_path_context: bool) -> bool:
+    path, _nodeid = _selection_path_parts(value)
+    slash_path = path.replace("\\", "/")
+    return bool(windows_path_context or _WINDOWS_DRIVE_QUALIFIED_RE.match(slash_path) or _WINDOWS_UNC_ABSOLUTE_RE.match(slash_path))
+
+
+def _selection_path_kind(value: str) -> str:
+    path, _nodeid = _selection_path_parts(value)
+    slash_path = path.replace("\\", "/")
+    if _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path) or _WINDOWS_UNC_ABSOLUTE_RE.match(slash_path):
+        return "windows_absolute"
+    if slash_path.startswith("/"):
+        return "posix_absolute"
+    return "relative"
+
+
+def _has_ambiguous_windows_component(value: str, *, windows_path_context: bool) -> bool:
+    """Whether ordinary Win32 cleanup may alias a textual path component.
+
+    Windows APIs normally discard trailing spaces and periods from path
+    components, while extended-length paths can preserve them. Without shell
+    and filesystem provenance, either interpretation is possible, so an
+    overlap decision involving such a spelling must fail closed.
+    """
+    if not _uses_windows_selection_semantics(value, windows_path_context=windows_path_context):
+        return False
+    path, _nodeid = _selection_path_parts(value)
+    return any(component not in {"", ".", ".."} and component.endswith((" ", ".")) for component in path.replace("\\", "/").split("/"))
+
+
+def _normalize_selection_path(value: str, *, windows_path_context: bool) -> tuple[str, str | None, bool]:
+    """Normalize safe lexical aliases without erasing pytest nodeid case.
+
+    Parent traversal is rejected by the caller because resolving ``..``
+    lexically can cross symlinks. ``.`` and duplicate separators are safe to
+    collapse. Drive-qualified and UNC paths always use ``ntpath`` semantics;
+    when the thread roots establish a Windows workspace, every runner path
+    does, including drive-rooted ``/tests`` and mapped virtual paths.
+    """
+    path, nodeid = _selection_path_parts(value)
+    slash_path = path.replace("\\", "/")
+    is_windows_path = _uses_windows_selection_semantics(value, windows_path_context=windows_path_context)
+    if is_windows_path:
+        normalized = ntpath.normcase(ntpath.normpath(slash_path))
+    else:
+        normalized = posixpath.normpath(slash_path)
+    return normalized, nodeid, is_windows_path
+
+
+def _nodeids_overlap(a: str | None, b: str | None) -> bool:
+    if a is None or b is None:
+        return True
+    return a == b or a.startswith(b + "::") or b.startswith(a + "::")
+
+
+def _negation_overlaps(criterion_token: str, negated_value: str, *, windows_path_context: bool = False) -> bool:
     """Whether a negated value overlaps a matched criterion target: equal, or
     one nested under the other at a path boundary (``tests`` vs
     ``tests/unit/test_auth.py``) or a pytest nodeid boundary (``tests/x.py``
     vs ``tests/x.py::test_y``). Overlap means part of the criterion's
     selection never ran, so the passing summary may not cover it; unrelated
     exclusions (``--ignore tests/slow`` against ``pytest tests/unit``) do not
-    overlap and keep matching."""
-    a = criterion_token.replace("\\", "/").removeprefix("./").rstrip("/")
-    b = negated_value.replace("\\", "/").removeprefix("./").rstrip("/")
-    if not a or not b:
+    overlap and keep matching. Safe lexical aliases are normalized, while
+    mixed absolute/relative forms fail closed because evidence does not carry
+    the runner's cwd."""
+    a_kind = _selection_path_kind(criterion_token)
+    b_kind = _selection_path_kind(negated_value)
+    if a_kind != b_kind:
+        # Relative selections resolve against the runner's cwd, which is not
+        # carried in the evidence, and a Windows local sandbox can map the
+        # virtual POSIX prefix onto its drive path. Mixed spellings can
+        # therefore alias even when their lexical prefixes differ.
+        if "relative" in {a_kind, b_kind} or windows_path_context:
+            return True
         return False
-    return a == b or a.startswith((b + "/", b + "::")) or b.startswith((a + "/", a + "::"))
+    if a_kind == "relative":
+        a_path, _a_nodeid = _selection_path_parts(criterion_token)
+        b_path, _b_nodeid = _selection_path_parts(negated_value)
+        a_is_drive_relative = bool(_WINDOWS_DRIVE_QUALIFIED_RE.match(a_path.replace("\\", "/")))
+        b_is_drive_relative = bool(_WINDOWS_DRIVE_QUALIFIED_RE.match(b_path.replace("\\", "/")))
+        if a_is_drive_relative != b_is_drive_relative:
+            # ``tests/x`` and ``D:tests/x`` can name the same path when the
+            # process cwd and D:'s remembered cwd coincide. Neither value is
+            # absolute, and the execution evidence carries neither cwd.
+            return True
+    a, a_nodeid, a_is_windows = _normalize_selection_path(criterion_token, windows_path_context=windows_path_context)
+    b, b_nodeid, b_is_windows = _normalize_selection_path(negated_value, windows_path_context=windows_path_context)
+    if not a or not b or a == "." or b == ".":
+        return False
+    if a == b:
+        return _nodeids_overlap(a_nodeid, b_nodeid)
+    if a_is_windows != b_is_windows:
+        # A drive-relative spelling can resolve to the same path as an
+        # ordinary relative token, but the per-drive cwd is not recorded.
+        return True
+    separator = "\\" if a_is_windows else "/"
+    a_prefix = a if a.endswith(separator) else a + separator
+    b_prefix = b if b.endswith(separator) else b + separator
+    return a.startswith(b_prefix) or b.startswith(a_prefix)
 
 
 def _normalize_command(command: str) -> str:
     return " ".join(command.split())
 
 
-def _shell_parse_line(line: str) -> tuple[str | None, list[list[str]], list[str]] | None:
+def _shell_parse_line(line: str, *, posix: bool = True) -> tuple[str | None, list[list[str]], list[str]] | None:
     """Tokenize one physical line into segments plus the operators joining them.
 
     Returns ``(leading_op, segments, ops)``: ``ops[i]`` is the operator
@@ -620,9 +826,11 @@ def _shell_parse_line(line: str) -> tuple[str | None, list[list[str]], list[str]
     ``;`` would overstate what provably ran. Comments are stripped (a
     ``# pytest ...`` remark executes nothing) and quotes are honored, so an
     operator inside an argument cannot split a segment. Returns ``None`` on
-    malformed shell (unbalanced quotes).
+    malformed shell (unbalanced quotes). ``posix=False`` is reserved for the
+    raw-token safety pass: it keeps backslashes and surrounding quotes visible
+    before the normal POSIX parse can consume them as escaping syntax.
     """
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=_SHELL_OPERATORS)
+    lexer = shlex.shlex(line, posix=posix, punctuation_chars=_SHELL_OPERATORS)
     lexer.whitespace_split = True
     lexer.commenters = "#"
     try:
@@ -654,7 +862,7 @@ def _shell_parse_line(line: str) -> tuple[str | None, list[list[str]], list[str]
     return leading_op, segments, ops
 
 
-def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
+def _shell_parse(command: str, *, posix: bool = True) -> tuple[list[list[str]], list[str]] | None:
     """Tokenize a shell command into segments plus the operators joining them.
 
     Physical newlines are command separators with ``;`` semantics — bash
@@ -676,7 +884,7 @@ def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
     segments: list[list[str]] = []
     ops: list[str] = []
     for line in command.split("\n"):
-        parsed = _shell_parse_line(line)
+        parsed = _shell_parse_line(line, posix=posix)
         if parsed is None:
             return None
         leading_op, line_segments, line_ops = parsed
@@ -691,6 +899,119 @@ def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
         segments.extend(line_segments)
         ops.extend(line_ops)
     return segments, ops
+
+
+def _has_shell_ambiguous_whitespace(command: str) -> bool:
+    """Whether whitespace can split differently across supported shells.
+
+    ASCII space, tab, LF, and CRLF are shared separators. PowerShell also
+    separates on bare CR, vertical tab, form feed, NEL, and Unicode separator
+    characters, while Python's POSIX ``shlex`` can retain them inside a token.
+    """
+    command_without_crlf = command.replace("\r\n", "\n")
+    return any(character in "\r\v\f\x85" or (character != " " and unicodedata.category(character) in {"Zs", "Zl", "Zp"}) for character in command_without_crlf)
+
+
+def _has_cmd_control_operator_in_single_quotes(command: str) -> bool:
+    """Whether POSIX single quotes hide cmd.exe control syntax.
+
+    Cmd does not use single quotes for grouping, so metacharacters within them
+    remain active there. Ordinary single-quoted text stays verifiable for the
+    POSIX execution path. Shell-specific ways to escape quotes are already
+    rejected by the other provenance checks below.
+    """
+    in_double_quotes = False
+    in_single_quotes = False
+    for character in command:
+        if character == '"':
+            in_double_quotes = not in_double_quotes
+        elif character == "'" and not in_double_quotes:
+            in_single_quotes = not in_single_quotes
+        elif in_single_quotes and character in "&|<>()":
+            return True
+    return False
+
+
+def _has_unquoted_single_quote(text: str) -> bool:
+    """Whether *text* contains a single quote outside double quotes.
+
+    The raw ``posix=False`` token stream retains surrounding quotes. Cmd.exe
+    passes a POSIX single quote to the child process instead of using it for
+    grouping, so such a token cannot be compared with its quote-stripped
+    POSIX form without knowing which shell executed it.
+    """
+    in_double_quotes = False
+    for character in text:
+        if character == '"':
+            in_double_quotes = not in_double_quotes
+        elif character == "'" and not in_double_quotes:
+            return True
+    return False
+
+
+def _raw_segment_has_unquoted_single_quote(segment: list[str]) -> bool:
+    return any(_has_unquoted_single_quote(token) for token in segment)
+
+
+def _matched_span_has_ambiguous_single_quotes(
+    expected_raw: list[list[str]],
+    actual_raw: list[list[str]],
+    actual: list[list[str]],
+    *,
+    start: int,
+    span: int,
+    thread_data: Mapping[str, Any] | None,
+) -> bool:
+    """Whether cmd.exe single-quote semantics can change a candidate match.
+
+    Every expected segment and the matching actual span define the invocation
+    being certified, so a POSIX single quote in any of them is ambiguous.
+    Before the span, only segments accepted as provably silent can contribute
+    to a successful match; a quoted ``cd`` or assignment can change the state
+    in which the runner executes and therefore also requires shell provenance.
+    Non-silent prefixes remain governed by output-attribution checks, preserving
+    authoritative failure results such as ``echo '12 passed'; make test``.
+    """
+    if any(_raw_segment_has_unquoted_single_quote(segment) for segment in expected_raw):
+        return True
+    if any(_raw_segment_has_unquoted_single_quote(segment) for segment in actual_raw[start : start + span]):
+        return True
+    return any(_raw_segment_has_unquoted_single_quote(actual_raw[index]) and _is_silent_segment(actual[index], thread_data) for index in range(start))
+
+
+def _command_requires_shell_provenance(command: str) -> bool:
+    """Whether raw command tokens have shell-dependent Windows semantics.
+
+    The acceptance evidence does not currently record which shell executed a
+    command. Inspect a non-POSIX tokenization before the authoritative POSIX
+    parser can discard backslashes anywhere in the candidate command: PowerShell
+    and native Windows runners preserve them as path separators while POSIX
+    shells treat them as escapes. Cmd percent/bang references and ``^``, a
+    leading tilde or Bash brace expression, and PowerShell splatting/array
+    expressions can all rewrite the native argv differently. ``#`` starts a
+    comment for the POSIX parser but is an ordinary argument to cmd.exe. Cmd
+    also does not treat single quotes as quoting, so cmd control syntax hidden
+    inside POSIX single quotes is unsafe. PowerShell recognizes more separators
+    than POSIX ``shlex``, including bare carriage returns and Unicode separator
+    characters; normal CRLF line endings remain unambiguous. Any of these
+    spellings therefore fail closed instead of certifying a test run whose
+    arguments depend on an unknown shell.
+    """
+    if (
+        _has_shell_ambiguous_whitespace(command)
+        or _has_cmd_control_operator_in_single_quotes(command)
+        or "#" in command
+        or "^" in command
+        or _CMD_DELAYED_ENV_EXPANSION_RE.search(command)
+        or _BASH_BRACE_EXPANSION_RE.search(command)
+        or _POWERSHELL_ARRAY_EXPRESSION_RE.search(command)
+    ):
+        return True
+    parsed = _shell_parse(command, posix=False)
+    if parsed is None:
+        return "\\" in command or bool(_CMD_ENV_EXPANSION_RE.search(command))
+    segments, _ops = parsed
+    return any("\\" in token or token.startswith(("~", "@")) or (token.startswith("(") and token.endswith(")")) or _CMD_ENV_EXPANSION_RE.search(token) for segment in segments for token in segment)
 
 
 def _strip_env_assignments(tokens: list[str]) -> list[str]:
@@ -862,7 +1183,7 @@ def _normalize_executable(token: str) -> str:
     return os.path.normpath(token.replace("\\", "/"))
 
 
-def _segment_matches(expected: list[str], actual: list[str]) -> str:
+def _segment_matches(expected: list[str], actual: list[str], *, windows_path_context: bool = False) -> str:
     """Match one segment against the criterion's, classifying extra flags.
 
     Returns ``"match"`` when the executable agrees — directional: a bare
@@ -987,7 +1308,14 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
         # before resolving ``..``, so a textually unrelated value can name
         # the criterion's target).
         return "unprovable"
-    if any(_negation_overlaps(actual[position], value) for position in consumed if position != 0 for value in negated_values):
+    compared_values = [actual[position] for position in consumed if position != 0] + negated_values
+    if negated_values and any(_has_ambiguous_windows_component(value, windows_path_context=windows_path_context) for value in compared_values):
+        return "unprovable"
+    if negated_values and any(_has_parent_path_component(actual[position]) for position in consumed if position != 0):
+        # The matched target itself may normalize onto an excluded path, but
+        # collapsing its ``..`` components would be unsound across symlinks.
+        return "unprovable"
+    if any(_negation_overlaps(actual[position], value, windows_path_context=windows_path_context) for position in consumed if position != 0 for value in negated_values):
         return "unprovable"
     for position, token in enumerate(actual):
         if position in consumed or position in negated or position in option_positions:
@@ -1080,7 +1408,13 @@ def _criterion_connectors_preserved(expected_ops: list[str], executed_within_ops
     return True
 
 
-def _commands_match(criterion_command: str, executed_command: str, *, executed_success: bool) -> str:
+def _commands_match(
+    criterion_command: str,
+    executed_command: str,
+    *,
+    executed_success: bool,
+    thread_data: Mapping[str, Any] | None = None,
+) -> str:
     """Shell-structure match with control-flow attribution.
 
     Returns ``"match"`` when the criterion's segment sequence appears as
@@ -1094,23 +1428,35 @@ def _commands_match(criterion_command: str, executed_command: str, *, executed_s
     """
     expected_parsed = _shell_parse(criterion_command)
     actual_parsed = _shell_parse(executed_command)
+    expected_raw_parsed = _shell_parse(criterion_command, posix=False)
+    actual_raw_parsed = _shell_parse(executed_command, posix=False)
+    needs_shell_provenance = _command_requires_shell_provenance(criterion_command) or _command_requires_shell_provenance(executed_command)
     if expected_parsed is None or actual_parsed is None:
         # Malformed shell: only exact normalized equality survives.
         expected_norm = _normalize_command(criterion_command)
-        return "match" if expected_norm and expected_norm == _normalize_command(executed_command) else "no_match"
+        if not expected_norm or expected_norm != _normalize_command(executed_command):
+            return "no_match"
+        has_ambiguous_single_quote = _has_unquoted_single_quote(criterion_command) or _has_unquoted_single_quote(executed_command)
+        return "unprovable" if needs_shell_provenance or has_ambiguous_single_quote else "match"
     expected, expected_ops = expected_parsed
     actual, ops = actual_parsed
     if not expected or not actual or len(expected) > len(actual):
         return "no_match"
+    raw_segments_align = expected_raw_parsed is not None and actual_raw_parsed is not None and len(expected_raw_parsed[0]) == len(expected) and len(actual_raw_parsed[0]) == len(actual)
+    if not raw_segments_align:
+        needs_shell_provenance = True
+    expected_raw = expected_raw_parsed[0] if raw_segments_align and expected_raw_parsed is not None else []
+    actual_raw = actual_raw_parsed[0] if raw_segments_align and actual_raw_parsed is not None else []
     span = len(expected)
     saw_unprovable = False
+    windows_path_context = _thread_uses_windows_paths(thread_data)
     for start in range(len(actual) - span + 1):
         if any(_segment_pollutes_state(segment) for segment in actual[:start]):
             # A preceding segment mutated shell state the matcher cannot see
             # (PATH/exports): nothing later is provable.
             saw_unprovable = True
             continue
-        outcomes = [_segment_matches(expected[i], actual[start + i]) for i in range(span)]
+        outcomes = [_segment_matches(expected[i], actual[start + i], windows_path_context=windows_path_context) for i in range(span)]
         if any(outcome == "no_match" for outcome in outcomes):
             continue
         if any(outcome == "unprovable" for outcome in outcomes):
@@ -1127,6 +1473,16 @@ def _commands_match(criterion_command: str, executed_command: str, *, executed_s
             saw_unprovable = True
             continue
         if _span_attributable(ops[:start], ops[start : start + span - 1], ops[start + span - 1 :], executed_success):
+            if needs_shell_provenance or _matched_span_has_ambiguous_single_quotes(
+                expected_raw,
+                actual_raw,
+                actual,
+                start=start,
+                span=span,
+                thread_data=thread_data,
+            ):
+                saw_unprovable = True
+                continue
             return "match"
         saw_unprovable = True
     return "unprovable" if saw_unprovable else "no_match"
@@ -1174,7 +1530,12 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
     matches: list[tuple[str, dict[str, Any]]] = []
     for execution in bash_executions or []:
         status = str(execution.get("status") or "")
-        outcome = _commands_match(command, str(execution.get("command") or ""), executed_success=status == "success")
+        outcome = _commands_match(
+            command,
+            str(execution.get("command") or ""),
+            executed_success=status == "success",
+            thread_data=thread_data,
+        )
         if outcome == "match" and execution.get("command_truncated"):
             # The recorded command lost its suffix to the evidence cap; a
             # selection-changing tail (``-k smoke``) may have been cut away.
