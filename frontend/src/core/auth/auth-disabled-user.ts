@@ -6,6 +6,10 @@ export const AUTH_DISABLED_USER: User = {
   system_role: "admin",
   needs_setup: false,
   oauth_provider: null,
+  // In the canonical auth-disabled deployment SSR short-circuits to this
+  // literal without ever fetching /me, so the literal itself is what tells
+  // session-only affordances (e.g. PAT management) that they are dead here.
+  auth_disabled: true,
 };
 
 const PRODUCTION_ENV_VALUES = new Set(["prod", "production"]);

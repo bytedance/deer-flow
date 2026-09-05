@@ -96,10 +96,16 @@ describe("getServerSideUser", () => {
 
     const { getServerSideUser } = await loadFreshServerAuth();
 
-    await expect(getServerSideUser()).resolves.toEqual({
+    const result = await getServerSideUser();
+    expect(result).toEqual({
       tag: "authenticated",
       user: AUTH_DISABLED_USER,
     });
+    // Explicit pin: the SSR bypass never fetches /me, so this literal is the
+    // only channel that marks session-only affordances dead in this mode.
+    expect(result.tag === "authenticated" && result.user.auth_disabled).toBe(
+      true,
+    );
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 

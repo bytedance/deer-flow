@@ -41,6 +41,15 @@ class _FakeProvider:
     async def get_user(self, user_id: str):
         return self._users.get(str(user_id))
 
+    async def create_user(self, *, email, password, system_role="user"):
+        for user in self._users.values():
+            if user.email == email:
+                raise ValueError("email already registered")
+        user = _fake_user(f"user-{len(self._users) + 1}", system_role=system_role)
+        user.email = email
+        self._users[str(user.id)] = user
+        return user
+
 
 def _fake_user(user_id: str = "user-1", *, system_role: str = "user"):
     return SimpleNamespace(
@@ -733,3 +742,40 @@ def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):
         response = disabled_client.get("/api/threads/whoami", headers={"Authorization": "Bearer dfp_garbage"})
     assert response.status_code == 200
     assert response.json()["auth_source"] == "auth_disabled"
+
+
+def test_me_reports_runtime_auth_disabled_state(client, monkeypatch):
+    """The /me payload carries the Gateway's runtime DEER_FLOW_AUTH_DISABLED
+    state so the browser can hide session-only affordances (the env itself is
+    invisible to the client bundle)."""
+    # get_me imports the helper function-locally at call time, so patch the
+    # source module attribute the import reads from.
+    import app.gateway.auth_disabled as auth_disabled_module
+
+    monkeypatch.setattr(auth_disabled_module, "is_auth_disabled", lambda: True)
+    _session_cookie(client)
+    while_disabled = client.get("/api/v1/auth/me")
+    assert while_disabled.status_code == 200
+    assert while_disabled.json()["auth_disabled"] is True
+
+    monkeypatch.setattr(auth_disabled_module, "is_auth_disabled", lambda: False)
+    while_enabled = client.get("/api/v1/auth/me")
+    assert while_enabled.status_code == 200
+    assert while_enabled.json()["auth_disabled"] is False
+
+
+def test_register_reports_runtime_auth_disabled_state(client, monkeypatch):
+    """/register is one of the endpoints a fresh client hits before ever
+    calling /me — its UserResponse must carry the same runtime flag, not the
+    False default that would tell the client session-only affordances are
+    live under DEER_FLOW_AUTH_DISABLED=1. (/initialize builds the model with
+    the identical constructor expression.)"""
+    import app.gateway.auth_disabled as auth_disabled_module
+
+    monkeypatch.setattr(auth_disabled_module, "is_auth_disabled", lambda: True)
+    registered = client.post(
+        "/api/v1/auth/register",
+        json={"email": "fresh@example.com", "password": "whatever1!"},
+    )
+    assert registered.status_code == 201, registered.text
+    assert registered.json()["auth_disabled"] is True

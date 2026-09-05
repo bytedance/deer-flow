@@ -1,4 +1,4 @@
-import { formatDistanceToNow } from "date-fns";
+import { format, formatDistanceToNow } from "date-fns";
 import { enUS as dateFnsEnUS, zhCN as dateFnsZhCN } from "date-fns/locale";
 
 import { detectLocale, type Locale } from "@/core/i18n";
@@ -31,4 +31,21 @@ export function formatTimeAgo(date: Date | string | number, locale?: Locale) {
     addSuffix: true,
     locale: getDateFnsLocale(effectiveLocale),
   });
+}
+
+export function formatDate(
+  date: Date | string | number,
+  pattern = "PP",
+  locale?: Locale,
+) {
+  // Same locale resolution as formatTimeAgo (cookie, then detection) so a
+  // single row never mixes app-locale relative times with browser-locale
+  // absolute dates.
+  const effectiveLocale =
+    locale ?? (getLocaleFromCookie() as Locale | null) ?? detectLocale();
+  const parsed = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(parsed.getTime())) {
+    return "-";
+  }
+  return format(parsed, pattern, { locale: getDateFnsLocale(effectiveLocale) });
 }

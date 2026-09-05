@@ -820,6 +820,7 @@ export const zhCN: Translations = {
       skills: "技能",
       notification: "通知",
       about: "关于",
+      tokens: "API 令牌",
     },
     memory: {
       title: "记忆",
@@ -942,6 +943,76 @@ export const zhCN: Translations = {
       removeServerDescription:
         "确定从 MCP 配置中移除“{name}”吗？它的工具将不再提供给智能体。",
       unnamedServer: "（空名称）",
+    },
+    tokens: {
+      title: "API 令牌",
+      description:
+        "个人访问令牌允许脚本和 CI 以你的身份调用 DeerFlow API，权限仅限你勾选的范围。令牌只能收窄你的权限，绝不会扩大。",
+      createButton: "创建令牌",
+      createTitle: "创建 API 令牌",
+      createDescription:
+        "只授予令牌实际需要的权限。创建后无法修改权限范围——需要变更时请撤销后重新创建。",
+      nameLabel: "名称",
+      namePlaceholder: "例如 ci-runner",
+      scopesLabel: "权限范围",
+      scopes: {
+        "threads:read": {
+          name: "读取会话",
+          description: "列出会话并读取其状态与历史。",
+        },
+        "threads:write": {
+          name: "写入会话",
+          description: "创建会话并更新其状态。",
+        },
+        "threads:delete": {
+          name: "删除会话",
+          description: "删除你拥有的会话。",
+        },
+        "runs:create": {
+          name: "启动运行",
+          description: "在你的会话上启动智能体运行。",
+        },
+        "runs:read": {
+          name: "读取运行",
+          description: "读取运行结果与消息。",
+        },
+        "runs:cancel": {
+          name: "取消运行",
+          description: "取消进行中的运行。",
+        },
+      },
+      expiryLabel: "有效期",
+      expiryDays: "{days} 天",
+      expiryNever: "永不过期",
+      createSubmit: "创建令牌",
+      resultTitle: "令牌已创建",
+      resultDescription: "请立即复制令牌并妥善保存——它不会再显示。",
+      copy: "复制",
+      copied: "已复制",
+      copyFailed: "复制到剪贴板失败",
+      done: "完成",
+      warning: "这是完整令牌唯一一次展示。如果丢失，请撤销此令牌并重新创建。",
+      emptyTitle: "还没有 API 令牌",
+      emptyDescription:
+        "创建一个令牌，让脚本或 CI 以你的身份调用 DeerFlow API。",
+      revokedBadge: "已撤销",
+      expiredBadge: "已过期",
+      authDisabledNotice: "个人访问令牌需要会话登录，而本部署已禁用登录。",
+      neverExpires: "永不过期",
+      expires: "过期于",
+      created: "创建于",
+      lastUsed: "最近使用",
+      neverUsed: "从未使用",
+      revoke: "撤销",
+      revokeTitle: "撤销“{name}”？",
+      revokeDescription:
+        "撤销立即生效：使用此令牌的 API 调用将从现在起失败。此操作无法撤销。",
+      revokeConfirm: "撤销令牌",
+      revoked: "令牌已撤销",
+      unavailableTitle: "API 令牌不可用",
+      unavailableDescription:
+        "个人访问令牌需要配置数据库后端（SQLite 或 PostgreSQL）。当前部署使用内存后端。",
+      loadError: "加载 API 令牌失败",
     },
     subagents: {
       title: "子智能体",

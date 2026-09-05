@@ -15,6 +15,7 @@ const SETTINGS_SECTIONS = new Set<SettingsSection>([
   "channels",
   "integrations",
   "memory",
+  "tokens",
   "tools",
   "subagents",
   "skills",

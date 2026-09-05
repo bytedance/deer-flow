@@ -854,6 +854,7 @@ export const enUS: Translations = {
       skills: "Skills",
       notification: "Notification",
       about: "About",
+      tokens: "API Tokens",
     },
     memory: {
       title: "Memory",
@@ -983,6 +984,79 @@ export const enUS: Translations = {
       removeServerDescription:
         'Remove "{name}" from the MCP configuration? Its tools stop being available to agents.',
       unnamedServer: "(empty name)",
+    },
+    tokens: {
+      title: "API Tokens",
+      description:
+        "Personal access tokens let scripts and CI call the DeerFlow API as you, restricted to the scopes you grant. They can only narrow your permissions, never widen them.",
+      createButton: "Create token",
+      createTitle: "Create API token",
+      createDescription:
+        "Grant this token only the access it needs. You will not be able to change scopes after creation — revoke and create a new token instead.",
+      nameLabel: "Name",
+      namePlaceholder: "e.g. ci-runner",
+      scopesLabel: "Scopes",
+      scopes: {
+        "threads:read": {
+          name: "Read threads",
+          description: "List threads and read their state and history.",
+        },
+        "threads:write": {
+          name: "Write threads",
+          description: "Create threads and update their state.",
+        },
+        "threads:delete": {
+          name: "Delete threads",
+          description: "Delete threads you own.",
+        },
+        "runs:create": {
+          name: "Start runs",
+          description: "Start agent runs on your threads.",
+        },
+        "runs:read": {
+          name: "Read runs",
+          description: "Read run results and messages.",
+        },
+        "runs:cancel": {
+          name: "Cancel runs",
+          description: "Cancel in-progress runs.",
+        },
+      },
+      expiryLabel: "Expires",
+      expiryDays: "{days} days",
+      expiryNever: "Never expires",
+      createSubmit: "Create token",
+      resultTitle: "Token created",
+      resultDescription:
+        "Copy the token now and store it somewhere safe — you will not see it again.",
+      copy: "Copy",
+      copied: "Copied",
+      copyFailed: "Failed to copy to clipboard",
+      done: "Done",
+      warning:
+        "This is the only time the full token is shown. If you lose it, revoke this token and create a new one.",
+      emptyTitle: "No API tokens yet",
+      emptyDescription:
+        "Create a token to let scripts or CI call the DeerFlow API on your behalf.",
+      revokedBadge: "Revoked",
+      expiredBadge: "Expired",
+      authDisabledNotice:
+        "Personal access tokens need session sign-in, which this deployment has disabled.",
+      neverExpires: "Never expires",
+      expires: "Expires",
+      created: "Created",
+      lastUsed: "Last used",
+      neverUsed: "Never used",
+      revoke: "Revoke",
+      revokeTitle: 'Revoke "{name}"?',
+      revokeDescription:
+        "Revocation is immediate: API calls using this token will fail from now on. This cannot be undone.",
+      revokeConfirm: "Revoke token",
+      revoked: "Token revoked",
+      unavailableTitle: "API tokens are unavailable",
+      unavailableDescription:
+        "Personal access tokens require a configured database backend (SQLite or PostgreSQL). The current deployment runs on the in-memory backend.",
+      loadError: "Failed to load API tokens",
     },
     subagents: {
       title: "Subagents",

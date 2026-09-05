@@ -841,9 +841,16 @@ only its path parameters.
 
 Non-interactive clients (CI pipelines, scripts, server-to-server integrations)
 can call the Gateway API with a **personal access token (PAT)** instead of a
-browser session. Create one while logged in via `POST /api/v1/auth/pats` — the
-raw `dfp_...` value is shown exactly once; only its SHA-256 digest is stored —
-then send it as a Bearer credential:
+browser session. The easiest way to manage tokens is the web UI: open
+**Settings → API Tokens** to create one (pick a name, the scopes it needs, and
+an expiry), copy the raw `dfp_...` value — it is shown exactly once; only its
+SHA-256 digest is stored — and list or revoke tokens at any time. No scope is
+preselected, so every permission grant is explicit. Static website/demo builds
+show this section as read-only because they have no Gateway PAT store, and
+deployments running with authentication disabled show the same read-only
+state. The same operations are available over the API: create a token with
+`POST /api/v1/auth/pats`, then send the value as a Bearer credential to any
+admitted route, for example:
 
 ```http
 POST /api/threads/search
