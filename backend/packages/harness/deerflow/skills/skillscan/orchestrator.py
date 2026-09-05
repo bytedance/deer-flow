@@ -17,7 +17,7 @@ import posixpath
 import re
 import stat
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -661,23 +661,45 @@ def _is_outbound_url(value: str) -> bool:
     return bool(value.startswith(("http://", "https://")) and (_http_host(value) or "") not in _LOCAL_HTTP_HOSTS)
 
 
-def _collect_python_aliases(tree: ast.AST) -> dict[str, str]:
-    """File-global import map keyed by the name each import statement actually binds.
+def _python_import_bindings(node: ast.Import | ast.ImportFrom) -> Iterator[tuple[str, str]]:
+    """Yield `(bound name, imported path)` for every name one import statement binds.
 
     `import http.client` binds `http`, not `http.client`, and no identifier can spell a dotted key,
-    so the entry has to sit under the bound root -- exactly as `_bind_client_import` records it --
-    for `_python_import_name` to prove a dotted constructor such as `http.client.HTTPSConnection`.
+    so the entry has to sit under the bound root or nothing ever looks it up. Every import map in
+    this module derives from this one rule so they cannot disagree on what a spelling proves.
     """
+    for alias in node.names:
+        if alias.name == "*":
+            continue
+        if isinstance(node, ast.Import):
+            name = alias.asname or alias.name.split(".")[0]
+            yield name, alias.name if alias.asname else name
+        elif node.module:
+            yield alias.asname or alias.name, f"{node.module}.{alias.name}"
+
+
+def _collect_python_aliases(tree: ast.AST) -> dict[str, str]:
+    """File-global import map, one path per bound name; a later import of the same name wins."""
     aliases: dict[str, str] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                name = alias.asname or alias.name.split(".")[0]
-                aliases[name] = alias.name if alias.asname else name
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            for alias in node.names:
-                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            aliases.update(_python_import_bindings(node))
     return aliases
+
+
+def _collect_python_import_targets(tree: ast.AST) -> dict[str, frozenset[str]]:
+    """File-global import map keeping every path a bound name may hold.
+
+    A name imported on both arms of a branch, or in different scopes, holds whichever import ran.
+    Collapsing it to one path drops the others, so a consumer that only needs "could this name be a
+    client module" reads this map instead of `_collect_python_aliases`.
+    """
+    targets: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for name, path in _python_import_bindings(node):
+                targets.setdefault(name, set()).add(path)
+    return {name: frozenset(paths) for name, paths in targets.items()}
 
 
 def _python_name(node: ast.AST, aliases: dict[str, str]) -> str:
@@ -697,6 +719,15 @@ def _python_import_name(node: ast.AST, aliases: dict[str, str]) -> str:
         base = _python_import_name(node.value, aliases)
         return f"{base}.{node.attr}" if base else ""
     return ""
+
+
+def _python_import_targets(node: ast.AST, targets: dict[str, frozenset[str]]) -> frozenset[str]:
+    """Every import path an expression may name; empty unless its root is an imported name."""
+    if isinstance(node, ast.Name):
+        return targets.get(node.id, frozenset())
+    if isinstance(node, ast.Attribute):
+        return frozenset(f"{base}.{node.attr}" for base in _python_import_targets(node.value, targets))
+    return frozenset()
 
 
 def _python_call_name(node: ast.Call, aliases: dict[str, str]) -> str:
@@ -1226,15 +1257,9 @@ def _drop_client_bindings(scope: _ClientScope, names: set[str]) -> None:
 
 
 def _bind_client_import(node: ast.Import | ast.ImportFrom, scope: _ClientScope) -> None:
-    for alias in node.names:
-        if alias.name == "*":
-            continue
-        name = alias.asname or alias.name.split(".")[0]
+    for name, path in _python_import_bindings(node):
         _drop_client_bindings(scope, {name})
-        if isinstance(node, ast.Import):
-            scope.aliases[name] = alias.name if alias.asname else name
-        elif node.module:
-            scope.aliases[name] = f"{node.module}.{alias.name}"
+        scope.aliases[name] = path
 
 
 def _call_is_client_handle_sink(node: ast.Call, handles: dict[str, str]) -> bool:
@@ -1265,11 +1290,15 @@ def _call_is_client_handle_sink(node: ast.Call, handles: dict[str, str]) -> bool
 # Three syntactic anchors survive: the constructor must be spelled as a call through a proven
 # import, the sink must be spelled `<expr>.method(...)`, and the sink's receiver must not be a
 # *never-rebound* import alias -- an import proves the receiver is a module only while that alias
-# still holds one, so a name the file rebinds stays a candidate. A locally aliased constructor
+# still holds one, so a name the file rebinds stays a candidate. "Proven" is read against every
+# path an import may bind the name to, not the last one: a name imported on both arms of a branch
+# holds whichever arm ran, and collapsing it would silence the branch-created client this rule
+# exists for. The payload half, by contrast, is the blocking rules' own signal recomputed under the
+# lazy-node exclusion, so it resolves names exactly as those rules do. A locally aliased constructor
 # (`Ctor = requests.Session`) and a detached or dynamic sink (`send = s.post`, `getattr(s, "post")`)
-# stay outside both signals. Lazily evaluated PEP 695 type syntax is skipped for the same reason the
-# blocking walker skips it, and the payload half is recomputed under that same exclusion so a value
-# the runtime never evaluates cannot satisfy the rule.
+# stay outside both signals. Lazily evaluated PEP 695 type syntax is skipped for sinks and payload
+# alike, for the same reason the blocking walker skips it: a value the runtime never evaluates
+# cannot satisfy the rule.
 #
 # The pass is iterative and node-budgeted, so an adversarial tree costs neither recursion nor branch
 # copies, and it runs only on files that already show an exfil payload and no proven sink -- its
@@ -1301,10 +1330,16 @@ def _scan_python_client_heuristic(rel_path: str, tree: ast.AST, aliases: dict[st
 
 
 def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], rel_path: str) -> _ClientHeuristicHit | None:
-    """Return the first supported client method call in a file that also constructs such a client."""
+    """Return the first supported client method call in a file that also constructs such a client.
+
+    `aliases` is the collapsed map the blocking rules resolve names with and serves the payload half
+    only; the constructor half reads every path an import may bind, so a conditional or scoped
+    import cannot hide a client behind the one that happened to be recorded last.
+    """
+    targets = _collect_python_import_targets(tree)
     remaining = _PYTHON_CLIENT_HEURISTIC_BUDGET
     constructors: set[str] = set()
-    candidates: list[tuple[str, str, str, ast.AST]] = []
+    candidates: list[tuple[str, str, bool, ast.AST]] = []
     rebound: set[str] = set()
     sensitive_read = False
     env_dump = False
@@ -1321,11 +1356,11 @@ def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], r
             # A call spelled entirely as a proven import path (`requests.Session`, `environ.get`)
             # names a module attribute rather than a value constructed at runtime, so it can be the
             # constructor half of the pair but never the instance half.
-            imported = _python_import_name(node.func, aliases)
-            if imported in _PYTHON_CLIENT_CONSTRUCTORS:
-                constructors.add(imported)
+            imported = _python_import_targets(node.func, targets)
+            if constructed := imported & _PYTHON_CLIENT_CONSTRUCTORS:
+                constructors.update(constructed)
             elif isinstance(node.func, ast.Attribute) and node.func.attr in _PYTHON_CLIENT_SINK_METHODS:
-                candidates.append((node.func.attr, _attribute_root_name(node.func), imported, node))
+                candidates.append((node.func.attr, _attribute_root_name(node.func), bool(imported), node))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _SENSITIVE_PATH_RE.search(node.value):
             sensitive_read = True
         elif isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, aliases) == "os.environ":
@@ -1341,7 +1376,7 @@ def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], r
     supported = {method for constructor in constructors for method in _PYTHON_CLIENT_SPECS[constructor].methods}
     for method, root, imported, node in candidates:
         # An import path is only evidence that the receiver is a module while that alias still holds
-        # it. `_collect_python_aliases` never invalidates an import, so a name the file rebinds --
+        # it. The import maps never invalidate an import, so a name the file rebinds --
         # `from pathlib import Path as session` then `session = requests.Session()` -- has to stay a
         # candidate, or the anchor would swallow the very rebind cases this rule exists to cover.
         if method in supported and (not imported or root in rebound):
