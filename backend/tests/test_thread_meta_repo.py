@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaRepository
 
@@ -24,11 +25,13 @@ class TestThreadMetaRepository:
         record = await repo.create("t1")
         assert record["thread_id"] == "t1"
         assert record["status"] == "idle"
+        assert len(record["incarnation"]) == 32
         assert "created_at" in record
 
         fetched = await repo.get("t1")
         assert fetched is not None
         assert fetched["thread_id"] == "t1"
+        assert fetched["incarnation"] == record["incarnation"]
 
     @pytest.mark.anyio
     async def test_create_with_assistant_id(self, repo):
@@ -45,6 +48,17 @@ class TestThreadMetaRepository:
     async def test_create_with_metadata(self, repo):
         record = await repo.create("t1", metadata={"key": "value"})
         assert record["metadata"] == {"key": "value"}
+
+    @pytest.mark.anyio
+    async def test_duplicate_create_raises_integrity_error(self, repo):
+        await repo.create("t1", display_name="original")
+
+        with pytest.raises(IntegrityError):
+            await repo.create("t1", display_name="replacement")
+
+        record = await repo.get("t1")
+        assert record is not None
+        assert record["display_name"] == "original"
 
     @pytest.mark.anyio
     async def test_update_display_name_can_remove_stale_metadata_atomically(self, repo):

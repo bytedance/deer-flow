@@ -848,8 +848,9 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         # the SQL-backed store rejects ours on the duplicate primary key.
         # Honour the documented idempotency contract by resolving the
         # now-existing record — running the same owner reconciliation the fast
-        # path does — instead of surfacing the conflict as a 500. (The memory
-        # store overwrites rather than raising, so it never reaches here.)
+        # path does — instead of surfacing the conflict as a 500. The memory
+        # store serializes same-id creates under its per-thread lock and keeps
+        # its historical overwrite behavior, so it does not reach this branch.
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
             return _existing_thread_response(thread_id, existing_record)

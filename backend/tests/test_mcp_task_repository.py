@@ -1,12 +1,16 @@
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
+from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError, McpTaskRepository
+from deerflow.persistence.mcp_tasks.model import McpTaskRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -50,6 +54,168 @@ async def _create_working_task(
         next_poll_at=now - timedelta(seconds=1),
         driver_data={"status_tool": "status"},
     )
+
+
+@pytest.mark.asyncio
+async def test_legacy_task_writer_leaves_thread_incarnation_null(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with repo._sf() as session:
+        session.add(
+            ThreadMetaRow(
+                thread_id="thread-1",
+                incarnation="owned-incarnation",
+                user_id="user-1",
+                metadata_json={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(
+            McpTaskRow(
+                id="legacy-writer",
+                user_id="user-1",
+                thread_id="thread-1",
+                server_name="reports",
+                driver_name="fake",
+                remote_task_id="remote-legacy-writer",
+                task_name="Generate report",
+                status="working",
+                driver_data={},
+                next_poll_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+    async with repo._sf() as session:
+        row = await session.get(McpTaskRow, "legacy-writer")
+    assert row is not None
+    assert row.thread_incarnation is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("thread_owner", "expected_incarnation"),
+    [
+        ("user-1", "matching-owner"),
+        (None, "shared-thread"),
+        ("user-2", None),
+    ],
+)
+async def test_create_atomically_copies_accessible_thread_incarnation(
+    tmp_path,
+    thread_owner,
+    expected_incarnation,
+):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    incarnation = expected_incarnation or "different-owner"
+    async with repo._sf() as session:
+        session.add(
+            ThreadMetaRow(
+                thread_id="thread-1",
+                incarnation=incarnation,
+                user_id=thread_owner,
+                metadata_json={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+    task = await _create_working_task(repo, task_id="new-writer", now=now)
+
+    assert "thread_incarnation" not in task
+    async with repo._sf() as session:
+        row = await session.get(McpTaskRow, "new-writer")
+    assert row is not None
+    assert row.thread_incarnation == expected_incarnation
+
+
+@pytest.mark.asyncio
+async def test_create_leaves_incarnation_null_without_matching_thread(tmp_path):
+    repo = await _make_repo(tmp_path)
+
+    await _create_working_task(repo, task_id="missing-thread", now=datetime.now(UTC))
+
+    async with repo._sf() as session:
+        row = await session.get(McpTaskRow, "missing-thread")
+    assert row is not None
+    assert row.thread_incarnation is None
+
+
+@pytest.mark.asyncio
+async def test_create_observes_delete_and_recreate_at_insert_boundary(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    async with repo._sf() as session:
+        session.add(
+            ThreadMetaRow(
+                thread_id="thread-1",
+                incarnation="old-incarnation",
+                user_id="user-1",
+                metadata_json={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+    engine = get_engine()
+    assert engine is not None
+    replaced = False
+    insert_statement = None
+
+    def replace_thread_before_task_insert(
+        _conn,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ):
+        nonlocal insert_statement, replaced
+        if replaced or not statement.lstrip().upper().startswith("INSERT INTO MCP_TASKS"):
+            return
+        replaced = True
+        insert_statement = statement
+        with sqlite3.connect(tmp_path / "deerflow.db") as connection:
+            connection.execute("DELETE FROM threads_meta WHERE thread_id = ?", ("thread-1",))
+            connection.execute(
+                """
+                INSERT INTO threads_meta (
+                    thread_id, incarnation, user_id, status, metadata_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "thread-1",
+                    "replacement-incarnation",
+                    "user-1",
+                    "idle",
+                    "{}",
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+
+    event.listen(engine.sync_engine, "before_cursor_execute", replace_thread_before_task_insert)
+    try:
+        await _create_working_task(repo, task_id="racing-task", now=now)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", replace_thread_before_task_insert)
+
+    assert replaced is True
+    assert insert_statement is not None
+    normalized_insert = " ".join(insert_statement.upper().split())
+    assert "SELECT THREADS_META.INCARNATION" in normalized_insert
+    assert "INSERT INTO MCP_TASKS" in normalized_insert
+    async with repo._sf() as session:
+        row = await session.get(McpTaskRow, "racing-task")
+    assert row is not None
+    assert row.thread_incarnation == "replacement-incarnation"
 
 
 @pytest.mark.asyncio

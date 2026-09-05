@@ -6,6 +6,7 @@ the in-memory LangGraph Store backend used when database.backend=memory.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -34,6 +35,129 @@ def _as_user(user):
 @pytest.fixture
 def store():
     return MemoryThreadMetaStore(InMemoryStore())
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_create_generates_stable_incarnation(store):
+    with _as_user(USER_A):
+        created = await store.create("incarnation-thread")
+        fetched = await store.get("incarnation-thread")
+
+    assert len(created["incarnation"]) == 32
+    assert fetched is not None
+    assert fetched["incarnation"] == created["incarnation"]
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_concurrent_create_preserves_overwrite_semantics_and_incarnation(store):
+    with _as_user(USER_A):
+        outcomes = await asyncio.gather(
+            store.create("same-thread", display_name="first"),
+            store.create("same-thread", display_name="second"),
+        )
+        fetched = await store.get("same-thread")
+
+    assert {outcome["display_name"] for outcome in outcomes} == {"first", "second"}
+    assert len({outcome["incarnation"] for outcome in outcomes}) == 1
+    assert fetched is not None
+    assert fetched["display_name"] in {"first", "second"}
+    assert fetched["incarnation"] == outcomes[0]["incarnation"]
+    assert not store._thread_locks._entries_by_loop
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_duplicate_create_overwrites_but_inherits_incarnation(store):
+    with _as_user(USER_A):
+        original = await store.create("duplicate", display_name="original")
+        replacement = await store.create("duplicate", display_name="replacement")
+        fetched = await store.get("duplicate")
+
+    assert replacement["incarnation"] == original["incarnation"]
+    assert replacement["display_name"] == "replacement"
+    assert fetched == replacement
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+@pytest.mark.parametrize(
+    "contender",
+    ["create", "update_display_name", "update_status", "update_metadata", "update_owner", "delete"],
+)
+async def test_all_memory_mutations_share_the_per_thread_lock(contender):
+    class PausingGetStore(InMemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.pause_next_get = False
+            self.get_entered = asyncio.Event()
+            self.allow_get = asyncio.Event()
+
+        async def aget(self, namespace, key):
+            item = await super().aget(namespace, key)
+            if self.pause_next_get:
+                self.pause_next_get = False
+                self.get_entered.set()
+                await self.allow_get.wait()
+            return item
+
+    backend = PausingGetStore()
+    store = MemoryThreadMetaStore(backend)
+    await store.create("locked-thread", user_id=None)
+    backend.pause_next_get = True
+    holder = asyncio.create_task(store.update_metadata("locked-thread", {"holder": True}, user_id=None))
+    await backend.get_entered.wait()
+
+    operations = {
+        "create": lambda: store.create("locked-thread", display_name="replacement", user_id=None),
+        "update_display_name": lambda: store.update_display_name("locked-thread", "renamed", user_id=None),
+        "update_status": lambda: store.update_status("locked-thread", "busy", user_id=None),
+        "update_metadata": lambda: store.update_metadata("locked-thread", {"contender": True}, user_id=None),
+        "update_owner": lambda: store.update_owner("locked-thread", "new-owner", user_id=None),
+        "delete": lambda: store.delete("locked-thread", user_id=None),
+    }
+    waiting = asyncio.create_task(operations[contender]())
+    await asyncio.sleep(0)
+    assert not waiting.done(), f"{contender} bypassed the per-thread lock"
+
+    backend.allow_get.set()
+    await asyncio.gather(holder, waiting)
+    assert not store._thread_locks._entries_by_loop
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_delete_and_recreate_are_serialized_per_thread():
+    class PausingDeleteStore(InMemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.delete_entered = asyncio.Event()
+            self.allow_delete = asyncio.Event()
+
+        async def adelete(self, namespace, key):
+            self.delete_entered.set()
+            await self.allow_delete.wait()
+            await super().adelete(namespace, key)
+
+    backend = PausingDeleteStore()
+    store = MemoryThreadMetaStore(backend)
+    with _as_user(USER_A):
+        original = await store.create("replace-me")
+        delete_task = asyncio.create_task(store.delete("replace-me"))
+        await backend.delete_entered.wait()
+        create_task = asyncio.create_task(store.create("replace-me"))
+        await asyncio.sleep(0)
+        assert not create_task.done()
+
+        backend.allow_delete.set()
+        await delete_task
+        replacement = await create_task
+        fetched = await store.get("replace-me")
+
+    assert replacement["incarnation"] != original["incarnation"]
+    assert fetched == replacement
+    assert not store._thread_locks._entries_by_loop
 
 
 @pytest.mark.anyio

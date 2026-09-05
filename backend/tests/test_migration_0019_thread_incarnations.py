@@ -1,0 +1,251 @@
+from __future__ import annotations
+
+import asyncio
+import importlib
+import os
+import uuid
+from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import pytest
+import sqlalchemy as sa
+from alembic import command as alembic_command
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.schema import CreateTable
+
+from deerflow.persistence.bootstrap import _get_alembic_config
+
+_PREVIOUS = "0020_threads_meta_project_id"
+_REVISION = "0019_thread_incarnations"
+_MIGRATION_MODULE = "deerflow.persistence.migrations.versions.0019_thread_incarnations"
+
+
+def _asyncpg_url(url: str | None) -> str | None:
+    if not url:
+        return url
+    parts = urlsplit(url)
+    scheme = "postgresql+asyncpg" if parts.scheme in {"postgres", "postgresql"} else parts.scheme
+    query = urlencode([(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key not in {"sslmode", "channel_binding"}])
+    return urlunsplit(parts._replace(scheme=scheme, query=query))
+
+
+_POSTGRES_URL = _asyncpg_url(os.getenv("DEERFLOW_TEST_POSTGRES_URL") or os.getenv("TEST_POSTGRES_URI"))
+
+
+@pytest.mark.asyncio
+async def test_sqlite_0019_adds_and_drops_nullable_columns(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
+    cfg = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _PREVIOUS)
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _REVISION)
+
+        async with engine.connect() as conn:
+            thread_columns = {column["name"]: column for column in await conn.run_sync(lambda sync: sa.inspect(sync).get_columns("threads_meta"))}
+            task_columns = {column["name"]: column for column in await conn.run_sync(lambda sync: sa.inspect(sync).get_columns("mcp_tasks"))}
+            version = await conn.scalar(sa.text("SELECT version_num FROM alembic_version"))
+
+        assert version == _REVISION
+        assert thread_columns["incarnation"]["nullable"] is True
+        assert task_columns["thread_incarnation"]["nullable"] is True
+
+        await asyncio.to_thread(alembic_command.downgrade, cfg, _PREVIOUS)
+        async with engine.connect() as conn:
+            thread_columns = {column["name"] for column in await conn.run_sync(lambda sync: sa.inspect(sync).get_columns("threads_meta"))}
+            task_columns = {column["name"] for column in await conn.run_sync(lambda sync: sa.inspect(sync).get_columns("mcp_tasks"))}
+        assert "incarnation" not in thread_columns
+        assert "thread_incarnation" not in task_columns
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_0019_reapply_does_not_report_varchar_drift(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
+    cfg = _get_alembic_config(engine)
+    migration = importlib.import_module(_MIGRATION_MODULE)
+    try:
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _REVISION)
+
+        def reapply(sync_connection) -> None:
+            context = MigrationContext.configure(sync_connection)
+            with Operations.context(context):
+                migration.upgrade()
+
+        with caplog.at_level("WARNING", logger="deerflow.persistence.migrations._helpers"):
+            async with engine.begin() as connection:
+                await connection.run_sync(reapply)
+
+        assert "drifts from the model definition" not in caplog.text
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "column_sql",
+    [
+        "VARCHAR(16) NULL",
+        "TEXT NULL",
+        'VARCHAR(32) NOT NULL DEFAULT "legacy"',
+        "VARCHAR(32) NULL DEFAULT 'legacy'",
+    ],
+)
+async def test_sqlite_0019_fails_fast_on_incompatible_existing_column(tmp_path: Path, column_sql: str) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
+    cfg = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _PREVIOUS)
+        async with engine.begin() as connection:
+            await connection.execute(sa.text(f"ALTER TABLE mcp_tasks ADD COLUMN thread_incarnation {column_sql}"))
+
+        with pytest.raises(RuntimeError, match="with no default or DEFAULT NULL"):
+            await asyncio.to_thread(alembic_command.upgrade, cfg, _REVISION)
+
+        async with engine.connect() as connection:
+            version = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
+            thread_columns = {column["name"] for column in await connection.run_sync(lambda sync: sa.inspect(sync).get_columns("threads_meta"))}
+        assert version == _PREVIOUS
+        assert "incarnation" not in thread_columns
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_0019_accepts_wider_nullable_varchar(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
+    cfg = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _PREVIOUS)
+        async with engine.begin() as connection:
+            await connection.execute(sa.text("ALTER TABLE mcp_tasks ADD COLUMN thread_incarnation VARCHAR(64) NULL"))
+
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _REVISION)
+
+        async with engine.connect() as connection:
+            columns = {column["name"]: column for column in await connection.run_sync(lambda sync: sa.inspect(sync).get_columns("mcp_tasks"))}
+        assert columns["thread_incarnation"]["type"].length == 64
+        assert columns["thread_incarnation"]["nullable"] is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_0019_accepts_default_null_and_legacy_writer_omission(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
+    cfg = _get_alembic_config(engine)
+    try:
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _PREVIOUS)
+        async with engine.begin() as connection:
+            await connection.execute(sa.text("ALTER TABLE threads_meta ADD COLUMN incarnation VARCHAR(32) NULL DEFAULT NULL"))
+
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _REVISION)
+
+        async with engine.begin() as connection:
+            await connection.execute(sa.text("INSERT INTO threads_meta (thread_id, status, metadata_json, created_at, updated_at) VALUES ('legacy-writer', 'idle', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"))
+            incarnation = await connection.scalar(sa.text("SELECT incarnation FROM threads_meta WHERE thread_id = 'legacy-writer'"))
+        assert incarnation is None
+    finally:
+        await engine.dispose()
+
+
+def test_postgresql_0019_column_ddl_compiles_without_value_default() -> None:
+    table = sa.Table(
+        "incarnation_compile_check",
+        sa.MetaData(),
+        sa.Column("incarnation", sa.VARCHAR(length=32), nullable=True),
+    )
+
+    ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
+
+    assert "incarnation VARCHAR(32)" in ddl
+    assert "DEFAULT" not in ddl
+
+
+def test_postgresql_reflected_default_null_cast_is_semantically_null() -> None:
+    migration = importlib.import_module(_MIGRATION_MODULE)
+
+    assert migration._is_null_server_default("NULL::character varying") is True
+    assert migration._is_null_server_default("(NULL)::character varying") is True
+    assert migration._is_null_server_default("'legacy'::character varying") is False
+    assert migration._is_null_server_default("NULL::integer IS NULL") is False
+
+
+def test_postgresql_ci_url_is_normalized_for_asyncpg() -> None:
+    assert _asyncpg_url("postgresql://user:pass@localhost/db?sslmode=disable") == "postgresql+asyncpg://user:pass@localhost/db"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _POSTGRES_URL, reason="set TEST_POSTGRES_URI or DEERFLOW_TEST_POSTGRES_URL to run live PostgreSQL tests")
+async def test_postgresql_0019_accepts_default_null_and_legacy_writer_omission() -> None:
+    schema = f"deerflow_0019_{uuid.uuid4().hex[:12]}"
+    engine = create_async_engine(_POSTGRES_URL or "")
+    cfg = _get_alembic_config(engine, postgres_schema=schema)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _PREVIOUS)
+        async with engine.begin() as connection:
+            await connection.execute(sa.text(f'ALTER TABLE "{schema}".threads_meta ADD COLUMN incarnation VARCHAR(32) NULL DEFAULT NULL'))
+
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _REVISION)
+
+        async with engine.begin() as connection:
+            await connection.execute(sa.text(f"INSERT INTO \"{schema}\".threads_meta (thread_id, status, metadata_json, created_at, updated_at) VALUES ('legacy-writer', 'idle', '{{}}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"))
+            incarnation = await connection.scalar(sa.text(f"SELECT incarnation FROM \"{schema}\".threads_meta WHERE thread_id = 'legacy-writer'"))
+        assert incarnation is None
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_0019_downgrade_retry_cleans_failed_batch_table(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
+    cfg = _get_alembic_config(engine)
+    migration = importlib.import_module(_MIGRATION_MODULE)
+    try:
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _REVISION)
+
+        def fail_then_retry(sync_connection) -> None:
+            context = MigrationContext.configure(sync_connection)
+            original_safe_drop = migration.safe_drop_column
+            injected = False
+
+            def fail_after_batch_temp_create(table: str, column_name: str) -> None:
+                nonlocal injected
+                if table == "mcp_tasks" and not injected:
+                    injected = True
+                    sync_connection.exec_driver_sql("CREATE TABLE _alembic_tmp_mcp_tasks AS SELECT * FROM mcp_tasks")
+                    raise RuntimeError("injected batch downgrade failure")
+                original_safe_drop(table, column_name)
+
+            with Operations.context(context):
+                monkeypatch.setattr(migration, "safe_drop_column", fail_after_batch_temp_create)
+                with pytest.raises(RuntimeError, match="injected"):
+                    migration.downgrade()
+                sync_connection.commit()
+
+                monkeypatch.setattr(migration, "safe_drop_column", original_safe_drop)
+                migration.downgrade()
+                sync_connection.commit()
+
+            tables = set(sa.inspect(sync_connection).get_table_names())
+            assert "_alembic_tmp_mcp_tasks" not in tables
+            assert "thread_incarnation" not in {column["name"] for column in sa.inspect(sync_connection).get_columns("mcp_tasks")}
+            assert "incarnation" not in {column["name"] for column in sa.inspect(sync_connection).get_columns("threads_meta")}
+
+        async with engine.connect() as connection:
+            await connection.run_sync(fail_then_retry)
+    finally:
+        await engine.dispose()
