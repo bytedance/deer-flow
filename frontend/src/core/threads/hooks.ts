@@ -175,6 +175,7 @@ export function buildThreadSubmitMessages({
 const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_RUN_MESSAGES: RunMessage[] = [];
 const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
+const EMPTY_MESSAGE_IDENTITIES_SET: ReadonlySet<string> = new Set<string>();
 const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
 // Thread-global feed position, attached by the backend to history rows and to
 // `values` frame messages it has already persisted. Mirrors MESSAGE_SEQ_KEY in
@@ -661,30 +662,103 @@ export function mergeMessages(
 }
 
 /**
+ * Collect live run ids that were not part of the pre-submit checkpoint.
+ * An empty result is safe because restoreLocalTurnMessageOrder independently
+ * anchors the current turn from the pending human's run_id when interrupt/stop
+ * has already flushed the live steps into canonical history.
+ */
+export function getCurrentTurnRunIds(
+  messages: Message[],
+  baselineMessageIdentities: ReadonlySet<string> | null,
+  confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+): Set<string> {
+  const runIds = new Set<string>();
+  if (baselineMessageIdentities === null) {
+    return runIds;
+  }
+
+  for (const message of messages) {
+    if (
+      (message.type !== "ai" && message.type !== "tool") ||
+      isHiddenFromUIMessage(message)
+    ) {
+      continue;
+    }
+    const identity = messageIdentity(message);
+    const runId = getMessageRunId(message);
+    if (
+      runId &&
+      (!identity ||
+        (!baselineMessageIdentities.has(identity) &&
+          !confirmedHistoryIdentities.has(identity)))
+    ) {
+      runIds.add(runId);
+    }
+  }
+  return runIds;
+}
+
+/**
  * Keep messages from a locally submitted turn behind that turn's user input.
  * LangGraph `messages-tuple` events can publish the first AI/tool steps before
  * canonical history contains the user message. Those steps are not part of the
  * pre-submit baseline, so move only that visible pending segment behind the
- * first new human message without disturbing established history or hidden
- * checkpoint controls. The caller keeps the baseline after stream completion
- * because the SDK may retain its transient event order until the next submit.
+ * latest new human message. Conversely, a baseline or history-confirmed message
+ * from an established turn can be woven after that human before a live
+ * checkpoint tail; move those established messages back before the input. The
+ * caller keeps the baseline after stream completion because the SDK may retain
+ * its transient event order until the next submit.
  */
 export function restoreLocalTurnMessageOrder(
   messages: Message[],
   baselineMessageIdentities: ReadonlySet<string>,
+  confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+  currentTurnRunIds: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
 ): Message[] {
-  const pendingHumanIndex = messages.findIndex((message) => {
+  // Context compaction can omit an older human from the checkpoint while the
+  // REST history page still supplies it. Anchor on the latest visible human
+  // that is not in the baseline so an old history-only turn cannot claim the
+  // current stream. A freshly submitted human may not have a server id yet;
+  // identity-less messages are therefore necessarily absent from the baseline.
+  let pendingHumanIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
     const identity = messageIdentity(message);
-    return (
+    if (
       message.type === "human" &&
       !isHiddenFromUIMessage(message) &&
-      identity !== undefined &&
-      !baselineMessageIdentities.has(identity)
-    );
-  });
-  if (pendingHumanIndex <= 0) {
+      (identity === undefined || !baselineMessageIdentities.has(identity))
+    ) {
+      pendingHumanIndex = index;
+      break;
+    }
+  }
+  if (pendingHumanIndex < 0) {
     return messages;
   }
+
+  // A message that canonical history (the REST /messages page) has already
+  // committed is an established part of a previous turn, no matter whether it
+  // also reached the live checkpoint baseline. Only a visible ai/tool step that
+  // is absent from BOTH sources is genuinely new output from the in-flight
+  // submit, and only that belongs after the new human input.
+  const isConfirmedHistoryMessage = (identity: string | undefined) =>
+    identity !== undefined && confirmedHistoryIdentities.has(identity);
+  // Steps of the CURRENT run must never be treated as displaced history: after
+  // an interrupt/stop the current turn's already-executed steps are persisted
+  // into canonical history, but they still belong AFTER the new human input.
+  // The pending human message itself carries the current run_id, so it is the
+  // most reliable anchor even when the live checkpoint no longer holds the
+  // current turn's steps (stop/interrupt can flush them to history).
+  const effectiveCurrentTurnRunIds = new Set(currentTurnRunIds);
+  const pendingHumanRunId = getMessageRunId(messages[pendingHumanIndex]!);
+  if (pendingHumanRunId) {
+    effectiveCurrentTurnRunIds.add(pendingHumanRunId);
+  }
+  const isCurrentTurnStep = (message: Message) => {
+    const runId = getMessageRunId(message);
+    return runId !== undefined && effectiveCurrentTurnRunIds.has(runId);
+  };
 
   const stablePrefix: Message[] = [];
   const earlyPendingSteps: Message[] = [];
@@ -694,22 +768,41 @@ export function restoreLocalTurnMessageOrder(
       (message.type === "ai" || message.type === "tool") &&
       !isHiddenFromUIMessage(message) &&
       identity !== undefined &&
-      !baselineMessageIdentities.has(identity);
+      !baselineMessageIdentities.has(identity) &&
+      (!isConfirmedHistoryMessage(identity) || isCurrentTurnStep(message));
     if (isVisiblePendingStep) {
       earlyPendingSteps.push(message);
     } else {
       stablePrefix.push(message);
     }
   }
-  if (earlyPendingSteps.length === 0) {
+  const displacedMessages: Message[] = [];
+  const stableSuffix: Message[] = [];
+  for (const message of messages.slice(pendingHumanIndex + 1)) {
+    const identity = messageIdentity(message);
+    const wasPresentBeforeSubmit =
+      identity !== undefined && baselineMessageIdentities.has(identity);
+    const wasConfirmedInPreviousHistory =
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message) &&
+      isConfirmedHistoryMessage(identity) &&
+      !isCurrentTurnStep(message);
+    if (wasPresentBeforeSubmit || wasConfirmedInPreviousHistory) {
+      displacedMessages.push(message);
+    } else {
+      stableSuffix.push(message);
+    }
+  }
+  if (earlyPendingSteps.length === 0 && displacedMessages.length === 0) {
     return messages;
   }
 
   return [
     ...stablePrefix,
+    ...displacedMessages,
     messages[pendingHumanIndex]!,
     ...earlyPendingSteps,
-    ...messages.slice(pendingHumanIndex + 1),
+    ...stableSuffix,
   ];
 }
 
@@ -2584,10 +2677,32 @@ export function useThreadStream({
       renderMessages,
       visibleOptimisticMessages,
     );
+    // Canonical history identities are established messages from previous
+    // turns; they must be treated as confirmed regardless of whether the live
+    // checkpoint baseline captured them (e.g. an ask_clarification card that
+    // reached the REST history page but not the checkpoint `messages` value).
+    const confirmedHistoryIdentities = new Set(
+      effectiveHistory.map(messageIdentity).filter(isNonEmptyString),
+    );
     const localTurnOrderBaseline = localTurnOrderBaselineIdentitiesRef.current;
-    return localTurnOrderBaseline === null
-      ? restoreReconnectedTurnMessageOrder(merged)
-      : restoreLocalTurnMessageOrder(merged, localTurnOrderBaseline);
+    // The current turn's run(s): visible ai/tool steps that appear in the live
+    // checkpoint but are NOT part of the pre-submit baseline. These are output
+    // from the in-flight submit and must never be moved before their human.
+    const currentTurnRunIds = getCurrentTurnRunIds(
+      renderMessages,
+      localTurnOrderBaseline,
+      confirmedHistoryIdentities,
+    );
+    const restored =
+      localTurnOrderBaseline === null
+        ? restoreReconnectedTurnMessageOrder(merged)
+        : restoreLocalTurnMessageOrder(
+            merged,
+            localTurnOrderBaseline,
+            confirmedHistoryIdentities,
+            currentTurnRunIds,
+          );
+    return restored;
   }, [
     previouslyRenderedOrder,
     renderMessages,
