@@ -10,6 +10,8 @@ Browser auth sessions are owned by `app.gateway.auth.session_cookie`. Login acce
 
 Localhost persistence deliberately reads the direct request `Host` and ignores `Forwarded` / `X-Forwarded-Host`. Scheme and auth-origin reconstruction still consume forwarding headers. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header, so the outer trusted proxy must replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
+Every Gateway Uvicorn launcher disables Uvicorn's proxy-header middleware. For HTTP CSRF and auth-origin reconstruction, `CSRFMiddleware` is the forwarded-header trust boundary: it checks the raw TCP peer against `AUTH_TRUSTED_PROXIES` before using `Forwarded` / `X-Forwarded-*`. Do not re-enable Uvicorn `--proxy-headers` or rely on `FORWARDED_ALLOW_IPS` for this Gateway; doing so rewrites the ASGI client and scheme before the auth boundary can evaluate them.
+
 Standalone local LangGraph Studio is recognized only through the upstream
 `Auth.types.StudioUser` principal type, never by its reusable identity string.
 The type is resolved once at import; an older SDK without it degrades to normal

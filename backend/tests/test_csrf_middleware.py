@@ -1,7 +1,10 @@
 """Tests for CSRF middleware."""
 
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, Request
 from starlette.testclient import TestClient
+from uvicorn.config import Config
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.gateway import csrf_middleware
 from app.gateway.csrf_middleware import CSRFMiddleware, _trusted_proxy_networks
@@ -180,6 +183,81 @@ def test_auth_post_allows_forwarded_same_origin(monkeypatch):
 
     assert response.status_code == 200
     assert response.cookies.get("csrf_token")
+
+
+@pytest.mark.parametrize(
+    ("proxy_headers", "expected_peer", "expected_scheme", "expected_auth_status"),
+    [
+        (True, "203.0.113.1", "https", 403),
+        (False, "10.0.0.2", "http", 200),
+    ],
+)
+def test_uvicorn_proxy_header_processing_preserves_gateway_trust_boundary(
+    monkeypatch,
+    proxy_headers,
+    expected_peer,
+    expected_scheme,
+    expected_auth_status,
+):
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "10.0.0.0/8")
+    app = _make_app()
+
+    @app.get("/_scope")
+    async def scope(request: Request):
+        return {"peer": request.client.host, "scheme": request.url.scheme}
+
+    config = Config(app, proxy_headers=proxy_headers, log_config=None)
+    config.load()
+    assert isinstance(config.loaded_app, ProxyHeadersMiddleware) is proxy_headers
+
+    client = TestClient(
+        config.loaded_app,
+        base_url="http://internal:8000",
+        client=("10.0.0.2", 12345),
+    )
+    forwarded_headers = {
+        "X-Forwarded-For": "203.0.113.1",
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Host": "deerflow.example",
+    }
+
+    assert client.get("/_scope", headers=forwarded_headers).json() == {
+        "peer": expected_peer,
+        "scheme": expected_scheme,
+    }
+
+    response = client.post(
+        "/api/v1/auth/login/local",
+        headers={"Origin": "https://deerflow.example", **forwarded_headers},
+    )
+
+    assert response.status_code == expected_auth_status
+    if proxy_headers:
+        assert response.cookies.get("csrf_token") is None
+    else:
+        assert response.cookies.get("csrf_token")
+
+
+def test_uvicorn_proxy_headers_cannot_override_the_default_off_auth_policy(monkeypatch):
+    """FORWARDED_ALLOW_IPS must not alter Gateway auth requests on its own."""
+    monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+    config = Config(_make_app(), proxy_headers=False, log_config=None)
+    config.load()
+
+    client = TestClient(
+        config.loaded_app,
+        base_url="http://internal:8000",
+        client=("203.0.113.1", 12345),
+    )
+    response = client.post(
+        "/api/v1/auth/login/local",
+        headers={"X-Forwarded-Proto": "https"},
+    )
+
+    assert response.status_code == 200
+    assert "secure" not in response.headers["set-cookie"].lower()
 
 
 def test_auth_post_rejects_spoofed_forwarded_same_origin_from_untrusted_peer(monkeypatch):

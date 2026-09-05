@@ -7,7 +7,7 @@ install:
 
 dev:
 	mkdir -p "$(DEER_FLOW_HOME)" "$(BACKEND_SANDBOX_HOME)"
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 DEER_FLOW_HOME="$(DEER_FLOW_HOME)" uv run --locked uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 \
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 DEER_FLOW_HOME="$(DEER_FLOW_HOME)" uv run --locked uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --no-proxy-headers \
 		--reload \
 		--reload-include='*.yaml' \
 		--reload-include='.env' \
@@ -17,7 +17,7 @@ dev:
 		--reload-exclude="$(DEER_FLOW_HOME)"
 
 gateway:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run --locked uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run --locked uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --no-proxy-headers
 
 test:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" tests/ -v
