@@ -741,6 +741,23 @@ def _defer_finalization_interrupt(
     return deferred if deferred is not None else interrupt
 
 
+async def _await_task_stop_after_host_cancellation(
+    task: asyncio.Task[None],
+    deferred: BaseException | None,
+) -> BaseException | None:
+    """Wait for one task-stop fan-out despite repeated host cancellation."""
+    while True:
+        try:
+            await asyncio.shield(task)
+            return deferred
+        except asyncio.CancelledError as exc:
+            host = asyncio.current_task()
+            if host is None or not host.cancelling():
+                # The fan-out task itself was cancelled rather than the host.
+                raise
+            deferred = _defer_finalization_interrupt(deferred, exc)
+
+
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -1562,8 +1579,8 @@ async def run_agent(
             if task_info is not None and task_store is not None:
                 # Keep the finalizing barrier held until stop observers finish, so
                 # a same-thread replacement cannot overlap this task's lifecycle.
-                try:
-                    await notify_task_stop(
+                task_stop = asyncio.create_task(
+                    notify_task_stop(
                         extensions,
                         task_store,
                         task_info,
@@ -1572,6 +1589,13 @@ async def run_agent(
                             succeeded=record.status == RunStatus.success,
                         ),
                         timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                    ),
+                    name=f"extension-task-stop-{run_id}",
+                )
+                try:
+                    deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(
+                        task_stop,
+                        deferred_finalization_interrupt,
                     )
                 except Exception:
                     logger.warning(
