@@ -359,8 +359,48 @@ def test_ttl_multiplier_below_two_is_rejected():
 @pytest.mark.parametrize("field", ["renewal_interval_seconds", "ttl_multiplier"])
 @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
 def test_lease_timing_rejects_non_finite_values(field, value):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="finite"):
         SandboxOwnershipConfig(**{field: value})
+
+
+def test_lease_timing_rejects_finite_values_with_infinite_product():
+    with pytest.raises(ValueError, match="lease TTL must be finite"):
+        SandboxOwnershipConfig(
+            renewal_interval_seconds=1e308,
+            ttl_multiplier=4.0,
+        )
+
+
+def test_redis_lease_timing_rejects_ttl_above_signed_64_bit_milliseconds():
+    ttl_seconds_above_limit = 2**63 / 1000
+
+    with pytest.raises(ValueError, match="signed 64-bit millisecond range"):
+        SandboxOwnershipConfig(
+            type="redis",
+            renewal_interval_seconds=ttl_seconds_above_limit / 4,
+            ttl_multiplier=4.0,
+        )
+
+
+def test_redis_lease_timing_rejects_ttl_without_absolute_expiry_headroom():
+    ttl_seconds_at_safe_limit = 2**62 / 1000
+
+    with pytest.raises(ValueError, match="absolute-expiry headroom"):
+        SandboxOwnershipConfig(
+            type="redis",
+            renewal_interval_seconds=ttl_seconds_at_safe_limit / 4,
+            ttl_multiplier=4.0,
+        )
+
+
+def test_redis_lease_timing_allows_operational_ttl():
+    config = SandboxOwnershipConfig(
+        type="redis",
+        renewal_interval_seconds=60 * 60,
+        ttl_multiplier=24,
+    )
+
+    assert compute_lease_ttl(config) == 24 * 60 * 60
 
 
 def test_owner_ids_are_unique_per_instance():

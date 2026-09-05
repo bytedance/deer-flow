@@ -1,12 +1,18 @@
 import ipaddress
+import math
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
 SandboxNetworkMode = Literal["open", "isolated", "allowlist"]
 SandboxNetworkApproval = Literal["deny", "prompt"]
+
+# Redis converts relative PX values to absolute Unix-millisecond timestamps.
+# Reserving half the signed range for that timestamp keeps accepted TTLs usable
+# without making config validation depend on the current clock.
+_REDIS_MAX_SAFE_TTL_MILLISECONDS = (2**63 - 1) // 2
 
 
 class SandboxNetworkConfig(BaseModel):
@@ -110,6 +116,15 @@ class SandboxOwnershipConfig(BaseModel):
         default="deerflow:sandbox:owner",
         description="Redis key prefix for ownership leases. Only applies to the redis ownership type.",
     )
+
+    @model_validator(mode="after")
+    def validate_lease_ttl(self) -> "SandboxOwnershipConfig":
+        lease_ttl_seconds = self.renewal_interval_seconds * self.ttl_multiplier
+        if not math.isfinite(lease_ttl_seconds):
+            raise ValueError("sandbox.ownership lease TTL must be finite")
+        if self.type == "redis" and lease_ttl_seconds * 1000 > _REDIS_MAX_SAFE_TTL_MILLISECONDS:
+            raise ValueError("sandbox.ownership Redis lease TTL must fit the signed 64-bit millisecond range with absolute-expiry headroom")
+        return self
 
 
 class VolumeMountConfig(BaseModel):
