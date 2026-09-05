@@ -15,7 +15,14 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 `user_id=None` selects only the legacy no-user root.
 `agent_name=None` selects all agent buckets in that user scope.
 It does not interrupt a context after `_process_queue` removes it from `_items`.
+Dropped pending snapshots still advance the conversation watermark so a later turn cannot restore them.
 Broader cancellation must iterate known user scopes.
+A durable clear generation in `memory.json` fences that in-flight window and other Gateway workers.
+The queue captures the generation at enqueue, before the process-local queue lock.
+A later clear bumps the generation in the same locked commit as the wipe.
+Extraction drops before the LLM call, and again at commit, when a newer clear exists.
+The updater returns `None` for clear-consumed work, `True` for persisted or no-op work, and `False` for retryable failures.
+Queue logs and batch counts preserve those three outcomes.
 
 Focused updater tests live in `backend/tests/test_memory_updater.py`.
 Backend-specific tests use `backend/tests/test_<backend>_memory_backend.py`.
@@ -45,7 +52,7 @@ DeerMem uses this layout:
 {base_dir}/users/{user_id}/agents/{agent_name}/facts/{sha256-prefix}/{fact-id}.md
 ```
 
-`memory.json` stores only shared summaries, revision data, and timestamps.
+`memory.json` stores shared summaries, revision data, timestamps, and durable clear-generation counters.
 It never stores facts or a fact index.
 Each Markdown file stores one fact with YAML front matter.
 
@@ -60,8 +67,16 @@ Public agent names use lowercase canonical form.
 
 `memory.mode: middleware` is the default passive mode.
 `MemoryMiddleware` queues filtered user and final assistant messages.
-It captures `user_id` when it enqueues work.
-This identity survives the background timer boundary.
+It captures `user_id` and the scope clear-generation fence when it enqueues work.
+Both survive the background timer boundary.
+The fence peek reads JSON counters only, not fact files, and runs before the queue lock.
+`DeerMem.aadd()` offloads the complete synchronous admission path with `asyncio.to_thread`.
+Async middleware must not call `DeerMem.add()` directly on the event loop.
+Provider exceptions and invalid generation values fail closed before queue admission.
+Normal capture failures log a replayable warning; emergency pre-summarization failures log an unrecoverable error with thread, user, and agent context.
+Same-key merges keep the earlier token unless a newer clear is already visible.
+A visible newer clear consumes the pre-clear snapshot and starts a fresh fence.
+An incoming peek older than the queued context cannot inherit the newer token.
 
 `memory.mode: tool` registers the four memory tools.
 The model chooses when to search or change facts.
@@ -89,6 +104,11 @@ Writes use a user lock, shared revision, fact revisions, and a recovery journal.
 Point operations can rebase only when all original fact preconditions still hold.
 Snapshot operations must reload and recompute after a manifest conflict.
 Use the typed conflict classes instead of matching exception text.
+A clear bumps `clearGeneration` / `agentClearGenerations` in the same locked commit as the wipe.
+`apply_changes` and `clear_all` must honor `expected_clear_generation` atomically.
+Custom `storage_class` providers must override `capabilities()` to advertise `clear-generation`.
+`create_storage` rejects providers that only pass those values through `**scope`.
+Snapshot-derived writes never rebase extracted facts onto an emptied document.
 
 The weak lock cache must not retain inactive user scopes.
 Cache validation uses the manifest metadata and persisted revision.
@@ -167,6 +187,11 @@ Tool-mode CRUD does not use the extraction gate.
 Custom prompt directories must include the same classification fields.
 Old templates cause extraction writes to fail closed.
 The rejection counter and high-rejection warning expose this condition.
+
+The enqueue token is the commit fence.
+Direct `update_memory` callers without a queue token fence from the pre-LLM snapshot.
+A generation-fenced drop still advances the conversation watermark.
+The next turn must not replay the same pre-clear messages against the newer generation.
 
 #### Capacity and review
 
@@ -256,3 +281,4 @@ Keep these cross-component constraints in sync:
 - Eviction weights must total `1.0`.
 - `watermark_max_keys: 0` makes the conversation watermark cache unbounded.
 - A dropped watermark can re-extract one batch on the next turn.
+- Custom `storage_class` providers must advertise `clear-generation` and bump it atomically on clear.

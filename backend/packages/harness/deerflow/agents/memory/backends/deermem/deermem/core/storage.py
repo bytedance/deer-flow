@@ -14,6 +14,7 @@ import abc
 import copy
 import hashlib
 import importlib
+import inspect
 import json
 import logging
 import math
@@ -69,6 +70,59 @@ class MemoryManifestRevisionConflict(MemoryRevisionConflict):
 
 class MemoryFactRevisionConflict(MemoryRevisionConflict):
     """A fact no longer satisfies its expected absence or revision."""
+
+
+class MemoryClearGenerationConflict(MemoryRevisionConflict):
+    """A writer started before a newer clear and must not commit."""
+
+
+def _as_clear_generation_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def read_clear_generations(memory: dict[str, Any] | None) -> tuple[int, dict[str, int]]:
+    """Return ``(user_clear_generation, agent_clear_generations)`` from a document."""
+    data = memory or {}
+    user_gen = _as_clear_generation_int(data.get("clearGeneration", 0))
+    raw_agents = data.get("agentClearGenerations")
+    agent_gens: dict[str, int] = {}
+    if isinstance(raw_agents, dict):
+        for name, value in raw_agents.items():
+            if not isinstance(name, str) or not name:
+                continue
+            generation = _as_clear_generation_int(value)
+            if generation > 0:
+                agent_gens[name] = generation
+    return user_gen, agent_gens
+
+
+def scope_clear_generation(memory: dict[str, Any] | None, agent_name: str | None) -> tuple[int, int]:
+    """Return ``(user_generation, agent_generation)`` for one write scope."""
+    user_gen, agent_gens = read_clear_generations(memory)
+    return user_gen, agent_gens.get(agent_name, 0) if agent_name else 0
+
+
+def is_stale_clear_generation(expected: tuple[int, int], current: tuple[int, int]) -> bool:
+    """Return True when ``current`` includes a clear that ``expected`` has not seen."""
+    return current[0] > expected[0] or current[1] > expected[1]
+
+
+def _clear_generation_fields(user_gen: int, agent_gens: dict[str, int]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if user_gen > 0:
+        payload["clearGeneration"] = user_gen
+    trimmed = {name: value for name, value in agent_gens.items() if value > 0}
+    if trimmed:
+        payload["agentClearGenerations"] = trimmed
+    return payload
+
+
+def _normalize_expected_clear_generation(value: Any) -> tuple[int, int]:
+    if not isinstance(value, tuple) or len(value) != 2 or isinstance(value[0], bool) or isinstance(value[1], bool) or not isinstance(value[0], int) or not isinstance(value[1], int) or value[0] < 0 or value[1] < 0:
+        raise ValueError("expected_clear_generation must be a pair of non-negative integers")
+    return value[0], value[1]
 
 
 class RetrievalPort(Protocol):
@@ -405,6 +459,45 @@ def _process_file_lock(lock_path: Path, timeout_seconds: float) -> Iterator[None
         handle.close()
 
 
+CLEAR_GENERATION_CAPABILITY = "clear-generation"
+
+
+def declares_clear_generation_fence(storage_cls: type) -> bool:
+    """Return True when ``storage_cls`` declares the atomic clear-generation contract.
+
+    Custom ``storage_class`` providers must override ``apply_changes``,
+    ``clear_all``, and ``capabilities``, and name ``expected_clear_generation`` /
+    ``bump_clear_generation`` as explicit parameters. A ``**scope`` sink is not
+    enough: those values can be accepted and ignored, leaving the
+    restore-after-clear race.
+    """
+    apply_changes = getattr(storage_cls, "apply_changes", None)
+    clear_all = getattr(storage_cls, "clear_all", None)
+    capabilities = getattr(storage_cls, "capabilities", None)
+    if apply_changes is None or apply_changes is MemoryStorage.apply_changes:
+        return False
+    if clear_all is None or clear_all is MemoryStorage.clear_all:
+        return False
+    if capabilities is None or capabilities is MemoryStorage.capabilities:
+        return False
+    try:
+        params = inspect.signature(apply_changes).parameters
+    except (TypeError, ValueError):
+        return False
+    return all(name in params and params[name].kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY) for name in ("expected_clear_generation", "bump_clear_generation"))
+
+
+def _validate_clear_generation_contract(storage: MemoryStorage, *, label: str) -> None:
+    if not declares_clear_generation_fence(type(storage)):
+        raise TypeError(f"Configured memory storage {label} does not implement the atomic clear-generation fence (apply_changes must declare expected_clear_generation/bump_clear_generation; clear_all and capabilities must be overridden)")
+    try:
+        advertised = storage.capabilities()
+    except NotImplementedError:
+        advertised = None
+    if not isinstance(advertised, (set, frozenset)) or CLEAR_GENERATION_CAPABILITY not in advertised:
+        raise TypeError(f"Configured memory storage {label} capabilities() omit {CLEAR_GENERATION_CAPABILITY!r}")
+
+
 class MemoryStorage(abc.ABC):
     @abc.abstractmethod
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]: ...
@@ -422,12 +515,33 @@ class MemoryStorage(abc.ABC):
         expected_revision: int | None = None,
     ) -> bool: ...
 
-    def apply_changes(self, change_set: dict[str, Any], **scope: Any) -> dict[str, Any]:
-        """Apply one repository change set; providers may override atomically."""
+    def apply_changes(
+        self,
+        change_set: dict[str, Any],
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+        expected_manifest_revision: int | None = None,
+        allow_manifest_rebase: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
+        bump_clear_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply one repository change set atomically with the clear-generation fence.
+
+        Providers must honor ``expected_clear_generation`` (raise
+        ``MemoryClearGenerationConflict`` when a newer clear exists) and bump
+        the matching counter when ``bump_clear_generation`` is ``user`` or
+        ``agent``. A ``**scope`` sink that ignores these values is not a valid
+        implementation.
+        """
         raise NotImplementedError
 
     def clear_all(self, *, user_id: str | None = None) -> dict[str, Any]:
-        """Clear global summaries and every agent fact bucket for one user."""
+        """Clear global summaries and every agent fact bucket for one user.
+
+        Implementations must bump the user-wide clear generation in the same
+        atomic commit as the clear so in-flight writers cannot restore facts.
+        """
         raise NotImplementedError
 
     def get_fact_usage(
@@ -469,6 +583,23 @@ class MemoryStorage(abc.ABC):
         fact_ids: list[str] | None = None,
     ) -> None:
         """Remove sidecar data for selected facts, or the whole scope."""
+
+    def capabilities(self) -> set[str]:
+        """Return advertised storage features.
+
+        Providers that implement the atomic clear-generation fence must include
+        ``clear-generation``. ``create_storage`` fail-fasts when that entry is
+        missing or this base implementation is left in place.
+        """
+        raise NotImplementedError
+
+    def peek_clear_generation(self, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        """Return the scope clear-generation fence.
+
+        The default implementation loads the complete document. File storage
+        overrides this to read only the shared JSON counters.
+        """
+        return scope_clear_generation(self.load(agent_name, user_id=user_id), agent_name)
 
     def close(self) -> None:
         """Release optional storage resources."""
@@ -1001,6 +1132,8 @@ class FileMemoryStorage(MemoryStorage):
         expected_revision: int | None,
         delete_revisions: dict[str, int] | None = None,
         upsert_revisions: dict[str, int | None] | None = None,
+        expected_clear_generation: tuple[int, int] | None = None,
+        bump_clear_generation: str | None = None,
     ) -> tuple[dict[str, Any], list[RetrievalNotification]]:
         """Commit only the addressed fact files plus the shared summary JSON.
 
@@ -1010,6 +1143,12 @@ class FileMemoryStorage(MemoryStorage):
         """
         current_memory = self._load_memory_file(path)
         current_revision = int((current_memory or {}).get("revision") or 0)
+        user_gen, agent_gens = read_clear_generations(current_memory)
+        agent_gen = agent_gens.get(agent_name, 0) if agent_name else 0
+        if expected_clear_generation is not None:
+            expected_user, expected_agent = _normalize_expected_clear_generation(expected_clear_generation)
+            if user_gen > expected_user or agent_gen > expected_agent:
+                raise MemoryClearGenerationConflict(f"Expected clear generation {(expected_user, expected_agent)}, found {(user_gen, agent_gen)}")
         if expected_revision is not None and expected_revision != current_revision:
             raise MemoryManifestRevisionConflict(f"Expected user-memory revision {expected_revision}, found {current_revision}")
         if (upserts or deletes) and agent_name is None:
@@ -1072,7 +1211,15 @@ class FileMemoryStorage(MemoryStorage):
                 history_section.update(copy.deepcopy(summaries["history"]))
         summaries_changed = user_section != base.get("user", {}) or history_section != base.get("history", {})
         needs_manifest_cleanup = current_memory is None or current_memory.get("version") != DOCUMENT_VERSION or "facts" in current_memory
-        if not prepared and not removals and not summaries_changed and not needs_manifest_cleanup:
+        if bump_clear_generation == "user":
+            user_gen += 1
+        elif bump_clear_generation == "agent":
+            if agent_name is None:
+                raise ValueError("agent_name is required to bump agent clear generation")
+            agent_gens[agent_name] = agent_gens.get(agent_name, 0) + 1
+        elif bump_clear_generation is not None:
+            raise ValueError("bump_clear_generation must be 'user', 'agent', or None")
+        if not prepared and not removals and not summaries_changed and not needs_manifest_cleanup and bump_clear_generation is None:
             memory_file = current_memory or {
                 "version": DOCUMENT_VERSION,
                 "revision": 0,
@@ -1124,6 +1271,7 @@ class FileMemoryStorage(MemoryStorage):
             "lastUpdated": utc_now_iso_z(),
             "user": user_section,
             "history": history_section,
+            **_clear_generation_fields(user_gen, agent_gens),
         }
         _atomic_write(path, json.dumps(memory_file, ensure_ascii=False, indent=2).encode("utf-8"))
         journal["state"] = "committed"
@@ -1263,6 +1411,11 @@ class FileMemoryStorage(MemoryStorage):
             result["facts"] = self._load_agent_facts(path, agent_name, user_id=user_id)
             return result
         return self._document_from_memory_file(memory_file, path, agent_name, user_id=user_id)
+
+    def peek_clear_generation(self, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        """Read ``clearGeneration`` / ``agentClearGenerations`` from the shared JSON only."""
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        return scope_clear_generation(self._load_memory_file(path), agent_name)
 
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         path = self._get_memory_file_path(agent_name, user_id=user_id)
@@ -1467,6 +1620,7 @@ class FileMemoryStorage(MemoryStorage):
                 deletes=[],
                 summaries={"user": empty["user"], "history": empty["history"]},
                 expected_revision=int((current_memory or {}).get("revision") or 0),
+                bump_clear_generation="user",
             )
 
         for agent_name, notifications in notifications_by_agent:
@@ -1529,6 +1683,8 @@ class FileMemoryStorage(MemoryStorage):
         agent_name: str | None = None,
         expected_manifest_revision: int | None = None,
         allow_manifest_rebase: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
+        bump_clear_generation: str | None = None,
     ) -> dict[str, Any]:
         """Commit an incremental change set and return only the applied delta.
 
@@ -1587,6 +1743,8 @@ class FileMemoryStorage(MemoryStorage):
                         expected_revision=expected,
                         delete_revisions=copy.deepcopy(delete_revisions),
                         upsert_revisions=normalized_upsert_revisions,
+                        expected_clear_generation=expected_clear_generation,
+                        bump_clear_generation=bump_clear_generation,
                     )
                 break
             except MemoryManifestRevisionConflict as exc:
@@ -1821,7 +1979,7 @@ class FileMemoryStorage(MemoryStorage):
         }
 
     def capabilities(self) -> set[str]:
-        capabilities = {"file", "markdown-facts", "global-summary-json", "revision", "journal", "fact-repository", "substring-fallback"}
+        capabilities = {"file", "markdown-facts", "global-summary-json", "revision", "journal", "fact-repository", "substring-fallback", CLEAR_GENERATION_CAPABILITY}
         if self._retrieval is not None:
             capabilities.add("retrieval")
         return capabilities
@@ -1842,12 +2000,16 @@ def create_storage(config: DeerMemConfig, retrieval: RetrievalPort | None = None
             raise ValueError(f"backend_config.retrieval_adapter={config.retrieval_adapter!r} failed to load: {exc}") from exc
     storage_class_path = config.storage_class
     if not storage_class_path or storage_class_path == "file":
-        return FileMemoryStorage(config, retrieval=retrieval)
+        storage = FileMemoryStorage(config, retrieval=retrieval)
+        _validate_clear_generation_contract(storage, label="file")
+        return storage
     try:
         module_path, class_name = storage_class_path.rsplit(".", 1)
         storage_class = getattr(importlib.import_module(module_path), class_name)
         if not isinstance(storage_class, type) or not issubclass(storage_class, MemoryStorage):
             raise TypeError(f"Configured memory storage '{storage_class_path}' is not a MemoryStorage class")
-        return storage_class(config)
+        storage = storage_class(config)
+        _validate_clear_generation_contract(storage, label=repr(storage_class_path))
+        return storage
     except Exception as exc:
         raise ValueError(f"backend_config.storage_class={storage_class_path!r} failed to load: {exc}. Refusing to silently fall back because memory is persistent state.") from exc

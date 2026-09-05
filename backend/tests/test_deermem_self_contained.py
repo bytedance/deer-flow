@@ -69,13 +69,13 @@ def test_add_swallows_queue_full_so_backpressure_does_not_break_caller(deermem_d
 
     conv = [HumanMessage("Please explain quantum computing in detail"), AIMessage("Quantum computing uses qubits and superposition.")]
     # First add fills the queue to its depth cap (non-signal, new key).
-    dm.add("thread-A", conv, agent_name="lead_agent", user_id="u")
+    dm.add("thread-A", conv, agent_name="lead-agent", user_id="u")
     assert dm._queue.pending_count == 1
 
     # Second add for a different key hits the cap -> QueueFull internally. It
     # must be caught: no exception escapes DeerMem.add.
     with caplog.at_level(logging.WARNING, logger="deerflow.agents.memory.backends.deermem.deer_mem"):
-        dm.add("thread-B", conv, agent_name="lead_agent", user_id="u")
+        dm.add("thread-B", conv, agent_name="lead-agent", user_id="u")
     assert "rejected under backpressure" in caplog.text
     # thread-B was rejected (not enqueued); only thread-A remains.
     assert dm._queue.pending_count == 1
