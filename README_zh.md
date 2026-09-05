@@ -13,6 +13,14 @@ DeerFlow（**D**eep **E**xploration and **E**fficient **R**esearch **Flow**）�
 
 https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
+### Affiliates.One Ad Link 擴充功能
+
+DeerFlow 也包含一個 Chrome／Edge Manifest V3 擴充功能原型，位於
+`tools/ad-link-extension/`。它會把目前網頁中的品牌網址送到 DeerFlow Gateway，
+再由 Gateway 呼叫 Affiliates.One Deep Links API。API 金鑰只放在 Gateway 的
+`AFFILIATES_ONE_API_KEY` 環境變數，不會打包到瀏覽器擴充功能中。安裝與設定方式請參考
+`tools/ad-link-extension/README.md`。
+
 > [!NOTE]
 > **DeerFlow 2.0 是一次彻底重写。** 它和 v1 没有共用代码。如果你要找的是最初的 Deep Research 框架，可以前往 [`1.x` 分支](https://github.com/bytedance/deer-flow/tree/main-1.x)。那里仍然欢迎贡献；当前的主要开发已经转向 2.0。
 

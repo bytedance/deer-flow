@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "DeerFlow Ad Link",
+  "description": "Convert eligible page links into Affiliates.One deep links through DeerFlow.",
+  "version": "0.1.0",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "http://localhost:8001/*",
+    "http://127.0.0.1:8001/*"
+  ],
+  "action": {
+    "default_title": "DeerFlow Ad Link",
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html",
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content-script.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

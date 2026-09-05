@@ -1,4 +1,5 @@
 from . import (
+    ad_links,
     artifacts,
     assistants_compat,
     browser,
@@ -15,6 +16,7 @@ from . import (
 )
 
 __all__ = [
+    "ad_links",
     "artifacts",
     "assistants_compat",
     "browser",

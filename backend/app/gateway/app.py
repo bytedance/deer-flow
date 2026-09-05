@@ -15,6 +15,7 @@ from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS, CSRFMiddleware, ge
 from app.gateway.deps import langgraph_runtime
 from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, readiness_payload
 from app.gateway.routers import (
+    ad_links,
     agents,
     artifacts,
     assistants_compat,
@@ -825,6 +826,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
+
+    # Affiliates.One deep-link proxy is mounted at /api/ad-links
+    app.include_router(ad_links.router)
 
     # Deployment-level subagent catalog and admin management.
     app.include_router(subagents.router)
