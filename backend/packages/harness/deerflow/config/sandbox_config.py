@@ -1,4 +1,6 @@
 import ipaddress
+import os
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -131,6 +133,20 @@ class VolumeMountConfig(BaseModel):
     )
     container_path: str = Field(..., description="Path inside the container")
     read_only: bool = Field(default=False, description="Whether the mount is read-only")
+
+    @field_validator("container_path")
+    @classmethod
+    def _canonicalize_container_path(cls, value: str) -> str:
+        normalized = value.replace("\\", "/")
+        if re.match(r"^[A-Za-z]:", normalized) or (os.name == "nt" and re.match(r"^/[A-Za-z](?:/|$)", normalized)):
+            raise ValueError("container_path must be a POSIX virtual path, not a drive-shaped host path")
+        if not normalized.startswith("/"):
+            return value
+        parts = normalized.split("/")
+        if any(part == ".." for part in parts):
+            raise ValueError("container_path traversal is not allowed")
+        tail = [part for part in parts if part not in {"", "."}]
+        return "/" + "/".join(tail) if tail else "/"
 
 
 class SandboxConfig(BaseModel):

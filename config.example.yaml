@@ -1318,6 +1318,12 @@ sandbox:
   #   - host_path: /home/user/my-project    # Absolute path; see note above for Docker mode
   #     container_path: /mnt/my-project     # Virtual path inside the sandbox
   #     read_only: true                     # Whether the mount is read-only (default: false)
+  # On Windows LocalSandbox, local file tools also accept the configured
+  # host_path spelling (C:\\Users\\lichen, C:/Users/lichen, or /c/Users/lichen)
+  # and translate it to container_path before validation. With
+  # allow_host_bash: true, Windows-only run_host_program can launch
+  # .exe/.cmd/.bat/.ps1 files from configured mounts; this is host execution,
+  # not isolation.
 
   # Tool output truncation limits (characters).
   # bash uses middle-truncation (head + tail) since errors can appear anywhere in the output.

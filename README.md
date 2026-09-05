@@ -1292,6 +1292,36 @@ downloads at the Gateway boundary.
 
 With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes, so host-native CLI launchers retain their normal MSYS compatibility.
 
+On Windows local deployments, configured `sandbox.mounts[].host_path` values are
+also accepted by local file tools and command arguments. For example, a mount
+from `C:/Users/lichen` to `/root` accepts `C:\\Users\\lichen\\config.tfx-dms`,
+`C:/Users/lichen/config.tfx-dms`, and `/c/Users/lichen/config.tfx-dms`; DeerFlow
+authorizes the path under the configured mount and translates it to `/root`.
+Unconfigured host paths remain denied. When `allow_host_bash: true`, trusted
+Windows LocalSandbox deployments additionally expose `run_host_program` for
+`.exe`, `.cmd`/`.bat`, and `.ps1` programs without changing those programs or
+their configuration files. A requested timeout must be positive and is capped
+by `sandbox.bash_command_timeout` (600 seconds by default). This runs code on
+the Gateway host and is not a security boundary; remote/container sandbox
+providers do not expose it. Keep mount `container_path` values POSIX-style;
+drive-prefixed values such as `C:/projects` are rejected on every OS, while
+slash-prefixed single-letter roots such as `/c/projects` are rejected only by
+Windows configuration validation. Accepted POSIX paths are canonicalized when
+the configuration is loaded, so provider mappings and tool authorization use
+the same path spelling.
+
+This host-path alias is intentionally Windows-only. POSIX local deployments
+continue to use the configured virtual `container_path` in tool arguments.
+Sandbox mount changes require a Gateway restart so authorization and provider
+path mappings remain aligned.
+For native program arguments, absolute, rooted, drive-relative, traversal, and
+local `file://` paths must resolve under configured mounts. The Windows wrapper
+rejects `%`, `^`, quotes, and control characters because `cmd.exe` expands or
+interprets those characters before launch; other shell metacharacters are
+quoted. Network URLs remain opaque arguments. When `cwd` is omitted,
+`run_host_program` starts the process in the program's mapped parent directory,
+so relative arguments resolve inside that mount.
+
 Docker AIO sandboxes default to their existing open egress behavior for
 compatibility. Operators can set `sandbox.network.mode` to `isolated` or
 `allowlist`; allowlist mode supports operator-defined domains and an interactive

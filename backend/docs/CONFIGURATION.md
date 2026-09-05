@@ -663,6 +663,9 @@ sandbox:
 ```
 
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
+`sandbox` is startup-only infrastructure, so changes to `sandbox.mounts` or their
+host/container mappings require a Gateway restart; this keeps tool authorization
+aligned with the provider's acquire-time path table.
 
 #### Sandbox network policy
 
@@ -770,6 +773,36 @@ A custom image that is already fully initialized as a non-root user and needs no
 | `DEER_FLOW_SANDBOX_NETWORK` | unset (daemon default network) | Legacy `open`-mode escape hatch passed through as `--network`. Prefer `sandbox.network` for managed isolation. `host`, `container:<name>`, and `none` are rejected at startup. Restricted modes ignore this variable and use their own per-sandbox internal network. |
 
 These hardening flags are Docker-only; Apple Container (`container` runtime) keeps its previous, unhardened invocation and therefore supports only `network.mode: open`. On macOS, an `open` Gateway normally prefers Apple Container, but it keeps using Docker while the configured sandbox prefix has managed Docker sandboxes so startup reconciliation can safely replace resources left by a restricted-mode deployment before the runtime changes.
+
+On Windows with `LocalSandboxProvider`, DeerFlow also accepts the configured
+`host_path` spelling at the local tool boundary. For example, with
+`C:/Users/lichen` mapped to `/root`, chat requests and tool arguments may use
+`C:\\Users\\lichen\\config.tfx-dms`, `C:/Users/lichen/config.tfx-dms`, or
+Git Bash's `/c/Users/lichen/config.tfx-dms`; the local adapter checks that the
+path is inside the configured mount and translates it to `/root/config.tfx-dms`
+before normal sandbox validation. Unconfigured host paths remain rejected.
+
+Trusted Windows local mode also exposes `run_host_program` when
+`sandbox.allow_host_bash: true`. It runs `.exe` files directly, `.cmd`/`.bat`
+files through an explicit `cmd.exe` wrapper, and `.ps1` files through
+PowerShell `-File`, without changing the target program or its configuration
+files. Its optional model-supplied timeout must be positive and is capped by
+`sandbox.bash_command_timeout` (600 seconds by default). This is host code
+execution, not an isolation boundary; use it only for trusted single-user
+deployments. AIO, E2B, provisioner, and other remote sandbox providers do not
+run Windows host programs. Keep every mount `container_path` as a POSIX virtual
+path. Drive-prefixed values such as `C:/projects` are rejected on every OS;
+slash-prefixed single-letter roots such as `/c/projects` are rejected during
+Windows configuration validation but remain valid POSIX roots on POSIX hosts.
+Accepted POSIX `container_path` values are canonicalized during configuration
+loading so provider mappings and tool authorization share one spelling.
+For native program arguments, absolute, rooted, drive-relative, traversal, and
+local `file://` paths must resolve under configured mounts. Network URLs remain
+opaque arguments. The Windows wrapper rejects `%`, `^`, quotes, and control
+characters because `cmd.exe` expands or interprets those characters before
+launch; other shell metacharacters are quoted. When `cwd` is omitted, the
+process starts in the program's mapped parent directory so relative arguments
+resolve inside the configured mount.
 
 Sandbox control-plane HTTP calls to loopback/private IPs, single-label cluster
 hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`

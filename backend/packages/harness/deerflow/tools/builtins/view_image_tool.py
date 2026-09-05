@@ -6,7 +6,6 @@ from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
-from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
 
@@ -26,8 +25,14 @@ _EXTENSION_TO_MIME = {
 }
 
 
-def _is_allowed_image_virtual_path(image_path: str) -> bool:
-    return any(image_path == root or image_path.startswith(f"{root}/") for root in _ALLOWED_IMAGE_VIRTUAL_ROOTS)
+def _is_allowed_image_virtual_path(image_path: str, *, allow_custom_mount: bool = False) -> bool:
+    if any(image_path == root or image_path.startswith(f"{root}/") for root in _ALLOWED_IMAGE_VIRTUAL_ROOTS):
+        return True
+    if allow_custom_mount:
+        from deerflow.sandbox.tools import _is_custom_mount_path
+
+        return _is_custom_mount_path(image_path)
+    return False
 
 
 def _detect_image_mime(image_data: bytes) -> str | None:
@@ -40,12 +45,6 @@ def _detect_image_mime(image_data: bytes) -> str | None:
     if image_data.startswith((b"GIF87a", b"GIF89a")):
         return "image/gif"
     return None
-
-
-def _sanitize_image_error(error: Exception, thread_data: ThreadDataState | None) -> str:
-    from deerflow.sandbox.tools import mask_local_paths_in_output
-
-    return mask_local_paths_in_output(f"{type(error).__name__}: {error}", thread_data)
 
 
 @tool("view_image", parse_docstring=True)
@@ -66,23 +65,38 @@ def view_image_tool(
     - For multiple files at once (use present_files instead)
 
     Args:
-        image_path: Absolute /mnt/user-data virtual path to the image file. Common formats supported: jpg, jpeg, png, webp, gif.
+        image_path: Absolute /mnt/user-data virtual path or configured local-mount path to the image file. On Windows LocalSandbox, a configured host spelling is also accepted. Common formats supported: jpg, jpeg, png, webp, gif.
     """
-    from deerflow.sandbox.exceptions import SandboxRuntimeError
+    from deerflow.sandbox.exceptions import SandboxError
+    from deerflow.sandbox.security import uses_local_sandbox_provider
     from deerflow.sandbox.tools import (
+        ensure_sandbox_initialized,
         get_thread_data,
+        is_local_sandbox,
+        normalize_local_tool_path,
         resolve_and_validate_user_data_path,
         validate_local_tool_path,
     )
 
     thread_data = get_thread_data(runtime)
+    local_runtime = is_local_sandbox(runtime)
+    local_provider = local_runtime or uses_local_sandbox_provider()
+    try:
+        if local_provider:
+            image_path = normalize_local_tool_path(image_path)
+    except (PermissionError, SandboxError):
+        # Host-path normalization can fail before a virtual path is available;
+        # keep the raw host spelling out of the model-visible ToolMessage.
+        return Command(
+            update={"messages": [ToolMessage("Error: Image path is not allowed", tool_call_id=tool_call_id)]},
+        )
 
-    if not _is_allowed_image_virtual_path(image_path):
+    if not _is_allowed_image_virtual_path(image_path, allow_custom_mount=local_provider):
         return Command(
             update={
                 "messages": [
                     ToolMessage(
-                        f"Error: Only image paths under {_ALLOWED_IMAGE_VIRTUAL_ROOTS_TEXT} are allowed",
+                        f"Error: Only image paths under {_ALLOWED_IMAGE_VIRTUAL_ROOTS_TEXT} or configured local mounts are allowed",
                         tool_call_id=tool_call_id,
                     )
                 ]
@@ -91,8 +105,17 @@ def view_image_tool(
 
     try:
         validate_local_tool_path(image_path, thread_data, read_only=True)
-        actual_path = resolve_and_validate_user_data_path(image_path, thread_data)
-    except (PermissionError, SandboxRuntimeError) as e:
+        if local_provider:
+            from deerflow.sandbox.tools import _is_custom_mount_path
+
+            if _is_custom_mount_path(image_path):
+                sandbox = ensure_sandbox_initialized(runtime)
+                actual_path = sandbox._resolve_path(image_path)
+            else:
+                actual_path = resolve_and_validate_user_data_path(image_path, thread_data)
+        else:
+            actual_path = resolve_and_validate_user_data_path(image_path, thread_data)
+    except (PermissionError, SandboxError) as e:
         return Command(
             update={"messages": [ToolMessage(f"Error: {str(e)}", tool_call_id=tool_call_id)]},
         )
@@ -125,9 +148,9 @@ def view_image_tool(
 
     try:
         image_size = path.stat().st_size
-    except OSError as e:
+    except OSError:
         return Command(
-            update={"messages": [ToolMessage(f"Error reading image metadata: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
+            update={"messages": [ToolMessage(f"Error reading image metadata: {image_path}", tool_call_id=tool_call_id)]},
         )
     if image_size > _MAX_IMAGE_BYTES:
         return Command(
@@ -138,9 +161,9 @@ def view_image_tool(
     try:
         with open(actual_path, "rb") as f:
             image_data = f.read()
-    except Exception as e:
+    except Exception:
         return Command(
-            update={"messages": [ToolMessage(f"Error reading image file: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
+            update={"messages": [ToolMessage(f"Error reading image file: {image_path}", tool_call_id=tool_call_id)]},
         )
 
     if len(image_data) != image_size:

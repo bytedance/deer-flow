@@ -672,6 +672,23 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 └── outputs/          ← 最终交付物
 ```
 
+在 Windows 的受信任本地模式下，`sandbox.mounts[].host_path` 的主机路径也
+可以直接出现在聊天请求和工具参数中。例如将 `C:/Users/lichen` 映射到
+`/root` 后，`C:\\Users\\lichen\\config.tfx-dms`、`C:/Users/lichen/config.tfx-dms`
+和 `/c/Users/lichen/config.tfx-dms` 都会先被授权并转换为 `/root` 路径。
+未配置的主机路径仍会被拒绝。设置 `allow_host_bash: true` 后，Windows
+LocalSandbox 还会提供 `run_host_program`，用于运行 `.exe`、`.cmd`/`.bat` 和
+`.ps1`，但这些程序实际运行在 Gateway 主机上，不具备容器隔离能力；AIO
+或其他远程沙盒不会提供该工具。
+
+`run_host_program` 的超时必须为正数，并且不会超过
+`sandbox.bash_command_timeout`（默认 600 秒）。挂载的 `container_path` 必须
+保持为 POSIX 虚拟路径；像 `C:/projects` 这样的盘符前缀路径在所有系统都会被拒绝，
+而 `/c/projects` 这样的单字母 POSIX 根目录只在 Windows 配置校验时拒绝。配置加载时会将合法的 POSIX 路径归一化，因此 provider 映射和工具授权使用相同的路径写法。
+主机路径别名仅适用于 Windows；POSIX 本地部署仍应在工具参数中使用配置的虚拟路径。
+修改沙盒挂载后需要重启 Gateway，以保持授权结果与沙盒路径映射一致。
+原生程序的绝对路径、根路径、盘符相对路径、遍历路径和本地 `file://` 参数必须位于配置的挂载目录下；网络 URL 会作为普通参数保留。Windows 包装器会拒绝 `%`、`^`、引号和控制字符，因为 `cmd.exe` 会在启动前展开或解释这些字符；其他 shell 元字符会被加引号。未指定 `cwd` 时，`run_host_program` 会将工作目录设为程序映射后的父目录，因此相对参数会在该挂载目录内解析。
+
 ### Agentic Browser Control
 
 读取页面和真正“使用”页面不是一回事。除了只读的 `web_fetch` 和 `web_capture` 工具外，DeerFlow 还提供一组可选的 agentic browser 工具，为每次对话保持一个实时浏览器会话，让 agent 真正操作页面——导航、读取可交互元素、点击、输入、提交表单，并在重度 JavaScript 站点上完成多步流程。

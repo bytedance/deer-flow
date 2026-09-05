@@ -202,6 +202,12 @@ def test_security_fail_closed_bumped_config_version():
     assert example["skill_evolution"]["security_fail_closed"] is True
 
 
+def test_windows_mount_validation_bumps_config_version():
+    """The Windows mount-path schema change must trigger the config upgrade warning."""
+    example = _load_repo_example()
+    assert example.get("config_version", 0) >= 39
+
+
 def test_version_26_config_reported_outdated_against_example(caplog):
     """A version-26 user config is flagged outdated against the real example version."""
     example = _load_repo_example()

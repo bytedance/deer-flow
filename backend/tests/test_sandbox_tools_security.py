@@ -23,6 +23,8 @@ from deerflow.sandbox.tools import (
     _resolve_skills_path,
     bash_tool,
     mask_local_paths_in_output,
+    normalize_local_command,
+    normalize_local_tool_path,
     replace_virtual_path,
     replace_virtual_paths_in_command,
     str_replace_tool,
@@ -36,6 +38,24 @@ _THREAD_DATA = {
     "uploads_path": "/tmp/deer-flow/threads/t1/user-data/uploads",
     "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
 }
+
+
+def test_normalize_local_tool_path_keeps_posix_host_paths_opaque() -> None:
+    mount = SimpleNamespace(host_path="/home/me/proj", container_path="/mnt/proj", read_only=False)
+    with (
+        patch("deerflow.sandbox.tools.os.name", "posix"),
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=[mount]),
+    ):
+        assert normalize_local_tool_path("/home/me/proj/x.txt") == "/home/me/proj/x.txt"
+
+
+def test_normalize_local_command_keeps_posix_host_paths_opaque() -> None:
+    mount = SimpleNamespace(host_path="/a", container_path="/mnt/proj", read_only=False)
+    with (
+        patch("deerflow.sandbox.tools.os.name", "posix"),
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=[mount]),
+    ):
+        assert normalize_local_command("cat /a/x.txt") == "cat /a/x.txt"
 
 
 # ---------- replace_virtual_path ----------
@@ -1267,8 +1287,9 @@ def test_validate_local_bash_command_paths_still_blocks_non_mount_paths() -> Non
 def test_get_custom_mounts_caching(monkeypatch, tmp_path) -> None:
     """_get_custom_mounts should cache after first successful load."""
     # Clear any existing cache
-    if hasattr(_get_custom_mounts, "_cached"):
-        monkeypatch.delattr(_get_custom_mounts, "_cached")
+    for attribute in ("_cached",):
+        if hasattr(_get_custom_mounts, attribute):
+            monkeypatch.delattr(_get_custom_mounts, attribute)
 
     # Use real directories so host_path.exists() filtering passes
     dir_a = tmp_path / "code-read"
@@ -1285,9 +1306,12 @@ def test_get_custom_mounts_caching(monkeypatch, tmp_path) -> None:
     mock_sandbox = SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", mounts=mounts)
     mock_config = SimpleNamespace(sandbox=mock_sandbox)
 
-    with patch("deerflow.config.get_app_config", return_value=mock_config):
+    with patch("deerflow.config.get_app_config", return_value=mock_config) as get_config:
         result = _get_custom_mounts()
         assert len(result) == 2
+        get_config.reset_mock()
+        assert _get_custom_mounts() == result
+        get_config.assert_not_called()
 
     # After caching, should return cached value even without mock
     assert hasattr(_get_custom_mounts, "_cached")
@@ -1321,6 +1345,39 @@ def test_get_custom_mounts_filters_nonexistent_host_path(monkeypatch, tmp_path) 
 
     # Cleanup
     monkeypatch.delattr(_get_custom_mounts, "_cached")
+
+
+def test_get_custom_mounts_stays_frozen_until_provider_restart(monkeypatch, tmp_path) -> None:
+    """The tool snapshot stays aligned with the startup provider mapping."""
+    for attribute in ("_cached",):
+        if hasattr(_get_custom_mounts, attribute):
+            monkeypatch.delattr(_get_custom_mounts, attribute)
+
+    from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
+
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    first = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=[VolumeMountConfig(host_path=str(mounted), container_path="/mnt/mounted")],
+        )
+    )
+    second = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=[],
+        )
+    )
+
+    with patch("deerflow.config.get_app_config", side_effect=[first, second]) as get_config:
+        assert _get_custom_mounts()[0].container_path == "/mnt/mounted"
+        assert _get_custom_mounts()[0].container_path == "/mnt/mounted"
+        assert get_config.call_count == 1
+
+    monkeypatch.delattr(_get_custom_mounts, "_cached")
+    with patch("deerflow.config.get_app_config", return_value=second):
+        assert _get_custom_mounts() == []
 
 
 def test_get_custom_mount_for_path_boundary_no_false_prefix_match() -> None:

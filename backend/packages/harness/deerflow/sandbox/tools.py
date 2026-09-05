@@ -32,6 +32,7 @@ from deerflow.sandbox.exceptions import (
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
+from deerflow.sandbox.host_path_compat import is_windows_host_path_spelling, normalize_host_path, replace_host_paths_in_command
 from deerflow.sandbox.lease import (
     get_sandbox_lease_manager,
     run_sync_lifecycle_operation,
@@ -389,31 +390,36 @@ def _is_acp_workspace_path(path: str) -> bool:
 def _get_custom_mounts():
     """Get custom volume mounts from sandbox config.
 
-    Result is cached after the first successful config load.  If config loading
-    fails an empty list is returned *without* caching so that a later call can
-    pick up the real value once the config is available.
+    Result is cached after the first successful config load. Sandbox mounts are
+    startup-only infrastructure, so this snapshot must stay aligned with the
+    provider's acquire-time path mappings until the Gateway restarts.
     """
     cached = getattr(_get_custom_mounts, "_cached", None)
     if cached is not None:
         return cached
-    try:
-        from pathlib import Path
 
+    try:
         from deerflow.config import get_app_config
 
         config = get_app_config()
-        mounts = []
-        if config.sandbox and config.sandbox.mounts:
-            # Only include mounts whose host_path exists, consistent with
-            # LocalSandboxProvider._setup_path_mappings() which also filters
-            # by host_path.exists().
-            mounts = [m for m in config.sandbox.mounts if Path(m.host_path).exists()]
+        configured_mounts = list(config.sandbox.mounts or []) if config.sandbox else []
+        # Only include mounts whose host_path exists, consistent with
+        # LocalSandboxProvider._setup_path_mappings(). Both snapshots are
+        # intentionally frozen together for the provider lifetime.
+        mounts = [mount for mount in configured_mounts if _mount_host_path_exists(mount.host_path)]
         _get_custom_mounts._cached = mounts  # type: ignore[attr-defined]
         return mounts
     except Exception:
-        # If config loading fails, return an empty list without caching so that
-        # a later call can retry once the config is available.
+        # If config loading fails, return an empty list without caching so a
+        # later startup/test retry can pick up the real configuration.
         return []
+
+
+def _mount_host_path_exists(host_path: str) -> bool:
+    try:
+        return Path(host_path).exists()
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def _is_custom_mount_path(path: str) -> bool:
@@ -432,6 +438,40 @@ def _get_custom_mount_for_path(path: str):
             if best is None or len(mount.container_path) > len(best.container_path):
                 best = mount
     return best
+
+
+def _looks_like_configured_host_path(path: str) -> bool:
+    """Return whether *path* is a host-path spelling handled by the adapter.
+
+    Windows drive and Git Bash paths are sent through the adapter so an
+    unconfigured drive is rejected with an actionable host-path error. POSIX
+    local deployments keep host spellings opaque and continue to use the
+    configured virtual path contract.
+    """
+    return is_windows_host_path_spelling(path, platform_name=os.name)
+
+
+def normalize_local_tool_path(path: str) -> str:
+    """Normalize a local-tool path from a configured host spelling to virtual.
+
+    The public tool surface accepts the virtual path used by the sandbox and,
+    for local Windows deployments, the host path written in a mount config.
+    Only configured mounts are translated; all other paths continue through
+    the normal virtual-path validator.
+    """
+    mounts = _get_custom_mounts()
+    if _is_skills_path(path) or _is_acp_workspace_path(path) or path.startswith(f"{VIRTUAL_PATH_PREFIX}/") or _is_custom_mount_path(path):
+        return path
+    if not _looks_like_configured_host_path(path):
+        return path
+    return normalize_host_path(path, mounts)
+
+
+def normalize_local_command(command: str) -> str:
+    """Translate configured host paths embedded in a local bash command."""
+    if os.name != "nt":
+        return command
+    return replace_host_paths_in_command(command, _get_custom_mounts())
 
 
 def _extract_thread_id_from_thread_data(thread_data: "ThreadDataState | None") -> str | None:
@@ -593,6 +633,7 @@ def _resolve_max_results(name: str, requested: int, *, default: int, upper_bound
 
 
 def _resolve_local_read_path(path: str, thread_data: ThreadDataState | None) -> str:
+    path = normalize_local_tool_path(path)
     validate_local_tool_path(path, thread_data, read_only=True)
     if _is_skills_path(path) or _is_acp_workspace_path(path) or _is_custom_mount_path(path):
         # Mounted paths are resolved by the sandbox's PathMapping (which uses
@@ -919,6 +960,7 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
+    path = normalize_local_tool_path(path)
     _reject_path_traversal(path)
 
     # Skills paths — read-only access only
@@ -1241,7 +1283,7 @@ def _is_non_path_literal_fragment(fragment: str) -> bool:
     return False
 
 
-def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
+def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> str:
     """Validate absolute paths in local-sandbox bash commands.
 
     This validation is only a best-effort guard for the explicit
@@ -1258,6 +1300,8 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
+
+    command = normalize_local_command(command)
 
     # Block file:// URLs which bypass the absolute-path regex but allow local file exfiltration
     file_url_match = _FILE_URL_PATTERN.search(command)
@@ -1283,6 +1327,8 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
         raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}. {_LOCAL_BASH_PATH_RECOVERY_GUIDANCE}")
+
+    return command
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
@@ -2045,7 +2091,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
             ensure_thread_directories_exist(runtime)
             thread_data = get_thread_data(runtime)
-            validate_local_bash_command_paths(command, thread_data)
+            command = validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
@@ -2130,6 +2176,7 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         thread_data = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
+            path = normalize_local_tool_path(path)
             validate_local_tool_path(path, thread_data, read_only=True)
             if _is_skills_path(path) or _is_acp_workspace_path(path):
                 # Skills and ACP workspace paths are resolved by the sandbox's
@@ -2216,6 +2263,7 @@ def glob_tool(
             thread_data = get_thread_data(runtime)
             if thread_data is None:
                 raise SandboxRuntimeError("Thread data not available for local sandbox")
+            path = normalize_local_tool_path(path)
             path = _resolve_local_read_path(path, thread_data)
         matches, truncated = sandbox.glob(path, pattern, include_dirs=include_dirs, max_results=effective_max_results)
         if thread_data is not None:
@@ -2300,6 +2348,7 @@ def grep_tool(
             thread_data = get_thread_data(runtime)
             if thread_data is None:
                 raise SandboxRuntimeError("Thread data not available for local sandbox")
+            path = normalize_local_tool_path(path)
             path = _resolve_local_read_path(path, thread_data)
         matches, truncated = sandbox.grep(
             path,
@@ -2547,6 +2596,7 @@ def write_file_tool(
         ensure_thread_directories_exist(runtime)
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
+            path = normalize_local_tool_path(path)
             validate_local_tool_path(path, thread_data)
             if not _is_custom_mount_path(path):
                 path = _resolve_and_validate_user_data_path(path, thread_data)
@@ -2613,6 +2663,7 @@ def str_replace_tool(
         requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
+            path = normalize_local_tool_path(path)
             validate_local_tool_path(path, thread_data)
             if not _is_custom_mount_path(path):
                 path = _resolve_and_validate_user_data_path(path, thread_data)
