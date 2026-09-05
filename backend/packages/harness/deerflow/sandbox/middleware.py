@@ -29,6 +29,7 @@ from deerflow.sandbox.lease import (
     sandbox_lease_owner,
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
+from deerflow.sandbox.resolution import resolve_declared_sandbox
 from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
 
 logger = logging.getLogger(__name__)
@@ -230,6 +231,22 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return super().before_agent(state, runtime)
         self._apply_network_policy_response(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
+        declared = resolve_declared_sandbox()
+        if declared is not None:
+            # The executing context declared its sandbox: the declaring runtime
+            # provisioned it and owns its release, and this agent loop is one
+            # holder inside it. The authorization gate still applies.
+            try:
+                authorize_sandbox_execution(
+                    context=runtime.context or {},
+                    app_config=safe_app_config(),
+                )
+            except SandboxAuthorizationError:
+                logger.info("Sandbox execution denied for this role; not binding the declared sandbox (thread_id=%s)", thread_id)
+                return None
+            if self._read_sandbox_id_from_state(state) == declared.id:
+                return super().before_agent(state, runtime)
+            return self._declared_sandbox_update(state, declared.id)
         projection = self._prepare_agent_skill_projection(thread_id, user_id=user_id)
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
@@ -350,6 +367,20 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return await super().abefore_agent(state, runtime)
         await asyncio.to_thread(self._apply_network_policy_response, state, runtime)
         user_id = resolve_runtime_user_id(runtime)
+        declared = resolve_declared_sandbox()
+        if declared is not None:
+            # Async counterpart of the declared-sandbox binding in before_agent.
+            try:
+                await authorize_sandbox_execution_async(
+                    context=runtime.context or {},
+                    app_config=await safe_app_config_async(),
+                )
+            except SandboxAuthorizationError:
+                logger.info("Sandbox execution denied for this role; not binding the declared sandbox (thread_id=%s)", thread_id)
+                return None
+            if self._read_sandbox_id_from_state(state) == declared.id:
+                return await super().abefore_agent(state, runtime)
+            return self._declared_sandbox_update(state, declared.id)
         projection = await asyncio.to_thread(
             self._prepare_agent_skill_projection,
             thread_id,
@@ -419,8 +450,17 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             runtime.context["sandbox_id"] = retained_id
         return await super().abefore_agent(state, runtime)
 
+    @staticmethod
+    def _declared_sandbox_update(state: SandboxMiddlewareState, sandbox_id: str) -> dict:
+        if SandboxMiddleware._read_sandbox_id_from_state(state) is not None:
+            return {"sandbox": Overwrite({"sandbox_id": sandbox_id})}
+        return {"sandbox": {"sandbox_id": sandbox_id}}
+
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        if resolve_declared_sandbox() is not None:
+            # The declaring runtime owns the release; this loop was a holder.
+            return None
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
@@ -454,6 +494,9 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
+        if resolve_declared_sandbox() is not None:
+            # The declaring runtime owns the release; this loop was a holder.
+            return None
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]

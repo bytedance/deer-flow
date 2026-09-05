@@ -40,6 +40,7 @@ from deerflow.sandbox.lease import (
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern, replace_output_path_matches
+from deerflow.sandbox.resolution import resolve_declared_sandbox
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -1394,6 +1395,9 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Tool runtime not available")
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
+    declared = resolve_declared_sandbox()
+    if declared is not None:
+        return declared
     # Read-only lookup: this only resolves the provider entry, and ownership
     # (release) stays with after_agent's short-circuit on the wrapped state.
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
@@ -1526,6 +1530,10 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             app_config=safe_app_config(),
         )
 
+    declared = resolve_declared_sandbox()
+    if declared is not None:
+        return declared
+
     # Check if sandbox already exists in state. A fork-restored execution keeps
     # the wrapper so after_agent cannot park the parent's sandbox, but it still
     # binds a non-releasing holder: parent cleanup cannot close the client under
@@ -1605,6 +1613,10 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             context=runtime.context or {},
             app_config=await safe_app_config_async(),
         )
+
+    declared = resolve_declared_sandbox()
+    if declared is not None:
+        return declared
 
     # Same borrowed-holder rule as the sync path above: keep the fork wrapper
     # while counting the child as an active client user.
