@@ -655,6 +655,8 @@ async def test_session_pool_tool_wrapping():
 @pytest.mark.asyncio
 async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
     """Stdio MCP subprocesses should write relative and temp outputs under user-data."""
+    import os
+
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
@@ -702,12 +704,15 @@ async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
     assert session_connection["env"]["TMP"] == str(tmp_dir)
     assert session_connection["env"]["TEMP"] == str(tmp_dir)
     assert tmp_dir.is_dir()
-    assert stat.S_IMODE(tmp_dir.stat().st_mode) == 0o700
+    if os.name == "posix":
+        assert stat.S_IMODE(tmp_dir.stat().st_mode) == 0o700
 
 
 @pytest.mark.asyncio
 async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
     """An operator-provided TMPDIR must win over our injected default."""
+    import os
+
     from langchain_core.tools import StructuredTool
     from pydantic import BaseModel, Field
 
@@ -748,7 +753,7 @@ async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
     session_connection = create_session.call_args.args[0]
     # Operator-provided TMPDIR is preserved; TMP/TEMP still get our default.
     assert session_connection["env"]["TMPDIR"] == "/operator/tmp"
-    assert session_connection["env"]["TMP"].endswith(MCP_TMP_SUBDIR)
+    assert session_connection["env"]["TMP"].endswith(MCP_TMP_SUBDIR.replace("/", os.sep))
 
 
 @pytest.mark.asyncio
