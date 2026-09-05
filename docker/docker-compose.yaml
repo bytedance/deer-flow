@@ -104,7 +104,7 @@ services:
     # reconnect, but run cancel, request dedup, and per-worker IM channel
     # services remain worker-local. Override GATEWAY_WORKERS only when the
     # Redis stream bridge is enabled and those limitations are acceptable.
-    command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
+    command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1} --no-proxy-headers"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       # Writable on purpose: the Gateway edits this file at runtime (MCP

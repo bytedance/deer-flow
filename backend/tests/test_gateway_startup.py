@@ -3,11 +3,25 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_GATEWAY_CLI_LAUNCHERS: dict[str, int] = {
+    "backend/Makefile": 2,
+    "backend/Dockerfile": 2,
+    "docker/dev-entrypoint.sh": 1,
+    "docker/docker-compose.yaml": 1,
+    "scripts/serve.sh": 1,
+    "deploy/helm/deer-flow/templates/gateway-deployment.yaml": 1,
+}
+_GATEWAY_PYTHON_LAUNCHERS = (
+    "backend/scripts/run_replay_gateway.py",
+    "backend/scripts/record_gateway.py",
+)
 
 
 def _read(path: str) -> str:
@@ -42,6 +56,20 @@ def test_gateway_runtime_commands_never_sync_dependencies() -> None:
 
     assert "PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app" in compose
     assert "PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app" in serve
+
+
+def test_gateway_launchers_keep_proxy_header_processing_disabled() -> None:
+    """The auth trust boundary must receive Uvicorn's unmodified ASGI scope."""
+    for path, expected_count in _GATEWAY_CLI_LAUNCHERS.items():
+        source = _read(path).replace("\\\n", " ")
+        commands = re.findall(r"uv run(?: --(?:locked|no-sync))? uvicorn\s+app\.gateway\.app:app(?P<args>[^\n]*)", source)
+
+        assert len(commands) == expected_count, path
+        assert all("--no-proxy-headers" in args for args in commands), path
+
+    for path in _GATEWAY_PYTHON_LAUNCHERS:
+        source = _read(path)
+        assert re.search(r"uvicorn\.run\([^\n]*proxy_headers=False", source), path
 
 
 def test_local_frontend_ignores_public_docker_port() -> None:

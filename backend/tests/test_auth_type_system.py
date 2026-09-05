@@ -30,6 +30,13 @@ from app.gateway.csrf_middleware import (
 # ── Setup ────────────────────────────────────────────────────────────
 
 _TEST_SECRET = "test-secret-for-auth-type-system-tests-min32"
+_TRUSTED_PROXY_HOST = "10.0.0.2"
+
+
+@pytest.fixture(autouse=True)
+def _trusted_proxy_env(monkeypatch):
+    """Use a trusted proxy by default for forwarded-header auth tests."""
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
 
 
 @pytest.fixture(autouse=True)
@@ -515,9 +522,9 @@ def _make_auth_app():
     return create_app()
 
 
-def _get_auth_client():
+def _get_auth_client(*, client_host: str = _TRUSTED_PROXY_HOST):
     """Get TestClient for auth API contract tests."""
-    return TestClient(_make_auth_app())
+    return TestClient(_make_auth_app(), client=(client_host, 12345))
 
 
 def test_api_auth_me_no_cookie_returns_structured_401():
@@ -639,7 +646,13 @@ def _get_response_set_cookie_headers(resp) -> list[str]:
     return [v.decode("latin-1") for k, v in resp.raw_headers if k.lower() == b"set-cookie"]
 
 
-def _make_request_scope(*, scheme: str = "http", host: str = "example.test", headers: dict[str, str] | None = None) -> dict:
+def _make_request_scope(
+    *,
+    scheme: str = "http",
+    host: str = "example.test",
+    headers: dict[str, str] | None = None,
+    client_host: str = _TRUSTED_PROXY_HOST,
+) -> dict:
     raw_headers = [(b"host", host.encode("ascii"))]
     for key, value in (headers or {}).items():
         raw_headers.append((key.lower().encode("ascii"), value.encode("ascii")))
@@ -650,6 +663,7 @@ def _make_request_scope(*, scheme: str = "http", host: str = "example.test", hea
         "headers": raw_headers,
         "scheme": scheme,
         "server": (host.split(":", 1)[0], 80 if scheme == "http" else 443),
+        "client": (client_host, 12345),
         "query_string": b"",
     }
 
@@ -1114,6 +1128,7 @@ def test_oidc_callback_access_and_csrf_cookie_lifetime_match_on_https():
         "headers": [(b"x-forwarded-proto", b"https")],
         "scheme": "http",
         "server": ("internal", 8000),
+        "client": (_TRUSTED_PROXY_HOST, 12345),
         "query_string": b"",
     }
     response = Response()
@@ -1144,6 +1159,7 @@ def test_oidc_callback_access_and_csrf_cookie_stay_session_only():
         "headers": [(b"x-forwarded-proto", b"https")],
         "scheme": "http",
         "server": ("internal", 8000),
+        "client": (_TRUSTED_PROXY_HOST, 12345),
         "query_string": b"",
     }
     response = Response()
