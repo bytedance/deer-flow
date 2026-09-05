@@ -55,8 +55,9 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `sandbox.use` - Sandbox provider class path
 - `sandbox.ownership` - Cross-instance sandbox lease storage. Renewal interval
   and TTL multiplier must each be finite, and their derived lease TTL must also
-  remain finite. Redis-backed lease TTLs must additionally fit the signed 64-bit
-  millisecond range accepted by Redis so invalid timing fails during validation.
+  remain finite. Redis-backed lease TTLs use at most half of Redis's signed
+  64-bit millisecond range, leaving deterministic headroom for conversion from a
+  relative TTL to an absolute Unix timestamp during validation.
 - `skills.path` / `skills.container_path` - Host and container paths to skills directory. AIO and E2B snapshot the container path at provider startup. Their local/remote backends and the Kubernetes provisioner require one canonical absolute non-root path outside reserved platform mounts; custom roots participate in deterministic sandbox identity, and E2B records the root in remote metadata.
 - `skills.deferred_discovery` - When `true`, replaces the full-metadata `<available_skills>` prompt block with a compact `<skill_index>` (names only) and registers the `describe_skill` tool so the agent fetches metadata on demand. Defaults to `false` (legacy full-metadata injection)
 - `title` - Auto-title generation (enabled, max_words, max_chars, model_name; null model_name uses fast local fallback, explicit model_name uses the prompt_template LLM path)

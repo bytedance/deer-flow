@@ -15,7 +15,6 @@ still covers the contract.
 
 from __future__ import annotations
 
-import math
 import os
 import threading
 import time
@@ -383,15 +382,25 @@ def test_redis_lease_timing_rejects_ttl_above_signed_64_bit_milliseconds():
         )
 
 
-def test_redis_lease_timing_allows_ttl_within_signed_64_bit_milliseconds():
-    max_representable_ttl_seconds = math.nextafter((2**63 - 1) / 1000, 0.0)
+def test_redis_lease_timing_rejects_ttl_without_absolute_expiry_headroom():
+    ttl_seconds_at_safe_limit = 2**62 / 1000
+
+    with pytest.raises(ValueError, match="absolute-expiry headroom"):
+        SandboxOwnershipConfig(
+            type="redis",
+            renewal_interval_seconds=ttl_seconds_at_safe_limit / 4,
+            ttl_multiplier=4.0,
+        )
+
+
+def test_redis_lease_timing_allows_operational_ttl():
     config = SandboxOwnershipConfig(
         type="redis",
-        renewal_interval_seconds=max_representable_ttl_seconds / 4,
-        ttl_multiplier=4.0,
+        renewal_interval_seconds=60 * 60,
+        ttl_multiplier=24,
     )
 
-    assert int(compute_lease_ttl(config) * 1000) <= 2**63 - 1
+    assert compute_lease_ttl(config) == 24 * 60 * 60
 
 
 def test_owner_ids_are_unique_per_instance():
