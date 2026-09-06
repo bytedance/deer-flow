@@ -506,6 +506,29 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 
 > 没有命令前缀的消息会被当作普通聊天处理。DeerFlow 会自动创建 thread，并以对话方式回复。
 
+#### 请求链路关联
+
+每个 Gateway HTTP 响应都携带 `X-Trace-Id` 响应头。若调用方传入了入站 `X-Trace-Id` 则继承之，否则自动生成，代理或上游服务可以借此跨服务固定同一个 id。该行为无需配置，也无法关闭。
+
+同一 id 会附着在生命周期超出 HTTP 响应的工作上：分离出的运行任务、它委派的 subagent，以及后台记忆更新线程。它以 `deerflow_trace_id` 的形式记录在 run 记录上（runs API 可见）、thread 的 checkpoint 元数据中，以及 Langfuse 追踪里。定时任务、MCP 任务通知运行和 IM 渠道消息不经 HTTP 启动，会为每次出现自行铸造一个 id。
+
+仅当增强日志开启时，日志记录才会携带该 id：
+
+```yaml
+logging:
+  enhance:
+    enabled: true   # 将 trace_id 打印进日志记录
+    format: text    # 或 json
+```
+
+该开关默认关闭，因为开启会改变日志格式。`logging` 配置需要重启才能生效，所以请编辑 `config.yaml` 并重启 Gateway。该设置只影响日志输出——id、响应头和运行元数据不受影响。
+
+`deerflow_trace_id` 是 DeerFlow 的链路关联 id：它不是 run id，也不是 provider 的原生追踪 id，同样不是查询键——没有任何逻辑用它反查 thread 或 run；它只用于关联日志行。在 run 请求的 `metadata` 或 `config.context` 中传入的 `deerflow_trace_id` 会被忽略并覆盖，因此响应头、日志和持久化的运行记录永远不会相互矛盾。要固定关联 id，请发送 `X-Trace-Id` 请求头。
+
+Gateway 的运行历史还会为每次运行记录一条终止时的 `run.delivery` 回执，包括零产出与崩溃恢复的运行。正常执行时，该回执会在持久化终止运行状态之前写入。孤儿恢复会先原子地认领过期租约，再幂等地回填回执，因此过期的恢复扫描不会覆盖仍在运行的详细交付事实。在事件存储中断期间，回执持久化保持尽力而为。对 checkpoint 预检失败（或在等待前序 finalization 时被取消）的运行，保持既有的完成数据行为：它们会收到零交付回执，但不会用空快照覆盖 RunStore 的完成字段。
+
+同一份运行事件历史还会为 lead agent 与普通 task subagent 记录 loop-detection 判定和延迟 MCP 工具晋升。晋升事件会标识新晋升的延迟工具名称，以及是路由元数据还是 `tool_search` 选中了它们，但不会把搜索查询、路由关键词、schema、参数、结果或目录哈希复制进晋升事件本身。
+
 #### LangSmith 链路追踪
 
 DeerFlow 内置了 [LangSmith](https://smith.langchain.com) 集成，用于可观测性。启用后，所有 LLM 调用、agent 运行和工具执行都会被追踪，并在 LangSmith 仪表盘中展示。
