@@ -26,7 +26,6 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import PrivateAttr
 
-from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.agents.memory import MemoryManager, MemoryReadError, reset_memory_manager
 from deerflow.agents.memory.manager import _scan_backends
 from deerflow.agents.middlewares.dynamic_context_middleware import (
