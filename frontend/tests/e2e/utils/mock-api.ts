@@ -156,6 +156,7 @@ export type MockAPIOptions = {
     browserControlEnabled?: boolean;
     mcpTasksEnabled?: boolean;
     knowledgeBaseEnabled?: boolean;
+    knowledgeScopeSelectionEnabled?: boolean;
   };
   runStreamHandler?: (route: Route) => Promise<void>;
 };
@@ -389,6 +390,8 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
     mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
     knowledgeBaseEnabled: options?.features?.knowledgeBaseEnabled ?? true,
+    knowledgeScopeSelectionEnabled:
+      options?.features?.knowledgeScopeSelectionEnabled ?? false,
   };
 
   const upsertThread = (thread: MockThread) => {
@@ -1846,6 +1849,8 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
           knowledge_base: {
             enabled: featureFlags.knowledgeBaseEnabled,
+            scope_selection_enabled:
+              featureFlags.knowledgeScopeSelectionEnabled,
             management_url: featureFlags.knowledgeBaseEnabled
               ? "http://ragflow.example"
               : null,

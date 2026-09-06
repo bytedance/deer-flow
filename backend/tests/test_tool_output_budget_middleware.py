@@ -1210,11 +1210,14 @@ class TestMiddlewareChainIntegration:
         middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
         # InputSanitizationMiddleware is the outermost wrap_model_call wrapper;
-        # ToolOutputBudgetMiddleware is the first wrap_tool_call handler.
+        # KnowledgeScopeMiddleware cleans model input immediately inside it;
+        # ToolOutputBudgetMiddleware remains immediately inside the scope guard.
         from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+        from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
 
         assert isinstance(middlewares[0], InputSanitizationMiddleware)
-        assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
+        assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
+        assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
 
     def test_budget_middleware_in_lead_chain(self):
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
@@ -1223,9 +1226,11 @@ class TestMiddlewareChainIntegration:
         middlewares = build_lead_runtime_middlewares(app_config=app_config, lazy_init=False)
 
         from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+        from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
 
         assert isinstance(middlewares[0], InputSanitizationMiddleware)
-        assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
+        assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
+        assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
 
 
 # ===========================================================================
