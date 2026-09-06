@@ -204,7 +204,7 @@ tools:
   - use: deerflow.community.sofya.tools:web_search_tool
     api_key: $SOFYA_API_KEY
 ```
-Results include the content of each page, not only a snippet. Requires a [Sofya](https://sofya.co) API key. `max_results` is capped at 20. Also supports `web_fetch`.
+Results include the content of each page, not only a snippet. Requires a [Sofya](https://sofya.co) API key. `max_results` is capped at 20, and each result's content is capped at `contents_max_characters` (default 2000, set 0 for no cap). Also supports `web_fetch`.
   </Tabs.Tab>
 </Tabs>
 

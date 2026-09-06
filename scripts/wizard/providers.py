@@ -661,7 +661,7 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         description="Search results include page content, API key required",
         use="deerflow.community.sofya.tools:web_search_tool",
         env_var="SOFYA_API_KEY",
-        extra_config={"max_results": 5},
+        extra_config={"max_results": 5, "contents_max_characters": 2000},
     ),
     SearchProvider(
         name="groundroute",

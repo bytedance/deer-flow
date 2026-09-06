@@ -892,6 +892,7 @@ tools:
   #   use: deerflow.community.sofya.tools:web_search_tool
   #   max_results: 5                # capped at 20 by the Sofya provider
   #   # search_depth: basic         # basic reads the result pages, snippets returns snippets only
+  #   contents_max_characters: 2000 # per-result content cap; 0 disables it
   #   # api_key: $SOFYA_API_KEY     # Optional explicit env-var reference
 
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)

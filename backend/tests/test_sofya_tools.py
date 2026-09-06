@@ -229,6 +229,72 @@ class TestWebSearchTool:
 
         assert mock_post.call_args.kwargs["json"]["search_depth"] == "snippets"
 
+    def test_result_content_is_capped_by_default(self, mock_config_with_key):
+        results = [{"title": "Result", "url": "https://example.com", "content": "x" * 9000}]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_search_response(results)
+
+            from deerflow.community.sofya.tools import web_search_tool
+
+            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+
+        assert len(parsed["results"][0]["content"]) == 2000
+
+    def test_contents_max_characters_from_config(self, mock_config_with_key):
+        mock_config_with_key.return_value.get_tool_config.return_value.model_extra = {
+            "api_key": "test-key",
+            "contents_max_characters": 100,
+        }
+        results = [{"title": "Result", "url": "https://example.com", "content": "x" * 9000}]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_search_response(results)
+
+            from deerflow.community.sofya.tools import web_search_tool
+
+            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+
+        assert len(parsed["results"][0]["content"]) == 100
+
+    def test_contents_max_characters_zero_disables_the_cap(self, mock_config_with_key):
+        mock_config_with_key.return_value.get_tool_config.return_value.model_extra = {
+            "api_key": "test-key",
+            "contents_max_characters": 0,
+        }
+        results = [{"title": "Result", "url": "https://example.com", "content": "x" * 9000}]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_search_response(results)
+
+            from deerflow.community.sofya.tools import web_search_tool
+
+            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+
+        assert len(parsed["results"][0]["content"]) == 9000
+
+    def test_invalid_contents_max_characters_falls_back_to_default(self):
+        from deerflow.community.sofya.tools import _coerce_content_limit
+
+        assert _coerce_content_limit("oops") == 2000
+        assert _coerce_content_limit(None) == 2000
+        assert _coerce_content_limit(-5) == 2000
+        assert _coerce_content_limit(0) == 0
+        assert _coerce_content_limit("150") == 150
+
+    def test_default_search_stays_under_the_externalize_threshold(self, mock_config_with_key):
+        """Five capped results must stay inline rather than being persisted to disk."""
+        results = [{"title": f"R{i}", "url": f"https://example.com/{i}", "content": "x" * 20000} for i in range(5)]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_search_response(results)
+
+            from deerflow.community.sofya.tools import web_search_tool
+
+            output = web_search_tool.invoke({"query": "test"})
+
+        assert len(output) < 12000
+
     def test_caller_max_results_wins_over_config(self, mock_config_with_key):
         mock_config_with_key.return_value.get_tool_config.return_value.model_extra = {
             "api_key": "test-key",

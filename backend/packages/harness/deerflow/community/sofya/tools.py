@@ -25,6 +25,7 @@ _SOFYA_MAX_RESULTS = 20
 _SOFYA_TIMEOUT = 60
 _SOFYA_FETCH_MAX_CHARS = 4096
 _DEFAULT_SEARCH_DEPTH = "basic"
+_DEFAULT_CONTENTS_MAX_CHARACTERS = 2000
 _SEARCH_DEPTHS = ("basic", "snippets")
 _api_key_warned: set[str] = set()
 
@@ -50,6 +51,15 @@ def _coerce_max_results(value: object, default: int = 5, max_allowed: int = _SOF
     if count <= 0:
         return default
     return min(count, max_allowed)
+
+
+def _coerce_content_limit(value: object, default: int = _DEFAULT_CONTENTS_MAX_CHARACTERS) -> int:
+    """Coerce the per-result content limit. 0 means no limit; anything invalid falls back to the default."""
+    try:
+        limit = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return default
+    return limit if limit >= 0 else default
 
 
 def _resolve_search_depth(value: object) -> str:
@@ -100,6 +110,11 @@ def _sofya_post(path: str, api_key: str, payload: dict) -> tuple[dict | None, st
     return data, None
 
 
+def _clip(text: str, limit: int) -> str:
+    """Truncate text to limit characters. A limit of 0 means no truncation."""
+    return text if limit <= 0 else text[:limit]
+
+
 def _response_results(data: dict) -> list[dict] | None:
     """Return the result dicts of a Sofya response, or None if malformed."""
     results = data.get("results")
@@ -127,6 +142,7 @@ def web_search_tool(query: str, max_results: int | None = None, time_range: Sear
         max_results = config_extra.get("max_results")
     max_results = _coerce_max_results(max_results)
     search_depth = _resolve_search_depth(config_extra.get("search_depth"))
+    content_limit = _coerce_content_limit(config_extra.get("contents_max_characters"))
 
     api_key = _get_api_key("web_search")
     if not api_key:
@@ -155,7 +171,8 @@ def web_search_tool(query: str, max_results: int | None = None, time_range: Sear
             "title": r.get("title", ""),
             "url": r.get("url", ""),
             # Page content when the result was read, the search snippet otherwise.
-            "content": r.get("content") or r.get("description") or "",
+            # Capped so a normal search stays inline rather than being written to disk.
+            "content": _clip(r.get("content") or r.get("description") or "", content_limit),
         }
         for r in results[:max_results]
     ]
