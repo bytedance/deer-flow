@@ -224,6 +224,10 @@ class SubagentStatus(Enum):
         }
 
 
+class SubagentBackgroundFatalError(RuntimeError):
+    """A fatal execution error transported without killing the shared loop."""
+
+
 @dataclass
 class SubagentResult:
     """Result of a subagent execution.
@@ -291,6 +295,7 @@ class SubagentResult:
     execution_done_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _background_execution: bool = field(default=False, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _fatal_error: BaseException | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         """Initialize mutable defaults."""
@@ -382,6 +387,25 @@ class SubagentResult:
             self.completed_at = completed_at or _utcnow()
             self.status = status
             return True
+
+    def record_fatal_error(self, exc: BaseException) -> None:
+        """Make a fatal background failure visible without losing its cause."""
+        with self._state_lock:
+            if self._fatal_error is not None:
+                return
+            self._fatal_error = exc
+            # Fatal teardown invalidates every provisional business outcome,
+            # including cancellation, timeout, and an earlier ordinary failure.
+            self.status = SubagentStatus.FAILED
+            self.result = None
+            self.stop_reason = None
+            self.error = str(exc) or type(exc).__name__
+            self.completed_at = self.completed_at or _utcnow()
+
+    def get_fatal_error(self) -> BaseException | None:
+        """Return the first original fatal captured by the background runner."""
+        with self._state_lock:
+            return self._fatal_error
 
 
 def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
@@ -483,6 +507,18 @@ _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
 _background_futures: dict[str, Future[SubagentResult]] = {}
 _background_cleanup_requested: set[str] = set()
+
+
+@dataclass
+class _BackgroundRunner:
+    """Cancellation handshake between callers and the isolated-loop runner."""
+
+    loop: asyncio.AbstractEventLoop | None = None
+    task: asyncio.Task[SubagentResult] | None = None
+    cancel_requested: bool = False
+
+
+_background_runners: dict[str, _BackgroundRunner] = {}
 
 
 def _harvest_tool_receipts(
@@ -1971,25 +2007,71 @@ class SubagentExecutor:
         # cleanup_background_task() refuses non-terminal entries.
         parent_context = _copy_isolated_subagent_context()
 
+        runner = _BackgroundRunner()
         with _background_tasks_lock:
             _background_tasks[execution_id] = result
+            _background_runners[execution_id] = runner
 
         async def run_with_timeout() -> SubagentResult:
+            execution: asyncio.Task[SubagentResult] | None = None
             try:
-                return await asyncio.wait_for(
-                    self._aexecute(task, result),
+                runner_task = asyncio.current_task()
+                if runner_task is None:
+                    raise RuntimeError("Background subagent runner has no current task")
+                with _background_tasks_lock:
+                    # The closure, not the externally cleanable registry, owns
+                    # this handshake object for the runner's full lifetime.
+                    runner.loop = asyncio.get_running_loop()
+                    runner.task = runner_task
+                    cancel_requested = runner.cancel_requested or result.cancel_event.is_set()
+                execution = asyncio.create_task(
+                    _capture_admitted_execution(lambda: self._aexecute(task, result)),
+                    name=f"subagent-{self.config.name}-background",
+                )
+                if cancel_requested:
+                    # Deliver cancellation only after this coroutine is running
+                    # and owns its child. Cancelling the concurrent Future
+                    # before this handshake can bypass this finally block.
+                    runner_task.cancel()
+                done, _pending = await asyncio.wait(
+                    {execution},
                     timeout=self.config.timeout_seconds,
                 )
-            except TimeoutError:
+                if execution in done:
+                    return await _await_admitted_execution(execution)
+
+                # Publish the business timeout immediately. The execution task
+                # remains owned here until stream, sandbox, extension, and
+                # capacity teardown have all completed.
                 result.cancel_event.set()
                 result.try_set_terminal(
                     SubagentStatus.TIMED_OUT,
                     error=f"Execution timed out after {self.config.timeout_seconds} seconds",
                     tool_receipts=result.snapshot_tool_receipts(),
                 )
+                execution.cancel()
+                try:
+                    await _await_admitted_execution(execution)
+                except asyncio.CancelledError:
+                    pass
                 return result
             except asyncio.CancelledError:
                 result.cancel_event.set()
+                if execution is not None:
+                    if not execution.done():
+                        execution.cancel()
+                    try:
+                        await _await_admitted_execution(execution)
+                    except asyncio.CancelledError:
+                        pass
+                    except BaseException as exc:
+                        logger.exception(
+                            "[trace=%s] Subagent %s cancellation teardown aborted",
+                            self.trace_id,
+                            self.config.name,
+                        )
+                        result.record_fatal_error(exc)
+                        raise SubagentBackgroundFatalError(f"{type(exc).__name__}: {str(exc) or 'fatal background execution error'}") from exc
                 result.try_set_terminal(
                     SubagentStatus.CANCELLED,
                     error="Cancelled by user",
@@ -2006,12 +2088,15 @@ class SubagentExecutor:
                     self.trace_id,
                     self.config.name,
                 )
-                result.try_set_terminal(
-                    SubagentStatus.FAILED,
-                    error=str(exc) or type(exc).__name__,
-                )
-                return result
+                result.record_fatal_error(exc)
+                raise SubagentBackgroundFatalError(f"{type(exc).__name__}: {str(exc) or 'fatal background execution error'}") from exc
             finally:
+                with _background_tasks_lock:
+                    current_runner = _background_runners.get(execution_id)
+                    if current_runner is runner:
+                        _background_runners.pop(execution_id, None)
+                    runner.loop = None
+                    runner.task = None
                 _mark_background_execution_done(result)
 
         try:
@@ -2029,7 +2114,12 @@ class SubagentExecutor:
         with _background_tasks_lock:
             _background_futures[execution_id] = execution_future
 
-        def forget_future(_future: Future[SubagentResult]) -> None:
+        def forget_future(completed_future: Future[SubagentResult]) -> None:
+            # Production consumers propagate the original fatal through
+            # SubagentResult after the execution fence. Still retrieve the
+            # transport Future's exception so it never remains unobserved.
+            if not completed_future.cancelled():
+                completed_future.exception()
             with _background_tasks_lock:
                 _background_futures.pop(execution_id, None)
 
@@ -2053,13 +2143,22 @@ def request_cancel_background_task(execution_id: str) -> None:
     """
     with _background_tasks_lock:
         result = _background_tasks.get(execution_id)
-        future = _background_futures.get(execution_id) if result is not None else None
+        runner = _background_runners.get(execution_id) if result is not None else None
+        if runner is not None:
+            runner.cancel_requested = True
+            loop = runner.loop
+            task = runner.task
+        else:
+            loop = None
+            task = None
     if result is not None:
         result.cancel_event.set()
-        # Future.cancel() may invoke forget_future synchronously; keep it out of
-        # _background_tasks_lock because that callback acquires the same lock.
-        if future is not None:
-            future.cancel()
+        # Never cancel the concurrent Future: before the isolated-loop runner
+        # starts, Future.cancel() can bypass its try/finally entirely. The
+        # registration handshake above either records this request for startup
+        # or targets the already-running asyncio task.
+        if loop is not None and task is not None:
+            loop.call_soon_threadsafe(task.cancel)
         logger.info("Requested cancellation for background execution %s", execution_id)
 
 
@@ -2089,6 +2188,7 @@ def list_background_tasks() -> list[SubagentResult]:
 def _remove_background_task_locked(execution_id: str) -> None:
     _background_tasks.pop(execution_id, None)
     _background_futures.pop(execution_id, None)
+    _background_runners.pop(execution_id, None)
     _background_cleanup_requested.discard(execution_id)
 
 

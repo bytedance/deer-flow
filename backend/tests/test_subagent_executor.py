@@ -3543,13 +3543,14 @@ class TestCooperativeCancellation:
             tools=[],
             thread_id="test-thread",
         )
+        fatal = KeyboardInterrupt("background fatal")
 
         execution_id = None
         try:
             with patch.object(
                 executor,
                 "_aexecute_admitted",
-                new=AsyncMock(side_effect=KeyboardInterrupt("background fatal")),
+                new=AsyncMock(side_effect=fatal),
             ):
                 execution_id = executor.execute_async("Task")
                 deadline = time.monotonic() + 3
@@ -3561,9 +3562,53 @@ class TestCooperativeCancellation:
             assert result.status.value == SubagentStatus.FAILED.value
             assert result.error == "background fatal"
             assert result.execution_done_event.is_set()
+            assert result.get_fatal_error() is fatal
+            assert execution_id not in executor_module._background_futures
         finally:
             if execution_id is not None:
                 executor_module.cleanup_background_task(execution_id)
+
+    def test_subagent_result_fatal_channel_is_thread_safe_first_wins(
+        self,
+        classes,
+    ):
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        result = SubagentResult(
+            task_id="fatal-first-wins",
+            trace_id="test-trace",
+            status=SubagentStatus.COMPLETED,
+            result="provisional",
+        )
+        first = KeyboardInterrupt("first fatal")
+        second = SystemExit("second fatal")
+        barrier = threading.Barrier(3)
+
+        def record(exc: BaseException) -> None:
+            barrier.wait()
+            result.record_fatal_error(exc)
+
+        threads = [
+            threading.Thread(target=record, args=(first,)),
+            threading.Thread(target=record, args=(second,)),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=1)
+            assert not thread.is_alive()
+
+        captured = result.get_fatal_error()
+        assert captured in {first, second}
+        assert result.status is SubagentStatus.FAILED
+        assert result.result is None
+        assert result.error == str(captured)
+
+        later = GeneratorExit("later fatal")
+        result.record_fatal_error(later)
+        assert result.get_fatal_error() is captured
+        assert result.error == str(captured)
 
     def test_execute_async_runs_without_calling_execute(self, executor_module, classes, base_config):
         """Regression: execute_async should not route through execute()/asyncio.run()."""
@@ -5680,3 +5725,393 @@ def test_utcnow_helper_returns_utc_aware_datetime(classes):
     assert now.tzinfo is not None
     assert now.utcoffset() is not None
     assert now.utcoffset().total_seconds() == 0.0
+
+
+@pytest.mark.parametrize(
+    "initial_status_name",
+    ["PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"],
+)
+def test_record_fatal_error_promotes_every_existing_status_to_failed(
+    classes,
+    initial_status_name,
+):
+    SubagentResult = classes["SubagentResult"]
+    SubagentStatus = classes["SubagentStatus"]
+    result = SubagentResult(
+        task_id="fatal-promotion",
+        trace_id="trace-1",
+        status=getattr(SubagentStatus, initial_status_name),
+        result="provisional result",
+        error="previous outcome",
+        stop_reason="turn_capped",
+    )
+
+    class FatalTeardown(BaseException):
+        pass
+
+    result.record_fatal_error(FatalTeardown("fatal teardown"))
+
+    assert result.status is SubagentStatus.FAILED
+    assert result.result is None
+    assert result.stop_reason is None
+    assert result.error == "fatal teardown"
+    assert result.completed_at is not None
+
+
+def test_execute_async_publishes_timeout_before_teardown_and_capacity_release(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentConfig = classes["SubagentConfig"]
+    SubagentExecutor = classes["SubagentExecutor"]
+    SubagentStatus = classes["SubagentStatus"]
+    admitted = threading.Event()
+    teardown_started = threading.Event()
+    teardown_release = threading.Event()
+    teardown_finished = threading.Event()
+    capacity_released = threading.Event()
+
+    class TrackingSlot:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            assert teardown_finished.is_set()
+            capacity_released.set()
+
+    class TrackingCapacity:
+        def slot(self):
+            return TrackingSlot()
+
+    async def slow_admitted(_task, _result):
+        admitted.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            teardown_started.set()
+            await asyncio.to_thread(teardown_release.wait)
+            teardown_finished.set()
+
+    executor = SubagentExecutor(
+        config=SubagentConfig(
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=0.05,
+        ),
+        tools=[],
+        thread_id="test-thread",
+        execution_capacity=TrackingCapacity(),
+    )
+    execution_id = None
+    try:
+        with patch.object(executor, "_aexecute_admitted", side_effect=slow_admitted):
+            execution_id = executor.execute_async("Task")
+            assert admitted.wait(timeout=3)
+            assert teardown_started.wait(timeout=3)
+            result = executor_module.get_background_task_result(execution_id)
+            assert result is not None
+            assert result.status.value == SubagentStatus.TIMED_OUT.value
+            assert not result.execution_done_event.is_set()
+            assert not capacity_released.is_set()
+            teardown_release.set()
+            assert result.execution_done_event.wait(timeout=3)
+
+        assert teardown_finished.is_set()
+        assert capacity_released.is_set()
+    finally:
+        teardown_release.set()
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)
+
+
+def test_execute_async_does_not_swallow_fatal_base_exception_after_terminal(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentExecutor = classes["SubagentExecutor"]
+    SubagentStatus = classes["SubagentStatus"]
+    submitted = {}
+
+    class FatalTeardown(BaseException):
+        pass
+
+    async def terminal_then_fatal(_task, result_holder):
+        result_holder.try_set_terminal(
+            SubagentStatus.COMPLETED,
+            result="apparently complete",
+        )
+        raise FatalTeardown("fatal after terminal")
+
+    original_submit = executor_module._submit_to_isolated_loop_in_context
+
+    def capture_submit(context, coroutine_factory):
+        future = original_submit(context, coroutine_factory)
+        submitted["future"] = future
+        return future
+
+    executor = SubagentExecutor(
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with (
+            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=capture_submit),
+            patch.object(executor, "_aexecute", side_effect=terminal_then_fatal),
+        ):
+            execution_id = executor.execute_async("Task")
+            with pytest.raises(
+                executor_module.SubagentBackgroundFatalError,
+                match="FatalTeardown: fatal after terminal",
+            ) as raised:
+                submitted["future"].result(timeout=3)
+            assert isinstance(raised.value.__cause__, FatalTeardown)
+
+        result = executor_module.get_background_task_result(execution_id)
+        assert result is not None
+        assert result.status.value == SubagentStatus.FAILED.value
+        assert result.result is None
+        assert result.error == "fatal after terminal"
+        assert result.execution_done_event.is_set()
+    finally:
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)
+
+
+def test_execute_async_cancelled_child_fatal_teardown_fails_and_opens_fence(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    started = threading.Event()
+    submitted = {}
+
+    class FatalTeardown(BaseException):
+        pass
+
+    async def fatal_on_cancel(_task, _result):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise FatalTeardown("fatal cancellation teardown")
+
+    original_submit = executor_module._submit_to_isolated_loop_in_context
+
+    def capture_submit(context, coroutine_factory):
+        future = original_submit(context, coroutine_factory)
+        submitted["future"] = future
+        return future
+
+    executor = classes["SubagentExecutor"](
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with (
+            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=capture_submit),
+            patch.object(executor, "_aexecute", side_effect=fatal_on_cancel),
+        ):
+            execution_id = executor.execute_async("Task")
+            assert started.wait(timeout=3)
+            executor_module.request_cancel_background_task(execution_id)
+            with pytest.raises(executor_module.SubagentBackgroundFatalError) as raised:
+                submitted["future"].result(timeout=3)
+
+        result = executor_module.get_background_task_result(execution_id)
+        assert result.status is classes["SubagentStatus"].FAILED
+        assert result.execution_done_event.is_set()
+        assert isinstance(raised.value.__cause__, FatalTeardown)
+    finally:
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)
+
+
+def test_execute_async_immediate_cancel_still_runs_runner_finally(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentExecutor = classes["SubagentExecutor"]
+    SubagentStatus = classes["SubagentStatus"]
+    loop_blocked = threading.Event()
+    release_loop = threading.Event()
+    loop = executor_module._get_isolated_subagent_loop()
+
+    def block_loop() -> None:
+        loop_blocked.set()
+        release_loop.wait(timeout=3)
+
+    loop.call_soon_threadsafe(block_loop)
+    assert loop_blocked.wait(timeout=3)
+
+    async def should_not_finish_normally(_task, _result):
+        await asyncio.Event().wait()
+
+    executor = SubagentExecutor(
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with patch.object(
+            executor,
+            "_aexecute",
+            side_effect=should_not_finish_normally,
+        ):
+            execution_id = executor.execute_async("Task")
+            executor_module.request_cancel_background_task(execution_id)
+            result = executor_module.get_background_task_result(execution_id)
+            assert result is not None
+            assert not result.execution_done_event.is_set()
+
+            release_loop.set()
+            assert result.execution_done_event.wait(timeout=3)
+
+        assert result.status.value == SubagentStatus.CANCELLED.value
+    finally:
+        release_loop.set()
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)
+
+
+def test_execute_async_force_cleanup_cannot_destroy_runner_owner(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentExecutor = classes["SubagentExecutor"]
+    SubagentStatus = classes["SubagentStatus"]
+    loop_blocked = threading.Event()
+    release_loop = threading.Event()
+    loop = executor_module._get_isolated_subagent_loop()
+
+    def block_loop() -> None:
+        loop_blocked.set()
+        release_loop.wait(timeout=3)
+
+    loop.call_soon_threadsafe(block_loop)
+    assert loop_blocked.wait(timeout=3)
+
+    async def should_not_finish_normally(_task, _result):
+        await asyncio.Event().wait()
+
+    executor = SubagentExecutor(
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with patch.object(
+            executor,
+            "_aexecute",
+            side_effect=should_not_finish_normally,
+        ):
+            execution_id = executor.execute_async("Task")
+            result = executor_module.get_background_task_result(execution_id)
+            assert result is not None
+            with executor_module._background_tasks_lock:
+                runner = executor_module._background_runners[execution_id]
+
+            executor_module.request_cancel_background_task(execution_id)
+            executor_module.force_cleanup_background_task(execution_id)
+
+            assert executor_module.get_background_task_result(execution_id) is None
+            assert execution_id not in executor_module._background_runners
+            assert not result.execution_done_event.is_set()
+
+            release_loop.set()
+            assert result.execution_done_event.wait(timeout=3)
+
+        assert result.status.value == SubagentStatus.CANCELLED.value
+        assert runner.loop is None
+        assert runner.task is None
+    finally:
+        release_loop.set()
+        if execution_id is not None:
+            executor_module.force_cleanup_background_task(execution_id)
+
+
+def test_execute_async_child_creation_failure_sets_done_fence(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentExecutor = classes["SubagentExecutor"]
+    SubagentStatus = classes["SubagentStatus"]
+    submitted = {}
+
+    original_submit = executor_module._submit_to_isolated_loop_in_context
+
+    def capture_submit(context, coroutine_factory):
+        future = original_submit(context, coroutine_factory)
+        submitted["future"] = future
+        return future
+
+    def fail_child_creation(coroutine, **_kwargs):
+        coroutine.close()
+        raise RuntimeError("child creation failed")
+
+    executor = SubagentExecutor(
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with (
+            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=capture_submit),
+            patch.object(executor_module.asyncio, "create_task", side_effect=fail_child_creation),
+        ):
+            execution_id = executor.execute_async("Task")
+            completed = submitted["future"].result(timeout=3)
+
+        result = executor_module.get_background_task_result(execution_id)
+        assert result is completed
+        assert result is not None
+        assert result.status.value == SubagentStatus.FAILED.value
+        assert result.error == "child creation failed"
+        assert result.execution_done_event.is_set()
+        assert execution_id not in executor_module._background_runners
+    finally:
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)

@@ -63,6 +63,24 @@ _SUBAGENT_POLL_INTERVAL_SECONDS = 5.0
 # cleaner on the persistent subagent loop.
 _UNEXPECTED_EXIT_GRACE_SECONDS = 5.0
 
+
+async def _wait_for_execution_done_event(
+    done_event: Any,
+    *,
+    timeout: float,
+) -> bool:
+    """Wait for the execution teardown fence without blocking indefinitely."""
+    if done_event.is_set():
+        return True
+    if isinstance(done_event, asyncio.Event):
+        try:
+            await asyncio.wait_for(done_event.wait(), timeout=timeout)
+        except TimeoutError:
+            return False
+        return True
+    return bool(await asyncio.to_thread(done_event.wait, timeout))
+
+
 # Sentinel returned by ``_peek_subagent_result`` when the registry entry exists
 # but cannot be read (persistent status-lookup / status-object failure).
 _STATUS_UNREADABLE = object()
@@ -147,7 +165,8 @@ class _ParentLoopMiddlewareRecorderProxy:
 
 def _is_subagent_terminal(result: Any) -> bool:
     """Return whether a background subagent result is safe to clean up."""
-    return result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None
+    status_value = getattr(result.status, "value", result.status)
+    return status_value in {"completed", "failed", "cancelled", "timed_out"} or getattr(result, "completed_at", None) is not None
 
 
 def _peek_subagent_result(execution_id: str, *, trace_id: str) -> Any:
@@ -977,10 +996,66 @@ async def task_tool(
                     error=error,
                 )
 
+            # Polling timeout as a safety net (in case thread pool timeout
+            # doesn't work). Check before publishing anything from this
+            # snapshot, including a provisional COMPLETED state whose teardown
+            # fence has not opened yet.
+            if poll_count > max_poll_count:
+                timeout_minutes = config.timeout_seconds // 60
+                logger.error(f"[trace={trace_id}] Task {tool_call_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
+                _report_subagent_usage(runtime, result)
+                usage = _summarize_usage(getattr(result, "token_usage_records", None))
+                await aemit_custom_event(
+                    {
+                        "type": "task_timed_out",
+                        "task_id": tool_call_id,
+                        "usage": usage,
+                        "model_name": effective_model,
+                    },
+                    writer=writer,
+                )
+                # The task may still be running in the background. Signal cooperative
+                # cancellation and schedule deferred cleanup to remove the entry from
+                # _background_tasks once the background thread reaches a terminal state.
+                request_cancel_background_task(execution_id)
+                _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, max_poll_count)
+                message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+                return _task_result_command(
+                    tool_call_id=tool_call_id,
+                    status="polling_timed_out",
+                    error=message,
+                    model_name=effective_model,
+                    usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
+                )
+
             # Log status changes for debugging
             if result.status != last_status:
                 logger.info(f"[trace={trace_id}] Task {tool_call_id} execution {execution_id} status: {result.status.value}")
                 last_status = result.status
+
+            if _is_subagent_terminal(result):
+                done_event = getattr(result, "execution_done_event", None)
+                if done_event is not None and not done_event.is_set():
+                    # Every terminal business state is provisional until the
+                    # executor leaves its teardown contexts. A fatal teardown
+                    # can promote any of them to FAILED, so wait only one poll
+                    # interval, then re-read the registry entry before emitting
+                    # events, usage, or the result. Repeated waits consume the
+                    # existing bounded poll budget.
+                    fence_opened = await _wait_for_execution_done_event(
+                        done_event,
+                        timeout=_SUBAGENT_POLL_INTERVAL_SECONDS,
+                    )
+                    if not fence_opened:
+                        poll_count += 1
+                    continue
+                get_fatal_error = getattr(result, "get_fatal_error", None)
+                fatal_error = get_fatal_error() if callable(get_fatal_error) else None
+                if fatal_error is not None:
+                    _report_subagent_usage(runtime, result)
+                    cleanup_background_task(execution_id)
+                    raise fatal_error
 
             # The collector publishes cumulative records. Reuse one snapshot for
             # both live progress and the terminal event so the frontend can
@@ -1138,38 +1213,6 @@ async def task_tool(
             # Still running, wait before next poll
             await asyncio.sleep(5)
             poll_count += 1
-
-            # Polling timeout as a safety net (in case thread pool timeout doesn't work)
-            # Set to execution timeout + 60s buffer, in 5s poll intervals
-            # This catches edge cases where the background task gets stuck
-            if poll_count > max_poll_count:
-                timeout_minutes = config.timeout_seconds // 60
-                logger.error(f"[trace={trace_id}] Task {tool_call_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
-                _report_subagent_usage(runtime, result)
-                usage = _summarize_usage(getattr(result, "token_usage_records", None))
-                await aemit_custom_event(
-                    {
-                        "type": "task_timed_out",
-                        "task_id": tool_call_id,
-                        "usage": usage,
-                        "model_name": effective_model,
-                    },
-                    writer=writer,
-                )
-                # The task may still be running in the background. Signal cooperative
-                # cancellation and schedule deferred cleanup to remove the entry from
-                # _background_tasks once the background thread reaches a terminal state.
-                request_cancel_background_task(execution_id)
-                _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, max_poll_count)
-                message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
-                return _task_result_command(
-                    tool_call_id=tool_call_id,
-                    status="polling_timed_out",
-                    error=message,
-                    model_name=effective_model,
-                    usage=usage,
-                    tool_receipts=getattr(result, "tool_receipts", None),
-                )
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively, then
         # wait for the terminal result so the final token usage snapshot is
