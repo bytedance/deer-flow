@@ -82,6 +82,47 @@ def test_shutdown_is_bounded_when_channel_stop_hangs():
     assert elapsed >= _SHUTDOWN_HOOK_TIMEOUT_SECONDS - 0.5, f"Lifespan exited too quickly ({elapsed:.2f}s); wait_for may not have been invoked."
 
 
+def test_shutdown_is_bounded_when_subagent_batch_stop_hangs():
+    import app.gateway.app as gateway_app
+
+    async def run() -> tuple[float, AsyncMock]:
+        async def hang_forever() -> None:
+            await asyncio.Event().wait()
+
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        fake_channel_service = MagicMock()
+        fake_channel_service.get_status = MagicMock(return_value={})
+        stop_batch = AsyncMock(side_effect=hang_forever)
+
+        async def fake_start(_startup_config, **_kwargs):
+            return fake_channel_service
+
+        with (
+            patch.object(gateway_app, "_SHUTDOWN_HOOK_TIMEOUT_SECONDS", 0.05),
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+            patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+            patch("app.channels.service.start_channel_service", side_effect=fake_start),
+            patch("app.channels.service.stop_channel_service", AsyncMock()),
+        ):
+            start = asyncio.get_running_loop().time()
+            async with gateway_app.lifespan(app):
+                app.state.subagent_batch_service = SimpleNamespace(stop=stop_batch)
+            elapsed = asyncio.get_running_loop().time() - start
+        return elapsed, stop_batch
+
+    elapsed, stop_batch = asyncio.run(run())
+
+    stop_batch.assert_awaited_once()
+    assert 0.04 <= elapsed < 1.0
+
+
 async def _run_lifespan_with_upload_staging_cleanup():
     from app.gateway.app import lifespan
 

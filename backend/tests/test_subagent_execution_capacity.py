@@ -114,6 +114,37 @@ async def test_capacity_cancelled_waiter_does_not_leak_queue_or_slot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_capacity_cancellation_during_release_does_not_leak_slot(monkeypatch) -> None:
+    configure_subagent_execution_capacity(SubagentRuntimeConfig(max_running=1))
+    capacity = get_subagent_execution_capacity()
+    release_started = asyncio.Event()
+    release_allowed = asyncio.Event()
+    original_release = capacity._release
+
+    async def controlled_release() -> None:
+        release_started.set()
+        await release_allowed.wait()
+        await original_release()
+
+    monkeypatch.setattr(capacity, "_release", controlled_release)
+
+    async def work() -> None:
+        async with capacity.slot():
+            pass
+
+    execution = asyncio.create_task(work())
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+    execution.cancel()
+    await asyncio.sleep(0)
+    assert not execution.done()
+    release_allowed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+
+    assert capacity.snapshot().running == 0
+
+
+@pytest.mark.asyncio
 async def test_installing_same_startup_config_does_not_reset_live_capacity() -> None:
     config = SubagentRuntimeConfig(max_running=1, max_queued=2, queue_timeout_seconds=5)
     configure_subagent_execution_capacity(config)

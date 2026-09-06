@@ -50,6 +50,65 @@ def _request(**overrides) -> BatchSubmitRequest:
 
 
 @pytest.mark.asyncio
+async def test_stop_waits_for_cancelled_background_executions_to_become_terminal(monkeypatch) -> None:
+    requested: list[str] = []
+    cleaned: list[str] = []
+    result = SimpleNamespace(
+        status=FakeStatus.RUNNING,
+        completed_at=None,
+        execution_done_event=asyncio.Event(),
+    )
+    repository = SimpleNamespace()
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+    )
+
+    async def pending_item() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(pending_item())
+    service._executions["item-1"] = task
+    service._execution_ids["item-1"] = "execution-1"
+    service._item_batches["item-1"] = "batch-1"
+    monkeypatch.setattr(
+        service_module,
+        "request_cancel_background_task",
+        requested.append,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "cleanup_background_task",
+        cleaned.append,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "get_background_task_result",
+        lambda _execution_id: result,
+    )
+
+    stop_task = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+
+    assert requested == ["execution-1"]
+    assert not stop_task.done()
+    assert cleaned == []
+    result.status = FakeStatus.COMPLETED
+    result.completed_at = service_module.datetime.now(service_module.UTC)
+    await asyncio.sleep(0)
+    assert not stop_task.done()
+    result.execution_done_event.set()
+    await asyncio.wait_for(stop_task, timeout=1)
+
+    assert cleaned == ["execution-1"]
+    assert task.cancelled()
+    assert service._executions == {}
+    assert service._execution_ids == {}
+    assert service._item_batches == {}
+
+
+@pytest.mark.asyncio
 async def test_submit_keeps_batch_running_limit_separate_from_one_process_capacity() -> None:
     repository = SimpleNamespace(create_batch=AsyncMock(return_value={"id": "batch-1"}))
     service = SubagentBatchService(

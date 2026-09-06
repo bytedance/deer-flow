@@ -12,6 +12,26 @@ from dataclasses import dataclass
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 
 
+async def _release_after_cancellation(release) -> None:
+    """Finish slot release before propagating any cancellation."""
+    release_task = asyncio.create_task(release())
+    host = asyncio.current_task()
+    observed_cancellations = host.cancelling() if host is not None else 0
+    deferred: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(release_task)
+            break
+        except asyncio.CancelledError as exc:
+            current_cancellations = host.cancelling() if host is not None else 0
+            if current_cancellations <= observed_cancellations:
+                raise
+            observed_cancellations = current_cancellations
+            deferred = deferred or exc
+    if deferred is not None:
+        raise deferred
+
+
 class SubagentCapacityError(RuntimeError):
     """Base class for explicit admission failures."""
 
@@ -111,7 +131,7 @@ class SubagentExecutionCapacity:
         try:
             yield
         finally:
-            await self._release()
+            await _release_after_cancellation(self._release)
 
 
 _config = SubagentRuntimeConfig()

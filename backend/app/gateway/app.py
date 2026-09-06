@@ -475,7 +475,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if getattr(app.state, "subagent_batch_service", None) is not None:
             app.state.subagent_batches_available = False
             try:
-                await app.state.subagent_batch_service.stop()
+                await asyncio.wait_for(
+                    app.state.subagent_batch_service.stop(),
+                    timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Subagent batch service shutdown exceeded %.1fs; proceeding with worker exit.",
+                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
             except Exception:
                 logger.exception("Failed to stop subagent batch service")
             finally:

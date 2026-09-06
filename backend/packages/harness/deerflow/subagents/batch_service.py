@@ -80,6 +80,18 @@ class SubagentBatchService:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        pending_execution_ids = set(execution_ids)
+        while pending_execution_ids:
+            for execution_id in tuple(pending_execution_ids):
+                result = get_background_task_result(execution_id)
+                if result is None:
+                    pending_execution_ids.remove(execution_id)
+                    continue
+                if result.execution_done_event.is_set() and (result.status.is_terminal or result.completed_at is not None):
+                    cleanup_background_task(execution_id)
+                    pending_execution_ids.remove(execution_id)
+            if pending_execution_ids:
+                await asyncio.sleep(0.05)
         self._executions.clear()
         self._execution_ids.clear()
         self._item_batches.clear()
