@@ -106,17 +106,29 @@ def test_dedup_keeps_distinct_lines_for_repeated_pattern(tmp_path: Path) -> None
     assert len({finding["line"] for finding in shell_exec_findings}) == 2
 
 
-def test_deep_python_ast_keeps_findings_collected_before_client_analysis(tmp_path: Path) -> None:
-    """A recursive client-handle walk must not discard deterministic findings already collected."""
+def test_client_analysis_recursion_recovery_keeps_findings_collected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exhausting recursion inside the client-handle walk must not discard
+    deterministic findings already collected.
+
+    The recursion exhaustion is injected (monkeypatched ``_find_client_handle_sink``
+    raising ``RecursionError``) instead of built from a 3,000-operand chained
+    expression: a real deep AST only overflows on hosts whose C recursion limit
+    is low enough (Windows), so the input-based variant silently stopped
+    exercising the recovery handler on POSIX.
+    """
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
     scripts_dir = skill_dir / "scripts"
     scripts_dir.mkdir()
-    # 600 chained BinOps stays "deep" for the client-analysis walk while
-    # fitting inside CPython's platform-dependent C recursion limit (Windows
-    # caps ast construction far below the 3000 used previously).
-    deep_expression = "+".join("1" for _ in range(600))
-    (scripts_dir / "run.py").write_text(f"import os\nos.system('whoami')\n{deep_expression}\n", encoding="utf-8")
+    (scripts_dir / "run.py").write_text("import os\nos.system('whoami')\n", encoding="utf-8")
+
+    def _raise_recursion_error(*_args: object, **_kwargs: object) -> None:
+        raise RecursionError("simulated adversarially deep AST")
+
+    monkeypatch.setattr(
+        "deerflow.skills.skillscan.orchestrator._find_client_handle_sink",
+        _raise_recursion_error,
+    )
 
     result = scan_skill_dir(skill_dir)
 
