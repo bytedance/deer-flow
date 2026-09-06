@@ -1057,7 +1057,11 @@ async def run_agent(
         from deerflow.extensions import bind_agent_build_extensions
 
         with bind_agent_build_extensions(extensions):
-            agent = _agent_graph(agent_factory(**agent_factory_kwargs))
+            # Agent construction performs synchronous tool assembly. In particular,
+            # lazy MCP initialization can wait on a process-wide condition or a
+            # worker future. Keep that wait off the Gateway event loop so SSE,
+            # cancellation, and unrelated requests can continue progressing.
+            agent = _agent_graph(await asyncio.to_thread(agent_factory, **agent_factory_kwargs))
 
         accessor = CheckpointStateAccessor.bind(
             agent,
