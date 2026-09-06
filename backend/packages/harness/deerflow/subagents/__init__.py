@@ -1,11 +1,12 @@
 from .config import SubagentConfig
-from .registry import get_available_subagent_names, get_subagent_config, list_subagents
+from .registry import get_available_subagent_descriptions, get_available_subagent_names, get_subagent_config, list_subagents
 
 __all__ = [
     "SubagentConfig",
     "SubagentExecutor",
     "SubagentResult",
     "SubagentRuntime",
+    "get_available_subagent_descriptions",
     "get_available_subagent_names",
     "get_subagent_config",
     "list_subagents",

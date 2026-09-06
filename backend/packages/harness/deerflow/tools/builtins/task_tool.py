@@ -738,7 +738,8 @@ async def task_tool(
     # Resolve the dispatching identity up front: user-scoped API agents are only
     # resolvable for their owner, and the prompt/listing/config lookup must agree.
     user_id = resolve_runtime_user_id(runtime)
-    available_subagent_names = get_available_subagent_names(
+    available_subagent_names = await asyncio.to_thread(
+        get_available_subagent_names,
         app_config=runtime_app_config,
         allowed_subagents=allowed_subagents,
         user_id=user_id,
@@ -747,7 +748,10 @@ async def task_tool(
     # Preserve the dedicated sandbox-policy guidance before the generic
     # registry/policy membership gate filters bash from the visible catalog.
     if subagent_type == "bash":
-        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+        if runtime_app_config is not None:
+            host_bash_allowed = await asyncio.to_thread(is_host_bash_allowed, runtime_app_config)
+        else:
+            host_bash_allowed = await asyncio.to_thread(is_host_bash_allowed)
         if not host_bash_allowed:
             return _task_result_command(
                 tool_call_id=tool_call_id,
@@ -756,7 +760,8 @@ async def task_tool(
             )
 
     # Get subagent configuration
-    config = get_subagent_config(
+    config = await asyncio.to_thread(
+        get_subagent_config,
         subagent_type,
         app_config=runtime_app_config,
         user_id=user_id,

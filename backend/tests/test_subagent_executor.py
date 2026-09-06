@@ -1152,6 +1152,83 @@ class TestAgentConstruction:
         assert captured["descriptor"]["thinking_enabled"] is True
         assert captured["descriptor"]["reasoning_effort"] == "high"
 
+    def test_create_agent_authorizes_model_with_parent_identity(
+        self,
+        classes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Store-backed agents cannot bypass model authorization on delegation."""
+        from deerflow.subagents import executor as executor_module
+
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        captured: dict[str, object] = {}
+        app_config = SimpleNamespace(
+            models=[SimpleNamespace(name="restricted-model"), SimpleNamespace(name="allowed-model")],
+            tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=3),
+            authorization=SimpleNamespace(enabled=True),
+        )
+
+        def authorize_model_name(name, *, context, app_config):
+            captured["authorization"] = (name, context, app_config)
+            return "allowed-model"
+
+        def create_chat_model(**kwargs):
+            captured["model"] = kwargs
+            return object()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.lead_agent.agent",
+            _module(
+                "deerflow.agents.lead_agent.agent",
+                _authorize_model_name=authorize_model_name,
+            ),
+        )
+        monkeypatch.setattr(executor_module, "create_chat_model", create_chat_model)
+        monkeypatch.setattr(executor_module, "create_agent", lambda **_kwargs: object())
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **_kwargs: [],
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="custom-agent",
+                description="custom",
+                model="restricted-model",
+            ),
+            tools=[],
+            app_config=app_config,
+            user_id="user-1",
+            user_role="member",
+            oauth_provider="github",
+            oauth_id="oauth-1",
+            channel_user_id="channel-1",
+            is_internal=False,
+            authz_attributes={"department": "engineering"},
+        )
+
+        executor._create_agent()
+
+        requested_name, context, captured_config = captured["authorization"]
+        assert requested_name == "restricted-model"
+        assert captured_config is app_config
+        assert context == {
+            "user_role": "member",
+            "oauth_provider": "github",
+            "oauth_id": "oauth-1",
+            "is_internal": False,
+            "authz_attributes": {"department": "engineering"},
+            "user_id": "user-1",
+            "channel_user_id": "channel-1",
+        }
+        assert captured["model"]["name"] == "allowed-model"
+
     def test_create_agent_threads_deferred_setup_to_middlewares(
         self,
         classes,

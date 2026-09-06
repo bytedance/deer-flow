@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -172,12 +173,18 @@ async def batch_task(
     app_config = _batch_app_config(runtime)
     allowed_subagents = metadata.get("allowed_subagents")
     user_id = resolve_runtime_user_id(runtime)
-    available = get_available_subagent_names(
+    available = await asyncio.to_thread(
+        get_available_subagent_names,
         app_config=app_config,
         allowed_subagents=allowed_subagents,
         user_id=user_id,
     )
-    config = get_subagent_config(subagent_type, app_config=app_config, user_id=user_id)
+    config = await asyncio.to_thread(
+        get_subagent_config,
+        subagent_type,
+        app_config=app_config,
+        user_id=user_id,
+    )
     if config is None or subagent_type not in available:
         names = ", ".join(available) if available else "none"
         return _result(

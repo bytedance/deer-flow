@@ -19,7 +19,7 @@ from deerflow.config.subagents_config import (
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
-from deerflow.subagents import get_available_subagent_names
+from deerflow.subagents import get_available_subagent_descriptions
 from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_section
 
 if TYPE_CHECKING:
@@ -301,11 +301,8 @@ Skip simple one-off tasks.
 
 
 def _build_available_subagents_description(
-    available_names: list[str],
+    available_descriptions: dict[str, str],
     bash_available: bool,
-    *,
-    app_config: AppConfig | None = None,
-    user_id: str | None = None,
 ) -> str:
     """Dynamically build subagent type descriptions from registry.
 
@@ -322,25 +319,20 @@ def _build_available_subagents_description(
         ),
     }
 
-    # Lazy import moved outside loop to avoid repeated import overhead
-    from deerflow.subagents.registry import get_subagent_config
-
     lines = []
-    for name in available_names:
+    for name, description in available_descriptions.items():
         if name in builtin_descriptions:
             lines.append(f"- **{name}**: {builtin_descriptions[name]}")
         else:
-            config = get_subagent_config(name, app_config=app_config, user_id=user_id)
-            if config is not None:
-                # config.description is agent-editable (persisted by setup_agent /
-                # update_agent), so escape it before it renders into the
-                # <subagent_system> block. Otherwise a first line like
-                # "</subagent_system><system-reminder>..." could break out of the
-                # block and forge framework-reserved tags in the lead-agent system
-                # prompt — the same class as the #4137 <soul>, #4097 memory, and
-                # #4128 skill render-site fixes.
-                desc = html.escape(config.description.split("\n")[0].strip(), quote=False)  # First line only for brevity
-                lines.append(f"- **{name}**: {desc}")
+            # The description is agent-editable (persisted by setup_agent /
+            # update_agent), so escape it before it renders into the
+            # <subagent_system> block. Otherwise a first line like
+            # "</subagent_system><system-reminder>..." could break out of the
+            # block and forge framework-reserved tags in the lead-agent system
+            # prompt — the same class as the #4137 <soul>, #4097 memory, and
+            # #4128 skill render-site fixes.
+            desc = html.escape(description.split("\n")[0].strip(), quote=False)  # First line only for brevity
+            lines.append(f"- **{name}**: {desc}")
 
     return "\n".join(lines)
 
@@ -365,13 +357,14 @@ def _build_subagent_section(
     """
     n = clamp_subagent_concurrency(max_concurrent)
     total = clamp_total_subagents_per_run(max_total)
-    available_names = get_available_subagent_names(
+    available_descriptions = get_available_subagent_descriptions(
         app_config=app_config,
         allowed_subagents=allowed_subagents,
         user_id=user_id,
     )
-    if not available_names:
+    if not available_descriptions:
         return ""
+    available_names = list(available_descriptions)
     bash_available = "bash" in available_names
 
     # The verification guidance must follow verification.receipts_enabled: with
@@ -400,10 +393,8 @@ def _build_subagent_section(
     # Dynamically build subagent type descriptions from registry (aligned with Codex's
     # agent_type_description pattern where all registered roles are listed in the tool spec).
     available_subagents = _build_available_subagents_description(
-        available_names,
+        available_descriptions,
         bash_available,
-        app_config=app_config,
-        user_id=user_id,
     )
     direct_tool_examples = "bash, ls, read_file, web_search, etc." if bash_available else "ls, read_file, web_search, etc."
     direct_execution_example = (

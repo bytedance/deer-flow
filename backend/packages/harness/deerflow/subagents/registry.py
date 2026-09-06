@@ -57,8 +57,8 @@ def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -
 
 def _resolve_full_app_config(app_config: Any | None = None) -> Any | None:
     """Return a full AppConfig-like object carrying ``.tools`` for group expansion."""
-    if app_config is not None and hasattr(app_config, "tools"):
-        return app_config
+    if app_config is not None:
+        return app_config if hasattr(app_config, "tools") else None
     try:
         from deerflow.config.app_config import get_app_config
 
@@ -69,13 +69,19 @@ def _resolve_full_app_config(app_config: Any | None = None) -> Any | None:
 
 
 def _expand_tool_groups(groups: list[str] | None, *, app_config: Any | None = None) -> list[str] | None:
-    """Expand ``AgentConfig.tool_groups`` into concrete tool names."""
+    """Expand ``AgentConfig.tool_groups`` into a strict tool-name allowlist.
+
+    ``None`` inherits the parent pool, while an explicit list fails closed to
+    no tools if the full tool catalog is unavailable.
+    """
     if groups is None:
         return None
+    if not groups:
+        return []
     full_config = _resolve_full_app_config(app_config)
     if full_config is None:
-        logger.warning("Could not resolve app config for tool-group expansion; inheriting full tool pool")
-        return None
+        logger.warning("Could not resolve app config for tool-group expansion; the subagent will run without tools")
+        return []
     expanded = [tool.name for tool in full_config.tools if tool.group in groups]
     if not expanded and groups:
         logger.warning(
@@ -86,19 +92,27 @@ def _expand_tool_groups(groups: list[str] | None, *, app_config: Any | None = No
 
 
 def _load_user_agent_record(name: str, *, user_id: str | None = None) -> tuple[Any, str | None] | None:
-    """Load ``(AgentConfig, soul)`` from the per-user agent store."""
+    """Load ``(AgentConfig, soul)`` from the caller-scoped agent store."""
     from deerflow.config.agents_config import load_agent_config, load_agent_soul
 
     try:
         agent = load_agent_config(name, user_id=user_id)
-    except (FileNotFoundError, ValueError, OSError):
+    except (FileNotFoundError, ValueError):
+        return None
+    except Exception:
+        logger.warning("Could not load user-scoped custom agent %r", name, exc_info=True)
         return None
     if agent is None:
         return None
     try:
         soul = load_agent_soul(name, user_id=user_id)
-    except (FileNotFoundError, ValueError, OSError):
+    except (FileNotFoundError, ValueError):
         soul = None
+    except Exception:
+        # Running without the user's SOUL would silently change the delegated
+        # agent's identity. Treat a store failure as an unavailable agent.
+        logger.warning("Could not load SOUL for user-scoped custom agent %r", name, exc_info=True)
+        return None
     return agent, soul
 
 
@@ -298,24 +312,19 @@ def list_subagents(
     return configs
 
 
-def get_subagent_names(
+def _subagent_descriptions(
     *,
     app_config: Any | None = None,
     allowed_subagents: list[str] | None = None,
     user_id: str | None = None,
-) -> list[str]:
-    """Get registered subagent names, optionally restricted by the caller policy.
-
-    Returns:
-        List of subagent names.
-    """
-    names = list(BUILTIN_SUBAGENTS.keys())
+) -> dict[str, str]:
+    """Build one ordered name/description snapshot across all registry tiers."""
+    descriptions = {name: config.description for name, config in BUILTIN_SUBAGENTS.items()}
 
     # Merge custom_agents from config.yaml
     subagents_config = _resolve_subagents_app_config(app_config)
-    for custom_name in subagents_config.custom_agents:
-        if custom_name not in names:
-            names.append(custom_name)
+    for custom_name, custom_config in subagents_config.custom_agents.items():
+        descriptions.setdefault(custom_name, custom_config.description)
 
     # Built-in and config.yaml definitions have operator-controlled precedence.
     # Later definitions that conflict remain persisted/listable on their owning
@@ -323,22 +332,61 @@ def get_subagent_names(
     for definition in _managed_definitions(app_config=app_config):
         if not definition.enabled:
             continue
-        if definition.name in names:
+        if definition.name in descriptions:
             logger.debug("Managed subagent '%s' conflicts with a built-in or config.yaml definition and is excluded from runtime", definition.name)
             continue
-        names.append(definition.name)
+        descriptions[definition.name] = definition.description
 
     for agent in _list_user_agents(user_id=user_id):
-        if agent.name in names:
+        if agent.name in descriptions:
             logger.debug("User-scoped custom agent '%s' conflicts with an earlier subagent tier and is excluded from runtime", agent.name)
             continue
-        names.append(agent.name)
+        descriptions[agent.name] = agent.description or ""
 
     if allowed_subagents is not None:
         allowed = set(allowed_subagents)
-        names = [name for name in names if name in allowed]
+        descriptions = {name: description for name, description in descriptions.items() if name in allowed}
 
-    return names
+    return descriptions
+
+
+def get_subagent_names(
+    *,
+    app_config: Any | None = None,
+    allowed_subagents: list[str] | None = None,
+    user_id: str | None = None,
+) -> list[str]:
+    """Get registered subagent names, optionally restricted by the caller policy."""
+    return list(
+        _subagent_descriptions(
+            app_config=app_config,
+            allowed_subagents=allowed_subagents,
+            user_id=user_id,
+        )
+    )
+
+
+def get_available_subagent_descriptions(
+    *,
+    app_config: Any | None = None,
+    allowed_subagents: list[str] | None = None,
+    user_id: str | None = None,
+) -> dict[str, str]:
+    """Return one ordered snapshot of subagents visible to the active runtime."""
+    descriptions = _subagent_descriptions(
+        app_config=app_config,
+        allowed_subagents=allowed_subagents,
+        user_id=user_id,
+    )
+    try:
+        host_bash_allowed = is_host_bash_allowed(app_config) if hasattr(app_config, "sandbox") else is_host_bash_allowed()
+    except Exception:
+        logger.debug("Could not determine host bash availability; exposing all subagents")
+        return descriptions
+
+    if not host_bash_allowed:
+        descriptions.pop("bash", None)
+    return descriptions
 
 
 def get_available_subagent_names(
@@ -352,13 +400,10 @@ def get_available_subagent_names(
     Returns:
         List of subagent names visible to the current sandbox configuration.
     """
-    names = get_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents, user_id=user_id)
-    try:
-        host_bash_allowed = is_host_bash_allowed(app_config) if hasattr(app_config, "sandbox") else is_host_bash_allowed()
-    except Exception:
-        logger.debug("Could not determine host bash availability; exposing all subagents")
-        return names
-
-    if not host_bash_allowed:
-        names = [name for name in names if name != "bash"]
-    return names
+    return list(
+        get_available_subagent_descriptions(
+            app_config=app_config,
+            allowed_subagents=allowed_subagents,
+            user_id=user_id,
+        )
+    )
