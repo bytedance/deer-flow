@@ -10,6 +10,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
@@ -54,7 +55,11 @@ _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 # server process cwd (e.g. ``temp/page.yml``, ``./shot.png``). Each match is
 # only rewritten when it resolves to an existing file inside the thread's
 # user-data tree, so an over-eager match is harmless (left untouched).
-_LOCAL_PATH_IN_TEXT_RE = re.compile(r"(?:file://)?/[^\s'\"<>|*?]+|(?:\.{0,2}/|[\w.-]+/)[^\s'\"<>|*?]+")
+_LOCAL_PATH_IN_TEXT_RE = re.compile(
+    r"(?:file://)?/[^\s'\"<>|*?]+"  # POSIX absolute path or file:// URI
+    r"|[A-Za-z]:[\\/][^\s'\"<>|*?]+"  # Windows drive-qualified absolute path
+    r"|(?:\.{0,2}/|[\w.-]+/)[^\s'\"<>|*?]+"  # path relative to the server cwd
+)
 
 # Trailing characters that are punctuation/markup rather than part of a path.
 _TEXT_PATH_TRAILING_CHARS = ".,;:!?)]}>\"'`"
@@ -77,7 +82,13 @@ def _local_path_from_uri(uri: str, *, base_dir: Path | None = None) -> Path | No
     except ValueError:
         return None
     if parsed.scheme == "file":
-        raw = unquote(parsed.path)
+        # url2pathname converts the "/C:/..." form a file URI's path takes on
+        # Windows into a drive-qualified "C:\..." path; on POSIX it is identity.
+        raw = url2pathname(unquote(parsed.path))
+    elif len(parsed.scheme) == 1 and parsed.scheme.isalpha():
+        # urlparse reads a Windows drive prefix ("C:\...") as the URI scheme;
+        # the original string is a bare local path, not a remote URI.
+        raw = uri
     elif parsed.scheme == "":
         raw = uri
     else:

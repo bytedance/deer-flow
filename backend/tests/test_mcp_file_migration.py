@@ -6,6 +6,7 @@ tool wrapper pins stdio cwd/temp under the thread's mounted user-data tree and
 rewrites returned file references to ``/mnt/user-data/...`` virtual paths.
 """
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,14 +35,17 @@ def _workspace_file(paths: Paths, relative_path: str, *, content: bytes = b"data
 
 
 class TestLocalPathFromUri:
-    def test_file_uri(self):
-        assert mcp_tools._local_path_from_uri("file:///tmp/shot.png") == Path("/tmp/shot.png")
+    def test_file_uri(self, tmp_path: Path):
+        src = tmp_path / "shot.png"
+        assert mcp_tools._local_path_from_uri(src.as_uri()) == src
 
-    def test_bare_absolute_path(self):
-        assert mcp_tools._local_path_from_uri("/var/data/out.pdf") == Path("/var/data/out.pdf")
+    def test_bare_absolute_path(self, tmp_path: Path):
+        src = tmp_path / "data" / "out.pdf"
+        assert mcp_tools._local_path_from_uri(str(src)) == src
 
-    def test_file_uri_with_url_encoded_spaces(self):
-        assert mcp_tools._local_path_from_uri("file:///tmp/my%20shot.png") == Path("/tmp/my shot.png")
+    def test_file_uri_with_url_encoded_spaces(self, tmp_path: Path):
+        src = tmp_path / "my shot.png"
+        assert mcp_tools._local_path_from_uri(src.as_uri()) == src
 
     def test_remote_uri_is_ignored(self):
         assert mcp_tools._local_path_from_uri("https://example.com/a.png") is None
@@ -63,9 +67,20 @@ class TestLocalPathFromUri:
     def test_file_uri_with_empty_path_is_ignored(self):
         assert mcp_tools._local_path_from_uri("file://") is None
 
-    def test_file_uri_with_localhost_host(self):
+    def test_file_uri_with_localhost_host(self, tmp_path: Path):
         # file://localhost/abs/path is the host form of file:///abs/path.
-        assert mcp_tools._local_path_from_uri("file://localhost/tmp/shot.png") == Path("/tmp/shot.png")
+        src = tmp_path / "shot.png"
+        assert mcp_tools._local_path_from_uri(src.as_uri().replace("file://", "file://localhost", 1)) == src
+
+    def test_windows_drive_letter_path_is_resolved(self):
+        # urlparse reads a Windows drive prefix ("C:/...") as the URI scheme.
+        # On Windows hosts it must still resolve as a bare local path; on
+        # POSIX it is not a local path at all.
+        path = mcp_tools._local_path_from_uri("C:/Users/shot.png")
+        if os.name == "nt":
+            assert path == Path("C:/Users/shot.png")
+        else:
+            assert path is None
 
     def test_empty_is_ignored(self):
         assert mcp_tools._local_path_from_uri("") is None
@@ -110,7 +125,7 @@ class TestLocalUriToVirtualPath:
         src = _workspace_file(paths, "shot.png")
 
         with _patch_paths(paths):
-            result = mcp_tools._local_uri_to_virtual_path(f"file://{src}", thread_id="t1", user_id="u1")
+            result = mcp_tools._local_uri_to_virtual_path(src.as_uri(), thread_id="t1", user_id="u1")
 
         assert result == f"{VIRTUAL_PATH_PREFIX}/workspace/shot.png"
 
@@ -431,7 +446,7 @@ class TestConvertCallToolResultRewrites:
     def test_resource_link_image_inside_workspace_rewritten(self, paths: Paths):
         src = _workspace_file(paths, "page.png", content=b"png")
         result = CallToolResult(
-            content=[ResourceLink(type="resource_link", name="page", uri=f"file://{src}", mimeType="image/png")],
+            content=[ResourceLink(type="resource_link", name="page", uri=src.as_uri(), mimeType="image/png")],
             isError=False,
         )
 
@@ -447,7 +462,7 @@ class TestConvertCallToolResultRewrites:
         src = outputs / "doc.pdf"
         src.write_bytes(b"pdf")
         result = CallToolResult(
-            content=[ResourceLink(type="resource_link", name="doc", uri=f"file://{src}", mimeType="application/pdf")],
+            content=[ResourceLink(type="resource_link", name="doc", uri=src.as_uri(), mimeType="application/pdf")],
             isError=False,
         )
 
@@ -460,7 +475,7 @@ class TestConvertCallToolResultRewrites:
     def test_resource_link_outside_user_data_untouched(self, tmp_path: Path, paths: Paths):
         src = tmp_path / "page.png"
         src.write_bytes(b"png")
-        uri = f"file://{src}"
+        uri = src.as_uri()
         result = CallToolResult(
             content=[ResourceLink(type="resource_link", name="page", uri=uri, mimeType="image/png")],
             isError=False,
@@ -514,7 +529,7 @@ class TestConvertCallToolResultRewrites:
 
     def test_no_context_does_not_rewrite(self, paths: Paths):
         src = _workspace_file(paths, "x.png", content=b"png")
-        uri = f"file://{src}"
+        uri = src.as_uri()
         result = CallToolResult(
             content=[ResourceLink(type="resource_link", name="x", uri=uri, mimeType="image/png")],
             isError=False,
