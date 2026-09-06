@@ -1,7 +1,6 @@
-import fs from "fs";
-import path from "path";
-
 import type { NextRequest } from "next/server";
+
+import { resolveStaticDemoArtifact } from "@/core/threads/static-demo";
 
 export async function GET(
   request: NextRequest,
@@ -14,36 +13,42 @@ export async function GET(
     }>;
   },
 ) {
-  const threadId = (await params).thread_id;
-  let artifactPath = (await params).artifact_path?.join("/") ?? "";
-  if (artifactPath.startsWith("mnt/")) {
-    artifactPath = path.resolve(
-      process.cwd(),
-      artifactPath.replace("mnt/", `public/demo/threads/${threadId}/`),
-    );
-    if (fs.existsSync(artifactPath)) {
-      if (request.nextUrl.searchParams.get("download") === "true") {
-        // Attach the file to the response
-        const headers = new Headers();
-        headers.set(
-          "Content-Disposition",
-          `attachment; filename="${artifactPath}"`,
-        );
-        return new Response(fs.readFileSync(artifactPath), {
-          status: 200,
-          headers,
-        });
-      }
-      if (artifactPath.endsWith(".mp4")) {
-        return new Response(fs.readFileSync(artifactPath), {
-          status: 200,
-          headers: {
-            "Content-Type": "video/mp4",
-          },
-        });
-      }
-      return new Response(fs.readFileSync(artifactPath), { status: 200 });
-    }
+  const { thread_id: threadId, artifact_path: artifactSegments = [] } =
+    await params;
+  const publicPath = resolveStaticDemoArtifact(threadId, artifactSegments);
+  if (!publicPath) return new Response("File not found", { status: 404 });
+
+  const upstreamRequestHeaders: Record<string, string> = {};
+  for (const headerName of ["Range", "If-Range"] as const) {
+    const value = request.headers.get(headerName);
+    if (value) upstreamRequestHeaders[headerName] = value;
   }
-  return new Response("File not found", { status: 404 });
+  const upstream = await fetch(
+    new URL(publicPath, request.nextUrl.origin).toString(),
+    { headers: upstreamRequestHeaders, signal: request.signal },
+  );
+  if (
+    (!upstream.ok && upstream.status !== 416) ||
+    (!upstream.body && upstream.status !== 416)
+  ) {
+    return new Response("File not found", { status: 404 });
+  }
+
+  const headers = new Headers();
+  for (const headerName of [
+    "Accept-Ranges",
+    "Content-Length",
+    "Content-Range",
+    "Content-Type",
+  ]) {
+    const value = upstream.headers.get(headerName);
+    if (value) headers.set(headerName, value);
+  }
+  if (request.nextUrl.searchParams.get("download") === "true") {
+    headers.set(
+      "Content-Disposition",
+      `attachment; filename="${artifactSegments.at(-1)}"`,
+    );
+  }
+  return new Response(upstream.body, { status: upstream.status, headers });
 }

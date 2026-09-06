@@ -27,6 +27,7 @@ def isolated_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("UV_EXTRAS", raising=False)
     monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", raising=False)
     return tmp_path
 
 
@@ -142,11 +143,90 @@ def test_detect_from_config_sqlite_returns_no_extras(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
+def test_detect_from_config_redis_via_stream_bridge(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("stream_bridge:\n  type: redis\n  redis_url: redis://localhost:6379/0\n")
+    assert detect.detect_from_config(cfg) == ["redis"]
+
+
+def test_detect_from_config_browser_via_browser_navigate_tool(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "tools:\n  - name: browser_navigate\n    group: browser\n    use: deerflow.community.browser_automation.tools:browser_navigate_tool\n",
+    )
+    assert detect.detect_from_config(cfg) == ["browser"]
+
+
+def test_detect_from_config_browser_via_indentless_tools_list(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "tools:\n- name: web_fetch\n  group: web\n- name: browser_navigate\n  group: browser\n",
+    )
+    assert detect.detect_from_config(cfg) == ["browser"]
+
+
+def test_detect_from_config_ignores_commented_browser_tool(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "tools:\n  # - name: browser_navigate\n  #   group: browser\n  - name: web_fetch\n    group: web\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_buzz_via_channels_enabled(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "channels:\n  buzz:\n    enabled: true\n    relay_url: wss://buzz.example.com\n",
+    )
+    assert detect.detect_from_config(cfg) == ["buzz"]
+
+
+def test_detect_from_config_buzz_disabled_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("channels:\n  buzz:\n    enabled: false\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_no_channels_section_returns_no_buzz_extra(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: sqlite\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ignores_commented_buzz_block(tmp_path):
+    """Mirrors the fully-commented example block shipped in config.example.yaml."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "# channels:\n#   buzz:\n#     enabled: true\n#     relay_url: wss://buzz.example.com\ndatabase:\n  backend: sqlite\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("stream_bridge:\n  type: memory\n  queue_maxsize: 256\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_combines_postgres_and_redis(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: postgres\nstream_bridge:\n  type: redis\n")
+    # Sorted unique extras across all detectors.
+    assert detect.detect_from_config(cfg) == ["postgres", "redis"]
+
+
 def test_detect_from_config_dedupes_when_both_present(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("checkpointer:\n  type: postgres\ndatabase:\n  backend: postgres\n")
     # Sorted unique extras, no double-counting.
     assert detect.detect_from_config(cfg) == ["postgres"]
+
+
+def test_detect_from_config_combines_buzz_with_postgres(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: postgres\nchannels:\n  buzz:\n    enabled: true\n")
+    # Existing postgres/redis/browser detection is unaffected by the new rule.
+    assert detect.detect_from_config(cfg) == ["buzz", "postgres"]
 
 
 def test_detect_from_config_missing_file_returns_empty(tmp_path):
@@ -164,6 +244,17 @@ def test_resolve_extras_env_overrides_config(isolated_cwd, monkeypatch):
 def test_resolve_extras_env_supports_multiple(isolated_cwd, monkeypatch):
     monkeypatch.setenv("UV_EXTRAS", "postgres,ollama")
     assert detect.resolve_extras() == ["postgres", "ollama"]
+
+
+def test_resolve_extras_detects_redis_url_env_without_config(isolated_cwd, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
+    assert detect.resolve_extras() == ["redis"]
+
+
+def test_resolve_extras_combines_uv_extras_with_redis_url_env(isolated_cwd, monkeypatch):
+    monkeypatch.setenv("UV_EXTRAS", "postgres")
+    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
+    assert detect.resolve_extras() == ["postgres", "redis"]
 
 
 def test_resolve_extras_falls_back_to_config(isolated_cwd):

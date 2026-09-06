@@ -255,6 +255,33 @@ class TestResolveAttachments:
 
 
 class TestInboundFileIngestion:
+    def test_consumes_inline_channel_bytes_without_exposing_them_downstream(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        msg = InboundMessage(
+            channel_name="telegram",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachment",
+            files=[{"type": "file", "filename": "report.pdf", "_content": b"pdf bytes"}],
+        )
+
+        with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir):
+            result = _run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert result == [
+            {
+                "filename": "report.pdf",
+                "size": len(b"pdf bytes"),
+                "path": "/mnt/user-data/uploads/report.pdf",
+                "is_image": False,
+            }
+        ]
+        assert (uploads_dir / "report.pdf").read_bytes() == b"pdf bytes"
+        assert "_content" not in msg.files[0]
+
     def test_rejects_preexisting_symlink_destination(self, tmp_path):
         from app.channels import manager
 

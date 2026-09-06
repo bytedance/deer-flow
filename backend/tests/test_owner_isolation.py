@@ -164,8 +164,8 @@ async def test_runs_cross_user_isolation(tmp_path):
         repo = RunRepository(get_session_factory())
 
         with _as_user(USER_A):
-            await repo.put("run-a1", thread_id="t-alpha")
-            await repo.put("run-a2", thread_id="t-alpha")
+            await repo.put("run-a1", thread_id="t-alpha", status="success")
+            await repo.put("run-a2", thread_id="t-alpha", status="pending")
 
         with _as_user(USER_B):
             await repo.put("run-b1", thread_id="t-beta")

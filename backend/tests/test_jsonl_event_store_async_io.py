@@ -10,6 +10,7 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import logging
 import tempfile
 from pathlib import Path
 
@@ -88,7 +89,7 @@ async def test_concurrent_puts_different_threads_independent_seqs():
 
 
 # ---------------------------------------------------------------------------
-# put_batch: delegates to put() and preserves order
+# put_batch: assigns monotonic seqs and preserves per-run files
 # ---------------------------------------------------------------------------
 
 
@@ -101,6 +102,24 @@ async def test_put_batch_seqs_are_monotonic():
     seqs = [r["seq"] for r in results]
     assert seqs == sorted(seqs)
     assert len(set(seqs)) == 5
+
+
+@pytest.mark.anyio
+async def test_put_batch_writes_mixed_run_ids_to_their_run_files():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(Path(tmp))
+        events = [
+            {"thread_id": "t1", "run_id": "r1", "event_type": "human_message", "category": "message", "content": "r1-first"},
+            {"thread_id": "t1", "run_id": "r2", "event_type": "human_message", "category": "message", "content": "r2-only"},
+            {"thread_id": "t1", "run_id": "r1", "event_type": "ai_message", "category": "message", "content": "r1-last"},
+        ]
+        records = await store.put_batch(events)
+        r1_messages = await store.list_messages_by_run("t1", "r1")
+        r2_messages = await store.list_messages_by_run("t1", "r2")
+
+    assert [(record["run_id"], record["seq"]) for record in records] == [("r1", 1), ("r2", 2), ("r1", 3)]
+    assert [message["content"] for message in r1_messages] == ["r1-first", "r1-last"]
+    assert [message["content"] for message in r2_messages] == ["r2-only"]
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +164,150 @@ async def test_put_offloads_write_via_to_thread():
             await store.put(thread_id="t1", run_id="r1", event_type="trace", category="trace", content="x")
 
     assert "_write_record" in calls, f"Expected asyncio.to_thread(_write_record, ...) — got: {calls}"
+
+
+# ---------------------------------------------------------------------------
+# put_batch failure rollback: a failed append must not leave partial records
+# so a caller re-buffering the batch on retry does not produce duplicates.
+# Regression for deer-flow PR #4082 (review feedback from willem-bd).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_put_batch_failure_rolls_back_no_partial_records(monkeypatch):
+    """A failed append is rolled back before the re-buffered batch is retried."""
+    import json
+
+    from deerflow.runtime.events.store import jsonl as jsonl_mod
+
+    real_append = jsonl_mod.JsonlRunEventStore._append_records
+
+    def failing_append(self, path, records):
+        # Write half the lines, then raise to simulate disk-full mid-batch.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mid = len(records) // 2
+        partial = "".join(json.dumps(r, default=str, ensure_ascii=False) + "\n" for r in records[:mid])
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(partial)
+        raise OSError("simulated mid-batch write failure")
+
+    monkeypatch.setattr(jsonl_mod.JsonlRunEventStore, "_append_records", failing_append)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(Path(tmp))
+        events = [
+            {
+                "thread_id": "t1",
+                "run_id": "r1",
+                "event_type": "trace",
+                "category": "trace",
+                "content": f"event-{i}",
+            }
+            for i in range(4)
+        ]
+        # First attempt — fails after partial output; expect raise. The
+        # in-memory seq counter is advanced because reservation happens under
+        # the lock, but the partial file contents must be rolled back.
+        with pytest.raises(OSError):
+            await store.put_batch(events)
+
+        # Retry the full batch with the real append, matching worker.py's
+        # re-buffer path. Verify persisted contents below, not only return
+        # values, so a duplicate or partial disk write cannot pass unnoticed.
+        monkeypatch.setattr(jsonl_mod.JsonlRunEventStore, "_append_records", real_append)
+        records = await store.put_batch(events)
+        persisted_events = await store.list_events("t1", "r1")
+
+    # The batch succeeded on retry, every event ended up exactly once on disk,
+    # and seqs are still strictly monotonic.
+    assert len(records) == 4, f"Expected 4 records, got {len(records)}"
+    seqs = [r["seq"] for r in records]
+    assert seqs == sorted(seqs) and len(set(seqs)) == 4, f"seqs not unique monotonic: {seqs}"
+    assert len(persisted_events) == 4
+    assert [event["content"] for event in persisted_events] == [f"event-{i}" for i in range(4)]
+    assert [event["seq"] for event in persisted_events] == seqs
+
+
+@pytest.mark.anyio
+async def test_mixed_run_batch_failure_restores_all_run_files(monkeypatch):
+    """A failed mixed-run append restores prior bytes in every touched file."""
+    from deerflow.runtime.events.store import jsonl as jsonl_mod
+
+    real_append = jsonl_mod.JsonlRunEventStore._append_records
+    append_calls = 0
+
+    def failing_append(self, path, records):
+        nonlocal append_calls
+        append_calls += 1
+        if append_calls == 2:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("partial\n")
+            raise OSError("simulated second-run write failure")
+        real_append(self, path, records)
+
+    monkeypatch.setattr(jsonl_mod.JsonlRunEventStore, "_append_records", failing_append)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(Path(tmp))
+        await store.put(thread_id="t1", run_id="r1", event_type="trace", category="trace", content="existing")
+        r1_path = store._run_file("t1", "r1")
+        r2_path = store._run_file("t1", "r2")
+        original_r1 = r1_path.read_bytes()
+
+        events = [
+            {"thread_id": "t1", "run_id": "r1", "event_type": "trace", "category": "trace", "content": "new-r1"},
+            {"thread_id": "t1", "run_id": "r2", "event_type": "trace", "category": "trace", "content": "new-r2"},
+        ]
+        with pytest.raises(OSError, match="second-run"):
+            await store.put_batch(events)
+
+        assert r1_path.read_bytes() == original_r1
+        assert not r2_path.exists()
+        assert [event["content"] for event in await store.list_events("t1", "r1")] == ["existing"]
+        assert await store.list_events("t1", "r2") == []
+
+
+@pytest.mark.anyio
+async def test_mixed_run_batch_logs_error_when_rollback_fails(monkeypatch, caplog):
+    """A rollback failure must make possible retry duplicates visible to operators."""
+    from deerflow.runtime.events.store import jsonl as jsonl_mod
+
+    real_append = jsonl_mod.JsonlRunEventStore._append_records
+    real_unlink = Path.unlink
+    append_calls = 0
+
+    def failing_append(self, path, records):
+        nonlocal append_calls
+        append_calls += 1
+        if append_calls == 2:
+            real_append(self, path, records)
+            raise OSError("simulated second-run write failure")
+        real_append(self, path, records)
+
+    monkeypatch.setattr(jsonl_mod.JsonlRunEventStore, "_append_records", failing_append)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(Path(tmp))
+        r2_path = store._run_file("t1", "r2")
+
+        def failing_unlink(path, missing_ok=False):
+            if path == r2_path:
+                raise OSError("simulated rollback failure")
+            return real_unlink(path, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+        events = [
+            {"thread_id": "t1", "run_id": "r1", "event_type": "trace", "category": "trace"},
+            {"thread_id": "t1", "run_id": "r2", "event_type": "trace", "category": "trace"},
+        ]
+        with caplog.at_level(logging.ERROR, logger=jsonl_mod.__name__), pytest.raises(OSError, match="second-run"):
+            await store.put_batch(events)
+
+        assert r2_path.exists()
+
+    rollback_errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert any("duplicate records" in record.getMessage() for record in rollback_errors)
 
 
 # ---------------------------------------------------------------------------

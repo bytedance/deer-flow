@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { enableSkill } from "./api";
+import { enableSkill, SkillRequestError, uploadSkillArchive } from "./api";
 
 import { loadSkills } from ".";
 
@@ -8,6 +8,7 @@ export function useSkills() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["skills"],
     queryFn: () => loadSkills(),
+    retry: (count, err) => !(err instanceof SkillRequestError) && count < 3,
   });
   return { skills: data ?? [], isLoading, error };
 }
@@ -26,6 +27,18 @@ export function useEnableSkill() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["skills"] });
+    },
+  });
+}
+
+export function useUploadSkillArchive() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: uploadSkillArchive,
+    onSuccess: (result) => {
+      if (result.success) {
+        void queryClient.invalidateQueries({ queryKey: ["skills"] });
+      }
     },
   });
 }

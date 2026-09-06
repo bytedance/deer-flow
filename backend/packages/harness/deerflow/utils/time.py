@@ -15,9 +15,29 @@ records that historically stored ``str(time.time())`` floats.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-__all__ = ["coerce_iso", "now_iso"]
+__all__ = ["coerce_iso", "is_lease_expired", "now_iso"]
+
+
+def is_lease_expired(lease_expires_at: str | None, *, grace_seconds: int) -> bool:
+    """Return ``True`` when *lease_expires_at* has elapsed past grace.
+
+    A NULL lease (pre-ownership data) is always considered expired so
+    take-over (cancel from a non-owning worker) can reclaim it in the
+    same way reconciliation does.  Unparseable timestamps are also
+    treated as expired (defence in depth).
+    """
+    if lease_expires_at is None:
+        return True
+    try:
+        dt = datetime.fromisoformat(lease_expires_at)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        return True
+    return dt < datetime.now(UTC) - timedelta(seconds=grace_seconds)
+
 
 _UNIX_TIMESTAMP_PATTERN = re.compile(r"^\d{10}(?:\.\d+)?$")
 """Matches the unix-timestamp string shape historically written by

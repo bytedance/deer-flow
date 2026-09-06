@@ -1,12 +1,18 @@
+import { usePathname } from "next/navigation";
 import {
   createContext,
+  type Dispatch,
   useCallback,
   useContext,
+  useEffect,
+  useRef,
   useState,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 
 import { useSidebar } from "@/components/ui/sidebar";
+import type { ArtifactDraftState } from "@/core/artifacts/editing";
 import { env } from "@/env";
 
 export interface ArtifactsContextType {
@@ -21,11 +27,56 @@ export interface ArtifactsContextType {
   open: boolean;
   autoOpen: boolean;
   setOpen: (open: boolean) => void;
+
+  drafts: Record<string, ArtifactDraftState>;
+  setDrafts: Dispatch<SetStateAction<Record<string, ArtifactDraftState>>>;
+  editingPath: string | null;
+  setEditingPath: Dispatch<SetStateAction<string | null>>;
 }
 
 const ArtifactsContext = createContext<ArtifactsContextType | undefined>(
   undefined,
 );
+
+const ARTIFACTS_STORAGE_PREFIX = "deerflow:artifacts:v1";
+
+type PersistedArtifactsState = {
+  artifacts: string[];
+  selectedArtifact: string | null;
+  open: boolean;
+};
+
+function storageKey(pathname: string) {
+  return `${ARTIFACTS_STORAGE_PREFIX}:${encodeURIComponent(pathname)}`;
+}
+
+function readPersistedState(pathname: string): PersistedArtifactsState | null {
+  try {
+    const raw = window.sessionStorage.getItem(storageKey(pathname));
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<PersistedArtifactsState>;
+    if (
+      !Array.isArray(parsed.artifacts) ||
+      !parsed.artifacts.every((artifact) => typeof artifact === "string") ||
+      !(
+        parsed.selectedArtifact === null ||
+        typeof parsed.selectedArtifact === "string"
+      ) ||
+      typeof parsed.open !== "boolean"
+    ) {
+      return null;
+    }
+    return {
+      artifacts: parsed.artifacts,
+      selectedArtifact: parsed.selectedArtifact,
+      open: parsed.open,
+    };
+  } catch {
+    return null;
+  }
+}
 
 interface ArtifactsProviderProps {
   children: ReactNode;
@@ -39,7 +90,55 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
   const [autoOpen, setAutoOpen] = useState(true);
+  const [drafts, setDrafts] = useState<Record<string, ArtifactDraftState>>({});
+  const [editingPath, setEditingPath] = useState<string | null>(null);
   const { setOpen: setSidebarOpen } = useSidebar();
+  const pathname = usePathname();
+  const hydratedPathRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!pathname) {
+      return;
+    }
+
+    const persisted = readPersistedState(pathname);
+    setArtifacts(persisted?.artifacts ?? []);
+    setSelectedArtifact(persisted?.selectedArtifact ?? null);
+    setOpen(persisted?.open ?? env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true");
+    setAutoOpen(true);
+    setAutoSelect(!persisted?.selectedArtifact);
+    setDrafts({});
+    setEditingPath(null);
+    hydratedPathRef.current = pathname;
+  }, [pathname]);
+
+  useEffect(() => {
+    const hasUnsavedDrafts = Object.values(drafts).some(
+      (draft) => draft.draftContent !== draft.baselineContent,
+    );
+    if (!hasUnsavedDrafts) {
+      return;
+    }
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [drafts]);
+
+  useEffect(() => {
+    if (!pathname || hydratedPathRef.current !== pathname) {
+      return;
+    }
+    try {
+      window.sessionStorage.setItem(
+        storageKey(pathname),
+        JSON.stringify({ artifacts, selectedArtifact, open }),
+      );
+    } catch {
+      // Browser storage can be disabled or full; panel state must keep working.
+    }
+  }, [artifacts, open, pathname, selectedArtifact]);
 
   const select = useCallback(
     (artifact: string, autoSelect = false) => {
@@ -78,6 +177,11 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     selectedArtifact,
     select,
     deselect,
+
+    drafts,
+    setDrafts,
+    editingPath,
+    setEditingPath,
   };
 
   return (

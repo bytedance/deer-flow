@@ -291,9 +291,9 @@ This document describes the detailed operating steps for each phase of the DeerF
 #### 4.2.2 Start Docker Services
 
 **Steps**:
-1. Run `make docker-start`
+1. Run `make up`
 
-**Description**: This command builds and starts all required Docker containers.
+**Description**: This command builds and starts all required Docker containers in production.
 
 ---
 
@@ -361,6 +361,22 @@ curl http://localhost:2026/health
 
 ---
 
+#### 5.1.5 Frontend Route Smoke Check
+
+**Objective**: Verify key `/workspace/*` frontend routes render correctly.
+
+**Steps**:
+1. Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh`.
+2. The script auto-detects whether authentication (`DEER_FLOW_AUTH_DISABLED`) is enabled.
+3. When auth is on, the script registers / logs in a smoke-test user (`smoke-test@deerflow.dev` by default) and passes the session cookie so the real `/workspace/*` pages are verified — not the login redirect.
+4. When auth is off, the routes are checked anonymously as before.
+
+**Customisation**:
+- `SMOKE_TEST_EMAIL` — email for the test account (default: `smoke-test@deerflow.dev`).
+- `SMOKE_TEST_PASSWORD` — password for the test account (default: `SmokeTest123!`).
+
+---
+
 ### 5.2 Docker Mode Health Check (When Using Docker)
 
 #### 5.2.1 Check Container Status
@@ -408,6 +424,22 @@ curl http://localhost:2026/health
 **Steps**:
 1. Visit `http://localhost:2026/api/langgraph/assistants/lead_agent` to verify Gateway's LangGraph-compatible API route is reachable.
 2. A `401` response is acceptable when authentication is enabled and no session cookie is provided.
+
+---
+
+#### 5.2.5 Frontend Route Smoke Check
+
+**Objective**: Verify key `/workspace/*` frontend routes render correctly.
+
+**Steps**:
+1. Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh`.
+2. The script auto-detects whether authentication (`DEER_FLOW_AUTH_DISABLED`) is enabled.
+3. When auth is on, the script registers / logs in a smoke-test user (`smoke-test@deerflow.dev` by default) and passes the session cookie so the real `/workspace/*` pages are verified — not the login redirect.
+4. When auth is off, the routes are checked anonymously as before.
+
+**Customisation**:
+- `SMOKE_TEST_EMAIL` — email for the test account (default: `smoke-test@deerflow.dev`).
+- `SMOKE_TEST_PASSWORD` — password for the test account (default: `SmokeTest123!`).
 
 ---
 

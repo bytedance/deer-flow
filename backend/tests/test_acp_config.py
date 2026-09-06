@@ -105,6 +105,38 @@ def test_acp_agent_config_auto_approve_permissions():
     assert cfg.auto_approve_permissions is True
 
 
+def test_acp_agent_config_timeout_seconds_default():
+    """Default mirrors subagents.timeout_seconds (1800s = 30 min) so an ACP agent
+    subprocess that hangs after initialize/new_session cannot block the tool call
+    (and therefore the whole agent turn) indefinitely."""
+    cfg = ACPAgentConfig(command="my-agent", description="desc")
+    assert cfg.timeout_seconds == 1800
+
+
+def test_acp_agent_config_timeout_seconds_override():
+    cfg = ACPAgentConfig(command="my-agent", description="desc", timeout_seconds=45)
+    assert cfg.timeout_seconds == 45
+
+
+def test_acp_agent_config_timeout_seconds_rejects_non_positive():
+    with pytest.raises(ValidationError):
+        ACPAgentConfig(command="my-agent", description="desc", timeout_seconds=0)
+
+
+def test_load_acp_config_preserves_timeout_seconds():
+    load_acp_config_from_dict(
+        {
+            "codex": {
+                "command": "codex-acp",
+                "args": [],
+                "description": "Codex CLI",
+                "timeout_seconds": 60,
+            }
+        }
+    )
+    assert get_acp_agents()["codex"].timeout_seconds == 60
+
+
 def test_acp_agent_config_missing_command_raises():
     with pytest.raises(ValidationError):
         ACPAgentConfig(description="No command provided")

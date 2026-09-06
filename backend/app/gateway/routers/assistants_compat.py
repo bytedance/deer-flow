@@ -9,6 +9,7 @@ initialization requirements (``assistants.search()`` and ``assistants.get()``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -91,7 +92,9 @@ async def search_assistants(body: AssistantSearchRequest | None = None) -> list[
 
     Returns all registered assistants (lead_agent + custom agents from config).
     """
-    assistants = _list_assistants()
+    # _list_assistants reads custom agents through the sync agent store (file IO
+    # or a DB round trip), so keep it off the event loop.
+    assistants = await asyncio.to_thread(_list_assistants)
 
     if body and body.graph_id:
         assistants = [a for a in assistants if a.graph_id == body.graph_id]
@@ -106,7 +109,7 @@ async def search_assistants(body: AssistantSearchRequest | None = None) -> list[
 @router.get("/{assistant_id}", response_model=AssistantResponse)
 async def get_assistant_compat(assistant_id: str) -> AssistantResponse:
     """Get an assistant by ID."""
-    for a in _list_assistants():
+    for a in await asyncio.to_thread(_list_assistants):
         if a.assistant_id == assistant_id:
             return a
     raise HTTPException(status_code=404, detail=f"Assistant {assistant_id} not found")
@@ -119,7 +122,7 @@ async def get_assistant_graph(assistant_id: str) -> dict:
     Returns a minimal graph description. Full graph introspection is
     not supported in the Gateway — this stub satisfies SDK validation.
     """
-    found = any(a.assistant_id == assistant_id for a in _list_assistants())
+    found = any(a.assistant_id == assistant_id for a in await asyncio.to_thread(_list_assistants))
     if not found:
         raise HTTPException(status_code=404, detail=f"Assistant {assistant_id} not found")
 
@@ -136,7 +139,7 @@ async def get_assistant_schemas(assistant_id: str) -> dict:
 
     Returns empty schemas — full introspection not supported in Gateway.
     """
-    found = any(a.assistant_id == assistant_id for a in _list_assistants())
+    found = any(a.assistant_id == assistant_id for a in await asyncio.to_thread(_list_assistants))
     if not found:
         raise HTTPException(status_code=404, detail=f"Assistant {assistant_id} not found")
 

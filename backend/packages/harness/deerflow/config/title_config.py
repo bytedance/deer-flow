@@ -24,11 +24,11 @@ class TitleConfig(BaseModel):
     )
     model_name: str | None = Field(
         default=None,
-        description="Model name to use for title generation (None = use default model)",
+        description="Model name to use for LLM title generation (None = use local fallback title)",
     )
     prompt_template: str = Field(
         default=("Generate a concise title (max {max_words} words) for this conversation.\nUser: {user_msg}\nAssistant: {assistant_msg}\n\nReturn ONLY the title, no quotes, no explanation."),
-        description="Prompt template for title generation",
+        description="Prompt template for LLM title generation when model_name is set",
     )
 
 

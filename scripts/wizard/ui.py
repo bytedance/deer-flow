@@ -224,6 +224,49 @@ def ask_choice(prompt: str, options: list[str], default: int | None = None) -> i
     return _ask_choice_with_numbers(prompt, options, default=default)
 
 
+def ask_multi_choice(prompt: str, options: list[str], default: list[int] | None = None) -> list[int]:
+    """Present a numbered multi-select menu and return 0-based indexes."""
+    has_default = default is not None
+    default_indexes = list(default or [])
+    for i, opt in enumerate(options, 1):
+        marker = f" {green('*')}" if has_default and i - 1 in default_indexes else "  "
+        print(f"{marker} {i}. {opt}")
+    print()
+
+    suffix = ""
+    if default_indexes:
+        suffix = f" [{','.join(str(idx + 1) for idx in default_indexes)}]"
+    elif has_default:
+        suffix = " [none]"
+
+    while True:
+        raw = input(f"{prompt}{suffix}: ").strip().lower()
+        if raw == "" and has_default:
+            return default_indexes
+        if raw in {"none", "no", "n", "skip"}:
+            return []
+        if raw == "all":
+            return list(range(len(options)))
+
+        parts = [part.strip() for part in raw.replace(" ", ",").split(",") if part.strip()]
+        selected: list[int] = []
+        valid = bool(parts)
+        for part in parts:
+            if not part.isdigit():
+                valid = False
+                break
+            idx = int(part) - 1
+            if not 0 <= idx < len(options):
+                valid = False
+                break
+            if idx not in selected:
+                selected.append(idx)
+        if valid:
+            return selected
+
+        print(f"  Enter comma-separated numbers between 1 and {len(options)}, 'all', or 'none'.")
+
+
 def ask_text(prompt: str, default: str = "", required: bool = False) -> str:
     """Ask for a text value, returning default if the user presses Enter."""
     suffix = f" [{default}]" if default else ""

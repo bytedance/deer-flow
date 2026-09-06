@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -229,45 +230,54 @@ class TestBuildCompactedMessages:
         assert "2500 chars" in raw_patched["function"]["args"]
 
 
-class _CapturingSummarizationMiddleware(DeerFlowSummarizationMiddleware):
-    def __init__(self):
-        super().__init__(model=MagicMock(), trigger=("messages", 1), keep=("messages", 1))
-        self.summary_messages: list | None = None
-
-    def _should_summarize(self, messages, total_tokens):  # noqa: ANN001
-        return True
-
-    def _determine_cutoff_index(self, messages):  # noqa: ANN001
-        return len(messages)
-
-    def _partition_with_skill_rescue(self, messages, cutoff_index):  # noqa: ANN001
-        return messages[:cutoff_index], messages[cutoff_index:]
-
-    def _create_summary(self, messages_to_summarize):  # noqa: ANN001
-        self.summary_messages = messages_to_summarize
-        return "summary"
-
-
-def test_summarization_uses_compacted_model_bound_view_without_mutating_state():
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync_auto", "async_auto", "sync_manual", "async_manual"])
+async def test_summarization_uses_compacted_model_bound_view_without_mutating_state(mode):
     large_content = "x" * 3000
     original_ai = _ai_with_tool_calls([_write_file_tool_call(content=large_content)])
     messages = [
         HumanMessage(content="please write a report"),
         original_ai,
         _tool_msg("call_write"),
+        HumanMessage(content="now review the report"),
     ]
-    mw = _CapturingSummarizationMiddleware()
-    runtime = MagicMock()
-    runtime.context = {}
+    model = MagicMock()
+    model.invoke.return_value = AIMessage(content="summary")
+    model.ainvoke = AsyncMock(return_value=AIMessage(content="summary"))
+    model.with_config.return_value = model
+    events = []
+    mw = DeerFlowSummarizationMiddleware(
+        model=model,
+        trigger=("messages", 100 if "manual" in mode else 1),
+        keep=("messages", 1),
+        token_counter=len,
+        before_summarization=[events.append],
+    )
+    runtime = SimpleNamespace(context={})
+    state = {"messages": messages, "summary_text": "earlier summary"}
 
-    result = mw.before_model({"messages": messages}, runtime)
+    if mode == "sync_auto":
+        result = mw.before_model(state, runtime)
+    elif mode == "async_auto":
+        result = await mw.abefore_model(state, runtime)
+    elif mode == "sync_manual":
+        result = mw.compact_state(state, runtime, force=True)
+    else:
+        result = await mw.acompact_state(state, runtime, force=True)
 
     assert result is not None
-    assert mw.summary_messages is not None
-    summary_ai = mw.summary_messages[1]
-    assert isinstance(summary_ai, AIMessage)
-    assert summary_ai.tool_calls[0]["args"]["content"] == "[write_file content omitted in model context: 3000 chars]"
+    invocation = model.ainvoke if mode.startswith("async") else model.invoke
+    invocation.assert_called_once()
+    prompt = invocation.call_args.args[0]
+    assert large_content not in prompt
+    assert "[write_file content omitted in model context: 3000 chars]" in prompt
+    assert "earlier summary" in prompt
+    assert len(events) == 1
+    # Hooks and compaction bookkeeping retain the original source messages.
+    assert events[0].messages_to_summarize[1] is original_ai
+    assert events[0].preserved_messages[-1] is messages[-1]
     assert original_ai.tool_calls[0]["args"]["content"] == large_content
+    assert state["summary_text"] == "earlier summary"
 
 
 class TestWrapModelCall:

@@ -1,12 +1,23 @@
 "use client";
 
-import { createContext, useContext, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
 
 import type { Locale } from "@/core/i18n";
+import type { Translations } from "@/core/i18n/locales";
+
+import { clientTranslations } from "./client-translations";
 
 export interface I18nContextType {
   locale: Locale;
   setLocale: (locale: Locale) => void;
+  t: Translations;
 }
 
 export const I18nContext = createContext<I18nContextType | null>(null);
@@ -19,14 +30,21 @@ export function I18nProvider({
   initialLocale: Locale;
 }) {
   const [locale, setLocale] = useState<Locale>(initialLocale);
+  const [t, setTranslations] = useState<Translations>(
+    clientTranslations[initialLocale],
+  );
 
-  const handleSetLocale = (newLocale: Locale) => {
+  const handleSetLocale = useCallback((newLocale: Locale) => {
     setLocale(newLocale);
-    document.cookie = `locale=${newLocale}; path=/; max-age=31536000`;
-  };
+    setTranslations(clientTranslations[newLocale]);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
 
   return (
-    <I18nContext.Provider value={{ locale, setLocale: handleSetLocale }}>
+    <I18nContext.Provider value={{ locale, setLocale: handleSetLocale, t }}>
       {children}
     </I18nContext.Provider>
   );

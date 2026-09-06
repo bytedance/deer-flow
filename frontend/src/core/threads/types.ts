@@ -2,11 +2,39 @@ import type { Message, Thread } from "@langchain/langgraph-sdk";
 
 import type { Todo } from "../todos";
 
+export interface GoalState {
+  objective: string;
+  status: "active";
+  created_at: string;
+  updated_at: string;
+  continuation_count: number;
+  max_continuations: number;
+  no_progress_count: number;
+  max_no_progress_continuations: number;
+  last_evaluation?: {
+    satisfied: boolean;
+    blocker:
+      | "none"
+      | "missing_evidence"
+      | "needs_user_input"
+      | "run_failed"
+      | "external_wait"
+      | "goal_not_met_yet";
+    reason: string;
+    evidence_summary?: string;
+    run_id?: string;
+    evaluated_at?: string;
+    progress_key?: string;
+    stand_down_reason?: string;
+  };
+}
+
 export interface AgentThreadState extends Record<string, unknown> {
   title: string;
   messages: Message[];
-  artifacts: string[];
+  artifacts?: string[];
   todos?: Todo[];
+  goal?: GoalState | null;
 }
 
 export interface AgentThreadContext extends Record<string, unknown> {
@@ -25,11 +53,19 @@ export interface AgentThread extends Thread<AgentThreadState> {
 
 export interface RunMessage {
   run_id: string;
+  seq: number;
   content: Message;
   metadata: {
     caller: string;
+    [key: string]: unknown;
   };
   created_at: string;
+}
+
+export interface ThreadContextUsage {
+  token_count: number;
+  max_context_tokens: number | null;
+  percentage: number | null;
 }
 
 export interface ThreadTokenUsageResponse {
@@ -44,4 +80,5 @@ export interface ThreadTokenUsageResponse {
     subagent: number;
     middleware: number;
   };
+  context_usage?: ThreadContextUsage | null;
 }

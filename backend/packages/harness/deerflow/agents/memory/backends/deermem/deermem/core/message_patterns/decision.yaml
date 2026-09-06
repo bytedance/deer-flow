@@ -1,0 +1,27 @@
+# Decision signal patterns for detect_signals (message_processing).
+#
+# Detects that the user made a decision / chose an option -- a high-value "what
+# to remember" signal. Matched via ``search`` over the last 6 human turns. Keep
+# these narrow to avoid false positives.
+#
+# Each list entry is either:
+#   - a string                       -> compiled with no flags
+#   - a mapping {pattern, flags}     -> flags is a list of names: "ignorecase"
+#
+# In single-quoted strings backslashes are literal (regex \b stays \b); double
+# '' for a literal single quote (apostrophe).
+
+- pattern: '\blet.s (?:go with|use|pick|choose)\b'
+  flags: [ignorecase]
+- pattern: '\bI.ll (?:go with|use|pick|choose)\b'
+  flags: [ignorecase]
+- pattern: '\bwe (?:should|will) (?:go with|use|pick|choose)\b'
+  flags: [ignorecase]
+- pattern: '\bI (?:decide|chose|selected) to\b'
+  flags: [ignorecase]
+- '就用'
+- '决定用'
+- '决定采用'
+- '我们选'
+- '我选'
+- '就采用'

@@ -202,6 +202,27 @@ class FeedbackRepository:
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
 
+    async def list_by_run_ids(
+        self,
+        thread_id: str,
+        run_ids: set[str],
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict[str, dict]:
+        """Return feedback for only the selected runs in one thread."""
+        if not run_ids:
+            return {}
+        resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.list_by_run_ids")
+        stmt = select(FeedbackRow).where(
+            FeedbackRow.thread_id == thread_id,
+            FeedbackRow.run_id.in_(run_ids),
+        )
+        if resolved_user_id is not None:
+            stmt = stmt.where(FeedbackRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
+
     async def aggregate_by_run(self, thread_id: str, run_id: str) -> dict:
         """Aggregate feedback stats for a run using database-side counting."""
         stmt = select(

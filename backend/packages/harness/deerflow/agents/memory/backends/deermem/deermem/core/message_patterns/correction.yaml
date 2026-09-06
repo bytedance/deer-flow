@@ -1,0 +1,26 @@
+# Correction signal patterns for detect_correction (message_processing).
+#
+# Each list entry is either:
+#   - a string                       -> compiled with no flags
+#   - a mapping {pattern, flags}     -> flags is a list of names: "ignorecase"
+#
+# In single-quoted strings backslashes are literal (regex \b stays \b); double
+# '' for a literal single quote. Default content mirrors the pre-externalization
+# hardcoded _CORRECTION_PATTERNS (en+zh) so zero-config behavior is unchanged.
+# Add languages / business phrases here without touching code.
+
+- pattern: '\bthat(?:''s| is) (?:wrong|incorrect)\b'
+  flags: [ignorecase]
+- pattern: '\byou misunderstood\b'
+  flags: [ignorecase]
+- pattern: '\btry again\b'
+  flags: [ignorecase]
+- pattern: '\bredo\b'
+  flags: [ignorecase]
+- '不对'
+- '你理解错了'
+- '你理解有误'
+- '重试'
+- '重新来'
+- '换一种'
+- '改用'

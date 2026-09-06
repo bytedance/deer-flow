@@ -4,22 +4,124 @@ from pathlib import Path
 
 import yaml
 
-from .types import SKILL_MD_FILE, Skill, SkillCategory
+from .types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
 
 logger = logging.getLogger(__name__)
 
+# Valid POSIX environment-variable name.
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PORTABLE_TOOL_ALIASES = {
+    "Bash": "bash",
+    "Edit": "str_replace",
+    "Glob": "glob",
+    "Grep": "grep",
+    "Read": "read_file",
+    "WebFetch": "web_fetch",
+    "WebSearch": "web_search",
+    "Write": "write_file",
+}
 
-def parse_allowed_tools(raw: object, skill_file: Path) -> list[str] | None:
+
+def _normalize_unscoped_allowed_tool(tool_name: str) -> str:
+    """Map known portable aliases while preserving unknown runtime names."""
+    if "(" in tool_name or ")" in tool_name:
+        return tool_name
+    return _PORTABLE_TOOL_ALIASES.get(tool_name, tool_name)
+
+
+def _split_portable_allowed_tools(raw: str, skill_file: Path) -> list[str]:
+    """Split a portable scalar while preserving quoted parenthesized patterns."""
+    tokens: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote: str | None = None
+    escaped = False
+
+    for char in raw:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            current.append(char)
+            continue
+        if char.isspace() and depth == 0:
+            if current:
+                tokens.append("".join(current))
+                current = []
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                raise ValueError(f"allowed-tools in {skill_file} contains an unmatched closing parenthesis")
+            depth -= 1
+        current.append(char)
+
+    if quote is not None:
+        raise ValueError(f"allowed-tools in {skill_file} contains an unclosed quote")
+    if depth:
+        raise ValueError(f"allowed-tools in {skill_file} contains an unclosed parenthesized pattern")
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
+def _format_yaml_error(skill_file: Path, exc: yaml.YAMLError, source: str) -> str:
+    """Render a developer-friendly explanation of a YAML front-matter error."""
+
+    lines = [f"Invalid YAML front-matter in {skill_file}: {exc}"]
+
+    mark = getattr(exc, "problem_mark", None)
+    source_lines = source.splitlines()
+    if mark is not None and 0 <= mark.line < len(source_lines):
+        offending = source_lines[mark.line]
+
+        # mark.line is 0-based within the front-matter body; +1 makes it
+        # 1-based, +1 more accounts for the leading `---` fence that the
+        # front-matter regex strips before yaml.safe_load sees it.
+        file_line_number = mark.line + 2
+        lines.append(f"  line {file_line_number}: {offending}")
+
+        if getattr(exc, "problem", "") == "mapping values are not allowed here" and ":" in offending:
+            key, _, value = offending.partition(":")
+            value = value.strip()
+            if value and value[0] not in {'"', "'", "|", ">", "[", "{"}:
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                lines.append(f'  hint: values containing ":" must be quoted, e.g. {key}: "{escaped}"')
+
+    return "\n".join(lines)
+
+
+def parse_allowed_tools(raw: object, skill_file: Path) -> tuple[str, ...] | None:
     """Parse the optional allowed-tools frontmatter field.
 
-    Returns None when the field is omitted. Returns a list when the field is a
-    YAML sequence of strings, including an empty list for explicit no-tool
-    skills. Raises ValueError for malformed values.
+    Returns None when the field is omitted. Accepts the Agent Skills standard
+    space-separated string or a YAML sequence of strings. Known portable client
+    aliases normalize to DeerFlow runtime names. Unknown names and
+    command-scoped patterns remain literal because DeerFlow does not inspect
+    tool arguments. Returns an empty tuple for an explicit empty value. Raises
+    ValueError for malformed values.
     """
     if raw is None:
         return None
-    if not isinstance(raw, list):
-        raise ValueError(f"allowed-tools in {skill_file} must be a list of strings")
+    if isinstance(raw, str):
+        raw = _split_portable_allowed_tools(raw, skill_file)
+        normalize_tools = True
+    elif not isinstance(raw, list):
+        raise ValueError(f"allowed-tools in {skill_file} must be a space-separated string or list of strings")
+    else:
+        normalize_tools = False
 
     allowed_tools: list[str] = []
     for item in raw:
@@ -28,8 +130,61 @@ def parse_allowed_tools(raw: object, skill_file: Path) -> list[str] | None:
         tool_name = item.strip()
         if not tool_name:
             raise ValueError(f"allowed-tools in {skill_file} cannot contain empty tool names")
-        allowed_tools.append(tool_name)
-    return allowed_tools
+        allowed_tools.append(_normalize_unscoped_allowed_tool(tool_name) if normalize_tools else tool_name)
+    return tuple(allowed_tools)
+
+
+def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequirement, ...]:
+    """Parse the optional required-secrets frontmatter field (issue #3861).
+
+    Accepts a YAML sequence whose items are either a string (the secret / env
+    variable name) or a mapping (``{name, optional}``). Returns an empty tuple
+    when the field is omitted. Entries whose name is missing or is not a valid
+    environment-variable name are dropped with a warning, so one malformed
+    declaration does not invalidate the whole skill. Raises ValueError only when
+    the field is present but is not a list.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"required-secrets in {skill_file} must be a list")
+
+    secrets: list[SecretRequirement] = []
+    seen: set[str] = set()
+    for item in raw:
+        if isinstance(item, str):
+            name, optional = item.strip(), False
+        elif isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            optional = bool(item.get("optional", False))
+        else:
+            logger.warning("Ignoring malformed required-secrets entry in %s: %r", skill_file, item)
+            continue
+
+        if not _ENV_VAR_NAME_RE.match(name):
+            logger.warning("Ignoring required-secrets entry with invalid env var name in %s: %r", skill_file, name)
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        secrets.append(SecretRequirement(name=name, optional=optional))
+    return tuple(secrets)
+
+
+def parse_secrets_autonomous(raw: object, skill_file: Path) -> bool:
+    """Parse the optional ``secrets-autonomous`` frontmatter field (issue #3914).
+
+    ``True`` (the default) lets declared secrets bind while the skill is
+    in-context via an autonomous model load; ``False`` restricts binding to
+    explicit ``/slash`` activation. A malformed (non-boolean) value fails
+    closed to ``False`` — the safer, less-injection direction.
+    """
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    logger.warning("Ignoring malformed secrets-autonomous value in %s: %r (autonomous binding disabled)", skill_file, raw)
+    return False
 
 
 def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None) -> Skill | None:
@@ -50,21 +205,19 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
     try:
         content = skill_file.read_text(encoding="utf-8")
 
-        # Extract YAML front-matter block between leading ``---`` fences.
-        front_matter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
+        # Keep parser diagnostics richer than the pure helper's host-path-free
+        # error string; tests and authoring UX depend on the line-specific hint.
+        front_matter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n?", content, re.DOTALL)
         if not front_matter_match:
             return None
-
         front_matter_text = front_matter_match.group(1)
-
         try:
             metadata = yaml.safe_load(front_matter_text)
         except yaml.YAMLError as exc:
-            logger.error("Invalid YAML front-matter in %s: %s", skill_file, exc)
+            logger.error("%s", _format_yaml_error(skill_file, exc, front_matter_text))
             return None
-
         if not isinstance(metadata, dict):
-            logger.error("Front-matter in %s is not a YAML mapping", skill_file)
+            logger.error("Invalid SKILL.md front-matter in %s: Frontmatter must be a YAML dictionary", skill_file)
             return None
 
         # Extract required fields.  Both must be non-empty strings.
@@ -93,6 +246,14 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
             logger.error("Invalid allowed-tools in %s: %s", skill_file, exc)
             return None
 
+        try:
+            required_secrets = parse_required_secrets(metadata.get("required-secrets"), skill_file)
+        except ValueError as exc:
+            logger.error("Invalid required-secrets in %s: %s", skill_file, exc)
+            return None
+
+        secrets_autonomous = parse_secrets_autonomous(metadata.get("secrets-autonomous"), skill_file)
+
         return Skill(
             name=name,
             description=description,
@@ -103,6 +264,8 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
             category=category,
             allowed_tools=allowed_tools,
             enabled=True,  # Actual state comes from the extensions config file.
+            required_secrets=required_secrets,
+            secrets_autonomous=secrets_autonomous,
         )
 
     except Exception:

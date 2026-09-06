@@ -1,0 +1,26 @@
+# Sample config for adopting DeerMem in another agent.
+# Copy backends/deermem/ into your agent, repoint the one ABC-contract import in
+# deer_mem.py to your vendored manager, then load this config + call
+# get_memory_manager(). Zero deer-flow code required. See README.md.
+manager_class: deermem
+backend_config:
+  storage_path: ~/.myagent/memory      # empty = $DEERMEM_DATA_DIR / ~/.deermem/
+  model:                               # memory-update LLM (empty = no LLM)
+    provider: openai                   # any langchain init_chat_model provider
+    model: gpt-4o-mini
+    api_key: ${OPENAI_API_KEY}
+    base_url: https://api.openai.com/v1
+  debounce_seconds: 30
+  max_facts: 100
+  fact_confidence_threshold: 0.7
+  max_injection_tokens: 2000
+  token_counting: tiktoken
+  guaranteed_categories:
+  - correction
+  guaranteed_token_budget: 500
+  staleness_review_enabled: true
+  staleness_age_days: 90
+  staleness_min_candidates: 3
+  staleness_max_removals_per_cycle: 10
+  staleness_protected_categories:
+  - correction

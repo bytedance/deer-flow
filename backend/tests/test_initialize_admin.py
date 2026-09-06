@@ -110,6 +110,21 @@ def test_initialize_register_does_not_block_initialization(client):
     assert resp.json()["system_role"] == "admin"
 
 
+def test_initialize_existing_regular_user_email_reports_email_conflict(client):
+    """With no admin, reusing a regular user's email is an email conflict, not initialized."""
+    client.post("/api/v1/auth/register", json={"email": "regular@example.com", "password": "Tr0ub4dor3a"})
+
+    resp = client.post(
+        "/api/v1/auth/initialize",
+        json={**_init_payload(), "email": "regular@example.com"},
+    )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["detail"]["code"] == "email_already_exists"
+    assert client.get("/api/v1/auth/setup-status").json()["needs_setup"] is True
+
+
 # ── Endpoint is public (no cookie required) ───────────────────────────────
 
 
@@ -162,7 +177,7 @@ def test_setup_status_after_initialization(client):
     assert resp.json()["needs_setup"] is False
 
 
-def test_setup_status_false_when_only_regular_user_exists(client):
+def test_setup_status_true_when_only_regular_user_exists(client):
     """setup-status returns needs_setup=True even when regular users exist (no admin)."""
     client.post("/api/v1/auth/register", json={"email": "regular@example.com", "password": "Tr0ub4dor3a"})
     resp = client.get("/api/v1/auth/setup-status")

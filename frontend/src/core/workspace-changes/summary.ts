@@ -1,0 +1,66 @@
+import type { WorkspaceChangeSummary, WorkspaceFileChange } from "./types";
+
+export type WorkspaceChangeLineClass =
+  | "addition"
+  | "context"
+  | "deletion"
+  | "hunk"
+  | "meta";
+
+export function getChangedFileCount(summary: WorkspaceChangeSummary) {
+  return (
+    summary.created +
+    summary.modified +
+    summary.deleted +
+    summary.symlink_created
+  );
+}
+
+export function getWorkspaceChangeBadgeLabel(summary: WorkspaceChangeSummary) {
+  const count = getChangedFileCount(summary);
+  return `${count} ${count === 1 ? "file" : "files"} changed +${summary.additions} -${summary.deletions}`;
+}
+
+export function getWorkspaceChangeLineClass(
+  line: string,
+): WorkspaceChangeLineClass {
+  // Unified-diff file headers are "+++ " / "--- " with a trailing space. A bare
+  // "+++"/"---" prefix would also match real content lines that begin with those
+  // sequences (e.g. an added line "+++foo"), styling them as meta by mistake.
+  if (line.startsWith("+++ ") || line.startsWith("--- ")) {
+    return "meta";
+  }
+  if (line.startsWith("@@")) {
+    return "hunk";
+  }
+  if (line.startsWith("+")) {
+    return "addition";
+  }
+  if (line.startsWith("-")) {
+    return "deletion";
+  }
+  return "context";
+}
+
+export function sortWorkspaceChanges(files: WorkspaceFileChange[]) {
+  // `symlink_created` shares modified's rank: it is a distinct change kind
+  // (a symlink replacing a file) that otherwise renders like a modification
+  // (see StatusIcon / statusLabel). This `satisfies Record<...>` guard forces
+  // every WorkspaceChangeStatus variant to have a rank, so adding a new status
+  // without updating this table is a compile error instead of a silent NaN
+  // from an unranked lookup (which broke Array#sort's ordering contract).
+  const statusRank = {
+    created: 0,
+    modified: 1,
+    symlink_created: 1,
+    deleted: 2,
+  } satisfies Record<WorkspaceFileChange["status"], number>;
+
+  return [...files].sort((left, right) => {
+    const rankDiff = statusRank[left.status] - statusRank[right.status];
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+    return left.path.localeCompare(right.path);
+  });
+}

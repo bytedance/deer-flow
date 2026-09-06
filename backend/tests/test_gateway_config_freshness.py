@@ -40,13 +40,26 @@ def _isolate_app_config_singleton():
     reset_app_config()
 
 
-def _write_config_yaml(path: Path, *, log_level: str) -> None:
+def _write_config_yaml(
+    path: Path,
+    *,
+    log_level: str,
+    checkpoint_channel_mode: str | None = None,
+) -> None:
+    database = (
+        ""
+        if checkpoint_channel_mode is None
+        else f"""
+database:
+  checkpoint_channel_mode: {checkpoint_channel_mode}
+"""
+    )
     path.write_text(
         f"""
 sandbox:
   use: deerflow.sandbox.local.provider:LocalSandboxProvider
 log_level: {log_level}
-""".strip()
+{database}""".strip()
         + "\n",
         encoding="utf-8",
     )
@@ -155,6 +168,28 @@ def test_run_context_app_config_reflects_yaml_edit(tmp_path, monkeypatch):
     # app_config follows the edit; run_events_config stays frozen to the
     # startup snapshot we wrote onto app.state above.
     assert second == {"log_level": "debug", "run_events_config": {"frozen": "startup"}}
+
+
+def test_run_context_freezes_checkpoint_channel_mode_at_startup(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from app.gateway.deps import get_run_context
+
+    config_file = tmp_path / "config.yaml"
+    _write_config_yaml(config_file, log_level="info", checkpoint_channel_mode="delta")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_file))
+
+    request = MagicMock()
+    request.app.state.checkpointer = MagicMock()
+    request.app.state.store = MagicMock()
+    request.app.state.run_event_store = MagicMock()
+    request.app.state.run_events_config = {"frozen": "startup"}
+    request.app.state.thread_store = MagicMock()
+    request.app.state.checkpoint_channel_mode = "full"
+
+    ctx = get_run_context(request)
+    assert ctx.app_config.database.checkpoint_channel_mode == "delta"
+    assert ctx.checkpoint_channel_mode == "full"
 
 
 @pytest.mark.parametrize(

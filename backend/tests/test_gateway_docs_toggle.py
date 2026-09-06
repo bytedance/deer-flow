@@ -148,6 +148,21 @@ def test_gateway_cors_allows_configured_origin():
     assert response.headers["access-control-allow-credentials"] == "true"
 
 
+def test_gateway_cors_exposes_the_run_metadata_header():
+    """`Content-Location` carries the created run id and is not CORS-safelisted.
+
+    A split-origin browser client that cannot read it never learns its own run
+    id, so the SDK reports no created run and the thread keeps its placeholder
+    route for the whole session.
+    """
+    client = _make_gateway_client("https://app.example")
+
+    response = client.get("/health", headers={"Origin": "https://app.example"})
+
+    exposed = {value.strip().lower() for value in response.headers.get("access-control-expose-headers", "").split(",")}
+    assert "content-location" in exposed
+
+
 def test_gateway_cors_rejects_unconfigured_origin():
     client = _make_gateway_client("https://app.example")
 

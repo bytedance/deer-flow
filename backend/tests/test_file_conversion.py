@@ -422,6 +422,15 @@ class TestExtractOutline:
         assert len(outline) == 5
         assert not any(e.get("truncated") for e in outline)
 
+    def test_no_truncation_sentinel_at_exact_limit(self, tmp_path):
+        """A document with exactly MAX_OUTLINE_ENTRIES headings is not truncated."""
+        lines = [f"# Heading {i}" for i in range(MAX_OUTLINE_ENTRIES)]
+        md = tmp_path / "exact.md"
+        md.write_text("\n".join(lines), encoding="utf-8")
+        outline = extract_outline(md)
+        assert len(outline) == MAX_OUTLINE_ENTRIES
+        assert not any(e.get("truncated") for e in outline)
+
     def test_blank_lines_and_whitespace_ignored(self, tmp_path):
         """Blank lines between headings do not produce empty entries."""
         md = tmp_path / "spaced.md"

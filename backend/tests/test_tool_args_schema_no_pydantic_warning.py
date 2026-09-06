@@ -13,10 +13,13 @@ Pydantic's serialization expectations aligned with reality.
 
 from __future__ import annotations
 
+import inspect
 import warnings
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain.tools import ToolRuntime
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from deerflow.sandbox.tools import (
     bash_tool,
@@ -27,6 +30,7 @@ from deerflow.sandbox.tools import (
     str_replace_tool,
     write_file_tool,
 )
+from deerflow.tools.builtins.list_uploaded_files_tool import list_uploaded_files
 from deerflow.tools.builtins.present_file_tool import present_file_tool
 from deerflow.tools.builtins.setup_agent_tool import setup_agent
 from deerflow.tools.builtins.task_tool import task_tool
@@ -55,12 +59,92 @@ _TOOL_CASES = [
     (read_file_tool, {"description": "read", "path": "/tmp/x"}),
     (write_file_tool, {"description": "write", "path": "/tmp/x", "content": "hi"}),
     (str_replace_tool, {"description": "replace", "path": "/tmp/x", "old_str": "a", "new_str": "b"}),
+    (list_uploaded_files, {"include_outline": False, "max_results": 20}),
     (present_file_tool, {"filepaths": ["/tmp/x"], "tool_call_id": "call-1"}),
     (view_image_tool, {"image_path": "/tmp/img.png", "tool_call_id": "call-1"}),
     (task_tool, {"description": "do", "prompt": "go", "subagent_type": "general-purpose", "tool_call_id": "call-1"}),
     (skill_manage_tool, {"action": "list", "name": "demo"}),
     (setup_agent, {"soul": "s", "description": "d"}),
     (update_agent, {}),
+]
+
+_SANDBOX_TOOL_CASES = [
+    (bash_tool, {"command": "ls"}, ("command",), ("command", "description")),
+    (ls_tool, {"path": "/tmp"}, ("path",), ("path", "description")),
+    (
+        glob_tool,
+        {"pattern": "*.py", "path": "/tmp"},
+        ("pattern", "path"),
+        ("pattern", "path", "description", "include_dirs", "max_results"),
+    ),
+    (
+        grep_tool,
+        {"pattern": "x", "path": "/tmp"},
+        ("pattern", "path"),
+        ("pattern", "path", "description", "glob", "literal", "case_sensitive", "max_results"),
+    ),
+    (
+        read_file_tool,
+        {"path": "/tmp/x"},
+        ("path",),
+        ("path", "description", "start_line", "end_line"),
+    ),
+    (
+        write_file_tool,
+        {"path": "/tmp/x", "content": "hi"},
+        ("path", "content"),
+        ("path", "content", "description", "append"),
+    ),
+    (
+        str_replace_tool,
+        {"path": "/tmp/x", "old_str": "a", "new_str": "b"},
+        ("path", "old_str", "new_str"),
+        ("path", "old_str", "new_str", "description", "replace_all"),
+    ),
+]
+
+_SANDBOX_TOOL_FORWARDING_CASES = [
+    (bash_tool, {"command": "command", "description": "description"}, ("command", "description")),
+    (ls_tool, {"path": "/path", "description": "description"}, ("/path", "description")),
+    (
+        glob_tool,
+        {"pattern": "*.py", "path": "/path", "description": "description", "include_dirs": True, "max_results": 7},
+        ("*.py", "/path", "description", True, 7),
+    ),
+    (
+        grep_tool,
+        {
+            "pattern": "needle",
+            "path": "/path",
+            "description": "description",
+            "glob": "*.py",
+            "literal": True,
+            "case_sensitive": True,
+            "max_results": 7,
+        },
+        ("needle", "/path", "description", "*.py", True, True, 7),
+    ),
+    (
+        read_file_tool,
+        {"path": "/path", "description": "description", "start_line": 2, "end_line": 3},
+        ("/path", "description", 2, 3),
+    ),
+    (
+        write_file_tool,
+        {"path": "/path", "content": "content", "description": "description", "append": True},
+        ("/path", "content", "description", True),
+    ),
+    (
+        str_replace_tool,
+        {
+            "path": "/path",
+            "old_str": "old",
+            "new_str": "new",
+            "description": "description",
+            "replace_all": True,
+        },
+        ("/path", "old", "new", "description", True),
+    ),
 ]
 
 
@@ -99,6 +183,74 @@ def test_write_file_append_is_discoverable_in_tool_schema() -> None:
     assert append_field.default is False
     assert append_field.description
     assert "append" in append_field.description
+
+
+@pytest.mark.parametrize(
+    ("tool_obj", "operational_args", "required_args", "property_args"),
+    _SANDBOX_TOOL_CASES,
+    ids=[case[0].name for case in _SANDBOX_TOOL_CASES],
+)
+def test_sandbox_tool_description_is_optional_but_discoverable(tool_obj, operational_args, required_args, property_args) -> None:
+    """Provider tool calls may omit UI-only descriptions without blocking execution."""
+    parameters = convert_to_openai_tool(tool_obj)["function"]["parameters"]
+
+    assert parameters["required"] == list(required_args)
+    assert list(parameters["properties"]) == list(property_args)
+    assert parameters["properties"]["description"]["description"]
+
+    validated = tool_obj.tool_call_schema.model_validate(operational_args)
+    assert validated.description == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_obj", "call_args", "forwarded_args"),
+    _SANDBOX_TOOL_FORWARDING_CASES,
+    ids=[case[0].name for case in _SANDBOX_TOOL_FORWARDING_CASES],
+)
+async def test_sandbox_tool_sync_async_signatures_and_forwarding_stay_aligned(
+    monkeypatch,
+    tool_obj,
+    call_args,
+    forwarded_args,
+) -> None:
+    """Async wrappers must keep both their public signature and positional forwarding aligned."""
+    assert tool_obj.func is not None
+    assert tool_obj.coroutine is not None
+    assert list(inspect.signature(tool_obj.func).parameters) == list(inspect.signature(tool_obj.coroutine).parameters)
+
+    run_sync_tool = AsyncMock(return_value="forwarded")
+    monkeypatch.setattr("deerflow.sandbox.tools._run_sync_tool_after_async_sandbox_init", run_sync_tool)
+    runtime = object()
+
+    assert await tool_obj.coroutine(runtime=runtime, **call_args) == "forwarded"
+    run_sync_tool.assert_awaited_once_with(tool_obj.func, runtime, *forwarded_args)
+
+    run_sync_tool.reset_mock()
+    call_args_without_description = {key: value for key, value in call_args.items() if key != "description"}
+    forwarded_without_description = tuple("" if value == "description" else value for value in forwarded_args)
+
+    assert await tool_obj.coroutine(runtime=runtime, **call_args_without_description) == "forwarded"
+    run_sync_tool.assert_awaited_once_with(tool_obj.func, runtime, *forwarded_without_description)
+
+
+def test_task_tool_description_is_optional_but_discoverable() -> None:
+    """Subagent execution may not depend on its UI-only progress label."""
+    parameters = convert_to_openai_tool(task_tool)["function"]["parameters"]
+
+    assert parameters["required"] == ["prompt", "subagent_type"]
+    assert list(parameters["properties"]) == ["prompt", "subagent_type", "acceptance_criteria", "description"]
+    assert parameters["properties"]["description"]["description"]
+
+    validated = task_tool.tool_call_schema.model_validate({"prompt": "go", "subagent_type": "general-purpose"})
+    assert validated.description == ""
+
+
+def test_list_uploaded_files_model_schema_excludes_injected_runtime() -> None:
+    """The model-facing schema must not expose ToolRuntime internals."""
+    parameters = convert_to_openai_tool(list_uploaded_files)["function"]["parameters"]
+
+    assert set(parameters["properties"]) == {"include_outline", "max_results"}
 
 
 @pytest.mark.parametrize("tool_obj", [case[0] for case in _TOOL_CASES], ids=[case[0].name for case in _TOOL_CASES])

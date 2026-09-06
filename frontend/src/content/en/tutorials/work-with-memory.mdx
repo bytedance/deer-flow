@@ -16,6 +16,7 @@ In `config.yaml`:
 ```yaml
 memory:
   enabled: true
+  mode: middleware
   injection_enabled: true
   max_injection_tokens: 2000
   debounce_seconds: 30
@@ -23,11 +24,13 @@ memory:
 
 ## How memory works
 
-Memory works automatically through `MemoryMiddleware`:
+By default, memory works automatically through `MemoryMiddleware`:
 
 1. **First conversation**: tell the agent about your preferences, project, or background.
 2. **Automatic learning**: the agent extracts and saves important facts in the background.
 3. **Future conversations**: memory facts are automatically injected into the system prompt — the agent does not need you to repeat context.
+
+DeerFlow also has an experimental `mode: tool` option. In tool mode, the agent receives `memory_search`, `memory_add`, `memory_update`, and `memory_delete` tools and decides when to call them. Keep `mode: middleware` unless you specifically want to evaluate model-driven memory behavior.
 
 ## Example
 

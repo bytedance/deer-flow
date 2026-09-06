@@ -1,9 +1,14 @@
 import asyncio
+import threading
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
 from deerflow.sandbox.sandbox import Sandbox
+
+if TYPE_CHECKING:
+    from deerflow.skills.projection import SkillProjectionPaths
 
 
 class SandboxProvider(ABC):
@@ -11,9 +16,13 @@ class SandboxProvider(ABC):
 
     uses_thread_data_mounts: bool = False
     needs_upload_permission_adjustment: bool = True
+    # Capability for enforcing a lead Agent's physical skill view across the
+    # provider's current Agent-accessible tool surface. Host-backed providers
+    # must return False whenever shell access can bypass managed path mappings.
+    supports_agent_skill_isolation: bool = False
 
     @abstractmethod
-    def acquire(self, thread_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.
 
         Returns:
@@ -21,7 +30,7 @@ class SandboxProvider(ABC):
         """
         pass
 
-    async def acquire_async(self, thread_id: str | None = None) -> str:
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox without blocking the event loop.
 
         Most sandbox providers expose a synchronous lifecycle API because local
@@ -29,7 +38,38 @@ class SandboxProvider(ABC):
         this method so those blocking operations run in a worker thread instead
         of stalling the event loop.
         """
-        return await asyncio.to_thread(self.acquire, thread_id)
+        return await asyncio.to_thread(self.acquire, thread_id, user_id=user_id)
+
+    def sync_agent_skills(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        projection: "SkillProjectionPaths",
+    ) -> None:
+        """Synchronize a prepared thread skill projection into a sandbox.
+
+        Bind-mount providers observe the stable projection roots directly and
+        use this no-op implementation. Upload-based providers override it.
+        """
+
+    async def sync_agent_skills_async(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        projection: "SkillProjectionPaths",
+    ) -> None:
+        """Async wrapper for upload-based skill synchronization."""
+        await asyncio.to_thread(
+            self.sync_agent_skills,
+            sandbox_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            projection=projection,
+        )
 
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:
@@ -50,11 +90,69 @@ class SandboxProvider(ABC):
         pass
 
     def reset(self) -> None:
-        """Clear cached state that survives provider instance replacement."""
+        """Clear cached state that survives provider instance replacement.
+
+        Provider overrides can release resources and make the instance unusable.
+        """
         pass
+
+    def sandbox_network_mode(self) -> str:
+        """Return the provider's effective outbound network mode."""
+        return "open"
+
+    def sandbox_network_temporary_grant_ttl(self) -> int:
+        return 300
+
+    def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
+        """Claim the oldest unsurfaced trusted-proxy event for a sandbox.
+
+        Providers without a managed network policy use the empty default.
+        """
+        del sandbox_id
+        return []
+
+    async def consume_network_policy_events_async(self, sandbox_id: str) -> list[dict[str, object]]:
+        return await asyncio.to_thread(self.consume_network_policy_events, sandbox_id)
+
+    def deny_pending_network_policy_events(self, sandbox_id: str) -> bool:
+        """Atomically deny all unsurfaced trusted-proxy events for a sandbox."""
+        del sandbox_id
+        return False
+
+    async def deny_pending_network_policy_events_async(self, sandbox_id: str) -> bool:
+        return await asyncio.to_thread(self.deny_pending_network_policy_events, sandbox_id)
+
+    def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        """Apply a user decision to one trusted-proxy event."""
+        del sandbox_id, request_id, decision
+        return False
+
+    async def decide_network_policy_request_async(self, sandbox_id: str, request_id: str, decision: str) -> bool:
+        return await asyncio.to_thread(self.decide_network_policy_request, sandbox_id, request_id, decision)
 
 
 _default_sandbox_provider: SandboxProvider | None = None
+# Guards every read and write of `_default_sandbox_provider`. The singleton is
+# reachable from more than one OS thread (e.g. the main event loop and the Feishu
+# channel thread, which runs its own loop), so a bare check-then-create can double
+# initialize the provider, and an unsynchronized reset/shutdown racing a get can
+# hand a caller `None` or a torn instance. Every access to the global below takes
+# this lock, including the read+return in `get_sandbox_provider()`.
+#
+# The lock guards only the reference swap. Provider callbacks (`__init__`,
+# `reset()`, `shutdown()`) and the dynamic import in `resolve_class()` run
+# *outside* the lock: they are plugin-supplied (`config.sandbox.use` resolves to
+# an arbitrary class) and may be slow or, worse, re-enter these lifecycle
+# functions. Holding a non-reentrant `threading.Lock` across them would
+# self-deadlock such a provider and would block every concurrent `get()` during a
+# slow teardown. Keeping callbacks off the lock avoids both.
+_provider_lock = threading.Lock()
+
+
+def get_initialized_sandbox_provider() -> SandboxProvider | None:
+    """Return the provider only when another lifecycle path initialized it."""
+    with _provider_lock:
+        return _default_sandbox_provider
 
 
 def get_sandbox_provider(**kwargs) -> SandboxProvider:
@@ -67,17 +165,39 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
         A sandbox provider instance.
     """
     global _default_sandbox_provider
-    if _default_sandbox_provider is None:
-        config = get_app_config()
-        cls = resolve_class(config.sandbox.use, SandboxProvider)
-        _default_sandbox_provider = cls(**kwargs)
-    return _default_sandbox_provider
+    # Fast path: a single locked read so a concurrent reset/shutdown can't null
+    # the global between the check and the return.
+    with _provider_lock:
+        if _default_sandbox_provider is not None:
+            return _default_sandbox_provider
+
+    # Cold start. Resolve + construct outside the lock: the import and the
+    # provider constructor are plugin code and must not run under a non-reentrant
+    # lock. The construction may race another caller; we reconcile under the lock.
+    config = get_app_config()
+    cls = resolve_class(config.sandbox.use, SandboxProvider)
+    provider = cls(**kwargs)
+
+    with _provider_lock:
+        if _default_sandbox_provider is None:
+            _default_sandbox_provider = provider
+            return provider
+        # We lost the install race: another thread got there first. `winner` is
+        # read under the same lock, so it is always a live instance, never None.
+        winner = _default_sandbox_provider
+
+    # Discard the instance we just built (outside the lock). For providers with
+    # side-effectful constructors (e.g. AioSandboxProvider starts an idle-checker
+    # thread), this tears down the orphan so it does not leak — issue #3721.
+    if hasattr(provider, "shutdown"):
+        provider.shutdown()
+    return winner
 
 
 def reset_sandbox_provider() -> None:
     """Reset the sandbox provider singleton.
 
-    This clears the cached instance without calling shutdown.
+    This clears the cached instance without calling shutdown directly.
     The next call to `get_sandbox_provider()` will create a new instance.
     Useful for testing or when switching configurations.
 
@@ -86,13 +206,22 @@ def reset_sandbox_provider() -> None:
     `LocalSandbox` singleton). Without it, config/mount changes would not take
     effect on the next acquire().
 
-    Note: If the provider has active sandboxes, they will be orphaned.
+    A provider override can release active sandboxes during reset.
+    Otherwise, active sandboxes become orphaned.
+    Do not reuse the detached provider after reset.
     Use `shutdown_sandbox_provider()` for proper cleanup.
     """
     global _default_sandbox_provider
-    if _default_sandbox_provider is not None:
-        _default_sandbox_provider.reset()
+    # Detach the reference under the lock, then run the provider's `reset()`
+    # callback outside it (see the `_provider_lock` note).
+    with _provider_lock:
+        provider = _default_sandbox_provider
         _default_sandbox_provider = None
+    if provider is not None:
+        from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+        discard_sandbox_lease_manager(provider)
+        provider.reset()
 
 
 def shutdown_sandbox_provider() -> None:
@@ -103,10 +232,16 @@ def shutdown_sandbox_provider() -> None:
     is shutting down or when you need to completely reset the sandbox system.
     """
     global _default_sandbox_provider
-    if _default_sandbox_provider is not None:
-        if hasattr(_default_sandbox_provider, "shutdown"):
-            _default_sandbox_provider.shutdown()
+    # Detach the reference under the lock, then run the (potentially slow)
+    # `shutdown()` callback outside it (see the `_provider_lock` note).
+    with _provider_lock:
+        provider = _default_sandbox_provider
         _default_sandbox_provider = None
+    if provider is not None and hasattr(provider, "shutdown"):
+        from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+        discard_sandbox_lease_manager(provider)
+        provider.shutdown()
 
 
 def set_sandbox_provider(provider: SandboxProvider) -> None:
@@ -114,8 +249,17 @@ def set_sandbox_provider(provider: SandboxProvider) -> None:
 
     This allows injecting a custom or mock provider for testing purposes.
 
+    Note: any previously installed provider is replaced but not shut down; the
+    caller owns the lifecycle of the instance it is overwriting.
+
     Args:
         provider: The SandboxProvider instance to use.
     """
     global _default_sandbox_provider
-    _default_sandbox_provider = provider
+    with _provider_lock:
+        previous = _default_sandbox_provider
+        _default_sandbox_provider = provider
+    if previous is not None and previous is not provider:
+        from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+        discard_sandbox_lease_manager(previous)

@@ -5,18 +5,12 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-TEST_SUPPORT_PATH = REPO_ROOT / "backend" / "tests"
-if str(TEST_SUPPORT_PATH) not in sys.path:
-    sys.path.insert(0, str(TEST_SUPPORT_PATH))
+from _detector_cli import run_detector
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    from support.detectors.thread_boundaries import main as detector_main
-
-    return detector_main(argv)
+    return run_detector("support.detectors.thread_boundaries", argv)
 
 
 if __name__ == "__main__":

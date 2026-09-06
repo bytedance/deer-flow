@@ -16,7 +16,7 @@
 -| **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; `?download=true` for download with citation removal |
 +| **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; `?download=true` for file download |
 
- Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
+ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
 ```
 
 - **第 159 行**：表格中 Artifacts 描述由「download with citation removal」改为「file download」。

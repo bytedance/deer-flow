@@ -42,8 +42,67 @@ esac
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+ENV_FILE="$REPO_ROOT/.env"
 DOCKER_DIR="$REPO_ROOT/docker"
-COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+if [ -f "$ENV_FILE" ]; then
+    COMPOSE_CMD=(docker compose --env-file "$ENV_FILE" -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+else
+    COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+fi
+
+load_uv_extras_from_dotenv() {
+    local line=""
+    local value=""
+
+    [ -f "$ENV_FILE" ] || return 0
+    [ -z "${UV_EXTRAS+x}" ] || return 0
+
+    line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?UV_EXTRAS[[:space:]]*=' "$ENV_FILE" | tail -n 1 || true)"
+    [ -n "$line" ] || return 0
+
+    value="${line#*=}"
+    value="${value%$'\r'}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+        \"*\") value="${value#\"}"; value="${value%\"}" ;;
+        \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    export UV_EXTRAS="$value"
+}
+
+load_uv_extras_from_dotenv
+
+# Read one key from $ENV_FILE the way compose --env-file interpolates it, so the
+# final summary reports the values the stack actually came up with. The shell
+# does not source $ENV_FILE, so reading these from the environment alone would
+# report "loopback only" for a stack that .env exposed to the network.
+read_dotenv_value() {
+    local key="$1"
+    local line=""
+    local value=""
+
+    # An exported shell variable wins, matching compose precedence.
+    if [ -n "${!key+x}" ]; then
+        printf '%s' "${!key}"
+        return 0
+    fi
+
+    [ -f "$ENV_FILE" ] || return 0
+
+    line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$ENV_FILE" | tail -n 1 || true)"
+    [ -n "$line" ] || return 0
+
+    value="${line#*=}"
+    value="${value%$'\r'}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+        \"*\") value="${value#\"}"; value="${value%\"}" ;;
+        \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    printf '%s' "$value"
+}
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 
@@ -172,6 +231,44 @@ if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     fi
 fi
 
+# ── UV_EXTRAS auto-detection ─────────────────────────────────────────────────
+# The production Dockerfile accepts UV_EXTRAS as a single build-arg token and
+# adds the --extra prefix itself. Convert the detector's uv flag string
+# ("--extra postgres --extra discord") to a comma-joined name token.
+
+if [ "$CMD" != "down" ] && [ -z "$UV_EXTRAS" ]; then
+    _detect_python=""
+    for _python in python3 python; do
+        if command -v "$_python" >/dev/null 2>&1 && \
+            "$_python" -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1)' >/dev/null 2>&1; then
+            _detect_python="$_python"
+            break
+        fi
+    done
+fi
+
+if [ "$CMD" != "down" ] && [ -z "$UV_EXTRAS" ] && [ -n "$_detect_python" ]; then
+    _uv_extras_flags="$("$_detect_python" "$REPO_ROOT/scripts/detect_uv_extras.py" 2>/dev/null || true)"
+    _uv_extras=""
+    set -- $_uv_extras_flags
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--extra" ] && [ "$#" -gt 1 ]; then
+            if [ -z "$_uv_extras" ]; then
+                _uv_extras="$2"
+            else
+                _uv_extras="$_uv_extras,$2"
+            fi
+            shift 2
+        else
+            shift
+        fi
+    done
+    if [ -n "$_uv_extras" ]; then
+        export UV_EXTRAS="$_uv_extras"
+        echo -e "${GREEN}✓ Auto-detected UV_EXTRAS=${UV_EXTRAS} from config.yaml${NC}"
+    fi
+fi
+
 # ── detect_sandbox_mode ───────────────────────────────────────────────────────
 
 detect_sandbox_mode() {
@@ -215,7 +312,6 @@ if [ "$CMD" = "down" ]; then
     export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$REPO_ROOT/backend/.deer-flow}"
     export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$DEER_FLOW_HOME/config.yaml}"
     export DEER_FLOW_EXTENSIONS_CONFIG_PATH="${DEER_FLOW_EXTENSIONS_CONFIG_PATH:-$DEER_FLOW_HOME/extensions_config.json}"
-    export DEER_FLOW_DOCKER_SOCKET="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
     export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
     export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
     export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
@@ -231,11 +327,6 @@ if [ "$CMD" = "build" ]; then
     echo "  DeerFlow — Building Images"
     echo "=========================================="
     echo ""
-
-    # Docker socket is needed for compose to parse volume specs
-    if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
-        export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
-    fi
 
     "${COMPOSE_CMD[@]}" build
 
@@ -264,43 +355,65 @@ echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
 
 echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
 
-services="frontend gateway nginx"
+services="redis frontend gateway nginx"
 
 if [ "$sandbox_mode" = "provisioner" ]; then
     services="$services provisioner"
 fi
 
-# ── DEER_FLOW_DOCKER_SOCKET ───────────────────────────────────────────────────
+# ── DEER_FLOW_DOCKER_SOCKET (aio / pure-DooD mode only) ──────────────────────
+# Only aio mode (AioSandboxProvider without provisioner_url) needs the host
+# Docker socket. It is mounted via the opt-in docker-compose.dood.yaml overlay,
+# appended here, so the default (local) and provisioner modes never expose the
+# host daemon. Mounting the socket = root-equivalent host control; see SECURITY.md.
 
 if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
     export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
 fi
 
-if [ "$sandbox_mode" != "local" ]; then
+if [ "$sandbox_mode" = "aio" ]; then
     if [ ! -S "$DEER_FLOW_DOCKER_SOCKET" ]; then
         echo -e "${RED}⚠ Docker socket not found at $DEER_FLOW_DOCKER_SOCKET${NC}"
         echo "  AioSandboxProvider (DooD) will not work."
         exit 1
-    else
-        echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
     fi
+    echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
+    echo -e "${YELLOW}  Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
+    COMPOSE_CMD+=(-f "$DOCKER_DIR/docker-compose.dood.yaml")
 fi
 
 echo ""
 
 # ── Start / Up ───────────────────────────────────────────────────────────────
 
+report_startup_failure() {
+    echo -e "${RED}✗ DeerFlow services failed to become ready.${NC}" >&2
+    echo '  If Docker Compose reports "unknown flag: --wait", upgrade to a version that' >&2
+    echo '  supports `docker compose up --wait`.' >&2
+    echo "  Container status:" >&2
+    "${COMPOSE_CMD[@]}" ps >&2 || true
+    echo "" >&2
+    echo "  Recent Gateway logs:" >&2
+    "${COMPOSE_CMD[@]}" logs --no-color --tail 100 gateway >&2 || true
+}
+
 if [ "$CMD" = "start" ]; then
     echo "Starting containers (no rebuild)..."
     echo ""
     # shellcheck disable=SC2086
-    "${COMPOSE_CMD[@]}" up -d --remove-orphans $services
+    if ! "${COMPOSE_CMD[@]}" up -d --remove-orphans --wait --wait-timeout 180 $services; then
+        report_startup_failure
+        exit 1
+    fi
 else
     # Default: build + start
     echo "Building images and starting containers..."
     echo ""
     # shellcheck disable=SC2086
-    "${COMPOSE_CMD[@]}" up --build -d --remove-orphans $services
+    if ! "${COMPOSE_CMD[@]}" up --build -d --remove-orphans --wait --wait-timeout 180 $services; then
+        report_startup_failure
+        exit 1
+    fi
 fi
 
 echo ""
@@ -308,10 +421,25 @@ echo "=========================================="
 echo "  DeerFlow is running!"
 echo "=========================================="
 echo ""
-echo "  🌐 Application: http://localhost:${PORT:-2026}"
-echo "  📡 API Gateway: http://localhost:${PORT:-2026}/api/*"
+RESOLVED_PORT="$(read_dotenv_value PORT)"
+RESOLVED_PORT="${RESOLVED_PORT:-2026}"
+RESOLVED_BIND_HOST="$(read_dotenv_value BIND_HOST)"
+RESOLVED_BIND_HOST="${RESOLVED_BIND_HOST:-127.0.0.1}"
+
+echo "  🌐 Application: http://localhost:${RESOLVED_PORT}"
+echo "  📡 API Gateway: http://localhost:${RESOLVED_PORT}/api/*"
 echo "  🤖 Runtime:     Gateway embedded"
 echo "  API:            /api/langgraph/* → Gateway"
+echo ""
+if [ "$RESOLVED_BIND_HOST" = "127.0.0.1" ] || [ "$RESOLVED_BIND_HOST" = "::1" ] || [ "$RESOLVED_BIND_HOST" = "localhost" ]; then
+    echo "  🔒 Bound to ${RESOLVED_BIND_HOST} — reachable from this machine only."
+    echo "     To expose it, set BIND_HOST in .env, put TLS/auth in front, and"
+    echo "     create the admin account before the host becomes reachable."
+else
+    echo "  ⚠️  Bound to ${RESOLVED_BIND_HOST} — reachable from the network."
+    echo "     Open http://localhost:${RESOLVED_PORT} and complete first-run"
+    echo "     setup now, before anyone else reaches this host."
+fi
 echo ""
 echo "  Manage:"
 echo "    make down        — stop and remove containers"

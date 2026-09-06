@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
+from _run_message_pagination_helpers import assert_run_message_page
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import runs
@@ -97,6 +99,51 @@ def test_run_messages_has_more_true_when_extra_row_returned():
     body = response.json()
     assert body["has_more"] is True
     assert len(body["data"]) == 50  # trimmed to limit
+    assert [m["seq"] for m in body["data"]] == list(range(2, 52))
+
+
+def test_run_messages_default_page_keeps_newest_messages_when_extra_row_returned():
+    """Default latest-page trimming drops the older sentinel row, not the newest message."""
+    rows = [_make_message(i) for i in range(16, 67)]
+    run_record = {"run_id": "run-2", "thread_id": "thread-2"}
+    app = _make_app(
+        run_store=_make_run_store(run_record),
+        event_store=_make_event_store(rows),
+    )
+    with TestClient(app) as client:
+        assert_run_message_page(client, "/api/runs/run-2/messages", expected_seq=list(range(17, 67)))
+
+
+def test_run_messages_before_seq_page_keeps_newest_side_when_extra_row_returned():
+    """Backward pagination trims the older sentinel so adjacent pages do not miss the boundary message."""
+    rows = [_make_message(i) for i in range(1, 18)]
+    run_record = {"run_id": "run-2", "thread_id": "thread-2"}
+    app = _make_app(
+        run_store=_make_run_store(run_record),
+        event_store=_make_event_store(rows),
+    )
+    with TestClient(app) as client:
+        assert_run_message_page(
+            client,
+            "/api/runs/run-2/messages?before_seq=18&limit=16",
+            expected_seq=list(range(2, 18)),
+        )
+
+
+def test_run_messages_after_seq_page_keeps_oldest_side_when_extra_row_returned():
+    """Forward pagination still trims the newer sentinel row."""
+    rows = [_make_message(i) for i in range(11, 62)]
+    run_record = {"run_id": "run-2", "thread_id": "thread-2"}
+    app = _make_app(
+        run_store=_make_run_store(run_record),
+        event_store=_make_event_store(rows),
+    )
+    with TestClient(app) as client:
+        assert_run_message_page(
+            client,
+            "/api/runs/run-2/messages?after_seq=10",
+            expected_seq=list(range(11, 61)),
+        )
 
 
 def test_run_messages_passes_after_seq_to_event_store():
@@ -160,6 +207,20 @@ def test_run_messages_passes_before_seq_to_event_store():
         before_seq=10,
         after_seq=None,
     )
+
+
+@pytest.mark.parametrize("cursor", ["before_seq", "after_seq"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_run_messages_rejects_non_positive_seq_cursors(cursor: str, value: int):
+    run_record = {"run_id": "run-6", "thread_id": "thread-6"}
+    app = _make_app(
+        run_store=_make_run_store(run_record),
+        event_store=_make_event_store([]),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/runs/run-6/messages", params={cursor: value})
+
+    assert response.status_code == 422
 
 
 def test_run_messages_empty_data():
@@ -243,3 +304,54 @@ class TestRunFeedback:
         with TestClient(app) as client:
             response = client.get("/api/runs/run-fb-3/feedback")
         assert response.status_code == 503
+
+
+def test_resolve_thread_id_handles_null_configurable():
+    """A client may send ``config.configurable`` as JSON ``null``.
+
+    The key is then present with value ``None``, so the old
+    ``.get("configurable", {}).get("thread_id")`` raised ``AttributeError``
+    (an unhandled HTTP 500). Per the docstring it should generate a new id.
+    """
+    import uuid
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    tid = runs._resolve_thread_id(RunCreateRequest(config={"configurable": None}))
+    uuid.UUID(tid)  # a freshly generated id, not a crash
+
+    # working inputs are unaffected
+    assert runs._resolve_thread_id(RunCreateRequest(config={"configurable": {"thread_id": "t1"}})) == "t1"
+
+
+@pytest.mark.parametrize(
+    "thread_id",
+    ["", "thread.with.dot", "../escape", "x" * 65, 123],
+)
+def test_run_request_rejects_invalid_configurable_thread_id(thread_id):
+    from pydantic import ValidationError
+
+    from app.gateway.run_models import RunCreateRequest
+
+    with pytest.raises(ValidationError):
+        RunCreateRequest(config={"configurable": {"thread_id": thread_id}})
+
+
+def test_build_run_config_handles_null_configurable():
+    """A null ``configurable`` must also survive ``build_run_config``.
+
+    ``_resolve_thread_id`` is not the only place that reads it: ``build_run_config``
+    does ``configurable.update(request_config.get("configurable", {}))`` and, in the
+    ``context`` branch, ``request_config.get("configurable", {}).keys()``. With the
+    key present and ``None``, ``.get(..., {})`` returns ``None``, so both raised
+    (``dict.update(None)`` / ``None.keys()``) -- an unhandled HTTP 500 that the
+    isolated ``_resolve_thread_id`` test could not catch.
+    """
+    from app.gateway.services import build_run_config
+
+    config = build_run_config("t1", {"configurable": None}, None)
+    assert config["configurable"]["thread_id"] == "t1"
+
+    # the context branch logs the caller's configurable keys; a null value must not crash
+    config = build_run_config("t1", {"context": {}, "configurable": None}, None)
+    assert config["configurable"]["thread_id"] == "t1"

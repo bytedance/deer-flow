@@ -24,7 +24,7 @@ export function useNotification(): UseNotificationReturn {
     useState<NotificationPermission>("default");
   const [isSupported, setIsSupported] = useState(false);
 
-  const lastNotificationTime = useRef<Date>(new Date());
+  const lastNotificationTime = useRef<number | null>(null);
 
   useEffect(() => {
     // Check if browser supports Notification API
@@ -60,19 +60,25 @@ export function useNotification(): UseNotificationReturn {
         return;
       }
 
+      const currentPermission = Notification.permission;
+      if (currentPermission !== permission) {
+        setPermission(currentPermission);
+      }
+
+      if (currentPermission !== "granted") {
+        console.warn("Notification permission not granted");
+        return;
+      }
+
+      const now = Date.now();
       if (
-        new Date().getTime() - lastNotificationTime.current.getTime() <
-        1000
+        lastNotificationTime.current !== null &&
+        now - lastNotificationTime.current < 1000
       ) {
         console.warn("Notification sent too soon");
         return;
       }
-      lastNotificationTime.current = new Date();
-
-      if (permission !== "granted") {
-        console.warn("Notification permission not granted");
-        return;
-      }
+      lastNotificationTime.current = now;
 
       const notification = new Notification(title, options);
 
