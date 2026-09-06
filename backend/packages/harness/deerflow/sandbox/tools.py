@@ -867,7 +867,7 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
             matched_path = match.group(0)
             if matched_path == _base:
                 return _virtual
-            relative = matched_path[len(_base) :].lstrip("/\\")
+            relative = matched_path[len(_base) :].lstrip("/\\").replace("\\", "/")
             return f"{_virtual}/{relative}" if relative else _virtual
 
         result = pattern.sub(replace_match, result)

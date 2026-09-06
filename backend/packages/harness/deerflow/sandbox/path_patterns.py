@@ -118,7 +118,7 @@ def replace_output_path_matches(
         if callable(replacement):
             replaced_path = replacement(matched_path)
         else:
-            relative = matched_path[len(base) :].lstrip("/\\")
+            relative = matched_path[len(base) :].lstrip("/\\").replace("\\", "/")
             replaced_path = f"{replacement}/{relative}" if relative else replacement
 
         chunks.append(output[copied_until:match_start])
