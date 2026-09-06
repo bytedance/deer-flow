@@ -484,9 +484,9 @@ _CMD_DELAYED_ENV_EXPANSION_RE = re.compile(r"![^!\r\n]+!")
 #: before a POSIX parser can turn the expression into one harmless-looking
 #: token.
 _BASH_BRACE_EXPANSION_RE = re.compile(r"\{[^{}\r\n]*(?:,|\.\.)[^{}\r\n]*\}")
-#: PowerShell treats typographic single and double quotes as string delimiters,
-#: while POSIX ``shlex`` retains them as ordinary token characters.
-_POWERSHELL_TYPOGRAPHIC_QUOTES = frozenset("‘’“”")
+#: PowerShell treats seven typographic single and double quotes as string
+#: delimiters, while POSIX ``shlex`` retains them as ordinary token characters.
+_POWERSHELL_QUOTE_DELIMITERS = frozenset("‘’‚‛“”„")
 
 
 def _carries_summary_shape(text: str) -> bool:
@@ -1026,7 +1026,7 @@ def _command_requires_shell_provenance(command: str) -> bool:
         or "^" in command
         or _CMD_DELAYED_ENV_EXPANSION_RE.search(command)
         or _BASH_BRACE_EXPANSION_RE.search(command)
-        or any(quote in command for quote in _POWERSHELL_TYPOGRAPHIC_QUOTES)
+        or any(quote in command for quote in _POWERSHELL_QUOTE_DELIMITERS)
         or _has_unquoted_parenthesis(command)
     ):
         return True

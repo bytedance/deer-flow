@@ -1245,8 +1245,11 @@ class TestTestsPassedLeaf:
         assert leaf["checked"] is False
         assert leaf["holds"] is False
 
-    @pytest.mark.parametrize(("opening_quote", "closing_quote"), [("“", "”"), ("‘", "’")])
-    def test_powershell_typographic_quotes_cannot_hide_runner_exclusions(self, opening_quote: str, closing_quote: str):
+    @pytest.mark.parametrize(
+        ("opening_quote", "closing_quote"),
+        [("“", "”"), ("‘", "’"), ("‚", "‚"), ("‛", "‛"), ("„", "„")],
+    )
+    def test_powershell_quote_delimiters_cannot_hide_runner_exclusions(self, opening_quote: str, closing_quote: str):
         command = f"pytest tests/security tests/unit {opening_quote}--deselect=tests/security/test_auth.py::test_required{closing_quote}"
         executions = [_bash_execution(command, output_tail="3 passed, 1 deselected")]
         verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
