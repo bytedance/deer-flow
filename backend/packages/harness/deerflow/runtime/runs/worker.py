@@ -1057,7 +1057,11 @@ async def run_agent(
         from deerflow.extensions import bind_agent_build_extensions
 
         with bind_agent_build_extensions(extensions):
-            agent = _agent_graph(agent_factory(**agent_factory_kwargs))
+            # Assemble off-loop: agent construction re-enters
+            # get_available_tools(), which may block on MCP cache
+            # initialization — it must not stall the calling event loop
+            # (issue #5172).
+            agent = _agent_graph(await asyncio.to_thread(agent_factory, **agent_factory_kwargs))
 
         accessor = CheckpointStateAccessor.bind(
             agent,
