@@ -665,11 +665,12 @@ def _python_import_bindings(node: ast.Import | ast.ImportFrom) -> Iterator[tuple
     """Yield `(bound name, imported path)` for every name one import statement binds.
 
     `import http.client` binds `http`, not `http.client`, and no identifier can spell a dotted key,
-    so the entry has to sit under the bound root or nothing ever looks it up. A bare relative import
-    (`from . import s`) still binds its name but names no resolvable module, so its path is `None`:
-    consumers that map names to paths skip it, while consumers that invalidate whatever a name held
-    before must not. Every import map in this module derives from this one rule so they cannot
-    disagree on what a spelling binds.
+    so the entry has to sit under the bound root or nothing ever looks it up. A relative import
+    (`from . import s`, `from .requests import Session`) still binds its name but names nothing
+    outside the current package -- `ImportFrom.module` drops the leading dots, so `.requests` would
+    otherwise read as the external `requests` -- and its path is `None`: consumers that map names to
+    paths skip it, while consumers that invalidate whatever a name held before must not. Every import
+    map in this module derives from this one rule so they cannot disagree on what a spelling binds.
     """
     for alias in node.names:
         if alias.name == "*":
@@ -678,7 +679,7 @@ def _python_import_bindings(node: ast.Import | ast.ImportFrom) -> Iterator[tuple
             name = alias.asname or alias.name.split(".")[0]
             yield name, alias.name if alias.asname else name
         else:
-            yield alias.asname or alias.name, f"{node.module}.{alias.name}" if node.module else None
+            yield alias.asname or alias.name, f"{node.module}.{alias.name}" if node.module and not node.level else None
 
 
 def _collect_python_aliases(tree: ast.AST) -> dict[str, str]:

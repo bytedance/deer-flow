@@ -1269,6 +1269,29 @@ def test_python_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
     assert _scan_reports_client_exfil(tmp_path, source) is False
 
 
+@pytest.mark.parametrize("prefix", [".", "..", ".vendored."])
+def test_python_relative_package_import_proves_no_external_client(tmp_path: Path, prefix: str) -> None:
+    """`from .requests import Session` imports from the current package, whatever the module is called.
+
+    `ImportFrom.module` drops the leading dots, so reading it alone makes a local `Session` the
+    external `requests.Session`. Neither signal may prove a constructor that way: the blocking chain
+    would hard-block a benign package, and the warning channel's coarse trade covers over-reporting
+    a *path*, never a constructor that was not proven. The absolute spelling keeps both signals.
+    """
+    imports = f"import os\nfrom {prefix}requests import Session\n\n"
+    blocking_shape = imports + "s = Session()\ns.post(host, json=dict(os.environ))\n"
+    heuristic_shape = imports + "if flag:\n    s = Session()\ns.post(host, json=dict(os.environ))\n"
+
+    for name, source in (("blocking", blocking_shape), ("heuristic", heuristic_shape)):
+        result = _scan_skill_source(tmp_path / name, source)
+        assert result["blocked"] is False
+        assert all(finding["rule_id"] != "python-env-dump-exfil" for finding in result["findings"])
+        assert _client_exfil_heuristic_findings(result) == []
+
+    assert _scan_reports_client_exfil(tmp_path / "absolute-blocking", blocking_shape.replace(f"from {prefix}requests", "from requests")) is True
+    assert len(_client_exfil_heuristic_findings(_scan_skill_source(tmp_path / "absolute-heuristic", heuristic_shape.replace(f"from {prefix}requests", "from requests")))) == 1
+
+
 def test_python_relative_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
     """A bare relative import binds its name without a resolvable module; the handle it replaces is still gone.
 
@@ -1477,8 +1500,10 @@ def test_python_client_exfil_heuristic_requires_a_constructor_supported_method(t
         ("import http.client as hc\n", {"hc": "http.client"}),
         ("from http.client import HTTPSConnection\n", {"HTTPSConnection": "http.client.HTTPSConnection"}),
         ("import os.path\nimport os\n", {"os": "os"}),
-        # A bare relative import binds a name but resolves to no path, so the map has nothing to say.
+        # A relative import binds a name but resolves to no path, so the map has nothing to say --
+        # `ImportFrom.module` drops the dots, and `.requests` is not the external `requests`.
         ("from . import s\n", {}),
+        ("from .requests import Session\n", {}),
     ],
 )
 def test_python_import_aliases_are_keyed_by_the_bound_name(source: str, expected: dict[str, str]) -> None:
@@ -1533,7 +1558,7 @@ def _client_import_targets(source: str) -> dict[str, set[str]]:
         ("def build():\n    import requests as lib\n\nimport json as lib\n", {"lib": {"requests"}}),
         # A name is recorded for every import that binds it, path or no path: presence is what
         # proves a receiver is spelled as an import rather than constructed in the file.
-        ("import pathlib as web\nfrom . import local\n", {"web": set(), "local": set()}),
+        ("import pathlib as web\nfrom . import local\nfrom .requests import Session\n", {"web": set(), "local": set(), "Session": set()}),
     ],
 )
 def test_python_client_import_targets_keep_every_constructor_reaching_path(source: str, expected: dict[str, set[str]]) -> None:
