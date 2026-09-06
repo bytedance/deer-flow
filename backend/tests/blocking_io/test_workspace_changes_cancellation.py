@@ -30,9 +30,7 @@ async def _reset_paths(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(paths_mod, "_paths", None)
 
 
-async def test_metadata_only_cancel_does_not_wait_for_scan_worker(
-    tmp_path: Path, monkeypatch, caplog
-) -> None:
+async def test_metadata_only_cancel_does_not_wait_for_scan_worker(tmp_path: Path, monkeypatch, caplog) -> None:
     """No text cache means cancellation must not wait for the worker scan."""
     await _reset_paths(tmp_path, monkeypatch)
 
@@ -54,45 +52,29 @@ async def test_metadata_only_cancel_does_not_wait_for_scan_worker(
     monkeypatch.setattr(recorder, "scan_workspace_roots", _blocking_scan)
     caplog.set_level(logging.INFO, logger=recorder.__name__)
 
-    task = asyncio.create_task(
-        recorder.capture_workspace_snapshot("t1", include_text=False)
-    )
-    assert await asyncio.to_thread(entered.wait, 5), (
-        "metadata scan worker did not start"
-    )
+    task = asyncio.create_task(recorder.capture_workspace_snapshot("t1", include_text=False))
+    assert await asyncio.to_thread(entered.wait, 5), "metadata scan worker did not start"
 
     try:
         task.cancel()
         for _ in range(5):
             await asyncio.sleep(0)
-        assert task.done(), (
-            "metadata-only cancellation waited for a scan with no cache resource to protect"
-        )
+        assert task.done(), "metadata-only cancellation waited for a scan with no cache resource to protect"
         with pytest.raises(asyncio.CancelledError):
             await task
     finally:
         release.set()
 
-    assert await asyncio.to_thread(finished.wait, 5), (
-        "metadata scan worker did not finish after release"
-    )
+    assert await asyncio.to_thread(finished.wait, 5), "metadata scan worker did not finish after release"
     for _ in range(100):
-        if any(
-            "Workspace scan failed after snapshot cancellation" in record.getMessage()
-            for record in caplog.records
-        ):
+        if any("Workspace scan failed after snapshot cancellation" in record.getMessage() for record in caplog.records):
             break
         await asyncio.sleep(0.01)
 
-    assert any(
-        "Workspace scan failed after snapshot cancellation" in record.getMessage()
-        for record in caplog.records
-    ), "the detached metadata scan's late failure must be consumed and logged"
+    assert any("Workspace scan failed after snapshot cancellation" in record.getMessage() for record in caplog.records), "the detached metadata scan's late failure must be consumed and logged"
 
 
-async def test_text_scan_cancel_logs_drain_and_late_failure(
-    tmp_path: Path, monkeypatch, caplog
-) -> None:
+async def test_text_scan_cancel_logs_drain_and_late_failure(tmp_path: Path, monkeypatch, caplog) -> None:
     """A text-cache scan still drains, and that cancellation latency is observable."""
     await _reset_paths(tmp_path, monkeypatch)
 
@@ -113,43 +95,26 @@ async def test_text_scan_cancel_logs_drain_and_late_failure(
         assert cache_dir.exists()
         entered.set()
         release.wait(timeout=5)
-        assert cache_dir.exists(), (
-            "text cache was removed while the scan worker was still running"
-        )
+        assert cache_dir.exists(), "text cache was removed while the scan worker was still running"
         raise RuntimeError("late text scan failure")
 
     monkeypatch.setattr(recorder, "scan_workspace_roots", _blocking_scan)
     caplog.set_level(logging.INFO, logger=recorder.__name__)
 
-    task = asyncio.create_task(
-        recorder.capture_workspace_snapshot("t1", include_text=True)
-    )
-    assert await asyncio.to_thread(entered.wait, 5), (
-        "text scan worker did not start"
-    )
+    task = asyncio.create_task(recorder.capture_workspace_snapshot("t1", include_text=True))
+    assert await asyncio.to_thread(entered.wait, 5), "text scan worker did not start"
 
     task.cancel()
     for _ in range(5):
         await asyncio.sleep(0)
 
-    assert not task.done(), (
-        "text-cache cancellation must keep ownership until the scan drains"
-    )
-    assert any(
-        "Waiting for cancelled workspace snapshot scan to finish before text-cache cleanup"
-        in record.getMessage()
-        for record in caplog.records
-    ), "entering the cancellation drain should be observable"
+    assert not task.done(), "text-cache cancellation must keep ownership until the scan drains"
+    assert any("Waiting for cancelled workspace snapshot scan to finish before text-cache cleanup" in record.getMessage() for record in caplog.records), "entering the cancellation drain should be observable"
 
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    leftovers = await asyncio.to_thread(
-        lambda: sorted(cache_root.glob("deerflow-workspace-changes-*"))
-    )
+    leftovers = await asyncio.to_thread(lambda: sorted(cache_root.glob("deerflow-workspace-changes-*")))
     assert leftovers == [], f"cancelled text scan leaked a cache dir: {leftovers}"
-    assert any(
-        "Workspace scan failed after snapshot cancellation" in record.getMessage()
-        for record in caplog.records
-    ), "a scan failure during cancellation drain must retain diagnostics"
+    assert any("Workspace scan failed after snapshot cancellation" in record.getMessage() for record in caplog.records), "a scan failure during cancellation drain must retain diagnostics"
