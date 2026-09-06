@@ -695,7 +695,10 @@ class _PythonImportScopes:
     a nested import shadows a module-level alias inside its own function and nowhere else, an
     unresolvable import there makes the name read as its bare spelling rather than as the
     module-level alias, and an initializer that rebinds a `global` name is seen by every later use
-    of that name. Within one scope the binding the walk met last wins, as the flat map always did.
+    of that name. A class body is visible only to itself: a method, or a nested class, skips it the
+    way the runtime does, so a name bound only by a class-body import cannot prove anything from a
+    method that could only raise on it. Within one scope the binding the walk met last wins, as
+    the flat map always did.
     """
 
     def __init__(self, module: ast.AST) -> None:
@@ -720,7 +723,7 @@ class _PythonImportScopes:
         current: ast.AST | None = self._binding_scope(scope, name)
         while current is not None:
             bindings = self._bindings.get(current)
-            if bindings is not None and name in bindings:
+            if bindings is not None and name in bindings and (current is scope or not isinstance(current, ast.ClassDef)):
                 return bindings[name]
             current = self._parents.get(current)
             if current is not None and name in self._declared.get(current, {}):

