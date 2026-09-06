@@ -38,6 +38,7 @@ import {
   branchThreadFromTurn,
   fetchThreadTokenUsage,
   patchThreadMetadata,
+  searchThreadsByArchive,
   type ThreadMetadataPatch,
 } from "./api";
 import {
@@ -1438,10 +1439,20 @@ export function upsertThreadInInfiniteCache(
   queryClient: QueryClient,
   thread: AgentThread,
 ) {
+  // Run-created snapshots do not carry archive metadata. Let the server
+  // decide membership instead of injecting a running chat into both views.
+  const hasArchiveFilter = ({ queryKey }: { queryKey: readonly unknown[] }) =>
+    typeof (queryKey[2] as InfiniteThreadsParams | undefined)?.archived ===
+    "boolean";
+  void queryClient.invalidateQueries({
+    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+    predicate: hasArchiveFilter,
+  });
   queryClient.setQueriesData(
     {
       queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
       exact: false,
+      predicate: (query) => !hasArchiveFilter(query),
     },
     (oldData: InfiniteData<AgentThread[]> | undefined) => {
       if (!oldData) {
@@ -2780,9 +2791,9 @@ const INFINITE_THREADS_NEXT_PAGE_PARAM = Symbol(
 );
 
 type InfiniteThreadsParams = Omit<
-  Parameters<ThreadsClient["search"]>[0],
+  NonNullable<Parameters<ThreadsClient["search"]>[0]>,
   "limit" | "offset"
->;
+> & { archived?: boolean };
 
 type InfiniteThreadsSearchClient = {
   threads: {
@@ -2816,11 +2827,20 @@ export async function fetchInfiniteThreadsPage(
 
   while (threads.length < pageSize) {
     const currentLimit = pageSize - threads.length;
-    const response = (await apiClient.threads.search<AgentThreadState>({
-      ...params,
-      limit: currentLimit,
-      offset,
-    })) as AgentThread[];
+    const response =
+      params.archived === undefined
+        ? ((await apiClient.threads.search<AgentThreadState>({
+            ...params,
+            limit: currentLimit,
+            offset,
+          })) as AgentThread[])
+        : await searchThreadsByArchive({
+            ...params,
+            archived: params.archived,
+            metadata: params.metadata ?? undefined,
+            limit: currentLimit,
+            offset,
+          });
 
     threads.push(...filterThreadSearchResults(response, params));
     offset += response.length;
@@ -2953,7 +2973,7 @@ function setThreadInCaches(
   );
 }
 
-function setThreadMetadataInCaches(
+export function setThreadMetadataInCaches(
   queryClient: QueryClient,
   threadId: string,
   metadata: ThreadMetadataPatch,
@@ -3116,9 +3136,8 @@ export function usePinThread() {
       patchThreadMetadata(threadId, {
         [THREAD_PINNED_METADATA_KEY]: pinned,
       }),
-    onSuccess(response, { threadId, pinned }) {
+    onSuccess(_response, { threadId, pinned }) {
       setThreadMetadataInCaches(queryClient, threadId, {
-        ...(response.metadata ?? {}),
         [THREAD_PINNED_METADATA_KEY]: pinned,
       });
     },

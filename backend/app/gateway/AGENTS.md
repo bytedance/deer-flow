@@ -157,3 +157,13 @@ tasks; absence of evidence stays permissive there rather than failing closed.
 Edit replay resolves its base through the same lineage-first path as regenerate;
 it must pass `head_checkpoint` or it silently degrades to the chronological scan
 that cannot tell sibling branches apart.
+
+### Chat archive
+
+`POST /api/threads/search` accepts an optional strict boolean `archived`: omitted
+or null preserves the unfiltered API, true selects only JSON boolean
+`metadata.deerflow_archived=true`, and false includes missing/null/non-true legacy
+flags. Both SQL and Memory thread stores filter before limit/offset and retain
+owner isolation. PATCH validates archive flags as booleans; pin/archive-only
+boolean metadata writes use `touch=False` to preserve activity ordering. Archive
+never changes runtime status, checkpoints, files, schedules, or read permissions.

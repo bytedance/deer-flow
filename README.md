@@ -1185,6 +1185,12 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
 
+### Chat Archive
+
+Use **Archive chat** in a recent chat's sidebar menu to hide completed work while keeping its messages, files, and original link. The success message offers **Undo**. Open **Chats → Archived** to find archived conversations and restore them individually; an open archived conversation also shows a restore button in its header. Search filters the titles of loaded conversations, with **Load more** for older entries.
+
+Archive and restore preserve the chat's activity time and pinned state. Archiving does not stop a running task or pause its schedules, and new activity does not automatically restore it. Use the existing Delete action when you intend to remove a conversation and its files.
+
 ### Session Goals
 
 Use `/goal <completion condition>` to attach one active completion condition to the current thread. The goal is thread-scoped state, not a skill activation, so it stays active across turns until DeerFlow determines it has been satisfied or you clear it.
