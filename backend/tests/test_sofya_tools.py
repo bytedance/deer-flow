@@ -229,6 +229,60 @@ class TestWebSearchTool:
 
         assert mock_post.call_args.kwargs["json"]["search_depth"] == "snippets"
 
+    def test_caller_max_results_wins_over_config(self, mock_config_with_key):
+        mock_config_with_key.return_value.get_tool_config.return_value.model_extra = {
+            "api_key": "test-key",
+            "max_results": 5,
+        }
+        results = [{"title": f"R{i}", "url": f"https://x.com/{i}", "content": f"C{i}"} for i in range(10)]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_post = mock_client_cls.return_value.__enter__.return_value.post
+            mock_post.return_value = _make_search_response(results)
+
+            from deerflow.community.sofya.tools import web_search_tool
+
+            parsed = json.loads(web_search_tool.invoke({"query": "test", "max_results": 8}))
+
+        assert parsed["total_results"] == 8
+        assert mock_post.call_args.kwargs["json"]["max_results"] == 8
+
+    def test_unsupported_search_depth_falls_back_with_warning(self, mock_config_with_key, caplog):
+        mock_config_with_key.return_value.get_tool_config.return_value.model_extra = {
+            "api_key": "test-key",
+            "search_depth": "advanced",
+        }
+        results = [{"title": "Result", "url": "https://example.com", "content": "Body"}]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_post = mock_client_cls.return_value.__enter__.return_value.post
+            mock_post.return_value = _make_search_response(results)
+
+            from deerflow.community.sofya.tools import web_search_tool
+
+            with caplog.at_level(logging.WARNING):
+                web_search_tool.invoke({"query": "test"})
+
+        assert mock_post.call_args.kwargs["json"]["search_depth"] == "basic"
+        assert any("search_depth" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+    def test_search_depth_is_normalized(self, mock_config_with_key):
+        mock_config_with_key.return_value.get_tool_config.return_value.model_extra = {
+            "api_key": "test-key",
+            "search_depth": " Snippets ",
+        }
+        results = [{"title": "Result", "url": "https://example.com", "description": "Snippet"}]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_post = mock_client_cls.return_value.__enter__.return_value.post
+            mock_post.return_value = _make_search_response(results)
+
+            from deerflow.community.sofya.tools import web_search_tool
+
+            web_search_tool.invoke({"query": "test"})
+
+        assert mock_post.call_args.kwargs["json"]["search_depth"] == "snippets"
+
     def test_respects_max_results_from_config(self, mock_config_with_key):
         mock_config_with_key.return_value.get_tool_config.return_value.model_extra = {
             "api_key": "test-key",
@@ -278,23 +332,6 @@ class TestWebSearchTool:
                 parsed = json.loads(web_search_tool.invoke({"query": "test", "max_results": 2}))
 
         assert parsed["total_results"] == 2
-
-    def test_config_max_results_overrides_parameter(self, mock_config_with_key):
-        """Config max_results overrides the parameter passed at call time, matching ddg_search behaviour."""
-        mock_config_with_key.return_value.get_tool_config.return_value.model_extra = {
-            "api_key": "test-key",
-            "max_results": 3,
-        }
-        results = [{"title": f"R{i}", "url": f"https://x.com/{i}", "content": f"C{i}"} for i in range(10)]
-
-        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
-            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_search_response(results)
-
-            from deerflow.community.sofya.tools import web_search_tool
-
-            parsed = json.loads(web_search_tool.invoke({"query": "test", "max_results": 8}))
-
-        assert parsed["total_results"] == 3
 
     def test_empty_results_return_error_json(self, mock_config_with_key):
         """An empty result list returns a structured error, matching ddg_search convention."""

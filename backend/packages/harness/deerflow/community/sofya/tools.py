@@ -25,6 +25,7 @@ _SOFYA_MAX_RESULTS = 20
 _SOFYA_TIMEOUT = 60
 _SOFYA_FETCH_MAX_CHARS = 4096
 _DEFAULT_SEARCH_DEPTH = "basic"
+_SEARCH_DEPTHS = ("basic", "snippets")
 _api_key_warned: set[str] = set()
 
 
@@ -49,6 +50,17 @@ def _coerce_max_results(value: object, default: int = 5, max_allowed: int = _SOF
     if count <= 0:
         return default
     return min(count, max_allowed)
+
+
+def _resolve_search_depth(value: object) -> str:
+    """Return a supported search depth, falling back to the default with a warning."""
+    if value is None:
+        return _DEFAULT_SEARCH_DEPTH
+    depth = str(value).strip().lower()
+    if depth in _SEARCH_DEPTHS:
+        return depth
+    logger.warning("Ignoring unsupported Sofya search_depth %r; using %r (supported: %s)", value, _DEFAULT_SEARCH_DEPTH, ", ".join(_SEARCH_DEPTHS))
+    return _DEFAULT_SEARCH_DEPTH
 
 
 def _missing_key_message(tool_name: str) -> str:
@@ -100,20 +112,21 @@ def _response_results(data: dict) -> list[dict] | None:
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRange | None = None) -> str:
+def web_search_tool(query: str, max_results: int | None = None, time_range: SearchTimeRange | None = None) -> str:
     """Search the web for information. Use this tool to find current information, news, articles, and facts from the internet.
 
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
-        max_results: Maximum number of results to return. Default is 5, capped at 20.
+        max_results: Maximum number of results to return. If omitted, uses the configured value (default 5). Capped at 20.
         time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
-    search_depth = _DEFAULT_SEARCH_DEPTH
     config = get_app_config().get_tool_config("web_search")
-    if config is not None:
-        max_results = config.model_extra.get("max_results", max_results)
-        search_depth = config.model_extra.get("search_depth", search_depth)
+    config_extra = (config.model_extra or {}) if config is not None else {}
+    # Honor the caller-supplied max_results; fall back to config only when omitted.
+    if max_results is None:
+        max_results = config_extra.get("max_results")
     max_results = _coerce_max_results(max_results)
+    search_depth = _resolve_search_depth(config_extra.get("search_depth"))
 
     api_key = _get_api_key("web_search")
     if not api_key:
