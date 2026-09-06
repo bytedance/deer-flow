@@ -142,3 +142,9 @@ logged but do NOT set ``truncated``.  ``None`` on a reclaimed sandbox
 means "not available" — the result was recorded at creation time and is
 preserved within the same Gateway process lifetime via a provider-level
 map.
+
+### Workspace Snapshot Cancellation (`workspace_changes/recorder.py`)
+
+After `_prepare_capture()` hands off the workspace roots, scan-stage cancellation follows resource ownership. Text snapshots (`include_text=True`) own a temporary text cache that the worker may still read or write, so cancellation must drain the scan before removing that cache. Metadata-only snapshots (`include_text=False`) own no cache, so scan-stage cancellation propagates promptly while the worker continues; a completion callback consumes and logs its eventual outcome.
+
+This invariant is intentionally limited to the scan stage. Cancellation during `_prepare_capture()` still follows the existing prepare handoff/reclaim path. Keep regressions in `tests/blocking_io/test_workspace_changes_cancellation.py` covering prompt metadata scan cancellation and text-cache drain/cleanup.
