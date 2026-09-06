@@ -9,7 +9,7 @@ from collections.abc import Iterable, Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 from langchain_core.tools import BaseTool, StructuredTool
@@ -58,7 +58,8 @@ _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _LOCAL_PATH_IN_TEXT_RE = re.compile(
     r"(?:file://)?/[^\s'\"<>|*?]+"  # POSIX absolute path or file:// URI
     r"|[A-Za-z]:[\\/][^\s'\"<>|*?]+"  # Windows drive-qualified absolute path
-    r"|(?:\.{0,2}/|[\w.-]+/)[^\s'\"<>|*?]+"  # path relative to the server cwd
+    # path relative to the server cwd (Windows servers print "\" separators)
+    r"|(?:\.{0,2}[\\/]|[\w.-]+[\\/])[^\s'\"<>|*?]+"
 )
 
 # Trailing characters that are punctuation/markup rather than part of a path.
@@ -84,7 +85,12 @@ def _local_path_from_uri(uri: str, *, base_dir: Path | None = None) -> Path | No
     if parsed.scheme == "file":
         # url2pathname converts the "/C:/..." form a file URI's path takes on
         # Windows into a drive-qualified "C:\..." path; on POSIX it is identity.
-        raw = url2pathname(unquote(parsed.path))
+        # It already percent-decodes, so no extra unquote here, and it can
+        # reject odd Windows spellings with OSError — leave those untouched.
+        try:
+            raw = url2pathname(parsed.path)
+        except OSError:
+            return None
     elif len(parsed.scheme) == 1 and parsed.scheme.isalpha():
         # urlparse reads a Windows drive prefix ("C:\...") as the URI scheme;
         # the original string is a bare local path, not a remote URI.

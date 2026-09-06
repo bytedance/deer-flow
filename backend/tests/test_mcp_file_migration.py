@@ -82,6 +82,10 @@ class TestLocalPathFromUri:
         else:
             assert path is None
 
+    @pytest.mark.skipif(os.name != "nt", reason="a raw '|' in a file URI path rejects with OSError only on Windows")
+    def test_windows_url2pathname_oserror_is_left_untouched(self):
+        assert mcp_tools._local_path_from_uri("file:///C:/tmp/a|b.png") is None
+
     def test_empty_is_ignored(self):
         assert mcp_tools._local_path_from_uri("") is None
 
@@ -123,6 +127,16 @@ class TestLocalUriToVirtualPath:
 
     def test_file_uri_inside_user_data_translates(self, paths: Paths):
         src = _workspace_file(paths, "shot.png")
+
+        with _patch_paths(paths):
+            result = mcp_tools._local_uri_to_virtual_path(src.as_uri(), thread_id="t1", user_id="u1")
+
+        assert result == f"{VIRTUAL_PATH_PREFIX}/workspace/shot.png"
+
+    @pytest.mark.skipif(os.name != "nt", reason="exercises the file:///C:/... drive-qualified URI form")
+    def test_windows_file_uri_translates_to_virtual_path(self, paths: Paths):
+        src = _workspace_file(paths, "shot.png")
+        assert src.as_uri().startswith("file:///C:/")
 
         with _patch_paths(paths):
             result = mcp_tools._local_uri_to_virtual_path(src.as_uri(), thread_id="t1", user_id="u1")
@@ -199,6 +213,17 @@ class TestRewriteLocalPathsInText:
             result = mcp_tools._rewrite_local_paths_in_text(text, thread_id="t1", user_id="u1")
 
         assert result == f"Saved to {VIRTUAL_PATH_PREFIX}/workspace/.mcp/tmp/page.png"
+
+    @pytest.mark.skipif(os.name != "nt", reason="exercises backslash drive-qualified paths in free text")
+    def test_windows_backslash_drive_path_in_text_is_rewritten(self, paths: Paths):
+        src = _workspace_file(paths, "shot.png")
+        text = f"Saved as {src}"
+        assert "\\" in text
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(text, thread_id="t1", user_id="u1")
+
+        assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/shot.png"
 
     def test_old_tmp_path_outside_user_data_is_left_untouched(self, tmp_path: Path, paths: Paths):
         src = tmp_path / "playwright-mcp-output" / "page.png"
