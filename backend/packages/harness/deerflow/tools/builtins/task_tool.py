@@ -869,7 +869,9 @@ async def task_tool(
     }
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
-    tools = get_available_tools(**available_tools_kwargs)
+    # Assemble off-loop: tool assembly may block on MCP cache initialization,
+    # which must not stall the calling event loop (issue #5172).
+    tools = await asyncio.to_thread(get_available_tools, **available_tools_kwargs)
 
     # Create executor
     executor_kwargs = {

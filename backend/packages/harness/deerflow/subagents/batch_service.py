@@ -194,7 +194,10 @@ class SubagentBatchService:
                 spec.get("parent_model"),
                 app_config=app_config,
             )
-            tools = get_available_tools(
+            # Assemble off-loop: tool assembly may block on MCP cache
+            # initialization, which must not stall the calling event loop (issue #5172).
+            tools = await asyncio.to_thread(
+                get_available_tools,
                 groups=spec.get("tool_groups"),
                 model_name=effective_model,
                 subagent_enabled=False,
