@@ -479,14 +479,14 @@ _POWERSHELL_DRIVE_QUALIFIED_RE = re.compile(r"^[^/\\:]+:")
 #: be treated as the literal relative path seen by the POSIX parser.
 _CMD_ENV_EXPANSION_RE = re.compile(r"%[^%\r\n]+%")
 _CMD_DELAYED_ENV_EXPANSION_RE = re.compile(r"![^!\r\n]+!")
-#: Shells supported by ``LocalSandbox`` do not agree on these expansion
-#: forms. Bash expands ``{a,b}``/``{1..3}``, while PowerShell enumerates
-#: ``@(...)`` and parenthesized comma expressions into multiple native
-#: arguments. The evidence currently records no shell kind, so matching must
-#: reject them before a POSIX parser can turn each expression into one
-#: apparently harmless token.
+#: Shells supported by ``LocalSandbox`` do not agree on Bash brace expansion.
+#: The evidence currently records no shell kind, so matching must reject it
+#: before a POSIX parser can turn the expression into one harmless-looking
+#: token.
 _BASH_BRACE_EXPANSION_RE = re.compile(r"\{[^{}\r\n]*(?:,|\.\.)[^{}\r\n]*\}")
-_POWERSHELL_ARRAY_EXPRESSION_RE = re.compile(r"@\s*\(|\([^()\r\n]*,[^()\r\n]*\)")
+#: PowerShell treats typographic single and double quotes as string delimiters,
+#: while POSIX ``shlex`` retains them as ordinary token characters.
+_POWERSHELL_TYPOGRAPHIC_QUOTES = frozenset("‘’“”")
 
 
 def _carries_summary_shape(text: str) -> bool:
@@ -932,6 +932,28 @@ def _has_cmd_control_operator_in_single_quotes(command: str) -> bool:
     return False
 
 
+def _has_unquoted_parenthesis(command: str) -> bool:
+    """Whether a parenthesis appears outside a quoted string.
+
+    PowerShell evaluates an unquoted parenthesized command expression and
+    expands its output into native arguments. POSIX tokenization instead
+    leaves the parentheses attached to ordinary tokens, which can hide an
+    injected runner option. Parentheses inside double- or single-quoted
+    strings are data; cmd-specific control syntax inside single quotes is
+    rejected separately because cmd does not honor those quotes.
+    """
+    in_double_quotes = False
+    in_single_quotes = False
+    for character in command:
+        if character == '"' and not in_single_quotes:
+            in_double_quotes = not in_double_quotes
+        elif character == "'" and not in_double_quotes:
+            in_single_quotes = not in_single_quotes
+        elif character in "()" and not in_double_quotes and not in_single_quotes:
+            return True
+    return False
+
+
 def _has_unquoted_single_quote(text: str) -> bool:
     """Whether *text* contains a single quote outside double quotes.
 
@@ -986,16 +1008,16 @@ def _command_requires_shell_provenance(command: str) -> bool:
     command. Inspect a non-POSIX tokenization before the authoritative POSIX
     parser can discard backslashes anywhere in the candidate command: PowerShell
     and native Windows runners preserve them as path separators while POSIX
-    shells treat them as escapes. Cmd percent/bang references and ``^``, a
-    leading tilde or Bash brace expression, and PowerShell splatting/array
-    expressions can all rewrite the native argv differently. ``#`` starts a
-    comment for the POSIX parser but is an ordinary argument to cmd.exe. Cmd
-    also does not treat single quotes as quoting, so cmd control syntax hidden
-    inside POSIX single quotes is unsafe. PowerShell recognizes more separators
-    than POSIX ``shlex``, including bare carriage returns and Unicode separator
-    characters; normal CRLF line endings remain unambiguous. Any of these
-    spellings therefore fail closed instead of certifying a test run whose
-    arguments depend on an unknown shell.
+    shells treat them as escapes. Cmd percent/bang references and ``^``, Bash
+    tilde/brace expansion, and PowerShell splatting, typographic quotes, or
+    unquoted parentheses can all rewrite the native argv differently. ``#``
+    starts a comment for the POSIX parser but is an ordinary argument to
+    cmd.exe. Cmd also does not treat single quotes as quoting, so cmd control
+    syntax hidden inside POSIX single quotes is unsafe. PowerShell recognizes
+    more separators than POSIX ``shlex``, including bare carriage returns and
+    Unicode separator characters; normal CRLF remains unambiguous. These forms
+    fail closed rather than certifying arguments that depend on an unknown
+    shell.
     """
     if (
         _has_shell_ambiguous_whitespace(command)
@@ -1004,7 +1026,8 @@ def _command_requires_shell_provenance(command: str) -> bool:
         or "^" in command
         or _CMD_DELAYED_ENV_EXPANSION_RE.search(command)
         or _BASH_BRACE_EXPANSION_RE.search(command)
-        or _POWERSHELL_ARRAY_EXPRESSION_RE.search(command)
+        or any(quote in command for quote in _POWERSHELL_TYPOGRAPHIC_QUOTES)
+        or _has_unquoted_parenthesis(command)
     ):
         return True
     parsed = _shell_parse(command, posix=False)

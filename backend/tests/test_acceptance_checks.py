@@ -1233,9 +1233,37 @@ class TestTestsPassedLeaf:
         assert leaf["checked"] is False
         assert leaf["holds"] is False
 
+    def test_powershell_parenthesized_expression_cannot_inject_runner_arguments(self):
+        """PowerShell expands a parenthesized command expression into native
+        arguments, while POSIX tokenization leaves the closing parenthesis on
+        the exclusion path and can miss that the required target was skipped."""
+        command = 'pytest tests/security tests/unit (Write-Output "--ignore" "tests/security")'
+        executions = [_bash_execution(command, output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+
+    @pytest.mark.parametrize(("opening_quote", "closing_quote"), [("“", "”"), ("‘", "’")])
+    def test_powershell_typographic_quotes_cannot_hide_runner_exclusions(self, opening_quote: str, closing_quote: str):
+        command = f"pytest tests/security tests/unit {opening_quote}--deselect=tests/security/test_auth.py::test_required{closing_quote}"
+        executions = [_bash_execution(command, output_tail="3 passed, 1 deselected")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+
     def test_shared_whitespace_and_double_quotes_remain_verifiable(self):
         executions = [_bash_execution('pytest\t"tests/security" -q', output_tail="3 passed")]
         verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_parentheses_inside_double_quoted_path_remain_verifiable(self):
+        executions = [_bash_execution('pytest "tests/(security)"', output_tail="3 passed")]
+        verdict = check_acceptance_criteria(['tests_passed:pytest "tests/(security)"'], bash_executions=executions)
 
         assert verdict["leaves"][0]["holds"] is True
 
