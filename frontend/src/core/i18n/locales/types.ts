@@ -520,6 +520,20 @@ export interface Translations {
 
   // Chats
   chats: {
+    noActiveChats: string;
+    activeChats: string;
+    archivedChats: string;
+    archiveChat: string;
+    restoreChat: string;
+    archiveSuccess: string;
+    restoreSuccess: string;
+    archiveFailed: string;
+    archiveDescription: string;
+    undoArchive: string;
+    noArchivedChats: string;
+    noMatchingChats: string;
+    loadChatsFailed: string;
+    retryLoadChats: string;
     searchChats: string;
     branchLabel: (title: string, parentTitle: string) => string;
     loadMoreToSearch: string;
