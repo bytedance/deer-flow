@@ -60,6 +60,7 @@ DEFAULT_CHANNEL_MAX_CONCURRENCY = 5
 DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS = 3.0
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 CHANNEL_AGENT_METADATA_KEY = "channel_agent_name"
+THREAD_AGENT_METADATA_KEY = "agent_name"
 MAX_CHANNEL_AGENT_LIST_ITEMS = 50
 MAX_CHANNEL_AGENT_DESCRIPTION_CHARS = 120
 
@@ -342,6 +343,37 @@ def _normalize_custom_agent_name(raw_value: str) -> str:
     if not CUSTOM_AGENT_NAME_PATTERN.fullmatch(normalized):
         raise InvalidChannelSessionConfigError(f"Invalid channel session assistant_id {raw_value!r}. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.")
     return normalized
+
+
+def _apply_explicit_agent_choice(
+    run_config: dict[str, Any],
+    run_context: dict[str, Any],
+    agent_name: str | None,
+) -> None:
+    """Pin or clear an explicit channel agent in every runtime carrier.
+
+    Gateway accepts ``agent_name`` from the request's top-level context and
+    from either RunnableConfig container. Its compatibility merge preserves
+    existing values with ``setdefault``, so an explicit ``/agent use`` choice
+    must normalize all three carriers before the request crosses that boundary.
+    ``None`` represents an explicit reset to the default lead agent.
+    """
+    carriers = [run_context]
+    for section in ("configurable", "context"):
+        value = run_config.get(section)
+        if isinstance(value, Mapping):
+            # Session layers own their nested dictionaries. Copy before changing
+            # one so selecting an agent for a conversation cannot mutate the
+            # manager's reusable channel configuration.
+            copied = dict(value)
+            run_config[section] = copied
+            carriers.append(copied)
+
+    for carrier in carriers:
+        if agent_name is None:
+            carrier.pop("agent_name", None)
+        else:
+            carrier["agent_name"] = agent_name
 
 
 def _extract_response_text(result: dict | list) -> str:
@@ -1477,15 +1509,16 @@ class ChannelManager:
         if assistant_id != DEFAULT_ASSISTANT_ID:
             normalized_agent_name = _normalize_custom_agent_name(assistant_id)
             if explicit_agent_choice:
-                run_context["agent_name"] = normalized_agent_name
+                _apply_explicit_agent_choice(run_config, run_context, normalized_agent_name)
             else:
                 run_context.setdefault("agent_name", normalized_agent_name)
             assistant_id = DEFAULT_ASSISTANT_ID
         elif explicit_agent_choice:
             # An explicit lead_agent selection is also a real pin: discard a
-            # configured context agent so /agent use lead_agent cannot claim
-            # to reset the conversation while silently routing elsewhere.
-            run_context.pop("agent_name", None)
+            # configured agent in every Gateway-supported carrier so
+            # /agent use lead_agent cannot claim to reset the conversation
+            # while silently routing elsewhere.
+            _apply_explicit_agent_choice(run_config, run_context, None)
 
         # Apply per-channel run policy (recursion_limit bump for webhook
         # channels, etc.). Looking the policy up by channel_name keeps
@@ -2039,6 +2072,13 @@ class ChannelManager:
         metadata = _thread_channel_metadata(msg)
         if agent_name is not None:
             metadata[CHANNEL_AGENT_METADATA_KEY] = agent_name
+            # Web thread search returns metadata but no run context. Persist the
+            # canonical key consumed by ``pathOfThread`` so opening this IM
+            # conversation in the browser keeps the same custom agent. The lead
+            # agent deliberately has no canonical key: it uses the ordinary chat
+            # route rather than a non-existent custom-agent route.
+            if agent_name != DEFAULT_ASSISTANT_ID:
+                metadata[THREAD_AGENT_METADATA_KEY] = agent_name
         owner_headers = _owner_headers(msg)
         # Some channels (notably GitHub) supply a deterministic preferred
         # thread id so a (repo, PR/issue number) always lands on the same

@@ -19,7 +19,7 @@ A user-owned IM channel connection is a **per-DeerFlow-user bind layer** layered
 ### Conversation-scoped Custom Agents
 
 Connected users can run `/agent list` to inspect the Custom Agents in their own DeerFlow user bucket, then `/agent use <name>` to start a new conversation with one.
-The selection is written to the new Gateway thread's metadata and cached by `ChannelManager` for subsequent turns. On restart, the manager reads the same metadata before the first resumed turn.
+The selection is written to the new Gateway thread's channel metadata and, for a Custom Agent, to the canonical `agent_name` routing metadata used by the Web UI. It is cached by `ChannelManager` for subsequent turns; on restart, the manager reads the channel metadata before the first resumed turn. Opening that thread from Web search therefore continues under the same Custom Agent instead of falling back to the default runtime.
 Because selecting an agent always creates a new thread instead of mutating the current one, an existing conversation keeps its original runtime, prompt, skills, and checkpoint lineage.
 `/agent use lead_agent` starts a new conversation with the default agent.
 

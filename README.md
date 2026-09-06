@@ -719,7 +719,7 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 
 > Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
 
-Agent selection is conversation-scoped: `/agent use <name>` starts a fresh conversation and pins that Custom Agent in the thread metadata. Existing conversations never switch agents midway, and the selection survives a Gateway restart.
+Agent selection is conversation-scoped: `/agent use <name>` starts a fresh conversation and pins that Custom Agent in the thread metadata. Existing conversations never switch agents midway, the selection survives a Gateway restart, and opening the IM-created thread in the Web UI continues through the same Custom Agent.
 Use `/agent use lead_agent` to return to the default agent in a new conversation.
 
 #### Request Trace Correlation
