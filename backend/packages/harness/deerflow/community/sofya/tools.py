@@ -110,8 +110,9 @@ def _sofya_post(path: str, api_key: str, payload: dict) -> tuple[dict | None, st
     return data, None
 
 
-def _clip(text: str, limit: int) -> str:
-    """Truncate text to limit characters. A limit of 0 means no truncation."""
+def _clip(value: object, limit: int) -> str:
+    """Coerce a result field to text and truncate it. A limit of 0 means no truncation."""
+    text = value if isinstance(value, str) else str(value)
     return text if limit <= 0 else text[:limit]
 
 

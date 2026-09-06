@@ -229,6 +229,22 @@ class TestWebSearchTool:
 
         assert mock_post.call_args.kwargs["json"]["search_depth"] == "snippets"
 
+    def test_non_string_content_does_not_raise(self, mock_config_with_key):
+        results = [
+            {"title": "Numeric", "url": "https://example.com/1", "content": 12345},
+            {"title": "Listy", "url": "https://example.com/2", "content": None, "description": ["a", "b"]},
+        ]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_search_response(results)
+
+            from deerflow.community.sofya.tools import web_search_tool
+
+            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+
+        assert parsed["results"][0]["content"] == "12345"
+        assert parsed["results"][1]["content"] == "['a', 'b']"
+
     def test_result_content_is_capped_by_default(self, mock_config_with_key):
         results = [{"title": "Result", "url": "https://example.com", "content": "x" * 9000}]
 
