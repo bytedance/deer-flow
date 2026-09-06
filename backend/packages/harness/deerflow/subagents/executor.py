@@ -1704,6 +1704,8 @@ class SubagentExecutor:
                 )
                 cancelled_during_stream = cancelled_during_stream or result.cancel_event.is_set()
                 if close_error is not None:
+                    if not isinstance(close_error, (asyncio.CancelledError, Exception)):
+                        raise close_error
                     interrupted = stream_error is not None or deferred_cancellation is not None or cancelled_during_stream
                     if not interrupted:
                         raise close_error

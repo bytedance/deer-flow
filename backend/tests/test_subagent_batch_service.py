@@ -109,6 +109,177 @@ async def test_stop_waits_for_cancelled_background_executions_to_become_terminal
 
 
 @pytest.mark.asyncio
+async def test_stop_waits_for_real_item_background_teardown(monkeypatch) -> None:
+    result = SimpleNamespace(
+        status=FakeStatus.RUNNING,
+        result=None,
+        error=None,
+        stop_reason=None,
+        token_usage_records=None,
+        completed_at=None,
+        execution_done_event=asyncio.Event(),
+    )
+    execution_started = asyncio.Event()
+    cancel_requested = asyncio.Event()
+    cleaned: list[str] = []
+
+    class Repository:
+        async def claim_items(self, **_kwargs):
+            return [
+                {
+                    "id": "item-1",
+                    "item_key": "record-1",
+                    "prompt": "Process record 1",
+                    "batch": {
+                        "id": "batch-1",
+                        "thread_id": "thread-1",
+                        "user_id": "user-1",
+                        "run_id": "run-1",
+                        "execution_spec": _request().execution_spec,
+                    },
+                }
+            ]
+
+        async def mark_item_running(self, *_args, **_kwargs):
+            return True
+
+    class Executor:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def execute_async(self, _prompt, task_id=None):
+            assert task_id == "item-1"
+            execution_started.set()
+            return "execution-1"
+
+    def request_cancel(execution_id: str) -> None:
+        assert execution_id == "execution-1"
+        result.status = FakeStatus.FAILED
+        result.completed_at = service_module.datetime.now(service_module.UTC)
+        cancel_requested.set()
+
+    repository = Repository()
+    monkeypatch.setattr(service_module, "get_app_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(service_module, "resolve_subagent_model_name", lambda *_args, **_kwargs: "model-a")
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(service_module, "get_background_task_result", lambda _execution_id: result)
+    monkeypatch.setattr(service_module, "request_cancel_background_task", request_cancel)
+    monkeypatch.setattr(service_module, "cleanup_background_task", cleaned.append)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+    )
+
+    await service.start()
+    await asyncio.wait_for(execution_started.wait(), timeout=1)
+    stop_task = asyncio.create_task(service.stop())
+    await asyncio.wait_for(cancel_requested.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert not stop_task.done()
+    assert not result.execution_done_event.is_set()
+
+    result.execution_done_event.set()
+    await asyncio.wait_for(stop_task, timeout=1)
+
+    assert cleaned.count("execution-1") >= 1
+    assert service._executions == {}
+    assert service._execution_ids == {}
+    assert service._item_batches == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_does_not_start_items_from_a_late_cancelled_claim(monkeypatch) -> None:
+    claim_started = asyncio.Event()
+    execution_started = False
+
+    class Repository:
+        async def claim_items(self, **_kwargs):
+            claim_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return [
+                    {
+                        "id": "item-1",
+                        "item_key": "record-1",
+                        "prompt": "Process record 1",
+                        "batch": {
+                            "id": "batch-1",
+                            "thread_id": "thread-1",
+                            "user_id": "user-1",
+                            "run_id": "run-1",
+                            "execution_spec": _request().execution_spec,
+                        },
+                    }
+                ]
+
+    class Executor:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def execute_async(self, _prompt, task_id=None):
+            nonlocal execution_started
+            execution_started = True
+            return f"execution-{task_id}"
+
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    service = SubagentBatchService(
+        repository=Repository(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+    )
+
+    await service.start()
+    await asyncio.wait_for(claim_started.wait(), timeout=1)
+    await asyncio.wait_for(service.stop(), timeout=1)
+
+    assert execution_started is False
+    assert service._executions == {}
+    assert service._execution_ids == {}
+
+
+@pytest.mark.asyncio
+async def test_stop_retry_keeps_waiting_for_captured_background_execution(monkeypatch) -> None:
+    result = SimpleNamespace(
+        status=FakeStatus.FAILED,
+        completed_at=service_module.datetime.now(service_module.UTC),
+        execution_done_event=asyncio.Event(),
+    )
+    cleaned: list[str] = []
+    service = SubagentBatchService(
+        repository=SimpleNamespace(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+    )
+    service._execution_ids["item-1"] = "execution-1"
+    monkeypatch.setattr(service_module, "request_cancel_background_task", lambda _execution_id: None)
+    monkeypatch.setattr(service_module, "get_background_task_result", lambda _execution_id: result)
+    monkeypatch.setattr(service_module, "cleanup_background_task", cleaned.append)
+
+    first_stop = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+    assert not first_stop.done()
+    first_stop.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_stop
+
+    assert service._shutdown_execution_ids == {"execution-1"}
+
+    second_stop = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+    assert not second_stop.done()
+    result.execution_done_event.set()
+    await asyncio.wait_for(second_stop, timeout=1)
+
+    assert cleaned == ["execution-1"]
+    assert service._shutdown_execution_ids == set()
+
+
+@pytest.mark.asyncio
 async def test_submit_keeps_batch_running_limit_separate_from_one_process_capacity() -> None:
     repository = SimpleNamespace(create_batch=AsyncMock(return_value={"id": "batch-1"}))
     service = SubagentBatchService(

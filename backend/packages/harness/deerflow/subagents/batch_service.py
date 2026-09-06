@@ -58,6 +58,7 @@ class SubagentBatchService:
         self._executions: dict[str, asyncio.Task[None]] = {}
         self._execution_ids: dict[str, str] = {}
         self._item_batches: dict[str, str] = {}
+        self._shutdown_execution_ids: set[str] = set()
 
     async def start(self) -> None:
         if self._poller is not None:
@@ -66,30 +67,39 @@ class SubagentBatchService:
         self._poller = asyncio.create_task(self._run(), name="subagent-batch-poller")
 
     async def stop(self) -> None:
+        # Freeze ownership before waking item pollers.  Their cancellation
+        # cleanup removes entries from both maps, but shutdown must still wait
+        # for every admitted background execution to finish teardown.
+        tasks = {id(task): task for task in self._executions.values()}
+        self._shutdown_execution_ids.update(self._execution_ids.values())
         self._stop.set()
         poller = self._poller
         self._poller = None
         if poller is not None:
             poller.cancel()
             await asyncio.gather(poller, return_exceptions=True)
-        execution_ids = list(self._execution_ids.values())
-        for execution_id in execution_ids:
+        # A repository may finish a claim transaction while cancellation is
+        # being delivered.  Reconcile once the sole task producer has stopped.
+        tasks.update({id(task): task for task in self._executions.values()})
+        self._shutdown_execution_ids.update(self._execution_ids.values())
+        for execution_id in tuple(self._shutdown_execution_ids):
             request_cancel_background_task(execution_id)
-        tasks = list(self._executions.values())
-        for task in tasks:
+        for task in tasks.values():
             task.cancel()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        pending_execution_ids = set(execution_ids)
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+        pending_execution_ids = set(self._shutdown_execution_ids)
         while pending_execution_ids:
             for execution_id in tuple(pending_execution_ids):
                 result = get_background_task_result(execution_id)
                 if result is None:
                     pending_execution_ids.remove(execution_id)
+                    self._shutdown_execution_ids.discard(execution_id)
                     continue
                 if result.execution_done_event.is_set() and (result.status.is_terminal or result.completed_at is not None):
                     cleanup_background_task(execution_id)
                     pending_execution_ids.remove(execution_id)
+                    self._shutdown_execution_ids.discard(execution_id)
             if pending_execution_ids:
                 await asyncio.sleep(0.05)
         self._executions.clear()
@@ -122,6 +132,8 @@ class SubagentBatchService:
             lease_seconds=self._config.lease_seconds,
             limit=available,
         )
+        if self._stop.is_set():
+            return
         for item in items:
             item_id = item["id"]
             if item_id in self._executions:

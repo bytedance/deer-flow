@@ -3269,6 +3269,54 @@ class TestCooperativeCancellation:
         assert stream.closed is True
 
     @pytest.mark.anyio
+    async def test_aexecute_cancelled_stream_propagates_fatal_close_error(self, classes, base_config, msg):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+
+        class FatalCloseError(BaseException):
+            pass
+
+        class FatalCloseStream:
+            def __init__(self):
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                cancel_event.set()
+                return {"messages": [msg.human("Task"), msg.ai("Partial", "msg-1")]}
+
+            async def aclose(self):
+                raise FatalCloseError("fatal close")
+
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = FatalCloseStream()
+        result_holder = SubagentResult(
+            task_id="cancel-fatal-close",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with (
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+            pytest.raises(FatalCloseError, match="fatal close"),
+        ):
+            await executor._aexecute("Task", result_holder=result_holder)
+
+    @pytest.mark.anyio
     async def test_aexecute_repeated_cancellation_waits_for_stream_teardown(self, classes, base_config):
         SubagentExecutor = classes["SubagentExecutor"]
         stream_started = asyncio.Event()
