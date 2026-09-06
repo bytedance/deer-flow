@@ -97,6 +97,12 @@ async def _drain_scan_and_cleanup(
     thread_id: str,
 ) -> None:
     """Let a cancelled scan finish before removing the cache it may still use."""
+    if not scan.done():
+        logger.info(
+            "Waiting for cancelled workspace snapshot scan to finish before text-cache cleanup for thread %s",
+            thread_id,
+        )
+
     while not scan.done():
         try:
             await asyncio.shield(scan)
@@ -172,10 +178,6 @@ async def capture_workspace_snapshot(
         # so deleting it immediately would race the scan. Keep the cache alive
         # until the worker drains, then remove it before propagating cancellation.
         # Repeated cancellation must not abandon either phase.
-        logger.info(
-            "Waiting for cancelled workspace snapshot scan to finish before text-cache cleanup for thread %s",
-            thread_id,
-        )
         await _drain_scan_and_cleanup(scan, text_cache_dir, thread_id=thread_id)
         raise
     except Exception:
