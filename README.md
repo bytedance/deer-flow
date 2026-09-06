@@ -1236,6 +1236,11 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+Workspace change summaries scan up to 2,000 files by default. When a scan is
+incomplete, the summary remains marked as truncated: files missing from that
+partial snapshot are not reported as created or deleted. Changes to files
+observed in both snapshots are still reported.
+
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
 automatically. Clients can use the structured error to schedule a retry.

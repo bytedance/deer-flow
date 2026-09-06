@@ -308,6 +308,14 @@ When using `make dev` from root, the frontend automatically connects through ngi
 
 ## Key Features
 
+### Workspace Change Detection
+
+`workspace_changes.diff.get_changed_paths()` owns change filtering for summaries,
+text capture, and output delivery detection. Absence from a truncated snapshot
+is unknown: require a complete before snapshot to infer creation and a complete
+after snapshot to infer deletion. Continue comparing files observed in both
+snapshots and preserve the summary's truncation flag.
+
 ### Web Search Recency
 
 DDG, Brave, Tavily, and SearXNG `web_search` share optional
