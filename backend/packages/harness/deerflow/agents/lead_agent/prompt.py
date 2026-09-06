@@ -767,6 +767,7 @@ def _get_memory_context(
     *,
     app_config: AppConfig | None = None,
     user_id: str | None = None,
+    query: str | None = None,
 ) -> str:
     """Get memory context for injection into system prompt.
 
@@ -776,6 +777,10 @@ def _get_memory_context(
             are read from this value instead of the global config singleton.
         user_id: Explicit user bucket. When omitted, resolves the current
             Gateway or standalone LangGraph Server identity.
+        query: Optional current-turn query hint forwarded to the memory
+            backend. Backends that enable query-aware ranking (DeerMem
+            ``retrieval_relevance_enabled``) rank injected facts against it;
+            others ignore it.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
@@ -800,6 +805,7 @@ def _get_memory_context(
         memory_content = get_memory_manager().get_context(
             user_id=user_id or resolve_runtime_user_id(None),
             agent_name=agent_name,
+            query=query,
         )
 
         if not memory_content.strip():

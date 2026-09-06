@@ -14,6 +14,8 @@ from typing import Any, cast
 import yaml
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
+from .relevance import order_facts_for_query
+
 logger = logging.getLogger(__name__)
 
 
@@ -470,6 +472,9 @@ def format_memory_for_injection(
     use_tiktoken: bool = True,
     guaranteed_categories: list[str] | None = None,
     guaranteed_token_budget: int = 500,
+    query: str | None = None,
+    relevance_weight: float | None = None,
+    diversity_weight: float | None = None,
 ) -> str:
     """Format memory data for injection into system prompt.
 
@@ -491,6 +496,17 @@ def format_memory_for_injection(
             point the safety-truncation ceiling is raised to
             ``max_tokens + guaranteed_actual_usage`` to protect them.
             Ignored when *guaranteed_categories* is ``None`` or empty.
+        query: Optional current-turn query. When provided together with
+            ``relevance_weight``, facts are first ranked by deterministic
+            lexical relevance combined with confidence (issue #4495) before
+            the guaranteed/regular partition and budget selection. ``None``
+            preserves the legacy confidence-only ordering.
+        relevance_weight: Weight of lexical relevance vs confidence for the
+            query-aware ranking (0.0 = confidence only). Ignored when
+            ``query`` is ``None``.
+        diversity_weight: Optional greedy-MMR similarity penalty that demotes
+            near-duplicate facts during query-aware ranking. Ignored when
+            ``query`` is ``None``.
 
     Returns:
         Formatted memory string for system prompt injection.
@@ -585,6 +601,20 @@ def format_memory_for_injection(
         # redoing validation work on the hot prompt-injection path.
         valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
 
+        # Query-aware ranking (issue #4495): reorder the valid facts by
+        # deterministic lexical relevance combined with confidence, then
+        # optionally diversify near-duplicates. The partition below must then
+        # preserve this order instead of re-sorting by confidence.
+        relevance_ordered = False
+        if query and query.strip() and relevance_weight is not None:
+            valid_facts = order_facts_for_query(
+                valid_facts,
+                query,
+                relevance_weight=relevance_weight,
+                diversity_weight=diversity_weight or 0.0,
+            )
+            relevance_ordered = True
+
         try:
             # Partition valid facts into guaranteed vs regular groups.
             # Use the *raw* category field (no ``or "context"`` default) so
@@ -604,19 +634,16 @@ def format_memory_for_injection(
                     cat = raw.strip()
                     return bool(cat) and cat in effective_guaranteed
 
-                guaranteed = sorted(
-                    [f for f in valid_facts if _category_match(f)],
-                    key=_confidence_key,
-                    reverse=True,
-                )
-                regular = sorted(
-                    [f for f in valid_facts if not _category_match(f)],
-                    key=_confidence_key,
-                    reverse=True,
-                )
+                guaranteed_pool = [f for f in valid_facts if _category_match(f)]
+                regular_pool = [f for f in valid_facts if not _category_match(f)]
+                if relevance_ordered:
+                    guaranteed, regular = guaranteed_pool, regular_pool
+                else:
+                    guaranteed = sorted(guaranteed_pool, key=_confidence_key, reverse=True)
+                    regular = sorted(regular_pool, key=_confidence_key, reverse=True)
             else:
                 guaranteed = []
-                regular = sorted(valid_facts, key=_confidence_key, reverse=True)
+                regular = valid_facts if relevance_ordered else sorted(valid_facts, key=_confidence_key, reverse=True)
 
             # ── Phase 1: select guaranteed lines ──────────────────────────
             header_cost = _count_tokens(facts_header, use_tiktoken=use_tiktoken)

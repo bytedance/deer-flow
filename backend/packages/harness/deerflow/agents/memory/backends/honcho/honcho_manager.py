@@ -205,6 +205,7 @@ class HonchoMemoryManager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         workspace = self._workspace(user_id)
         if workspace is None or not user_id:
@@ -290,8 +291,9 @@ class HonchoMemoryManager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
-        return await asyncio.to_thread(self.get_context, user_id, agent_name=agent_name, thread_id=thread_id)
+        return await asyncio.to_thread(self.get_context, user_id, agent_name=agent_name, thread_id=thread_id, query=query)
 
     async def asearch(
         self,

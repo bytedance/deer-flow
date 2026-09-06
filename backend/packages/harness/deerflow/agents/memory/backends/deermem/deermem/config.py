@@ -73,6 +73,29 @@ class DeerMemConfig(BaseModel):
         default="fts5",
         description="Retrieval adapter factory: 'fts5' (default), an empty string to disable, or a dotted factory receiving DeerMemConfig and implementing RetrievalPort.",
     )
+    retrieval_relevance_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in relevance-aware retrieval (issue #4495). When true, "
+            "memory_search ranks all facts in scope by deterministic lexical "
+            "relevance combined with confidence, related facts are returned "
+            "even without a literal substring match, and prompt injection "
+            "ranks facts against the current query. False preserves the "
+            "legacy confidence-based behavior exactly."
+        ),
+    )
+    retrieval_relevance_weight: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Weight of lexical relevance vs confidence in the combined retrieval score. 0.0 = confidence only; 1.0 = relevance only. Used only when retrieval_relevance_enabled is true.",
+    )
+    retrieval_diversity_weight: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Greedy MMR similarity penalty that demotes near-duplicate facts during relevance-aware ranking. 0.0 (default) = no diversification. Used only when retrieval_relevance_enabled is true.",
+    )
     # ── Queue ────────────────────────────────────────────────────────────
     debounce_seconds: int = Field(
         default=30,

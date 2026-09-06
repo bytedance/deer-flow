@@ -268,3 +268,23 @@ Keep these cross-component constraints in sync:
 - Eviction weights must total `1.0`.
 - `watermark_max_keys: 0` makes the conversation watermark cache unbounded.
 - A dropped watermark can re-extract one batch on the next turn.
+
+#### Relevance-aware retrieval (opt-in)
+
+The deterministic lexical strategy behind issue #4495 lives in
+`deermem/core/relevance.py` (token overlap + idf weights + confidence blend +
+greedy MMR diversity). It never touches the persisted memory format and never
+runs by default.
+
+- `retrieval_relevance_enabled: true` opts in. `memory_search` then ranks every
+  fact in scope (not only literal substring matches) and prompt injection ranks
+  facts against the current query before the token-budget selection.
+- `retrieval_relevance_weight` blends lexical relevance with confidence;
+  `retrieval_diversity_weight` demotes near-duplicate facts. Defaults preserve
+  the legacy confidence-only ordering exactly.
+- The current-turn query flows from `DynamicContextMiddleware` (bounded,
+  user-message text) through the optional `query` keyword on
+  `MemoryManager.get_context` / `aget_context`. Backends without query-aware
+  ranking ignore the hint.
+- Ranking must be deterministic, network-free, and mutation-free: caller-owned
+  fact dicts are read-only inputs.

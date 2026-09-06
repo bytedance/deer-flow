@@ -374,7 +374,7 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     def fail_get_memory_config():
         raise AssertionError("ambient get_memory_config() must not be used when app_config is explicit")
 
-    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None, query=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
         return "remember this"
@@ -455,7 +455,7 @@ def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
     def fail_resolve_runtime_user_id(runtime):
         raise AssertionError("explicit user_id must bypass ambient identity resolution")
 
-    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None, query=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
         return "remember this"
