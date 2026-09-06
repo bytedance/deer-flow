@@ -129,12 +129,15 @@ def _subagent_release_policy(
     max_concurrent: int,
     max_total: int,
     user_id: str | None = None,
+    allowed_subagents: list[str] | None = None,
 ) -> dict[str, object]:
     """Delegation limits as the run will actually enforce them.
 
     The per-type turn/timeout caps are read here rather than left implicit
     because a subagent config edit changes what the lead agent can spend
-    without changing anything visible in the lead's own configuration.
+    without changing anything visible in the lead's own configuration. The
+    catalog also respects the caller's ``allowed_subagents`` snapshot so the
+    descriptor matches the prompt and task()/batch_task() enforcement surface.
     """
     policy: dict[str, object] = {
         "enabled": enabled,
@@ -148,7 +151,15 @@ def _subagent_release_policy(
 
     from deerflow.subagents import get_available_subagent_names, get_subagent_config
 
-    type_allowlist = sorted(set(get_available_subagent_names(app_config=app_config, user_id=user_id)))
+    type_allowlist = sorted(
+        set(
+            get_available_subagent_names(
+                app_config=app_config,
+                allowed_subagents=allowed_subagents,
+                user_id=user_id,
+            )
+        )
+    )
     runtime_limits: dict[str, object] = {}
     for name in type_allowlist:
         subagent_config = get_subagent_config(name, app_config=app_config, user_id=user_id)
@@ -1094,6 +1105,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                     max_concurrent=max_concurrent_subagents,
                     max_total=max_total_subagents,
                     user_id=resolved_user_id,
+                    allowed_subagents=allowed_subagents,
                 ),
                 "deferred_tools": {
                     "enabled": resolved_app_config.tool_search.enabled,
@@ -1214,6 +1226,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                 max_concurrent=max_concurrent_subagents,
                 max_total=max_total_subagents,
                 user_id=resolved_user_id,
+                allowed_subagents=allowed_subagents,
             ),
             "deferred_tools": {
                 "enabled": resolved_app_config.tool_search.enabled,
