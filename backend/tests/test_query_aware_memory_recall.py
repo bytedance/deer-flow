@@ -23,6 +23,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.message import add_messages
 
 from deerflow.agents.memory.context import aload_memory_context, load_memory_context
+from deerflow.agents.memory.manager import MemoryReadError
 from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, CURRENT_RUN_RECALL_BOUNDARY_MESSAGE_IDS_KEY
@@ -386,6 +387,41 @@ async def test_async_memory_context_config_resolution_failure_is_fail_open(monke
     )
 
     assert await aload_memory_context() == ""
+
+
+@pytest.mark.parametrize("query", [None, "current question"], ids=["baseline", "turn"])
+def test_sync_memory_context_preserves_required_read_failure(monkeypatch, query):
+    manager = SimpleNamespace(
+        supports_query_aware_context=True,
+        get_context=Mock(side_effect=MemoryReadError("required recall failed")),
+    )
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+
+    with pytest.raises(MemoryReadError, match="required recall failed"):
+        load_memory_context(
+            app_config=_app_config(session=query is None, turn=query is not None),
+            user_id="alice",
+            thread_id="thread-1",
+            query=query,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", [None, "current question"], ids=["baseline", "turn"])
+async def test_async_memory_context_preserves_required_read_failure(monkeypatch, query):
+    manager = SimpleNamespace(
+        supports_query_aware_context=True,
+        aget_context=AsyncMock(side_effect=MemoryReadError("required recall failed")),
+    )
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+
+    with pytest.raises(MemoryReadError, match="required recall failed"):
+        await aload_memory_context(
+            app_config=_app_config(session=query is None, turn=query is not None),
+            user_id="alice",
+            thread_id="thread-1",
+            query=query,
+        )
 
 
 def test_sync_query_aware_backend_receives_no_thread_id_without_query(monkeypatch):
