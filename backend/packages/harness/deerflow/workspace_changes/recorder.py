@@ -88,6 +88,15 @@ async def _drain_scan_and_cleanup(
         except Exception:
             break
 
+    # Cancellation remains the caller-visible outcome, but consume any late scan
+    # failure so the drained task cannot emit an un-retrieved exception warning.
+    try:
+        scan.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
     if text_cache_dir is None:
         return
 
