@@ -642,6 +642,8 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
 
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.tools.builtins.tool_search import build_deferred_tool_setup
     from deerflow.tools.mcp_metadata import tag_mcp_tool
 
@@ -659,9 +661,14 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, deferred_setup=setup)
 
     filters = [m for m in middlewares if isinstance(m, DeferredToolFilterMiddleware)]
+    audits = [m for m in middlewares if isinstance(m, DeferredToolPromotionAuditMiddleware)]
     assert len(filters) == 1
+    assert len(audits) == 1
+    audit_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolPromotionAuditMiddleware))
+    policy_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillToolPolicyMiddleware))
     filter_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DeferredToolFilterMiddleware))
     safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    assert audit_idx < policy_idx < filter_idx
     assert filter_idx < safety_idx
 
 
@@ -703,6 +710,7 @@ def test_subagent_runtime_middlewares_place_mcp_routing_before_deferred_filter(m
 def test_subagent_runtime_middlewares_skip_deferred_filter_without_names(monkeypatch):
     """No deferred setup (disabled / no MCP tool) -> no DeferredToolFilterMiddleware."""
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+    from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
     app_config = _make_app_config()
@@ -711,6 +719,7 @@ def test_subagent_runtime_middlewares_skip_deferred_filter_without_names(monkeyp
     for setup in (None, DeferredToolSetup(None, frozenset(), None)):
         middlewares = build_subagent_runtime_middlewares(app_config=app_config, deferred_setup=setup)
         assert not any(isinstance(m, DeferredToolFilterMiddleware) for m in middlewares)
+        assert not any(isinstance(m, DeferredToolPromotionAuditMiddleware) for m in middlewares)
 
 
 def test_subagent_runtime_middlewares_attach_loop_detection_when_enabled(monkeypatch):

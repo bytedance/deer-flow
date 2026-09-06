@@ -535,6 +535,63 @@ class TestAgentConstruction:
         assert isinstance(messages[1], HumanMessage)
 
     @pytest.mark.anyio
+    async def test_build_initial_state_seeds_current_upload_snapshot(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A delegated graph receives the parent's current-run upload boundary."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        parent_uploads = [
+            {
+                "filename": "fresh.pdf",
+                "size": 128,
+                "path": "/mnt/user-data/uploads/fresh.pdf",
+                "extension": ".pdf",
+                "outline": [{"line": 1, "title": "Summary"}],
+            }
+        ]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            uploaded_files=parent_uploads,
+        )
+
+        parent_uploads[0]["filename"] = "mutated-after-dispatch.pdf"
+        parent_uploads[0]["outline"][0]["title"] = "Mutated"
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+
+        assert state["uploaded_files"] == [
+            {
+                "filename": "fresh.pdf",
+                "size": 128,
+                "path": "/mnt/user-data/uploads/fresh.pdf",
+                "extension": ".pdf",
+                "outline": [{"line": 1, "title": "Summary"}],
+            }
+        ]
+        assert state["uploaded_files"] is not parent_uploads
+        assert state["uploaded_files"][0] is not parent_uploads[0]
+
+        empty_executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            uploaded_files=[],
+        )
+        empty_state, _final_tools, _deferred_setup = await empty_executor._build_initial_state("Find earlier uploads")
+        assert "uploaded_files" in empty_state
+        assert empty_state["uploaded_files"] == []
+
+    @pytest.mark.anyio
     async def test_build_initial_state_no_system_prompt_with_skills(
         self,
         classes,
@@ -3783,6 +3840,7 @@ class TestSubagentGuardrailAttribution:
         oauth_id=None,
         run_id=None,
         loop_detection_recorder=None,
+        tool_promotion_recorder=None,
         name="general-purpose",
         parent_model="test-model",
     ):
@@ -3807,6 +3865,7 @@ class TestSubagentGuardrailAttribution:
             oauth_id=oauth_id,
             run_id=run_id,
             loop_detection_recorder=loop_detection_recorder,
+            tool_promotion_recorder=tool_promotion_recorder,
         )
 
     @pytest.mark.anyio
@@ -3870,6 +3929,32 @@ class TestSubagentGuardrailAttribution:
         context = fake_agent.captured_context
         assert context is not None
         assert context.get("__run_loop_detection_recorder") is recorder
+        assert "__run_journal" not in context
+        assert context.get("agent_id") == "general-purpose"
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_narrow_tool_promotion_recorder(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """Promotion audit crosses the child-loop boundary without the raw journal."""
+        recorder = object()
+        executor = self._make_executor(
+            classes,
+            run_id="run-42",
+            tool_promotion_recorder=recorder,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("__run_tool_promotion_recorder") is recorder
         assert "__run_journal" not in context
         assert context.get("agent_id") == "general-purpose"
 

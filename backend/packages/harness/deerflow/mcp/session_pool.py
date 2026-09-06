@@ -738,8 +738,10 @@ def get_session_pool() -> MCPSessionPool:
         return _pool
 
 
-def reset_session_pool() -> None:
-    """Reset the singleton (used in tests and the MCP cache reset path)."""
+def reset_session_pool() -> MCPSessionPool | None:
+    """Reset the singleton and return the retired pool, if any."""
     global _pool
     with _pool_lock:
+        retired = _pool
         _pool = None
+        return retired
