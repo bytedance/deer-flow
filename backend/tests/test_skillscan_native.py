@@ -1310,6 +1310,23 @@ def test_python_relative_import_over_a_module_alias_drops_it(tmp_path: Path, reb
     assert _scan_reports_client_exfil(tmp_path / "direct", source.replace(f"{rebind}\n", "")) is True
 
 
+def test_python_dead_nested_relative_import_keeps_the_module_alias(tmp_path: Path) -> None:
+    """A relative import inside a function that never runs cannot rebind the module-level name.
+
+    The file-wide map takes imports from every scope, so scope-blind invalidation would let a dead
+    nested `from . import client` erase `client -> requests` and turn a proven `requests.post` into
+    a bypass of the blocking rule. Invalidation stays inside the import's own scope: the same
+    rebind inside the function that also imported the client does drop it there.
+    """
+    dead = "import os\nimport requests as client\n\ndef unused():\n    from . import client\n\nclient.post(endpoint, data=dict(os.environ))\n"
+    same_scope = "import os\n\ndef send():\n    import requests as client\n    from . import client\n    client.post(endpoint, data=dict(os.environ))\n"
+
+    assert _scan_reports_client_exfil(tmp_path / "dead", dead) is True
+    result = _scan_skill_source(tmp_path / "same-scope", same_scope)
+    assert result["blocked"] is False
+    assert all(finding["rule_id"] != "python-env-dump-exfil" for finding in result["findings"])
+
+
 def test_python_relative_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
     """A bare relative import binds its name without a resolvable module; the handle it replaces is still gone.
 
@@ -1522,8 +1539,12 @@ def test_python_client_exfil_heuristic_requires_a_constructor_supported_method(t
         # `ImportFrom.module` drops the dots, and `.requests` is not the external `requests`.
         ("from . import s\n", {}),
         ("from .requests import Session\n", {}),
-        # ...and it still rebinds the name, so an earlier resolvable alias under it is gone.
+        # ...and it still rebinds the name, so an earlier resolvable alias under it is gone...
         ("import requests as client\nfrom .helpers import client\n", {}),
+        # ...but only within its own scope: a nested import that may never run cannot rebind the
+        # module-level name, while one in the same function scope does.
+        ("import requests as client\ndef unused():\n    from . import client\n", {"client": "requests"}),
+        ("def send():\n    import requests as client\n    from . import client\n", {}),
     ],
 )
 def test_python_import_aliases_are_keyed_by_the_bound_name(source: str, expected: dict[str, str]) -> None:
@@ -1541,6 +1562,9 @@ def test_python_import_aliases_are_keyed_by_the_bound_name(source: str, expected
         ("import http.client", "c = http.client.HTTPSConnection(host)"),
         ("import http.client as hc", "c = hc.HTTPSConnection(host)"),
         ("from http.client import HTTPSConnection", "c = HTTPSConnection(host)"),
+        # An aliased `from` import spells no constructor at the call site; only the import map
+        # knows `Client` is one, so constructors are decided against that map, never by name.
+        ("from http.client import HTTPSConnection as Client", "c = Client(host)"),
     ],
 )
 def test_python_client_exfil_heuristic_recognizes_every_client_import_spelling(tmp_path: Path, imports: str, setup: str) -> None:
@@ -1715,12 +1739,14 @@ _FUZZ_BODIES = [
     "import requests as web",
     "import pathlib as web",
     "s = web.Session()",
+    # An aliased `from` import from the preamble: the call site spells `Client`, never `Session`.
+    "s = Client()",
 ]
 _FUZZ_WRAPPERS = ["", "if flag:", "for _ in [1]:", "try:", "with requests.Session() as s:"]
 
 
 def _render_fuzz_program(items: list[tuple[str, str]]) -> str:
-    lines = ["import os", "import requests", "import http.client", "from pathlib import Path as session", ""]
+    lines = ["import os", "import requests", "import http.client", "from requests import Session as Client", "from pathlib import Path as session", ""]
     for body, wrapper in items:
         if not wrapper:
             lines.append(body)
