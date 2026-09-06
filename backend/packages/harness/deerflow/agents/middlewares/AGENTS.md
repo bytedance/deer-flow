@@ -2,16 +2,14 @@
 
 Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values.
 
-Lead-agent middlewares are assembled in strict order across three functions: the shared base in `packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py` (`_build_runtime_middlewares`, exposed via `build_lead_runtime_middlewares`), then the lead-only middlewares appended in `packages/harness/deerflow/agents/lead_agent/agent.py` (`build_middlewares`). Items marked *(optional)* are appended only when their config/runtime condition holds, so the live chain length varies.
+Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares` appends lead-only entries. Optional entries require their config/runtime condition.
 
 **Message provenance.** A middleware that injects or rewrites a message stamps
 `additional_kwargs` with the neutral provenance keys from
 `deerflow_extension_api.provenance` (`deerflow_content_kind`,
 `deerflow_producer_kind`, and optionally `deerflow_producer_entity_id`) via
-`provenance_kwargs()`. The producer is not recoverable downstream — by the
-model-call boundary the message is indistinguishable from any other — so the
-fact is recorded where it is known. Stamping is unconditional: a fact whose
-presence depends on whether an observer is installed is not a fact. All three
+`provenance_kwargs()`. Stamp at injection/rewrite regardless of installed
+observers; downstream cannot recover the producer. All three
 keys are in `_SERVER_OWNED_MESSAGE_METADATA_KEYS`, so a caller cannot forge
 provenance on inbound messages. Currently stamped by: DynamicContext (reminder + memory),
 DurableContext (contract + data), SystemMessageCoalescing, ViewImage,
@@ -55,7 +53,7 @@ it to that middleware's declaration in the same change.
    their narrower discovery allowlists never rebuild the shared thread view or
    force eager sandbox acquisition.
 7. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., user interruption), preserving raw provider tool-call payloads in `additional_kwargs["tool_calls"]`; malformed tool-call names and arguments are sanitized in the model-bound request so strict OpenAI-compatible providers do not reject the next request
-8. **LLMErrorHandlingMiddleware** - Normalizes provider/model invocation failures into recoverable assistant-facing errors before later stages run. Async cancellation during concurrency admission, provider execution, retry-event delivery, or backoff releases only the cancelled call's half-open circuit probe and propagates unchanged; it is neither retried nor counted as a provider failure. Probe ownership is assigned under the circuit lock, so cancelling an older call cannot release another call's recovery probe.
+8. **LLMErrorHandlingMiddleware** - Converts provider/model failures to recoverable assistant errors. Async cancellation at admission, provider execution, retry events, or backoff releases only the call's own half-open probe (ownership assigned under the circuit lock), then propagates unchanged, without retry or failure accounting.
 9. **Authorization / GuardrailMiddleware** - Up to two independent pre-tool-call gates run here. When `authorization.enabled`, the `AuthorizationProvider` instance already used for Layer 1 capability filtering is wrapped by `GuardrailAuthorizationAdapter` and reused for Layer 2 execution checks. A generated `tool_search` bypasses the adapter's second provider call only when the current build has a concrete deferred setup; its catalog was already filtered by Layer 1, and an ordinary same-named tool without that deferred setup receives no exemption. When `guardrails.enabled`, the explicitly configured `GuardrailProvider` is appended after authorization and still evaluates every call, including `tool_search`. Authorization therefore runs outermost and can deny before an external guardrail call; both use the existing middleware's fail-closed, audit, sync/async, and error-`ToolMessage` behavior. See the authorization RFC and [docs/GUARDRAILS.md](../../../../../docs/GUARDRAILS.md).
 
    Every guardrail decision path publishes a neutral
