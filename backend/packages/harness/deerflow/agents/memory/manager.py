@@ -255,8 +255,14 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Return injection-ready memory text for the given bucket.
+
+        ``query`` is an optional current-turn query hint. Backends that
+        support query-aware ranking (DeerMem with
+        ``retrieval_relevance_enabled``) may rank injected facts against it;
+        other backends ignore it. ``None`` must preserve legacy behavior.
 
         Implementations load their memory and format it however they choose;
         the returned string is injected verbatim by call sites. Format
@@ -530,8 +536,9 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
-        return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id)
+        return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id, query=query)
 
     async def asearch(
         self,

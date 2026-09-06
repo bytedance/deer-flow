@@ -83,11 +83,11 @@ async def test_abefore_agent_does_not_block_event_loop() -> None:
     # event-loop blocking visible to the Blockbuster gate.
     original_build = mw._build_full_reminder
 
-    def slow_build_reminder(runtime=None):
+    def slow_build_reminder(runtime=None, *, query=None):
         import time
 
         time.sleep(0.05)  # 50ms sync sleep — blocks the thread it runs on
-        return original_build(runtime)
+        return original_build(runtime, query=query)
 
     with (
         mock.patch.object(mw, "_build_full_reminder", slow_build_reminder),
