@@ -14,8 +14,8 @@ Each test resets the singleton + restores config so they are order-independent.
 from __future__ import annotations
 
 import asyncio
-from unittest import mock
 from typing import ClassVar
+from unittest import mock
 
 import pytest
 from pydantic import PrivateAttr
