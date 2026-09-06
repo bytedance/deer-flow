@@ -110,7 +110,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -192,11 +192,19 @@ GroundRoute 是一个元搜索层：一个 API 接入六个搜索引擎（Serper
 安装：`cd backend && uv add 'deerflow-harness[groundroute]'`
 
   </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.sofya.tools:web_search_tool
+    api_key: $SOFYA_API_KEY
+```
+搜索结果包含每个页面的正文内容，而不仅是摘要。需要 [Sofya](https://sofya.co) API Key，`max_results` 上限为 20。同时支持 `web_fetch`。
+  </Tabs.Tab>
 </Tabs>
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "GroundRoute"]}>
+<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "GroundRoute", "Sofya"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -229,6 +237,14 @@ tools:
   - use: deerflow.community.groundroute.tools:web_fetch_tool
     api_key: $GROUNDROUTE_API_KEY
 ```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.sofya.tools:web_fetch_tool
+    api_key: $SOFYA_API_KEY
+```
+以 Markdown 形式返回页面内容。需要 [Sofya](https://sofya.co) API Key。
   </Tabs.Tab>
 </Tabs>
 
