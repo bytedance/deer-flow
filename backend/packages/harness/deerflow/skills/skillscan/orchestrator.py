@@ -683,11 +683,20 @@ def _python_import_bindings(node: ast.Import | ast.ImportFrom) -> Iterator[tuple
 
 
 def _collect_python_aliases(tree: ast.AST) -> dict[str, str]:
-    """File-global import map, one path per bound name; a later import of the same name wins."""
+    """File-global import map, one path per bound name; a later import of the same name wins.
+
+    An import whose path cannot be resolved still rebinds its name, so it removes whatever the name
+    resolved to before: `import requests as client` followed by `from .helpers import client` must
+    not leave `client.post` reading as `requests.post`.
+    """
     aliases: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
-            aliases.update((name, path) for name, path in _python_import_bindings(node) if path is not None)
+            for name, path in _python_import_bindings(node):
+                if path is None:
+                    aliases.pop(name, None)
+                else:
+                    aliases[name] = path
     return aliases
 
 

