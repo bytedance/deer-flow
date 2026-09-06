@@ -259,6 +259,21 @@ def _snapshot_file(
     )
 
 
+def _normalize_symlink_target(target: str) -> str:
+    """Strip the Windows extended-length prefix from a symlink target.
+
+    ``os.readlink`` on Windows reports absolute targets in extended-length
+    form (``\\\\?\\C:\\...`` or ``\\\\?\\UNC\\server\\share``). Recorded targets
+    are surfaced in workspace-change events and compared against ordinary
+    paths, so keep the plain spelling; on POSIX this is a no-op.
+    """
+    if target.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + target[len("\\\\?\\UNC\\") :]
+    if target.startswith("\\\\?\\"):
+        return target[len("\\\\?\\") :]
+    return target
+
+
 def _snapshot_symlink(root: WorkspaceRoot, host_file: Path) -> FileSnapshot | None:
     # Deliberately never follows the link (no read_bytes()/open() on the target):
     # the target may point anywhere on the host, including outside the scanned
@@ -278,6 +293,8 @@ def _snapshot_symlink(root: WorkspaceRoot, host_file: Path) -> FileSnapshot | No
         target = os.readlink(host_file)
     except OSError:
         target = None
+    else:
+        target = _normalize_symlink_target(target)
 
     return FileSnapshot(
         path=virtual_path,
