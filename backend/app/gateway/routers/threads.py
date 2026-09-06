@@ -532,7 +532,7 @@ class ThreadCompactRequest(BaseModel):
 
     force: bool = Field(default=True, description="Run compaction even if automatic summarization thresholds are not met")
     keep: ContextSize | None = Field(default=None, description="Optional retention policy for this compaction only")
-    agent_name: str | None = Field(default=None, max_length=128, description="Optional custom agent name for memory attribution")
+    agent_name: str | None = Field(default=None, max_length=128, description="Optional legacy agent hint for model selection; memory policy is bound to checkpoint metadata")
     model_name: str | None = Field(default=None, max_length=128, description="Optional model to summarize with; resolved request override -> custom-agent model -> default, mirroring run model selection")
 
 

@@ -52,7 +52,11 @@ from deerflow.runtime.checkpoint_state import (
     graph_state_schema,
     graph_writable_channels,
 )
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_keys import (
+    CHECKPOINT_AGENT_NAME_METADATA_KEY,
+    CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    DEFAULT_AGENT_NAME_METADATA_VALUE,
+)
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -728,6 +732,36 @@ def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
     return trace_id
 
 
+def _defer_finalization_interrupt(
+    deferred: BaseException | None,
+    interrupt: BaseException,
+) -> BaseException:
+    """Preserve the first interrupt while allowing terminal awaits to finish."""
+    if isinstance(interrupt, asyncio.CancelledError):
+        task = asyncio.current_task()
+        if task is not None:
+            while task.cancelling():
+                task.uncancel()
+    return deferred if deferred is not None else interrupt
+
+
+async def _await_task_stop_after_host_cancellation(
+    task: asyncio.Task[None],
+    deferred: BaseException | None,
+) -> BaseException | None:
+    """Wait for one task-stop fan-out despite repeated host cancellation."""
+    while True:
+        try:
+            await asyncio.shield(task)
+            return deferred
+        except asyncio.CancelledError as exc:
+            host = asyncio.current_task()
+            if host is None or not host.cancelling():
+                # The fan-out task itself was cancelled rather than the host.
+                raise
+            deferred = _defer_finalization_interrupt(deferred, exc)
+
+
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -768,7 +802,7 @@ async def run_agent(
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
     task_store: ExtensionData | None = None
     task_info: TaskInfo | None = None
-    deferred_stop_interrupt: BaseException | None = None
+    deferred_finalization_interrupt: BaseException | None = None
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
@@ -1004,6 +1038,21 @@ async def run_agent(
             task_store,
             extensions,
         )
+        # Bind every checkpoint produced by this run to the effective agent
+        # identity that produced its state. Manual compaction uses only this
+        # server-overwritten value for memory policy; request metadata cannot
+        # forge it, and an explicit default sentinel distinguishes new default
+        # checkpoints from unbound legacy state.
+        if "agent_name" in runtime_ctx:
+            checkpoint_agent_name = runtime_ctx["agent_name"]
+        else:
+            configurable = config.get("configurable")
+            checkpoint_agent_name = configurable.get("agent_name") if isinstance(configurable, dict) else None
+        checkpoint_metadata = config.get("metadata")
+        if not isinstance(checkpoint_metadata, dict):
+            checkpoint_metadata = {}
+            config["metadata"] = checkpoint_metadata
+        checkpoint_metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] = DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name
         deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
@@ -1534,12 +1583,23 @@ async def run_agent(
                     await ctx.on_run_completed(record)
                 except Exception:
                     logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
+                except BaseException as exc:
+                    # A terminal hook must not leave replacement runs blocked or
+                    # stream consumers waiting indefinitely.
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(
+                        deferred_finalization_interrupt,
+                        exc,
+                    )
+                    logger.warning(
+                        "Run completion hook interrupted for %s; completing finalization first",
+                        run_id,
+                    )
 
             if task_info is not None and task_store is not None:
                 # Keep the finalizing barrier held until stop observers finish, so
                 # a same-thread replacement cannot overlap this task's lifecycle.
-                try:
-                    await notify_task_stop(
+                task_stop = asyncio.create_task(
+                    notify_task_stop(
                         extensions,
                         task_store,
                         task_info,
@@ -1548,6 +1608,13 @@ async def run_agent(
                             succeeded=record.status == RunStatus.success,
                         ),
                         timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                    ),
+                    name=f"extension-task-stop-{run_id}",
+                )
+                try:
+                    deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(
+                        task_stop,
+                        deferred_finalization_interrupt,
                     )
                 except Exception:
                     logger.warning(
@@ -1558,7 +1625,10 @@ async def run_agent(
                 except BaseException as exc:
                     # Cancellation here must not strand the finalizing barrier or
                     # leave stream consumers waiting for the end frame.
-                    deferred_stop_interrupt = exc
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(
+                        deferred_finalization_interrupt,
+                        exc,
+                    )
                     logger.warning(
                         "Extension task-stop notification interrupted for run %s; completing cleanup first",
                         run_id,
@@ -1568,8 +1638,8 @@ async def run_agent(
 
             await bridge.publish_end(run_id)
 
-            if deferred_stop_interrupt is not None:
-                raise deferred_stop_interrupt
+            if deferred_finalization_interrupt is not None:
+                raise deferred_finalization_interrupt
         finally:
             try:
                 if journal is not None:
