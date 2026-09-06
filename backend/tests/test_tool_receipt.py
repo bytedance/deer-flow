@@ -6,8 +6,13 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from deerflow.agents.middlewares.tool_receipt import (
     TOOL_RECEIPT_KEY,
+    TOOL_RECEIPT_LEDGER_KEY,
+    extract_citing_turn_receipts,
     extract_tool_receipts,
+    format_citation,
     make_tool_receipt,
+    parse_citations,
+    receipt_id,
     render_tool_receipts,
 )
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
@@ -27,6 +32,29 @@ def _stamped_msg(content: str, *, tool_call_id: str, name: str, args: dict | Non
     receipt = make_tool_receipt({"name": name, "id": tool_call_id, "args": args or {}}, message)
     message.additional_kwargs[TOOL_RECEIPT_KEY] = receipt
     return message
+
+
+def test_citation_format_round_trip():
+    """format_citation and parse_citations are inverse over the wire format."""
+    assert parse_citations(format_citation(receipt_id(2), "write_file")) == [("r2", "write_file")]
+    assert parse_citations(format_citation(receipt_id(2))) == [("r2", None)]
+
+
+def test_parse_citations_ignores_oversized_model_generated_id():
+    oversized = "9" * 5000
+
+    assert parse_citations(f"bad [r{oversized}] then valid [r2]") == [("r2", None)]
+
+
+def test_render_prompt_example_matches_verifier_format():
+    """The instruction example is generated from the shared format, so the
+    parent-side verifier must be able to parse it back."""
+    receipts = extract_tool_receipts([_stamped_msg("ok", tool_call_id="tc-1", name="write_file")])
+    text = render_tool_receipts(receipts)
+
+    example = format_citation(receipt_id(1), "write_file")
+    assert f"e.g. {example})" in text
+    assert parse_citations(example) == [("r1", "write_file")]
 
 
 def test_make_tool_receipt_hashes_args_and_output():
@@ -67,6 +95,52 @@ def test_extract_assigns_sequential_ids_and_skips_unstamped():
     assert [r["id"] for r in receipts] == ["r1", "r2"]
     assert receipts[0]["tool_name"] == "write_file"
     assert receipts[1]["tool_name"] == "bash"
+
+
+def test_extract_citing_turn_receipts_preserves_pre_compaction_ids():
+    original = extract_tool_receipts(
+        [
+            _stamped_msg("first", tool_call_id="tc-original", name="write_file"),
+            _stamped_msg("second", tool_call_id="tc-survivor", name="bash"),
+        ]
+    )
+    final_report = AIMessage(
+        content="saved it [r1]",
+        additional_kwargs={TOOL_RECEIPT_LEDGER_KEY: [dict(receipt) for receipt in original]},
+    )
+    # Summarization dropped the original r1 ToolMessage. A terminal re-scan
+    # would rename tc-survivor to r1, but the citing-turn snapshot must not.
+    compacted_messages = [
+        _stamped_msg("second", tool_call_id="tc-survivor", name="bash"),
+        final_report,
+    ]
+
+    receipts = extract_citing_turn_receipts(compacted_messages)
+
+    assert receipts == original
+    assert extract_tool_receipts(compacted_messages)[0]["tool_call_id"] == "tc-survivor"
+
+
+def test_extract_citing_turn_receipts_accepts_truncated_original_id_range():
+    original = extract_tool_receipts([_stamped_msg(f"result-{index}", tool_call_id=f"tc-{index}", name="bash") for index in range(1, 31)])
+    retained = original[23:]
+    final_report = AIMessage(
+        content="latest result [r30]",
+        additional_kwargs={TOOL_RECEIPT_LEDGER_KEY: [dict(receipt) for receipt in retained]},
+    )
+
+    receipts = extract_citing_turn_receipts([final_report])
+
+    assert receipts == retained
+    assert [receipt["id"] for receipt in receipts] == [f"r{index}" for index in range(24, 31)]
+
+
+def test_extract_citing_turn_receipts_rejects_non_contiguous_original_ids():
+    original = extract_tool_receipts([_stamped_msg(f"result-{index}", tool_call_id=f"tc-{index}", name="bash") for index in range(1, 4)])
+    malformed = [dict(original[0]), dict(original[2])]
+    final_report = AIMessage(content="done", additional_kwargs={TOOL_RECEIPT_LEDGER_KEY: malformed})
+
+    assert extract_citing_turn_receipts([final_report]) is None
 
 
 def test_render_empty_and_budget():

@@ -210,6 +210,11 @@ _FRAMEWORK_STRUCTURED_TAGS = [
     "guidelines",
     "output_format",
     "working_directory",
+    # Subagent report-contract blocks (subagents/report_contract.py, RFC #4651
+    # PR3): injected into every subagent system prompt and into delegated
+    # prompts carrying acceptance criteria.
+    "report_contract",
+    "acceptance_criteria",
 ]
 
 

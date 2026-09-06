@@ -5,6 +5,8 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from deerflow.community.ddg_search import tools
 
 
@@ -46,6 +48,86 @@ def test_search_text_passes_wikipedia_safe_region_to_ddgs(monkeypatch) -> None:
     assert calls["timeout"] == 30
     assert calls["region"] == "cn-zh"
     assert calls["backend"] == "auto"
+    assert "timelimit" not in calls
+
+
+@pytest.mark.parametrize(
+    ("time_range", "expected_timelimit"),
+    [
+        ("day", "d"),
+        ("week", "w"),
+        ("month", "m"),
+        ("year", "y"),
+    ],
+)
+def test_search_text_maps_time_range_to_ddgs_timelimit(monkeypatch, time_range: str, expected_timelimit: str) -> None:
+    calls = {}
+
+    class FakeDDGS:
+        def __init__(self, timeout: int) -> None:
+            calls["timeout"] = timeout
+
+        def text(self, query: str, **kwargs):
+            calls["query"] = query
+            calls.update(kwargs)
+            return [{"title": "Result", "href": "https://example.com", "body": "Snippet"}]
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FakeDDGS))
+
+    results = tools._search_text("latest release", backend="duckduckgo", time_range=time_range)
+
+    assert results == [{"title": "Result", "href": "https://example.com", "body": "Snippet"}]
+    assert calls["timelimit"] == expected_timelimit
+
+
+def test_search_text_time_range_replaces_auto_with_filter_capable_backends(monkeypatch) -> None:
+    calls = {}
+
+    class FakeDDGS:
+        def __init__(self, timeout: int) -> None:
+            calls["timeout"] = timeout
+
+        def text(self, query: str, **kwargs):
+            calls.update(kwargs)
+            return []
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FakeDDGS))
+
+    tools._search_text("latest release", backend="auto", time_range="week")
+
+    assert calls["backend"] == "brave,duckduckgo,yahoo"
+    assert calls["region"] == "wt-wt"
+    assert calls["timelimit"] == "w"
+
+
+@pytest.mark.parametrize(
+    ("configured_backend", "expected_backend"),
+    [
+        ("wikipedia,duckduckgo,yandex", "duckduckgo"),
+        ("wikipedia", "brave,duckduckgo,yahoo"),
+        ("all", "brave,duckduckgo,yahoo"),
+    ],
+)
+def test_search_text_time_range_excludes_explicit_filter_agnostic_backends(
+    monkeypatch,
+    configured_backend: str,
+    expected_backend: str,
+) -> None:
+    calls = {}
+
+    class FakeDDGS:
+        def __init__(self, timeout: int) -> None:
+            calls["timeout"] = timeout
+
+        def text(self, query: str, **kwargs):
+            calls.update(kwargs)
+            return []
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FakeDDGS))
+
+    tools._search_text("latest release", backend=configured_backend, time_range="day")
+
+    assert calls["backend"] == expected_backend
 
 
 def test_web_search_tool_reads_ddgs_options_from_config() -> None:
@@ -62,7 +144,7 @@ def test_web_search_tool_reads_ddgs_options_from_config() -> None:
         with patch("deerflow.community.ddg_search.tools._search_text") as mock_search:
             mock_search.return_value = [{"title": "Result", "href": "https://example.com", "body": "Snippet"}]
 
-            result = tools.web_search_tool.invoke({"query": "latest news", "max_results": 8})
+            result = tools.web_search_tool.invoke({"query": "latest news", "max_results": 8, "time_range": "week"})
             parsed = json.loads(result)
 
     assert parsed["total_results"] == 1
@@ -72,4 +154,5 @@ def test_web_search_tool_reads_ddgs_options_from_config() -> None:
         region="us-en",
         safesearch="off",
         backend="auto",
+        time_range="week",
     )

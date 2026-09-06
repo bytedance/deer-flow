@@ -295,6 +295,18 @@ class Paths:
         """Enabled managed integration skills exposed to one user's sandboxes."""
         return self.user_skills_view_dir(user_id) / "integrations"
 
+    def thread_skills_view_dir(self, thread_id: str, *, user_id: str) -> Path:
+        """Sandbox-visible skill projection scoped to one user/thread.
+
+        The directory lives below the thread root so ordinary thread deletion
+        also removes its policy projection.
+        """
+        return self.thread_dir(thread_id, user_id=user_id) / "skills_view"
+
+    def host_thread_skills_view_dir(self, thread_id: str, *, user_id: str) -> str:
+        """Host path for a thread-scoped skill projection."""
+        return _join_host_path(self.host_thread_dir(thread_id, user_id=user_id), "skills_view")
+
     def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for a thread's data.

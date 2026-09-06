@@ -107,3 +107,31 @@ def test_the_installed_resolver_projects_system_role_into_roles(_stub_app_config
 
     no_role_request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u3", system_role=None), auth_source=None))
     assert resolver(no_role_request).roles == ()
+
+
+def test_the_installed_resolver_suppresses_admin_for_pat_callers(_stub_app_config):
+    """P1 regression (#5041 review): an admin-owned PAT must not regain admin
+    capability through the extension principal projection. Every admin signal
+    — ``is_admin`` and the ``admin`` role — is suppressed for PAT callers,
+    matching the documented guarantee that PAT credentials never carry admin
+    capability."""
+    from app.gateway.app import create_app
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT, AUTH_SOURCE_SESSION
+
+    app = create_app()
+    resolver = getattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY)
+
+    pat_request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u1", system_role="admin"), auth_source=AUTH_SOURCE_PAT))
+    pat_principal = resolver(pat_request)
+    assert pat_principal.is_admin is False
+    assert "admin" not in pat_principal.roles
+
+    # Control: the same admin over a session cookie still projects admin.
+    session_request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u1", system_role="admin"), auth_source=AUTH_SOURCE_SESSION))
+    session_principal = resolver(session_request)
+    assert session_principal.is_admin is True
+    assert session_principal.roles == ("admin",)
+
+    # A non-admin PAT keeps its plain role: only admin signals are suppressed.
+    plain_pat_request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u2", system_role="user"), auth_source=AUTH_SOURCE_PAT))
+    assert resolver(plain_pat_request).roles == ("user",)

@@ -18,6 +18,49 @@ class TestTruncateBashOutput:
         output = "hello world"
         assert _truncate_bash_output(output, 20000) == output
 
+    def test_trailing_exit_marker_survives_truncation(self):
+        """PR review: a failing command's pass-shaped text must not lose the
+        authoritative exit marker to truncation — evidence consumers parse it."""
+        output = "1 passed\n" + "M" * 30000 + "\nExit Code: 1"
+        result = _truncate_bash_output(output, 20000)
+        assert result.endswith("\nExit Code: 1")
+        assert len(result) <= 20000
+
+    def test_trailing_exit_marker_survives_a_tiny_budget(self):
+        output = "x" * 5000 + "\nExit Code: 124"
+        result = _truncate_bash_output(output, 100)
+        assert result.endswith("\nExit Code: 124")
+        assert len(result) <= 100
+
+    def test_command_exited_with_code_form_is_preserved(self):
+        output = "M" * 5000 + "\nCommand exited with code 3"
+        result = _truncate_bash_output(output, 1000)
+        assert result.endswith("Command exited with code 3")
+
+    def test_signed_signal_exit_marker_is_preserved(self):
+        """Signal-killed processes report signed codes (Exit Code: -9)."""
+        output = "5 passed\n" + "M" * 5000 + "\nExit Code: -9"
+        result = _truncate_bash_output(output, 100)
+        assert result.endswith("\nExit Code: -9")
+        assert len(result) <= 100
+
+    def test_marker_preserved_when_limit_is_below_marker_length(self):
+        """PR review: a configured limit smaller than the exit marker must
+        not silently discard failure status — the floor keeps it."""
+        result = _truncate_bash_output("1 passed\nExit Code: 1", 10)
+        assert result.endswith("\nExit Code: 1")
+        assert len(result) <= 32  # the marker-preserving floor
+
+    def test_small_limit_without_marker_uses_the_floor(self):
+        result = _truncate_bash_output("x" * 500, 10)
+        assert len(result) <= 32
+
+    def test_output_without_marker_truncates_as_before(self):
+        output = "A" * 30000
+        result = _truncate_bash_output(output, 20000)
+        assert len(result) <= 20000
+        assert not result.endswith("Exit Code: 1")
+
     def test_output_equal_to_limit_returned_unchanged(self):
         output = "A" * 20000
         assert _truncate_bash_output(output, 20000) == output
@@ -83,7 +126,10 @@ class TestTruncateBashOutput:
     def test_small_max_chars_does_not_crash(self):
         output = "A" * 1000
         result = _truncate_bash_output(output, 10)
-        assert len(result) <= 10
+        # Limits below the marker-preserving floor (32) are raised so a
+        # failing command's exit marker always fits; see
+        # _BASH_OUTPUT_MIN_LIMIT_CHARS.
+        assert len(result) <= 32
 
     def test_result_never_exceeds_max_chars_various_sizes(self):
         output = "X" * 50000

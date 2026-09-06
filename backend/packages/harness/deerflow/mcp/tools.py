@@ -11,12 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-import anyio
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
-from mcp import ClientSession
-from mcp.shared.exceptions import McpError
-from mcp.types import CONNECTION_CLOSED
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
@@ -25,7 +21,7 @@ from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import MCPSessionPool, get_session_pool
+from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
@@ -64,43 +60,6 @@ _LOCAL_PATH_IN_TEXT_RE = re.compile(r"(?:file://)?/[^\s'\"<>|*?]+|(?:\.{0,2}/|[\
 _TEXT_PATH_TRAILING_CHARS = ".,;:!?)]}>\"'`"
 
 _FILE_SNAPSHOT = dict[Path, tuple[int, int]]
-
-_MCP_CLOSED_STREAM_ERRORS = (
-    anyio.ClosedResourceError,
-    anyio.BrokenResourceError,
-    anyio.EndOfStream,
-)
-
-
-def _is_mcp_transport_disconnect(error: Exception) -> bool:
-    if isinstance(error, _MCP_CLOSED_STREAM_ERRORS):
-        return True
-    return isinstance(error, McpError) and error.error.code == CONNECTION_CLOSED and error.error.message == "Connection closed"
-
-
-async def _call_pooled_session_tool(
-    session: ClientSession,
-    pool: MCPSessionPool,
-    *,
-    server_name: str,
-    scope_key: str,
-    tool_name: str,
-    arguments: dict[str, Any],
-    call_kwargs: dict[str, Any],
-) -> Any:
-    try:
-        return await session.call_tool(tool_name, arguments, **call_kwargs)
-    except Exception as error:
-        if _is_mcp_transport_disconnect(error):
-            try:
-                await pool.close_session_if_current(server_name, scope_key, session)
-            except Exception:
-                logger.warning(
-                    "Failed to close disconnected MCP session for server '%s'",
-                    server_name,
-                    exc_info=True,
-                )
-        raise
 
 
 def _local_path_from_uri(uri: str, *, base_dir: Path | None = None) -> Path | None:
@@ -598,7 +557,7 @@ def _make_session_pool_tool(
                         kwargs["meta"] = {"headers": dict(request.headers)}
                     else:
                         logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
-                return await _call_pooled_session_tool(
+                return await call_pooled_session_tool(
                     session,
                     pool,
                     server_name=server_name,
@@ -618,7 +577,7 @@ def _make_session_pool_tool(
             )
             call_tool_result = await handler(request)
         else:
-            call_tool_result = await _call_pooled_session_tool(
+            call_tool_result = await call_pooled_session_tool(
                 session,
                 pool,
                 server_name=server_name,

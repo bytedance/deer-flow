@@ -43,11 +43,18 @@ class SubagentExecutionCapacity:
         self._waiters: deque[asyncio.Future[None]] = deque()
 
     def snapshot(self) -> SubagentCapacitySnapshot:
+        # snapshot() is read from non-loop threads (notably
+        # configure_subagent_execution_capacity), while the loop thread mutates
+        # the waiters deque under its own asyncio lock — iterating cross-thread
+        # can raise "deque mutated during iteration". ``len()`` reads the
+        # deque's size atomically instead. The raw length may count a waiter
+        # that just timed out but has not removed itself yet; that only makes
+        # the "capacity busy" answer more conservative, never less.
         return SubagentCapacitySnapshot(
             max_running=self._config.max_running,
             running=self._running,
             max_queued=self._config.max_queued,
-            queued=sum(not waiter.done() for waiter in self._waiters),
+            queued=len(self._waiters),
             admission_policy=self._config.admission_policy,
         )
 

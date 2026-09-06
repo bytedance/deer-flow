@@ -27,7 +27,11 @@ from typing import Any
 from langchain_core.tools import ToolException
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpUserScopedAuthConfig
-from deerflow.mcp.headers import apply_header_overrides, header_spellings
+from deerflow.mcp.headers import (
+    apply_header_overrides,
+    header_spellings,
+    illegal_header_value_reason,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 
 logger = logging.getLogger(__name__)
@@ -114,6 +118,26 @@ def build_user_scoped_auth_interceptor(extensions_config: ExtensionsConfig) -> A
             # surfacing it leaks nothing across users.
             raise ToolException(
                 f"No credential is configured for your account (user id '{user_id}') on MCP server '{request.server_name}'. Ask the operator to add this exact id to that server's user_auth.users map (or set its environment variable)."
+            )
+
+        # A credential the transport would refuse (trailing newline from a
+        # token file or a CRLF env-file, non-ASCII) must be rejected here. On
+        # the line break and whitespace cases h11 renders the full value into
+        # its exception message, which ToolErrorHandlingMiddleware copies into
+        # a model-visible ToolMessage. Always denied, regardless of on_missing
+        # — the user *is* mapped, so falling back to the discovery credential
+        # would silently run the call under the shared authority.
+        reason = illegal_header_value_reason(credential)
+        if reason is not None:
+            logger.warning(
+                "Denied MCP tool call to server '%s': the user_auth credential for user '%s' cannot be sent as an HTTP header value (%s)",
+                request.server_name,
+                user_id,
+                reason,
+            )
+            raise ToolException(
+                f"The credential configured for your account (user id '{user_id}') on MCP server '{request.server_name}' {reason}, so it cannot be sent as an HTTP header. "
+                "Ask the operator to fix that server's user_auth.users entry; a stray newline in the value or its environment variable is the usual cause."
             )
 
         updated_headers = apply_header_overrides(

@@ -29,6 +29,7 @@ class TestProviders:
 
         expected = {
             "volcengine",
+            "zai",
             "openai",
             "openai_responses",
             "ollama_qwen",
@@ -55,6 +56,42 @@ class TestProviders:
         assert providers["mimo"].use == "deerflow.models.patched_mimo:PatchedChatMiMo"
         assert providers["deepseek"].use == "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
         assert providers["volcengine"].extra_config["api_base"] == "https://ark.cn-beijing.volces.com/api/v3"
+
+    def test_zai_glm_flash_uses_required_thinking_workaround(self):
+        provider = next(p for p in LLM_PROVIDERS if p.name == "zai")
+        config = provider.extra_config_for("glm-5.3-flash")
+
+        assert provider.use == "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
+        assert provider.env_var == "ZAI_API_KEY"
+        assert config["api_base"] == "https://api.z.ai/api/paas/v4"
+        assert config["supports_thinking"] is True
+        assert config["supports_reasoning_effort"] is False
+        assert "when_thinking_enabled" not in config
+        assert "when_thinking_disabled" not in config
+        assert config["extra_body"] == {
+            "thinking": {"type": "enabled", "clear_thinking": True},
+            "tool_stream": True,
+        }
+
+    def test_zai_glm_flash_workaround_is_preserved_in_generated_config(self):
+        provider = next(p for p in LLM_PROVIDERS if p.name == "zai")
+        content = build_minimal_config(
+            provider_use=provider.use,
+            model_name=provider.default_model,
+            display_name=provider.display_name,
+            api_key_field=provider.api_key_field,
+            env_var=provider.env_var,
+            extra_model_config=provider.extra_config,
+        )
+
+        model = yaml.safe_load(content)["models"][0]
+        assert model["model"] == "glm-5.3-flash"
+        assert model["api_key"] == "$ZAI_API_KEY"
+        assert model["supports_reasoning_effort"] is False
+        assert model["extra_body"]["thinking"] == {
+            "type": "enabled",
+            "clear_thinking": True,
+        }
 
     def test_minimax_vision_is_per_model(self):
         """M3 supports vision; M2.7 variants are text-only.

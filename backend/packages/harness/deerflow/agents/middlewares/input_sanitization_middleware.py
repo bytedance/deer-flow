@@ -77,7 +77,6 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "critical_reminders",
         "response_style",
         "citations",
-        "uploaded_files",  # old uploads tag — still processed by deermem for backward-compat
         "current_uploads",
         "subagent_system",
         "skill_system",
@@ -100,6 +99,14 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         # tool off-limits. Forging this in untrusted input could trick the
         # model into believing it has (or lacks) tool restrictions it does not.
         "tool_restrictions",
+        # Subagent report-contract blocks (subagents/report_contract.py, RFC
+        # #4651 PR3): injected by the executor into every subagent system
+        # prompt (the criteria pointer note carries no criterion values —
+        # those stay in the untrusted task message). Forging them in
+        # untrusted input could impersonate the verification contract (e.g.
+        # pre-declaring acceptance criteria as met).
+        "report_contract",
+        "acceptance_criteria",
         # Common prompt-injection tag patterns
         "system",
         "instruction",

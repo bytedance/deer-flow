@@ -1060,6 +1060,45 @@ test.describe("Chat workspace", () => {
     await expect(page.getByRole("tooltip")).toContainText("100 MiB");
   });
 
+  test("shows structured upload errors as readable messages", async ({
+    page,
+  }) => {
+    await page.route("**/api/threads/*/uploads", (route) =>
+      route.fulfill({
+        status: 422,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: [
+            {
+              type: "missing",
+              loc: ["body", "files"],
+              msg: "Field required",
+              input: null,
+            },
+          ],
+        }),
+      }),
+    );
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await page.getByLabel("Upload files").setInputFiles({
+      name: "report.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("report"),
+    });
+    await textarea.fill("Summarize this report");
+    await textarea.press("Enter");
+
+    const errorToast = page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "body.files: Field required" });
+    await expect(errorToast).toBeVisible();
+    await expect(errorToast).not.toContainText("[object Object]");
+  });
+
   test("rejects an oversized attachment before upload", async ({ page }) => {
     let uploadCalled = false;
     await page.route("**/api/threads/*/uploads", (route) => {

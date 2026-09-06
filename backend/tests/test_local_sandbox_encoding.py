@@ -1,14 +1,116 @@
 import builtins
-from types import SimpleNamespace
+import os
+import subprocess
+import sys
+
+import pytest
 
 import deerflow.sandbox.local.local_sandbox as local_sandbox
-from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping, _BoundedPipeCapture
 
 
 def _open(base, file, mode="r", *args, **kwargs):
     if "b" in mode:
         return base(file, mode, *args, **kwargs)
     return base(file, mode, *args, encoding=kwargs.pop("encoding", "gbk"), **kwargs)
+
+
+def test_bounded_pipe_capture_decodes_non_utf8_output_with_configured_encoding():
+    capture = _BoundedPipeCapture(encoding="cp1252")
+    capture.append("caf\u00e9".encode("cp1252"))
+
+    assert capture.read() == "caf\u00e9"
+
+
+def test_bounded_pipe_capture_applies_text_mode_newline_normalization_when_enabled():
+    capture = _BoundedPipeCapture(normalize_newlines=True)
+    capture.append(b"crlf\r\nbare-cr\rlf\n")
+
+    assert capture.read() == "crlf\nbare-cr\nlf\n"
+
+
+def test_bounded_pipe_capture_preserves_posix_newlines_by_default():
+    capture = _BoundedPipeCapture()
+    capture.append(b"crlf\r\nbare-cr\rlf\n")
+
+    assert capture.read() == "crlf\r\nbare-cr\rlf\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX capture semantics")
+def test_posix_command_capture_preserves_newlines():
+    stdout, stderr, returncode, timed_out = LocalSandbox._run_posix_command(
+        [sys.executable, "-c", "import os; os.write(1, b'crlf\\r\\nbare-cr\\rlf\\n')"],
+        10,
+    )
+
+    assert stdout == "crlf\r\nbare-cr\rlf\n"
+    assert stderr == ""
+    assert returncode == 0
+    assert timed_out is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows text-mode newline semantics")
+def test_windows_command_capture_normalizes_newlines():
+    stdout, stderr, returncode, timed_out = LocalSandbox._run_windows_command(
+        [sys.executable, "-c", "import os; os.write(1, b'crlf\\r\\nbare-cr\\rlf\\n')"],
+        10,
+    )
+
+    assert stdout == "crlf\nbare-cr\nlf\n"
+    assert stderr == ""
+    assert returncode == 0
+    assert timed_out is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows text-mode encoding semantics")
+@pytest.mark.parametrize(
+    ("python_args", "python_utf8"),
+    [([], "0"), ([], "1"), (["-X", "utf8"], "0")],
+    ids=["locale-code-page", "PYTHONUTF8", "-X-utf8"],
+)
+def test_windows_capture_matches_subprocess_text_mode_encoding(python_args, python_utf8):
+    probe = r"""
+import subprocess
+import sys
+
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
+
+reference = subprocess.Popen([sys.executable, "-c", ""], stdout=subprocess.PIPE, text=True)
+encoding = reference.stdout.encoding
+reference.communicate()
+
+for expected in ("caf\u00e9", "\u4f60\u597d", "\u65e5\u672c\u8a9e", "\u041f\u0440\u0438\u0432\u0435\u0442"):
+    try:
+        payload = expected.encode(encoding)
+    except UnicodeEncodeError:
+        continue
+    if any(byte >= 0x80 for byte in payload):
+        break
+else:
+    raise AssertionError(f"no non-ASCII probe text for {encoding}")
+
+stdout, stderr, returncode, timed_out = LocalSandbox._run_windows_command(
+    [sys.executable, "-c", f"import sys; sys.stdout.buffer.write(bytes.fromhex('{payload.hex()}'))"],
+    10,
+)
+assert stdout == expected, (encoding, stdout)
+assert stderr == ""
+assert returncode == 0
+assert timed_out is False
+"""
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = python_utf8
+
+    result = subprocess.run(
+        [sys.executable, *python_args, "-c", probe],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_read_file_uses_utf8_on_windows_locale(tmp_path, monkeypatch):
@@ -79,16 +181,16 @@ def test_get_shell_uses_cmd_as_last_windows_fallback(monkeypatch):
 
 
 def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
-    calls: list[tuple[object, dict]] = []
+    calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(*args, **kwargs):
-        calls.append((args[0], kwargs))
-        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+    def fake_run(args, timeout, env):
+        calls.append((args, timeout, env))
+        return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Windows", "OPENAI_API_KEY": "should-not-leak"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"))
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
     output = LocalSandbox("t").execute_command("Write-Output hello")
 
@@ -104,29 +206,24 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
                 "-Command",
                 "Write-Output hello",
             ],
-            {
-                "shell": False,
-                "capture_output": True,
-                "text": True,
-                "timeout": 600,
-                "env": {"PATH": r"C:\Windows"},
-            },
+            600,
+            {"PATH": r"C:\Windows"},
         )
     ]
 
 
 def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows(monkeypatch):
-    calls: list[tuple[object, dict]] = []
+    calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(*args, **kwargs):
-        calls.append((args[0], kwargs))
-        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+    def fake_run(args, timeout, env):
+        calls.append((args, timeout, env))
+        return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
     monkeypatch.setattr(LocalSandbox, "_msys_path_conversion_exclusions", lambda self: "/mnt/user-data")
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
     output = LocalSandbox("t").execute_command("echo hello")
 
@@ -134,59 +231,54 @@ def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows
     assert calls == [
         (
             [r"C:\Program Files\Git\bin\sh.exe", "-c", "echo hello"],
+            600,
             {
-                "shell": False,
-                "capture_output": True,
-                "text": True,
-                "timeout": 600,
-                "env": {
-                    "PATH": r"C:\Program Files\Git\bin",
-                    "MSYS2_ARG_CONV_EXCL": "/mnt/user-data",
-                },
+                "PATH": r"C:\Program Files\Git\bin",
+                "MSYS2_ARG_CONV_EXCL": "/mnt/user-data",
             },
         )
     ]
 
 
 def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monkeypatch):
-    calls: list[tuple[object, dict]] = []
+    calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(*args, **kwargs):
-        calls.append((args[0], kwargs))
-        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+    def fake_run(args, timeout, env):
+        calls.append((args, timeout, env))
+        return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
     monkeypatch.setattr(LocalSandbox, "_msys_path_conversion_exclusions", lambda self: "/mnt/user-data")
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
     output = LocalSandbox("t").execute_command("cat /mnt/user-data/workspace/input.txt")
 
     assert output == "ok"
-    assert calls[0][1]["env"] == {
+    assert calls[0][2] == {
         "PATH": r"C:\Program Files\Git\bin",
         "MSYS2_ARG_CONV_EXCL": "/mnt/user-data",
     }
 
 
 def test_execute_command_ignores_root_msys_mapping_for_host_commands_on_windows(monkeypatch):
-    calls: list[tuple[object, dict]] = []
+    calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(*args, **kwargs):
-        calls.append((args[0], kwargs))
-        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+    def fake_run(args, timeout, env):
+        calls.append((args, timeout, env))
+        return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
     monkeypatch.setattr(LocalSandbox, "_msys_path_conversion_exclusions", lambda self: "")
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
     output = LocalSandbox("t").execute_command("echo hello")
 
     assert output == "ok"
-    assert calls[0][1]["env"] == {"PATH": r"C:\Program Files\Git\bin"}
+    assert calls[0][2] == {"PATH": r"C:\Program Files\Git\bin"}
 
 
 def test_msys_path_conversion_exclusions_omit_blanket_patterns():
@@ -204,37 +296,37 @@ def test_msys_path_conversion_exclusions_omit_blanket_patterns():
 
 
 def test_execute_command_does_not_set_msys_env_for_non_msys_posix_shell_on_windows(monkeypatch):
-    calls: list[tuple[object, dict]] = []
+    calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(*args, **kwargs):
-        calls.append((args[0], kwargs))
-        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+    def fake_run(args, timeout, env):
+        calls.append((args, timeout, env))
+        return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\tools"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\tools\busybox\sh.exe"))
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
     output = LocalSandbox("t").execute_command("echo /mnt/skills/demo")
 
     assert output == "ok"
     # Non-MSYS posix shell adds no MSYS_* vars; the env is the scrubbed inherited
     # environment, not None (#3861).
-    assert calls[0][1]["env"] == {"PATH": r"C:\tools"}
-    assert "MSYS_NO_PATHCONV" not in calls[0][1]["env"]
+    assert calls[0][2] == {"PATH": r"C:\tools"}
+    assert "MSYS_NO_PATHCONV" not in calls[0][2]
 
 
 def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
-    calls: list[tuple[object, dict]] = []
+    calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(*args, **kwargs):
-        calls.append((args[0], kwargs))
-        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+    def fake_run(args, timeout, env):
+        calls.append((args, timeout, env))
+        return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Windows", "GITHUB_TOKEN": "should-not-leak"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\cmd.exe"))
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
     output = LocalSandbox("t").execute_command("echo hello")
 
@@ -244,12 +336,7 @@ def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
     assert calls == [
         (
             [r"C:\Windows\System32\cmd.exe", "/c", "echo hello"],
-            {
-                "shell": False,
-                "capture_output": True,
-                "text": True,
-                "timeout": 600,
-                "env": {"PATH": r"C:\Windows"},
-            },
+            600,
+            {"PATH": r"C:\Windows"},
         )
     ]

@@ -16,8 +16,8 @@ function recencyOfThread(thread: AgentThread) {
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-function branchParentId(thread: AgentThread) {
-  if (thread.metadata?.[THREAD_BRANCH_METADATA_KEY] !== true) {
+function branchParentId(thread: AgentThread | null | undefined) {
+  if (thread?.metadata?.[THREAD_BRANCH_METADATA_KEY] !== true) {
     return null;
   }
   const parentId = thread.metadata?.[THREAD_BRANCH_PARENT_METADATA_KEY];
@@ -25,6 +25,10 @@ function branchParentId(thread: AgentThread) {
     return null;
   }
   return parentId.trim() || null;
+}
+
+export function isBranchThread(thread: AgentThread | null | undefined) {
+  return branchParentId(thread) !== null;
 }
 
 /**
