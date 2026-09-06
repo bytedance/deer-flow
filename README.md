@@ -1236,10 +1236,17 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
-Workspace change summaries scan up to 2,000 files by default. When a scan is
-incomplete, the summary remains marked as truncated: files missing from that
-partial snapshot are not reported as created or deleted. Changes to files
-observed in both snapshots are still reported.
+Workspace change summaries scan up to 2,000 files across workspace and outputs
+by default. When a scan is incomplete, the summary remains marked as truncated:
+files missing from that partial snapshot are not reported as created or deleted.
+Changes to files observed in both snapshots are still reported.
+
+Output-delivery verification uses these same snapshots. When the pre-run scan
+is truncated, genuinely new outputs can be omitted even if the post-run scan
+sees them. If no output changes can be established, the run does not fail with
+"Artifact delivery incomplete" and its delivery receipt omits output-verification
+details. Outputs modified and observed in both snapshots still participate in
+that check.
 
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn

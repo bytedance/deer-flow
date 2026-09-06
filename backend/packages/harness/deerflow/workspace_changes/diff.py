@@ -110,7 +110,13 @@ def get_changed_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> se
 
 
 def get_changed_output_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> list[str]:
-    """Return created or modified regular files under the outputs root."""
+    """Return regular output changes established by the bounded snapshots.
+
+    Paths absent from a truncated before snapshot are omitted, including
+    genuinely new files; modifications observed in both snapshots are retained.
+    The worker's delivery check relies on this list and is skipped when it is
+    empty, so an empty result does not prove that the run produced no outputs.
+    """
     paths: list[str] = []
     for path in sorted(get_changed_paths(before, after)):
         snapshot = after.files.get(path)
