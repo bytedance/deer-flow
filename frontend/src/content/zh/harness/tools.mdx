@@ -204,7 +204,7 @@ tools:
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "GroundRoute", "Sofya"]}>
+<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -229,6 +229,20 @@ tools:
 tools:
   - use: deerflow.community.exa.tools:web_fetch_tool
     api_key: $EXA_API_KEY
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.infoquest.tools:web_fetch_tool
+    api_key: $INFOQUEST_API_KEY
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.firecrawl.tools:web_fetch_tool
+    api_key: $FIRECRAWL_API_KEY
 ```
   </Tabs.Tab>
   <Tabs.Tab>
