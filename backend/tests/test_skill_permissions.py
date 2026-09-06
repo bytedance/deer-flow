@@ -10,10 +10,9 @@ def _mode(path):
     return stat.S_IMODE(path.stat().st_mode)
 
 
-requires_posix_mode_bits = pytest.mark.skipif(
-    os.name == "nt",
-    reason="Windows chmod only toggles the read-only bit, so the 0o644/0o755 modes asserted here are never observable",
-)
+_POSIX_MODE_BITS_REASON = "Windows chmod only toggles the read-only bit, so the 0o644/0o755 modes asserted here are never observable"
+
+requires_posix_mode_bits = pytest.mark.skipif(os.name == "nt", reason=_POSIX_MODE_BITS_REASON)
 
 
 @requires_posix_mode_bits
@@ -73,7 +72,7 @@ def test_written_path_readability_is_limited_to_written_path(tmp_path):
     assert sibling.read_text(encoding="utf-8") == "note"
 
     if os.name == "nt":
-        pytest.skip("Windows chmod only toggles the read-only bit, so the 0o644/0o755 modes asserted here are never observable")
+        pytest.skip(_POSIX_MODE_BITS_REASON)
 
     assert _mode(root) == 0o755
     assert _mode(ref_dir) == 0o755
