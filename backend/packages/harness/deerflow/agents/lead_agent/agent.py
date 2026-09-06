@@ -128,6 +128,7 @@ def _subagent_release_policy(
     enabled: bool,
     max_concurrent: int,
     max_total: int,
+    user_id: str | None = None,
 ) -> dict[str, object]:
     """Delegation limits as the run will actually enforce them.
 
@@ -147,10 +148,10 @@ def _subagent_release_policy(
 
     from deerflow.subagents import get_available_subagent_names, get_subagent_config
 
-    type_allowlist = sorted(set(get_available_subagent_names(app_config=app_config)))
+    type_allowlist = sorted(set(get_available_subagent_names(app_config=app_config, user_id=user_id)))
     runtime_limits: dict[str, object] = {}
     for name in type_allowlist:
-        subagent_config = get_subagent_config(name, app_config=app_config)
+        subagent_config = get_subagent_config(name, app_config=app_config, user_id=user_id)
         if subagent_config is None:
             continue
         runtime_limits[name] = {
@@ -1092,6 +1093,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                     enabled=subagent_enabled,
                     max_concurrent=max_concurrent_subagents,
                     max_total=max_total_subagents,
+                    user_id=resolved_user_id,
                 ),
                 "deferred_tools": {
                     "enabled": resolved_app_config.tool_search.enabled,
@@ -1211,6 +1213,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                 enabled=subagent_enabled,
                 max_concurrent=max_concurrent_subagents,
                 max_total=max_total_subagents,
+                user_id=resolved_user_id,
             ),
             "deferred_tools": {
                 "enabled": resolved_app_config.tool_search.enabled,

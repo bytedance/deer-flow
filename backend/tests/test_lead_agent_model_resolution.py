@@ -156,6 +156,11 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
     monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", _load_skills)
     monkeypatch.setattr(lead_agent_module, "build_middlewares", _build_middlewares)
     monkeypatch.setattr(lead_agent_module, "apply_prompt_template", _apply_prompt_template)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_subagent_release_policy",
+        lambda _app_config, *, enabled, max_concurrent, max_total, user_id=None: captured.update(release_policy_user_id=user_id) or {},
+    )
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
     monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
@@ -180,7 +185,48 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
         "skills_user_id": "authenticated-user",
         "middleware_user_id": "authenticated-user",
         "prompt_user_id": "authenticated-user",
+        "release_policy_user_id": "authenticated-user",
     }
+
+
+def test_subagent_release_policy_uses_user_scoped_catalog(monkeypatch):
+    """Descriptor policies must match the same user-scoped catalog task() sees."""
+    from deerflow.subagents.config import SubagentConfig
+    import deerflow.subagents as subagents_module
+
+    captured: dict[str, object] = {}
+
+    def _available_names(*, app_config=None, user_id=None, **_kwargs):
+        captured["names_user_id"] = user_id
+        return ["writer"]
+
+    def _config(name, *, app_config=None, user_id=None, **_kwargs):
+        captured["config_lookup"] = (name, user_id)
+        return SubagentConfig(
+            name=name,
+            description="User writer",
+            system_prompt="You are the writer.",
+            max_turns=12,
+            timeout_seconds=345,
+        )
+
+    monkeypatch.setattr(subagents_module, "get_available_subagent_names", _available_names)
+    monkeypatch.setattr(subagents_module, "get_subagent_config", _config)
+
+    policy = lead_agent_module._subagent_release_policy(
+        SimpleNamespace(),
+        enabled=True,
+        max_concurrent=2,
+        max_total=4,
+        user_id="user-1",
+    )
+
+    assert captured == {
+        "names_user_id": "user-1",
+        "config_lookup": ("writer", "user-1"),
+    }
+    assert policy["type_allowlist"] == ["writer"]
+    assert policy["runtime_limits"] == {"writer": {"max_turns": 12, "timeout_seconds": 345}}
 
 
 def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatch):
