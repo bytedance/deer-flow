@@ -89,6 +89,18 @@ CI.
 
 **Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
 
+### AIO Sandbox Network Policy
+
+Restricted AIO keeps sandboxes internal; a per-sandbox, ICC-disabled sidecar
+handles egress and its token-authenticated API relay. Parse headers strictly;
+reject policy-denied names before DNS and try all validated answers. Claim the
+oldest unsurfaced denial; subagent/non-interactive runs drain and deny. Approvals
+never replay tools; policy labels fence reuse. CONNECT/SNI cannot inspect
+encrypted authority. Discovery and enumeration are read-only, including on a
+policy or network-mode mismatch; only the provider may replace it after the
+orphan grace, local teardown reservation, and cross-instance teardown lease.
+Destroy the sandbox, sidecar, and both networks together.
+
 ### E2B Mount Uploads
 
 The E2B provider uploads host mounts during sandbox creation. It passes binary file objects to the E2B SDK.

@@ -99,6 +99,7 @@ LLM-powered persistent context retention across conversations:
 - **Debounced updates**: Batches updates to minimize LLM calls (configurable wait time)
 - **System prompt injection**: Top facts + context injected into agent prompts
 - **Run-level memory identity**: `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory` returns the SHA-256 identity of the effective hidden memory block without copying memory text into the event store
+- **Read failures**: Strict backend policies (including legacy `fail_closed`) stop the turn, including at the 5-second async injection deadline. Fail-open reads continue without new context. Timeout handling does not wait for a free worker; a timed-out read may still occupy its worker until the backend returns.
 - **Storage**: JSON file with mtime-based cache invalidation
 
 ### Tool Ecosystem

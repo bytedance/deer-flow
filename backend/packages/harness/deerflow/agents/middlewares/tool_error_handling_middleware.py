@@ -392,6 +392,10 @@ def build_subagent_runtime_middlewares(
             slash_source_owner_token=slash_source_owner_token,
         )
     )
+    if deferred_setup is not None and deferred_setup.deferred_names:
+        from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
+
+        middlewares.append(DeferredToolPromotionAuditMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
     middlewares.append(
         SkillToolPolicyMiddleware(
             available_skills=available_skills,
