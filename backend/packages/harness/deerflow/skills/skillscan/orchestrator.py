@@ -685,40 +685,53 @@ def _python_import_bindings(node: ast.Import | ast.ImportFrom) -> Iterator[tuple
 
 
 class _PythonImportScopes:
-    """Import bindings per lexical scope, resolved innermost-first like the names they stand for.
+    """Import bindings per scope, resolved outward from the use like the names they stand for.
 
     A binding is the path an import gives a name, or `None` when the import binds the name to
-    something it cannot resolve (a relative import). Lookup walks from the scope of the use outward
-    and stops at the first scope that binds the name, so a nested import shadows a module-level
-    alias inside its own function and nowhere else, and an unresolvable import there makes the name
-    read as its bare spelling rather than as the module-level alias. Within one scope the binding
-    the walk met last wins, as the flat map always did.
+    something it cannot resolve (a relative import). An import binds its lexical scope unless that
+    scope declares the name `global` (the binding lands at module level) or `nonlocal` (it lands in
+    the nearest enclosing function, as it does at runtime). Lookup walks from the scope of the use
+    outward, honouring the same declarations, and stops at the first scope that binds the name, so
+    a nested import shadows a module-level alias inside its own function and nowhere else, an
+    unresolvable import there makes the name read as its bare spelling rather than as the
+    module-level alias, and an initializer that rebinds a `global` name is seen by every later use
+    of that name. Within one scope the binding the walk met last wins, as the flat map always did.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, module: ast.AST) -> None:
+        self._module = module
         self._bindings: dict[ast.AST, dict[str, str | None]] = {}
         self._parents: dict[ast.AST, ast.AST] = {}
+        # Names a scope declares `global` (True) or `nonlocal` (False).
+        self._declared: dict[ast.AST, dict[str, bool]] = {}
         self._views: dict[ast.AST, _PythonScopeAliases] = {}
 
     def enter(self, scope: ast.AST, parent: ast.AST) -> None:
         self._parents[scope] = parent
 
+    def declare(self, scope: ast.AST, declaration: ast.Global | ast.Nonlocal) -> None:
+        self._declared.setdefault(scope, {}).update(dict.fromkeys(declaration.names, isinstance(declaration, ast.Global)))
+
     def bind(self, scope: ast.AST, name: str, path: str | None) -> None:
-        self._bindings.setdefault(scope, {})[name] = path
+        self._bindings.setdefault(self._binding_scope(scope, name), {})[name] = path
 
     def resolve(self, scope: ast.AST, name: str) -> str | None:
         """The import path `name` reads as at `scope`, or `None` when no import proves one."""
-        current: ast.AST | None = scope
+        current: ast.AST | None = self._binding_scope(scope, name)
         while current is not None:
             bindings = self._bindings.get(current)
             if bindings is not None and name in bindings:
                 return bindings[name]
             current = self._parents.get(current)
+            if current is not None and name in self._declared.get(current, {}):
+                # A scope that declares the name is not where it binds it: keep going to the scope
+                # the declaration points at.
+                current = self._binding_scope(current, name)
         return None
 
     def resolved(self, scope: ast.AST) -> dict[str, str]:
-        """Every name an import proves at `scope`, innermost binding first."""
-        names = {name for current in self._chain(scope) for name in self._bindings.get(current, ())}
+        """Every name an import proves at `scope`."""
+        names = {name for bindings in self._bindings.values() for name in bindings}
         return {name: path for name in sorted(names) if (path := self.resolve(scope, name)) is not None}
 
     def aliases(self, scope: ast.AST) -> _PythonScopeAliases:
@@ -726,11 +739,24 @@ class _PythonImportScopes:
             self._views[scope] = _PythonScopeAliases(self, scope)
         return self._views[scope]
 
-    def _chain(self, scope: ast.AST) -> Iterator[ast.AST]:
-        current: ast.AST | None = scope
-        while current is not None:
-            yield current
+    def _binding_scope(self, scope: ast.AST, name: str) -> ast.AST:
+        """Where a binding of `name` made at `scope` lands, following `global` and `nonlocal`."""
+        current = scope
+        while name in self._declared.get(current, {}):
+            if self._declared[current][name]:
+                return self._module
+            enclosing = self._enclosing_function(current)
+            if enclosing is None:
+                # `nonlocal` with no enclosing function is a SyntaxError; leave it where it is.
+                return scope
+            current = enclosing
+        return current
+
+    def _enclosing_function(self, scope: ast.AST) -> ast.AST | None:
+        current = self._parents.get(scope)
+        while current is not None and not isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             current = self._parents.get(current)
+        return current
 
 
 @dataclass(frozen=True)
@@ -759,18 +785,24 @@ def _collect_python_aliases(tree: ast.AST) -> _PythonImportScopes:
     """Import bindings from every lexical scope, each recorded under the scope that made it.
 
     Imports inside functions have to count, because a call inside that function resolves through
-    them; recording them under their own scope is what stops a nested import -- resolvable or not
-    -- from rebinding a module-level name it never touches at runtime, while still shadowing that
-    name for the calls inside its own function.
+    them; recording them under the scope they really bind is what stops a nested import --
+    resolvable or not -- from rebinding a module-level name it never touches at runtime, while
+    still shadowing that name for the calls inside its own function, and what lets an initializer
+    that declares the name `global` or `nonlocal` bind it for the scope it names.
     """
-    scopes = _PythonImportScopes()
+    scopes = _PythonImportScopes(tree)
+    # Declarations decide where a binding lands, so every import waits until the walk has seen them.
+    pending: list[tuple[ast.AST, str, str | None]] = []
     for node, scope in _walk_python_scopes(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            for name, path in _python_import_bindings(node):
-                scopes.bind(scope, name, path)
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            scopes.declare(scope, node)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            pending.extend((scope, name, path) for name, path in _python_import_bindings(node))
         for child in ast.iter_child_nodes(node):
             if isinstance(child, _PYTHON_SCOPE_NODES):
                 scopes.enter(child, scope)
+    for scope, name, path in pending:
+        scopes.bind(scope, name, path)
     return scopes
 
 

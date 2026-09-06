@@ -1326,6 +1326,18 @@ def test_python_relative_import_over_a_module_alias_drops_it(tmp_path: Path, reb
         ("import os\nimport requests as client\n\ndef send():\n    import json as client\n    client.post(host, json=dict(os.environ))\n", False),
         # An unresolvable import in the same scope as the client import drops it there too.
         ("import os\n\ndef send():\n    import requests as client\n    from . import client\n    client.post(endpoint, data=dict(os.environ))\n", False),
+        # With no module-level alias at all, a module-level call reads an unbound name: the flat
+        # map's `CRITICAL` here was a false positive, since the call raises before any egress.
+        ("import os\n\ndef initialize():\n    import requests as client\n\nclient.post(endpoint, json=dict(os.environ))\n", False),
+        # `global` moves the import's binding to module level, so the module-level call is proven...
+        ("import os\n\ndef initialize():\n    global client\n    import requests as client\n\ninitialize()\nclient.post(endpoint, json=dict(os.environ))\n", True),
+        # ...`nonlocal` moves it to the enclosing function, so that function's call is proven...
+        (
+            "import os\n\ndef outer():\n    client = None\n\n    def initialize():\n        nonlocal client\n        import requests as client\n\n    initialize()\n    client.post(endpoint, json=dict(os.environ))\n\nouter()\n",
+            True,
+        ),
+        # ...and a `global` relative import replaces the module-level alias, not a local it never had.
+        ("import os\nimport requests as client\n\ndef initialize():\n    global client\n    from .helpers import client\n\ninitialize()\nclient.post(endpoint, json=dict(os.environ))\n", False),
     ],
 )
 def test_python_nested_imports_shadow_only_within_their_own_scope(tmp_path: Path, source: str, blocks: bool) -> None:
@@ -1588,6 +1600,33 @@ def test_python_import_aliases_resolve_through_the_lexical_scope_of_the_use() ->
     assert scopes.resolved(send) == {}
     assert scopes.resolved(also) == {"client": "json"}
     assert scopes.resolved(neither) == {"client": "requests"}
+
+
+def test_python_import_aliases_honor_global_and_nonlocal_declarations() -> None:
+    """`global` and `nonlocal` move an import's binding to the scope they name, for binding and lookup alike.
+
+    An initializer that declares `global client` and imports under that name binds the module-level
+    `client`, so every later module-level use reads it; one that declares `nonlocal client` binds
+    the enclosing function's local instead. A function that only declares `global client` reads the
+    module binding even when an enclosing function shadows the name, and a `global` relative
+    import removes the module-level alias rather than a local it never had.
+    """
+    tree = ast.parse(
+        "import requests as client\n"
+        "def initialize():\n    global client\n    from .helpers import client\n"
+        "def outer():\n    import json as client\n    def inner():\n        nonlocal client\n        import urllib3 as client\n    def reader():\n        global client\n        return client\n"
+        "def fresh():\n    global other\n    import aiohttp as other\n"
+    )
+    scopes = _collect_python_aliases(tree)
+    initialize, outer, fresh = tree.body[1], tree.body[2], tree.body[3]
+    inner, reader = outer.body[1], outer.body[2]
+
+    assert scopes.resolved(tree) == {"other": "aiohttp"}
+    assert scopes.resolved(initialize) == {"other": "aiohttp"}
+    assert scopes.resolved(outer) == {"client": "urllib3", "other": "aiohttp"}
+    assert scopes.resolved(inner) == {"client": "urllib3", "other": "aiohttp"}
+    assert scopes.resolved(reader) == {"other": "aiohttp"}
+    assert scopes.resolved(fresh) == {"other": "aiohttp"}
 
 
 @pytest.mark.parametrize(
