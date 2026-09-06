@@ -862,10 +862,7 @@ def _declared_date_timezone_policies():
         SubagentDateContextMiddleware,
     )
 
-    return [
-        DynamicContextMiddleware().release_policy_parameters(),
-        SubagentDateContextMiddleware().release_policy_parameters(),
-    ]
+    return [{"current_date_timezone": middleware.release_policy_parameters()["current_date_timezone"]} for middleware in (DynamicContextMiddleware(), SubagentDateContextMiddleware())]
 
 
 def test_date_middlewares_declare_configured_timezone(monkeypatch):

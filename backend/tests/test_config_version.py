@@ -127,7 +127,7 @@ def test_newer_user_version_no_warning(caplog):
         assert "outdated" not in caplog.text
 
 
-@pytest.mark.parametrize("old_version", [26, 39])
+@pytest.mark.parametrize("old_version", [26, 40])
 def test_older_config_upgrades_without_overwriting_user_settings(tmp_path, caplog, old_version):
     """Older configs must warn and gain new fields without losing custom settings.
 
