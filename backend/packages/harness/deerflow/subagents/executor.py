@@ -31,6 +31,7 @@ from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadSt
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
 from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
@@ -49,7 +50,11 @@ from deerflow.subagents.report_contract import (
 from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, resolve_trace_id
-from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+from deerflow.tracing import (
+    build_tracing_callbacks,
+    inject_langfuse_metadata,
+    redact_knowledge_scope_callbacks,
+)
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
@@ -786,6 +791,7 @@ class SubagentExecutor:
         is_internal: bool = False,
         authz_attributes: Mapping[str, Any] | None = None,
         deerflow_trace_id: str | None = None,
+        knowledge_scope: dict[str, Any] | None = None,
         extensions: Any | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
         acceptance_criteria: list[str] | None = None,
@@ -821,6 +827,8 @@ class SubagentExecutor:
                 from the parent run for Langfuse metadata correlation. Falls
                 back to the ambient trace so the attribute is always a real
                 id, never ``None``.
+            knowledge_scope: Canonical execution-only knowledge scope inherited
+                from the parent turn. Display labels are never propagated.
             extensions: The parent run's immutable ``LoadedExtensions`` snapshot,
                 captured at ``task_tool`` dispatch. When None (embedded client,
                 standalone LangGraph Server), ``_aexecute`` falls back to the
@@ -882,6 +890,7 @@ class SubagentExecutor:
         # trace contract, and ``_aexecute`` rebinds it because a subagent runs
         # on the isolated loop thread where the parent ContextVar may be gone.
         self.deerflow_trace_id = resolve_trace_id(deerflow_trace_id)
+        self.knowledge_scope = execution_scope(knowledge_scope) if knowledge_scope is not None else None
         # Parent run's extension snapshot. Binding it here (rather than reading
         # the singleton at execution time) is what keeps one run on a single
         # extension generation: a concurrent ``set_loaded_extensions()`` between
@@ -1451,7 +1460,7 @@ class SubagentExecutor:
             # produces one trace with all node / LLM / tool calls as child spans.
             # This mirrors the lead agent pattern: graph-level tracing paired with
             # attach_tracing=False on the model avoids double-counted traces.
-            tracing_callbacks = build_tracing_callbacks()
+            tracing_callbacks = redact_knowledge_scope_callbacks(build_tracing_callbacks())
             if tracing_callbacks:
                 existing_callbacks = list(run_config.get("callbacks") or [])
                 run_config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
@@ -1502,6 +1511,8 @@ class SubagentExecutor:
             context["is_internal"] = self.is_internal
             context["authz_attributes"] = dict(self.authz_attributes)
             context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
+            if self.knowledge_scope is not None:
+                context[KNOWLEDGE_SCOPE_RUNTIME_KEY] = dict(self.knowledge_scope)
             context["is_subagent"] = True
             context[_SANDBOX_LEASE_OWNER_CONTEXT_KEY] = sandbox_lease_owner_id
             context[_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY] = sandbox_lease_owner_id

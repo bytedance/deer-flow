@@ -389,29 +389,20 @@ For models with `supports_vision: true`:
 
 ### RAGFlow Knowledge Retrieval
 
-The harness provides an opt-in, read-only RAGFlow integration under
-`deerflow.community.ragflow`. `knowledge_base.enabled` gates the entire
-`knowledge` tool group; the two Agent tools list tenant-shared knowledge bases
-and retrieve compact cited chunks. RAGFlow remains the sole source of truth:
-there are no DeerFlow ORM models, migrations, or mirrored knowledge metadata.
-The Gateway separately exposes authenticated, human-facing management routes
-under `/api/knowledge`; they remain absent from the Agent toolset. Dataset and
-document deletes are admin-only. Multipart uploads validate 50 MiB per-file,
-100 MiB per-request, and 10-file limits while streaming the original request
-body directly to RAGFlow without local spooling. The configured tenant API key
-must never appear in logs, tool errors, or HTTP errors. Tests live in
-`tests/test_ragflow_client.py`, `tests/test_ragflow_tools.py`, and
-`tests/test_knowledge_router.py`.
+`deerflow.community.ragflow` provides opt-in, read-only Agent tools for listing
+tenant-shared knowledge bases and retrieving compact cited chunks; RAGFlow is
+the source of truth, with no DeerFlow ORM mirror. `knowledge_base.enabled`
+gates the tool group and authenticated `/api/knowledge` management UI. Deletes
+are admin-only; uploads stream to RAGFlow after enforcing 50 MiB/file,
+100 MiB/request, and 10-file limits. Keep API keys out of model schemas, logs,
+tool errors, and HTTP errors. Custom-chat scope selection is admitted
+by Gateway and enforced in harness; see the Gateway, middleware, subagent, and
+frontend module guides for those boundaries.
 
-`app.gateway.knowledge.watcher` owns the process-local parsing-status snapshot
-and fans one RAGFlow poll loop out through `/api/knowledge/events`. No SSE
-subscriber means no poll task. Active parsing uses
-`watch_interval_seconds`; a subscribed-but-idle watcher continues at
-`idle_interval_seconds` so parsing started outside DeerFlow can be discovered.
-Upload and parse routes explicitly wake the loop. This is deliberately not a
-distributed watcher: every Gateway process has an independent in-memory
-instance, with no Redis/database coordination. Lifecycle and event regressions
-live in `tests/test_knowledge_watcher.py`.
+`app.gateway.knowledge.watcher` fans one process-local RAGFlow polling loop to
+`/api/knowledge/events`: no subscriber means no task, upload/parse wakes it,
+and it has no cross-worker coordination. Tests use `test_ragflow_*`
+and `test_knowledge_*` modules.
 
 ## Code Style
 

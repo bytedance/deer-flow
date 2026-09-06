@@ -19,6 +19,8 @@ from deerflow.subagents.capacity import configured_subagent_max_running
 
 router = APIRouter(prefix="/api", tags=["features"])
 
+_RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER = "deerflow.community.ragflow.tools:knowledge_search_tool"
+
 
 class AgentsApiFeature(BaseModel):
     """Availability of the custom-agent management API."""
@@ -51,6 +53,10 @@ class KnowledgeBaseFeature(BaseModel):
     """Availability of tenant-shared RAGFlow knowledge management."""
 
     enabled: bool = Field(..., description="Whether the RAGFlow knowledge routes and UI are available")
+    scope_selection_enabled: bool = Field(
+        ...,
+        description="Whether custom-agent chat may select a per-message RAGFlow retrieval scope",
+    )
     management_url: str | None = Field(
         default=None,
         description="Credential-free RAGFlow origin for unsupported management operations",
@@ -95,6 +101,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
         ),
         knowledge_base=KnowledgeBaseFeature(
             enabled=config.knowledge_base.enabled,
+            scope_selection_enabled=_knowledge_scope_selection_enabled(config),
             management_url=_knowledge_management_url(config),
         ),
     )
@@ -109,3 +116,12 @@ def _knowledge_management_url(config: AppConfig) -> str | None:
     if parsed.username is not None or parsed.password is not None:
         return None
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")).rstrip("/")
+
+
+def _knowledge_scope_selection_enabled(config: AppConfig) -> bool:
+    """Fail closed unless the effective knowledge_search entry is RAGFlow."""
+    settings = config.knowledge_base
+    if not settings.enabled or not settings.scope_selection_enabled:
+        return False
+    tool = config.get_tool_config("knowledge_search")
+    return tool is not None and tool.use == _RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER

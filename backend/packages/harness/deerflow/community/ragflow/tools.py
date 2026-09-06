@@ -13,6 +13,12 @@ from langchain_core.tools import StructuredTool
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from deerflow.config import get_app_config
+from deerflow.knowledge_scope import (
+    KNOWLEDGE_SCOPE_RUNTIME_KEY,
+    canonicalize_knowledge_scope,
+    execution_scope,
+)
+from deerflow.tools.types import Runtime
 
 from .client import RAGFlowAPIError, RAGFlowClient, RAGFlowConnectionError, RAGFlowProtocolError
 from .formatting import format_retrieval_result
@@ -31,6 +37,13 @@ class _ResolvedDataset:
     name: str
     embedding_model: str
     chunk_count: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RetrievalGroup:
+    embedding_model: str
+    dataset_ids: list[str]
+    document_ids: list[str] | None
 
 
 class _RAGFlowRetrievalSettings(BaseModel):
@@ -100,8 +113,8 @@ def _settings_from_extra(extra: Mapping[str, object]) -> _RAGFlowRetrievalSettin
     return _RAGFlowRetrievalSettings.model_validate(dict(extra))
 
 
-def _settings_or_error() -> tuple[_RAGFlowRetrievalSettings | None, str | None]:
-    app_config = get_app_config()
+def _settings_or_error(app_config: Any | None = None) -> tuple[_RAGFlowRetrievalSettings | None, str | None]:
+    app_config = app_config or get_app_config()
     get_tool_config = getattr(app_config, "get_tool_config", lambda _name: None)
     tool_config = get_tool_config("knowledge_search") or get_tool_config("list_knowledge_bases")
     global_config = getattr(app_config, "knowledge_base", None)
@@ -229,7 +242,30 @@ def _log_missing_dataset(*, position: int, dataset_id: str, code: object = None)
 async def _resolve_datasets(
     client: RAGFlowClient,
     settings: _RAGFlowRetrievalSettings,
+    requested_dataset_ids: list[str] | None = None,
 ) -> tuple[list[_ResolvedDataset] | None, str | None]:
+    if requested_dataset_ids is not None:
+        if settings.datasets is not None:
+            operator_allowlist = set(settings.datasets)
+            if any(dataset_id not in operator_allowlist for dataset_id in requested_dataset_ids):
+                logger.warning("Selected RAGFlow scope contains a dataset outside the operator allowlist")
+                return (
+                    None,
+                    "Error: The selected knowledge scope is no longer available; choose the knowledge bases again.",
+                )
+        resolved_datasets: list[_ResolvedDataset] = []
+        for dataset_id in requested_dataset_ids:
+            datasets = await client.list_datasets(dataset_id=dataset_id)
+            resolved = _current_dataset(datasets, dataset_id)
+            if resolved is None:
+                logger.warning("Selected RAGFlow dataset is missing or inaccessible (dataset_id=%s)", dataset_id)
+                return (
+                    None,
+                    "Error: The selected knowledge scope is no longer available; choose the knowledge bases again.",
+                )
+            resolved_datasets.append(resolved)
+        return resolved_datasets, None
+
     if settings.datasets is None:
         datasets = await client.list_datasets()
         resolved_by_id: dict[str, _ResolvedDataset] = {}
@@ -258,6 +294,28 @@ async def _resolve_datasets(
     return resolved_datasets, None
 
 
+def resolve_ragflow_retrieval_settings(
+    app_config: Any,
+) -> tuple[_RAGFlowRetrievalSettings | None, str | None]:
+    """Resolve the provider settings shared by tools and safe catalog APIs."""
+    return _settings_or_error(app_config)
+
+
+def build_ragflow_retrieval_client(
+    settings: _RAGFlowRetrievalSettings,
+) -> RAGFlowClient:
+    return _build_client(settings)
+
+
+async def resolve_ragflow_datasets(
+    client: RAGFlowClient,
+    settings: _RAGFlowRetrievalSettings,
+    requested_dataset_ids: list[str] | None = None,
+) -> tuple[list[_ResolvedDataset] | None, str | None]:
+    """Apply the operator allowlist and live RAGFlow dataset resolution."""
+    return await _resolve_datasets(client, settings, requested_dataset_ids)
+
+
 def _group_searchable_datasets(datasets: list[_ResolvedDataset]) -> list[tuple[str, list[str]]]:
     groups: dict[str, list[str]] = {}
     for dataset in datasets:
@@ -265,6 +323,67 @@ def _group_searchable_datasets(datasets: list[_ResolvedDataset]) -> list[tuple[s
             continue
         groups.setdefault(dataset.embedding_model, []).append(dataset.dataset_id)
     return sorted(groups.items())
+
+
+async def _validate_document_filters(
+    client: RAGFlowClient,
+    document_filters: list[dict[str, Any]],
+) -> tuple[dict[str, list[str]] | None, str | None]:
+    validated: dict[str, list[str]] = {}
+    for item in document_filters:
+        dataset_id = item["dataset_id"]
+        document_ids = list(item["document_ids"])
+        params = [
+            ("page", "1"),
+            ("page_size", str(len(document_ids))),
+            *(("ids", document_id) for document_id in document_ids),
+        ]
+        payload = await client.list_documents(dataset_id, params=params)
+        data = payload.get("data")
+        documents = data.get("docs") if isinstance(data, Mapping) else None
+        if not isinstance(documents, list):
+            raise RAGFlowProtocolError("RAGFlow returned an invalid document list.")
+        by_id = {str(document.get("id")): document for document in documents if isinstance(document, Mapping) and document.get("id") is not None}
+        for document_id in document_ids:
+            document = by_id.get(document_id)
+            chunk_count = document.get("chunk_count") if document is not None else None
+            run = str(document.get("run") or "").upper() if document is not None else ""
+            if document is None or run != "DONE" or not isinstance(chunk_count, int) or isinstance(chunk_count, bool) or chunk_count <= 0:
+                logger.warning(
+                    "Selected RAGFlow document is missing or not searchable (dataset_id=%s, document_id=%s)",
+                    dataset_id,
+                    document_id,
+                )
+                return (
+                    None,
+                    "Error: The selected knowledge scope is no longer available; choose the knowledge bases or files again.",
+                )
+        validated[dataset_id] = document_ids
+    return validated, None
+
+
+def _group_scoped_datasets(
+    datasets: list[_ResolvedDataset],
+    document_filters: Mapping[str, list[str]],
+) -> list[_RetrievalGroup]:
+    grouped: dict[tuple[str, bool], _RetrievalGroup] = {}
+    for dataset in datasets:
+        if dataset.chunk_count == 0:
+            continue
+        document_ids = document_filters.get(dataset.dataset_id)
+        key = (dataset.embedding_model, document_ids is not None)
+        existing = grouped.get(key)
+        if existing is None:
+            grouped[key] = _RetrievalGroup(
+                embedding_model=dataset.embedding_model,
+                dataset_ids=[dataset.dataset_id],
+                document_ids=list(document_ids) if document_ids is not None else None,
+            )
+            continue
+        existing.dataset_ids.append(dataset.dataset_id)
+        if document_ids is not None and existing.document_ids is not None:
+            existing.document_ids.extend(document_ids)
+    return [grouped[key] for key in sorted(grouped)]
 
 
 def _result_chunks(result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -334,22 +453,24 @@ async def _retrieve_dataset_groups(
     client: RAGFlowClient,
     settings: _RAGFlowRetrievalSettings,
     query: str,
-    groups: list[tuple[str, list[str]]],
+    groups: list[_RetrievalGroup],
 ) -> dict[str, Any]:
     semaphore = asyncio.Semaphore(_MAX_PARALLEL_RETRIEVAL_GROUPS)
 
-    async def retrieve_group(dataset_ids: list[str]) -> dict[str, Any]:
+    async def retrieve_group(group: _RetrievalGroup) -> dict[str, Any]:
         async with semaphore:
-            return await client.retrieve(
-                query,
-                dataset_ids=dataset_ids,
-                page_size=settings.page_size,
-                similarity_threshold=settings.similarity_threshold,
-                vector_similarity_weight=settings.vector_similarity_weight,
-                top_k=settings.top_k,
-            )
+            kwargs: dict[str, Any] = {
+                "dataset_ids": group.dataset_ids,
+                "page_size": settings.page_size,
+                "similarity_threshold": settings.similarity_threshold,
+                "vector_similarity_weight": settings.vector_similarity_weight,
+                "top_k": settings.top_k,
+            }
+            if group.document_ids is not None:
+                kwargs["document_ids"] = group.document_ids
+            return await client.retrieve(query, **kwargs)
 
-    results = await asyncio.gather(*(retrieve_group(dataset_ids) for _, dataset_ids in groups), return_exceptions=True)
+    results = await asyncio.gather(*(retrieve_group(group) for group in groups), return_exceptions=True)
     successful_results: list[dict[str, Any]] = []
     for result in results:
         if isinstance(result, BaseException):
@@ -359,11 +480,33 @@ async def _retrieve_dataset_groups(
     return _merge_group_results(successful_results, page_size=settings.page_size)
 
 
-async def knowledge_search(query: str) -> str:
+def _runtime_knowledge_scope(runtime: Runtime | None) -> object | None:
+    context = runtime.context if runtime is not None else None
+    if not isinstance(context, Mapping):
+        return None
+    return context.get(KNOWLEDGE_SCOPE_RUNTIME_KEY)
+
+
+async def knowledge_search(
+    query: str,
+    *,
+    knowledge_scope: object | None = None,
+    runtime: Runtime | None = None,
+) -> str:
     """Search the configured RAGFlow scope, defaulting to every accessible dataset."""
     query = query.strip()
     if not query:
         return "Error: query must not be empty."
+
+    scope_value = knowledge_scope if knowledge_scope is not None else _runtime_knowledge_scope(runtime)
+    resolved_scope: dict[str, Any] | None = None
+    if scope_value is not None:
+        try:
+            resolved_scope = execution_scope(canonicalize_knowledge_scope(scope_value))
+        except ValidationError:
+            return "Error: Invalid knowledge scope for this turn."
+        if resolved_scope["mode"] == "disabled":
+            return "Error: Knowledge search is disabled for this turn."
 
     settings, error = _settings_or_error()
     if settings is None:
@@ -371,13 +514,27 @@ async def knowledge_search(query: str) -> str:
 
     client = _build_client(settings)
     try:
-        datasets, resolution_error = await _resolve_datasets(client, settings)
+        selected_dataset_ids = resolved_scope.get("dataset_ids") if resolved_scope is not None and resolved_scope["mode"] == "selected" else None
+        datasets, resolution_error = await _resolve_datasets(
+            client,
+            settings,
+            requested_dataset_ids=selected_dataset_ids,
+        )
         if resolution_error is not None:
             return resolution_error
         if not datasets:  # Defensive; both resolution paths return a non-empty scope.
             return "Error: No RAGFlow datasets could be resolved; check knowledge_search in config.yaml."
 
-        groups = _group_searchable_datasets(datasets)
+        document_filters: dict[str, list[str]] = {}
+        if resolved_scope is not None and resolved_scope["mode"] == "selected":
+            validated_filters, filter_error = await _validate_document_filters(
+                client,
+                list(resolved_scope.get("document_filters") or []),
+            )
+            if filter_error is not None:
+                return filter_error
+            document_filters = validated_filters or {}
+        groups = _group_scoped_datasets(datasets, document_filters)
         if not groups:
             return _NO_RELEVANT_CONTENT
 
@@ -422,13 +579,13 @@ def _tool_description() -> str:
     return f"{base} If knowledge_search.datasets is omitted, all datasets accessible to the configured RAGFlow API key are searched. Dataset IDs are never shown to the model."
 
 
-async def _knowledge_search_entrypoint(query: str) -> str:
+async def _knowledge_search_entrypoint(query: str, runtime: Runtime) -> str:
     """Search the configured RAGFlow datasets, or every accessible dataset by default.
 
     Args:
         query: Specific question or search terms to retrieve from the configured private documents.
     """
-    return await knowledge_search(query)
+    return await knowledge_search(query, runtime=runtime)
 
 
 knowledge_search_tool = StructuredTool.from_function(

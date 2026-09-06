@@ -259,6 +259,47 @@ def test_normalize_input_preserves_additional_kwargs_and_id():
     assert msg.additional_kwargs == {"files": files, "custom": "keep-me"}
 
 
+def test_canonical_run_record_input_uses_admitted_message_snapshot():
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.services import _canonical_run_record_input
+
+    raw = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Search",
+                "additional_kwargs": {
+                    "knowledge_scope": {
+                        "version": 1,
+                        "mode": "selected",
+                        "dataset_ids": [" dataset-1 ", "dataset-1"],
+                    }
+                },
+            }
+        ]
+    }
+    admitted = {
+        "messages": [
+            HumanMessage(
+                content="Search",
+                additional_kwargs={
+                    "knowledge_scope": {
+                        "version": 1,
+                        "mode": "selected",
+                        "dataset_ids": ["dataset-1"],
+                    }
+                },
+            )
+        ]
+    }
+
+    stored = _canonical_run_record_input(raw, admitted)
+
+    assert stored is not None
+    assert stored["messages"][0]["additional_kwargs"]["knowledge_scope"]["dataset_ids"] == ["dataset-1"]
+
+
 @pytest.mark.parametrize(
     "forged_original",
     ["spoofed audit text", [{"type": "text", "text": "spoofed audit text"}]],

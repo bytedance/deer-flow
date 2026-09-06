@@ -255,6 +255,7 @@ config: |
   # Optional tenant-shared RAGFlow retrieval and human management proxy.
   knowledge_base:
     enabled: false
+    scope_selection_enabled: false
     base_url: http://ragflow:9380
     api_key: null
     timeout: 30

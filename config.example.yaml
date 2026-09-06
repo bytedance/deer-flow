@@ -724,6 +724,9 @@ models:
 # does not persist dataset or document contents.
 knowledge_base:
   enabled: false
+  # Custom-agent chat only. Keeps the selector hidden unless the effective
+  # knowledge_search provider is the bundled RAGFlow tool.
+  scope_selection_enabled: false
   base_url: http://localhost:9380
   api_key: null  # Recommended when enabled: $RAGFLOW_API_KEY
   timeout: 30

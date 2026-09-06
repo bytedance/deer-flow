@@ -153,6 +153,7 @@ config: |
     type: redis   # cross-pod SSE; URL from DEER_FLOW_STREAM_BRIDGE_REDIS_URL
   knowledge_base:
     enabled: true
+    scope_selection_enabled: false
     base_url: http://ragflow:9380
     api_key: $RAGFLOW_API_KEY
     # Retrieval defaults and watcher intervals are optional.

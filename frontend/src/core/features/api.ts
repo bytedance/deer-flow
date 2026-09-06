@@ -14,6 +14,7 @@ export interface FeaturesResponse {
   knowledge_base?: {
     enabled: boolean;
     management_url?: string | null;
+    scope_selection_enabled?: boolean;
   };
 }
 
@@ -60,10 +61,12 @@ export async function fetchKnowledgeBaseEnabled(): Promise<boolean> {
 export async function fetchKnowledgeBaseFeature(): Promise<{
   enabled: boolean;
   managementUrl: string | null;
+  scopeSelectionEnabled: boolean;
 }> {
   const feature = (await fetchFeatures()).knowledge_base;
   return {
     enabled: feature?.enabled ?? false,
     managementUrl: feature?.management_url ?? null,
+    scopeSelectionEnabled: feature?.scope_selection_enabled ?? false,
   };
 }

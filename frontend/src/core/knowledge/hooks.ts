@@ -35,6 +35,7 @@ export function useKnowledgeBaseEnabled() {
   return {
     enabled: query.data?.enabled ?? false,
     managementUrl: query.data?.managementUrl ?? null,
+    scopeSelectionEnabled: query.data?.scopeSelectionEnabled ?? false,
     isLoading: query.isPending,
   };
 }

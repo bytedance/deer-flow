@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -17,6 +18,8 @@ def _app_with_config(
     subagent_batches_available: bool = False,
     subagent_batch_repo_available: bool | None = None,
     knowledge_base_enabled: bool = False,
+    scope_selection_enabled: bool = False,
+    knowledge_search_provider: str | None = None,
     knowledge_base_url: str = "http://ragflow.example",
 ) -> FastAPI:
     app = FastAPI()
@@ -39,9 +42,12 @@ def _app_with_config(
         subagent_runtime=SimpleNamespace(max_running=3),
         knowledge_base=SimpleNamespace(
             enabled=knowledge_base_enabled,
+            scope_selection_enabled=scope_selection_enabled,
             base_url=knowledge_base_url,
         ),
     )
+    search_tool = SimpleNamespace(use=knowledge_search_provider) if knowledge_search_provider is not None else None
+    fake_config.get_tool_config = lambda name: search_tool if name == "knowledge_search" else None
     app.dependency_overrides[get_config] = lambda: fake_config
     return app
 
@@ -60,7 +66,11 @@ def test_features_reports_agents_api_enabled() -> None:
             "worker_running": False,
             "max_running": 3,
         },
-        "knowledge_base": {"enabled": False, "management_url": None},
+        "knowledge_base": {
+            "enabled": False,
+            "scope_selection_enabled": False,
+            "management_url": None,
+        },
     }
 
 
@@ -78,7 +88,11 @@ def test_features_reports_agents_api_disabled() -> None:
             "worker_running": False,
             "max_running": 3,
         },
-        "knowledge_base": {"enabled": False, "management_url": None},
+        "knowledge_base": {
+            "enabled": False,
+            "scope_selection_enabled": False,
+            "management_url": None,
+        },
     }
 
 
@@ -88,8 +102,51 @@ def test_features_reports_knowledge_base_enabled() -> None:
     assert response.status_code == 200
     assert response.json()["knowledge_base"] == {
         "enabled": True,
+        "scope_selection_enabled": False,
         "management_url": "http://ragflow.example",
     }
+
+
+def test_features_enables_scope_selection_only_for_exact_ragflow_provider() -> None:
+    with TestClient(
+        _app_with_config(
+            agents_api_enabled=True,
+            knowledge_base_enabled=True,
+            scope_selection_enabled=True,
+            knowledge_search_provider=("deerflow.community.ragflow.tools:knowledge_search_tool"),
+        )
+    ) as client:
+        response = client.get("/api/features")
+
+    assert response.status_code == 200
+    assert response.json()["knowledge_base"]["scope_selection_enabled"] is True
+
+
+@pytest.mark.parametrize(
+    ("knowledge_base_enabled", "provider"),
+    [
+        (False, "deerflow.community.ragflow.tools:knowledge_search_tool"),
+        (True, "deerflow.community.lightrag.tools:knowledge_search_tool"),
+        (True, "custom.provider:knowledge_search_tool"),
+        (True, None),
+    ],
+)
+def test_features_scope_selection_fails_closed(
+    knowledge_base_enabled: bool,
+    provider: str | None,
+) -> None:
+    with TestClient(
+        _app_with_config(
+            agents_api_enabled=True,
+            knowledge_base_enabled=knowledge_base_enabled,
+            scope_selection_enabled=True,
+            knowledge_search_provider=provider,
+        )
+    ) as client:
+        response = client.get("/api/features")
+
+    assert response.status_code == 200
+    assert response.json()["knowledge_base"]["scope_selection_enabled"] is False
 
 
 def test_features_does_not_expose_credentials_embedded_in_ragflow_url() -> None:
@@ -102,7 +159,11 @@ def test_features_does_not_expose_credentials_embedded_in_ragflow_url() -> None:
     ) as client:
         response = client.get("/api/features")
     assert response.status_code == 200
-    assert response.json()["knowledge_base"] == {"enabled": True, "management_url": None}
+    assert response.json()["knowledge_base"] == {
+        "enabled": True,
+        "scope_selection_enabled": False,
+        "management_url": None,
+    }
     assert "password" not in response.text
 
 
@@ -118,6 +179,7 @@ def test_features_strips_ragflow_url_query_and_fragment() -> None:
     assert response.status_code == 200
     assert response.json()["knowledge_base"] == {
         "enabled": True,
+        "scope_selection_enabled": False,
         "management_url": "http://ragflow.example/prefix",
     }
     assert "secret" not in response.text

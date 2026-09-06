@@ -7,6 +7,7 @@ class KnowledgeBaseConfig(BaseModel):
     model_config = ConfigDict(validate_default=True)
 
     enabled: bool = Field(default=False)
+    scope_selection_enabled: bool = Field(default=False)
     base_url: AnyHttpUrl = Field(default="http://localhost:9380")
     api_key: SecretStr | None = Field(default=None)
     timeout: float = Field(default=30, gt=0, le=600)
