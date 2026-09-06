@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
@@ -32,6 +33,7 @@ from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.runtime.runs.worker import _close_agent_stream
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import (
@@ -1398,6 +1400,7 @@ class SubagentExecutor:
                 return None
             return _harvest_bash_executions(final_state)
 
+        stream = None
         try:
             if task_info is not None and task_store is not None:
                 await notify_task_start(
@@ -1517,7 +1520,10 @@ class SubagentExecutor:
                 )
                 return result
 
-            async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
+            # Retain the stream so the outer finally can close it before the
+            # sandbox lease is released and task-stop is notified.
+            stream = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
+            async for chunk in stream:
                 # A yielded values chunk is already executed state.  Retain it
                 # before observing cooperative cancellation so terminal receipt
                 # harvesting includes a tool result that completed while the
@@ -1655,6 +1661,21 @@ class SubagentExecutor:
             )
 
         finally:
+            # Close the graph stream first: teardown completes before the lease
+            # release and the task-stop notification below.
+            if stream is not None:
+                close_error = sys.exception()
+                try:
+                    await _close_agent_stream(stream)
+                except Exception:
+                    if close_error is None and not result.cancel_event.is_set():
+                        raise
+                    logger.warning(
+                        "[trace=%s] Could not close subagent stream for %s",
+                        self.trace_id,
+                        self.config.name,
+                        exc_info=True,
+                    )
             if execution_context is not None and execution_context.get("sandbox_id") is not None:
                 try:
                     from deerflow.sandbox import get_sandbox_provider

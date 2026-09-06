@@ -2863,6 +2863,56 @@ class TestCooperativeCancellation:
         assert result.error == "Cancelled by user"
         assert result.completed_at is not None
 
+    @pytest.mark.anyio
+    async def test_aexecute_cancelled_mid_stream_closes_stream(self, classes, base_config, msg):
+        """The graph stream is closed before a cooperative cancel returns."""
+
+        class CloseTrackingStream:
+            def __init__(self, cancel_event):
+                self.closed = False
+                self._cancel_event = cancel_event
+
+            def __aiter__(self):
+                return self._gen()
+
+            async def _gen(self):
+                yield {"messages": [msg.human("Task"), msg.ai("Partial", "msg-1")]}
+                self._cancel_event.set()
+                yield {"messages": [msg.human("Task"), msg.ai("Should not appear", "msg-2")]}
+
+            async def aclose(self):
+                self.closed = True
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        cancel_event = threading.Event()
+        stream = CloseTrackingStream(cancel_event)
+
+        mock_agent = MagicMock()
+        mock_agent.astream = MagicMock(return_value=stream)
+
+        result_holder = SubagentResult(
+            task_id="cancel-mid-close",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task", result_holder=result_holder)
+
+        assert result.status == SubagentStatus.CANCELLED
+        assert stream.closed is True
+
     def test_request_cancel_sets_event(self, executor_module, classes):
         """Test that request_cancel_background_task sets the cancel_event."""
         SubagentResult = classes["SubagentResult"]
