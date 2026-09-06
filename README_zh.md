@@ -307,6 +307,41 @@ make down   # 停止并移除容器
 
 5. **访问地址**：http://localhost:2026
 
+#### LangGraph Studio（可选）
+
+默认的 `make dev` 拓扑使用 DeerFlow 内嵌于 Gateway 的运行时，无需 LangGraph Studio。
+如需用独立开发服务器检查和测试已注册的 lead-agent 图，请在 `backend/` 目录下运行
+以下命令，以便 CLI 发现 `langgraph.json`：
+
+```bash
+cd backend
+uv run langgraph dev --allow-blocking
+```
+
+该命令会打印本地 API 与 Studio UI 地址。这个内存态服务器仅用于开发与测试；
+该标志允许 DeerFlow 在处理本地 Studio 请求时执行同步的配置加载与图工厂初始化，
+不能当作生产服务器设置使用。本地 Studio 的认证会自动处理，连接无需自定义请求头。
+生产负载请使用 DeerFlow 文档中的生产启动模式或受支持的 LangSmith 部署。在这种
+独立模式下，assistant 的归属与来源由服务器管理：Studio 可以发现已注册的图及其
+创建的 assistants，正常的 assistant 版本选择依然可用。在锁定态本地运行时加载其
+持久化开发存储之前，DeerFlow 会修复历史遗留的 assistant 行与版本历史，防止历史
+客户端元数据恢复服务器权限，或被运行时的启动清理流程丢弃。请用 `uv sync` 保持
+后端依赖同步；该兼容路径依赖已声明的 LangGraph 运行时版本，若持久化存储契约
+与预期不再匹配会记录警告。文档中的命令使用 LangGraph 基于文件的自定义应用加载器，
+DeerFlow 的回归测试也直接覆盖了它。
+
+对通过 LangGraph Studio 或直连 LangGraph Server 调用 `backend/langgraph.json`
+的工作流，DeerFlow 会消费该运行时发布的已认证身份，并将其用于 custom-agent
+配置/SOUL、用户技能与技能策略、上传、线程数据以及记忆读写。这使经过认证的运行
+不会落入共享的 `default` 文件系统桶，且服务器管理的身份优先于普通客户端提供的
+`user_id` 值。诸如邮箱地址之类的外部身份会在访问 DeerFlow 存储前，被映射为稳定、
+抗碰撞且目录安全的用户 ID。默认的 DeerFlow 服务拓扑仍是上文描述的 Gateway 内嵌
+运行时。
+
+Gateway 运行时会自动强制对 `/mnt/user-data/outputs` 下创建或修改的产物执行原生交付：`present_files` 必须至少展示一个由当前运行产出的输出，且终止时的 `run.delivery` 回执必须被持久化记录。虚拟产物路径会在产出该输出的同一已认证用户与线程范围内解析，然后再校验输出目录边界。未产出产物文件的运行保持普通对话行为。
+
+DeerFlow 的内置自定义事件同时通过两种 LangGraph 流式接口提供：原生客户端可以继续订阅 `stream_mode="custom"`，基于回调的集成则可以从 `astream_events(version="v2")` 以 `on_custom_event` 记录的形式消费相同载荷。回调事件名与载荷的 `type` 字段一致。
+
 ### 进阶配置
 #### Sandbox 模式
 
