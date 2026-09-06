@@ -2863,6 +2863,67 @@ class TestCooperativeCancellation:
         assert result.error == "Cancelled by user"
         assert result.completed_at is not None
 
+    @pytest.mark.asyncio
+    async def test_aexecute_cancel_mid_stream_closes_agent_stream(self, classes, base_config, msg):
+        """#5218: cooperative cancellation must close the active astream iterator.
+
+        The executor returns CANCELLED from inside the ``async for`` loop; the
+        stream must be closed (``aclose`` awaited) before the outer ``finally``
+        releases the sandbox lease, or graph-stream teardown would still be
+        pending while shared runtime resources are already released.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        cancel_event = threading.Event()
+        closed = {"aclose_called": False}
+
+        async def mock_astream(*args, **kwargs):
+            try:
+                yield {"messages": [msg.human("Task"), msg.ai("Partial", "msg-1")]}
+                cancel_event.set()
+                yield {"messages": [msg.human("Task"), msg.ai("Should not appear", "msg-2")]}
+            finally:
+                closed["aclose_called"] = True
+
+        class _CloseTrackingAsyncGen:
+            def __init__(self, agen):
+                self._agen = agen
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                return await self._agen.__anext__()
+
+            async def aclose(self):
+                closed["aclose_called"] = True
+                await self._agen.aclose()
+
+        mock_agent = MagicMock()
+        mock_agent.astream = lambda *args, **kwargs: _CloseTrackingAsyncGen(mock_astream(*args, **kwargs))
+
+        result_holder = SubagentResult(
+            task_id="cancel-close-stream",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task", result_holder=result_holder)
+
+        assert result.status == SubagentStatus.CANCELLED
+        assert closed["aclose_called"] is True
+
     def test_request_cancel_sets_event(self, executor_module, classes):
         """Test that request_cancel_background_task sets the cancel_event."""
         SubagentResult = classes["SubagentResult"]
