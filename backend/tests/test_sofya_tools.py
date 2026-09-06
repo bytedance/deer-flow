@@ -499,6 +499,30 @@ class TestWebFetchTool:
 
         assert len(result) == len("# Long\n\n") + 4096
 
+    def test_non_string_content_does_not_raise(self, mock_config_with_key):
+        results = [{"title": "Numeric", "url": "https://example.com", "content": 12345, "success": True}]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_fetch_response(results)
+
+            from deerflow.community.sofya.tools import web_fetch_tool
+
+            result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "# Numeric\n\n12345"
+
+    def test_missing_content_still_reports_no_content(self, mock_config_with_key):
+        results = [{"title": "Empty", "url": "https://example.com", "content": None, "success": True}]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_fetch_response(results)
+
+            from deerflow.community.sofya.tools import web_fetch_tool
+
+            result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "Error: No content found"
+
     def test_falls_back_to_untitled(self, mock_config_with_key):
         results = [{"title": "", "url": "https://example.com", "content": "Body", "success": True}]
 

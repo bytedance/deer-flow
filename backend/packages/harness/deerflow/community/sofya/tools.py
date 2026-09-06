@@ -215,9 +215,9 @@ def web_fetch_tool(url: str) -> str:
     if not result.get("success", True):
         return f"Error: {result.get('error') or 'Failed to fetch the URL'}"
 
-    content = result.get("content") or ""
+    content = _clip(result.get("content") or "", _SOFYA_FETCH_MAX_CHARS)
     if not content:
         return "Error: No content found"
 
     title = result.get("title") or "Untitled"
-    return f"# {title}\n\n{content[:_SOFYA_FETCH_MAX_CHARS]}"
+    return f"# {title}\n\n{content}"
