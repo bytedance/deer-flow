@@ -64,7 +64,9 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.audit_context import TOOL_PROGRESS_RECORDER_CONTEXT_KEY
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, ToolResultMeta
+from deerflow.runtime.events.catalog import MIDDLEWARE_TOOL_PROGRESS_TAG
 
 if TYPE_CHECKING:
     from deerflow.config.tool_progress_config import ToolProgressConfig
@@ -74,6 +76,46 @@ logger = logging.getLogger(__name__)
 _MAX_PENDING_PER_RUN = 3
 # Jaccard word-set computation is capped to avoid O(n) regex work on very large tool results.
 _MAX_CONTENT_FOR_WORDSET = 8192
+_AUDIT_ERROR_TYPES = frozenset(
+    {
+        "auth",
+        "blocked_by_progress_guard",
+        "config",
+        "internal",
+        "no_results",
+        "not_found",
+        "permission",
+        "rate_limited",
+        "transient",
+        "unknown",
+    }
+)
+_AUDIT_NEXT_ACTIONS = frozenset(
+    {
+        "continue",
+        "rewrite_query",
+        "try_alternative",
+        "summarize",
+        "stop",
+    }
+)
+
+
+def _audit_error_type(value: object) -> str | None:
+    """Project an untrusted tool stamp onto the bounded audit vocabulary."""
+    if value is None:
+        return None
+    return value if type(value) is str and value in _AUDIT_ERROR_TYPES else "unknown"
+
+
+def _audit_next_action(value: object) -> str:
+    """Return only framework-defined recovery actions to persistence."""
+    return value if type(value) is str and value in _AUDIT_NEXT_ACTIONS else "unknown"
+
+
+def _audit_recoverable(value: object) -> bool | None:
+    """Reject truthy non-booleans from producer-supplied tool metadata."""
+    return value if type(value) is bool else None
 
 
 # ---------------------------------------------------------------------------
@@ -232,10 +274,11 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         self._max_tracked_threads = max_tracked_threads
 
         # threading.Lock (not asyncio.Lock): critical sections are short in-memory dict
-        # ops with no I/O, so event-loop stall risk is negligible.  asyncio.Lock would
-        # not protect the sync wrap_tool_call path used by subagent executor thread
-        # pools — two separate locks would be required instead.  This matches the
-        # existing LoopDetectionMiddleware pattern; see module docstring for details.
+        # ops plus an in-memory RunJournal append (or call_soon_threadsafe through the
+        # subagent proxy), with no storage I/O. asyncio.Lock would not protect the sync
+        # wrap_tool_call path used by subagent executor thread pools — two separate
+        # locks would be required instead. This matches the existing
+        # LoopDetectionMiddleware pattern; see module docstring for details.
         self._lock = threading.Lock()
         # LRU-evicting store: thread_id → {tool_name → ToolPhaseState}
         self._phase_states: OrderedDict[str, dict[str, ToolPhaseState]] = OrderedDict()
@@ -269,6 +312,64 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
 
     def _pending_key(self, runtime: Runtime) -> tuple[str, str]:
         return self._thread_id(runtime), self._run_id(runtime)
+
+    def _record_phase_transition(
+        self,
+        *,
+        runtime: Runtime,
+        tool_name: str,
+        state: ToolPhaseState,
+        new_state: ToolPhaseState,
+        meta: ToolResultMeta,
+    ) -> None:
+        """Persist one effective transition without copying tool content."""
+        context = getattr(runtime, "context", None)
+        if not isinstance(context, dict):
+            return
+        is_subagent = context.get("is_subagent") is True
+        recorder = context.get(TOOL_PROGRESS_RECORDER_CONTEXT_KEY)
+        if recorder is None:
+            # Lead runs own a RunJournal. Ordinary task-tool subagents receive
+            # only the narrow, loop-safe recorder key above.
+            recorder = context.get("__run_journal")
+        if recorder is None:
+            return
+
+        if new_state.phase == "warned":
+            action = "warn"
+            threshold = self._stagnation_threshold
+        elif new_state.phase == "blocked":
+            action = "block"
+            threshold = 1 if not meta.recoverable_by_model and meta.recommended_next_action == "stop" else self._stagnation_threshold + self._warn_escalation
+        else:
+            action = "recover"
+            threshold = 1
+
+        try:
+            recorder.record_middleware(
+                tag=MIDDLEWARE_TOOL_PROGRESS_TAG,
+                name=type(self).__name__,
+                hook="wrap_tool_call",
+                action=action,
+                changes={
+                    "is_subagent": is_subagent,
+                    "agent_id": context.get("agent_id") if is_subagent else None,
+                    "tool_name": tool_name,
+                    "from_phase": state.phase,
+                    "to_phase": new_state.phase,
+                    "consecutive_problems": new_state.consecutive_problems,
+                    "error_type": _audit_error_type(meta.error_type),
+                    "recoverable_by_model": _audit_recoverable(meta.recoverable_by_model),
+                    "recommended_next_action": _audit_next_action(meta.recommended_next_action),
+                    "threshold": threshold,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            # Observability must never alter the progress guard or agent run.
+            logger.warning(
+                "Failed to record middleware:tool_progress event",
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # State store (caller holds lock)
@@ -341,6 +442,17 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
             state = self._get_state(thread_id, tool_name)
             new_state, hint = self._assess_and_transition(state, meta, content)
             self._set_state(thread_id, tool_name, new_state)
+            if new_state.phase != state.phase:
+                # Keep state mutation and its audit append ordered. Concurrent
+                # completions may warn and then block the same tool; recording
+                # outside this lock could persist those transitions backwards.
+                self._record_phase_transition(
+                    runtime=runtime,
+                    tool_name=tool_name,
+                    state=state,
+                    new_state=new_state,
+                    meta=meta,
+                )
         if new_state.phase != state.phase:
             if new_state.phase == "blocked":
                 logger.warning(

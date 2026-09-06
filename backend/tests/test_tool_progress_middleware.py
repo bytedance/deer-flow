@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,6 +18,8 @@ from deerflow.agents.middlewares.tool_progress_middleware import (
     word_set,
 )
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.journal import RunJournal
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1380,6 +1384,244 @@ def test_log_warned_to_active_reset_emits_info(caplog):
     reset_records = [r for r in caplog.records if r.levelname == "INFO" and "ACTIVE" in r.message]
     assert len(reset_records) == 1
     assert "web_search" in reset_records[0].message
+
+
+class TestToolProgressRunEvents:
+    """Durable audit coverage for state-machine interventions.
+
+    The tool result feed records what a tool returned, but it cannot prove that
+    ToolProgressMiddleware crossed a phase boundary and changed later runtime
+    behavior.  Persist exactly those phase transitions, without copying tool
+    arguments or result content into the middleware event.
+    """
+
+    @staticmethod
+    def _runtime_with_journal(journal):
+        runtime = _make_runtime()
+        runtime.context["__run_journal"] = journal
+        return runtime
+
+    def test_lead_warn_and_recover_transitions_are_recorded_without_result_content(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        middleware = _make_mw(stagnation_threshold=2, warn_escalation_count=2)
+        request = _make_tool_request(runtime=runtime)
+        secret = "SENSITIVE_TOOL_RESULT_MUST_NOT_BE_PERSISTED"
+        no_results = _make_error_message(content=f"Error: no results found {secret}")
+
+        # The first problem remains ACTIVE; only the phase-changing second call
+        # is a durable intervention.
+        assert middleware.wrap_tool_call(request, lambda _request: no_results) is no_results
+        assert middleware.wrap_tool_call(request, lambda _request: no_results) is no_results
+
+        journal.record_middleware.assert_called_once()
+        warned = journal.record_middleware.call_args
+        assert warned.kwargs["tag"] == "tool_progress"
+        assert warned.kwargs["name"] == "ToolProgressMiddleware"
+        assert warned.kwargs["hook"] == "wrap_tool_call"
+        assert warned.kwargs["action"] == "warn"
+        assert warned.kwargs["changes"] == {
+            "is_subagent": False,
+            "agent_id": None,
+            "tool_name": "web_search",
+            "from_phase": "active",
+            "to_phase": "warned",
+            "consecutive_problems": 2,
+            "error_type": "no_results",
+            "recoverable_by_model": True,
+            "recommended_next_action": "rewrite_query",
+            "threshold": 2,
+        }
+        assert secret not in repr(warned)
+        assert "content" not in warned.kwargs["changes"]
+        assert "args" not in warned.kwargs["changes"]
+
+        recovered_result = _make_tool_message(
+            "fresh evidence with enough distinct words to remain a useful result",
+        )
+        assert middleware.wrap_tool_call(request, lambda _request: recovered_result) is recovered_result
+
+        assert journal.record_middleware.call_count == 2
+        recovered = journal.record_middleware.call_args_list[-1]
+        assert recovered.kwargs["action"] == "recover"
+        assert recovered.kwargs["changes"] == {
+            "is_subagent": False,
+            "agent_id": None,
+            "tool_name": "web_search",
+            "from_phase": "warned",
+            "to_phase": "active",
+            "consecutive_problems": 0,
+            "error_type": None,
+            "recoverable_by_model": True,
+            "recommended_next_action": "continue",
+            "threshold": 1,
+        }
+
+    @pytest.mark.anyio
+    async def test_warn_transition_round_trips_through_run_journal(self):
+        store = MemoryRunEventStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        runtime = self._runtime_with_journal(journal)
+        middleware = _make_mw(stagnation_threshold=1)
+        request = _make_tool_request(runtime=runtime)
+
+        middleware.wrap_tool_call(request, lambda _request: _make_error_message())
+        await journal.flush()
+
+        events = await store.list_events("t1", "r1")
+        assert len(events) == 1
+        assert events[0]["event_type"] == "middleware:tool_progress"
+        assert events[0]["category"] == "middleware"
+        assert events[0]["content"]["action"] == "warn"
+        assert events[0]["content"]["changes"]["to_phase"] == "warned"
+
+    def test_lead_immediate_block_transition_is_recorded(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        middleware = _make_mw(stagnation_threshold=5)
+        request = _make_tool_request(runtime=runtime)
+        auth_error = _make_error_message(
+            content="Error: invalid API key",
+            error_type="auth",
+            recoverable_by_model=False,
+            recommended_next_action="stop",
+        )
+
+        assert middleware.wrap_tool_call(request, lambda _request: auth_error) is auth_error
+
+        journal.record_middleware.assert_called_once()
+        blocked = journal.record_middleware.call_args
+        assert blocked.kwargs["tag"] == "tool_progress"
+        assert blocked.kwargs["action"] == "block"
+        assert blocked.kwargs["changes"] == {
+            "is_subagent": False,
+            "agent_id": None,
+            "tool_name": "web_search",
+            "from_phase": "active",
+            "to_phase": "blocked",
+            "consecutive_problems": 1,
+            "error_type": "auth",
+            "recoverable_by_model": False,
+            "recommended_next_action": "stop",
+            "threshold": 1,
+        }
+
+    def test_producer_supplied_meta_is_projected_onto_bounded_audit_values(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        middleware = _make_mw(stagnation_threshold=1)
+        request = _make_tool_request(runtime=runtime)
+        secret = "PRIVATE_EXTENSION_VALUE_" * 50
+        result = _make_tool_message(
+            "ordinary result content",
+            meta_kwargs=_meta_kwargs(
+                status="error",
+                error_type=secret,
+                recoverable_by_model=secret,
+                recommended_next_action=secret,
+                source=secret,
+            ),
+        )
+
+        assert middleware.wrap_tool_call(request, lambda _request: result) is result
+
+        recorded = journal.record_middleware.call_args
+        assert recorded.kwargs["changes"]["error_type"] == "unknown"
+        assert recorded.kwargs["changes"]["recoverable_by_model"] is None
+        assert recorded.kwargs["changes"]["recommended_next_action"] == "unknown"
+        assert secret not in repr(recorded)
+
+    def test_recorder_failure_is_fail_open(self, caplog):
+        journal = MagicMock()
+        journal.record_middleware.side_effect = RuntimeError("event store unavailable")
+        runtime = self._runtime_with_journal(journal)
+        middleware = _make_mw(stagnation_threshold=1)
+        request = _make_tool_request(runtime=runtime)
+        no_results = _make_error_message()
+
+        with caplog.at_level(logging.WARNING, logger=_MW_LOGGER):
+            result = middleware.wrap_tool_call(request, lambda _request: no_results)
+
+        assert result is no_results
+        assert middleware._phase_states["t1"]["web_search"].phase == "warned"
+        assert middleware._pending[("t1", "r1")]
+        assert "Failed to record middleware:tool_progress event" in caplog.text
+
+    def test_narrow_subagent_recorder_records_without_crossing_raw_journal(self):
+        recorder = MagicMock()
+        runtime = _make_runtime()
+        runtime.context["__run_tool_progress_recorder"] = recorder
+        runtime.context["is_subagent"] = True
+        runtime.context["agent_id"] = "general-purpose"
+        assert "__run_journal" not in runtime.context
+        middleware = _make_mw(stagnation_threshold=1)
+        request = _make_tool_request(runtime=runtime)
+
+        middleware.wrap_tool_call(request, lambda _request: _make_error_message())
+
+        recorder.record_middleware.assert_called_once()
+        recorded = recorder.record_middleware.call_args
+        assert recorded.kwargs["tag"] == "tool_progress"
+        assert recorded.kwargs["action"] == "warn"
+        assert recorded.kwargs["changes"]["is_subagent"] is True
+        assert recorded.kwargs["changes"]["agent_id"] == "general-purpose"
+
+    def test_concurrent_warn_and_block_transitions_keep_durable_order(self):
+        """The state lock must also serialize transition publication.
+
+        Parallel calls can both pass the pre-execution block gate while the
+        phase is ACTIVE.  Delaying publication of the first WARN transition
+        makes an implementation that records outside the state lock publish
+        BLOCK before WARN; the durable trace must retain state-machine order.
+        """
+
+        class DelayingRecorder:
+            def __init__(self):
+                self.actions: list[str] = []
+                self.calls: list[dict] = []
+                self.warn_started = threading.Event()
+                self.release_warn = threading.Event()
+                self.block_seen = threading.Event()
+                self.block_overtook_warn = False
+
+            def record_middleware(self, **kwargs):
+                action = kwargs["action"]
+                if action == "warn":
+                    self.warn_started.set()
+                    assert self.release_warn.wait(timeout=5)
+                elif action == "block":
+                    self.block_overtook_warn = not self.release_warn.is_set()
+                    self.block_seen.set()
+                self.actions.append(action)
+                self.calls.append(kwargs)
+
+        recorder = DelayingRecorder()
+        runtime = self._runtime_with_journal(recorder)
+        middleware = _make_mw(stagnation_threshold=1, warn_escalation_count=1)
+        request = _make_tool_request(runtime=runtime)
+        result = _make_non_recoverable_error_message()
+        handlers_ready = threading.Barrier(2)
+
+        def complete_tool(_request):
+            handlers_ready.wait(timeout=5)
+            return result
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(middleware.wrap_tool_call, request, complete_tool) for _ in range(2)]
+            warn_started = recorder.warn_started.wait(timeout=5)
+            if warn_started:
+                # Give the second completion a deterministic opportunity to
+                # overtake an out-of-lock WARN publication.
+                recorder.block_seen.wait(timeout=0.25)
+            recorder.release_warn.set()
+            results = [future.result(timeout=5) for future in futures]
+
+        assert warn_started, "the first concurrent problem must publish WARN"
+        assert results == [result, result]
+        assert recorder.block_overtook_warn is False
+        assert recorder.actions == ["warn", "block"]
+        assert [call["changes"]["threshold"] for call in recorder.calls] == [1, 2]
+        assert middleware._phase_states["t1"]["web_search"].phase == "blocked"
 
 
 def test_log_hint_injection_emits_debug(caplog):

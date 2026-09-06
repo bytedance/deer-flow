@@ -2,3 +2,4 @@
 
 LOOP_DETECTION_RECORDER_CONTEXT_KEY = "__run_loop_detection_recorder"
 TOOL_PROMOTION_RECORDER_CONTEXT_KEY = "__run_tool_promotion_recorder"
+TOOL_PROGRESS_RECORDER_CONTEXT_KEY = "__run_tool_progress_recorder"

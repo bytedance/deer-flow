@@ -462,6 +462,7 @@ def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
     kwargs = captured["executor_kwargs"]
     proxy = kwargs["loop_detection_recorder"]
     assert kwargs["tool_promotion_recorder"] is proxy
+    assert kwargs["tool_progress_recorder"] is proxy
     assert proxy.is_closed is True
     proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="warn", changes={})
     journal.record_middleware.assert_not_called()

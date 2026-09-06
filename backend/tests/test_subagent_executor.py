@@ -3855,6 +3855,7 @@ class TestSubagentGuardrailAttribution:
         run_id=None,
         loop_detection_recorder=None,
         tool_promotion_recorder=None,
+        tool_progress_recorder=None,
         name="general-purpose",
         parent_model="test-model",
     ):
@@ -3867,6 +3868,12 @@ class TestSubagentGuardrailAttribution:
             max_turns=5,
             timeout_seconds=30,
         )
+        recorder_kwargs = {}
+        if tool_progress_recorder is not None:
+            # Kept conditional so the pre-feature attribution cases exercise
+            # the existing constructor surface; only the new propagation case
+            # requires the additive recorder argument.
+            recorder_kwargs["tool_progress_recorder"] = tool_progress_recorder
         return SubagentExecutor(
             config=config,
             tools=[],
@@ -3880,6 +3887,7 @@ class TestSubagentGuardrailAttribution:
             run_id=run_id,
             loop_detection_recorder=loop_detection_recorder,
             tool_promotion_recorder=tool_promotion_recorder,
+            **recorder_kwargs,
         )
 
     @pytest.mark.anyio
@@ -3969,6 +3977,32 @@ class TestSubagentGuardrailAttribution:
         context = fake_agent.captured_context
         assert context is not None
         assert context.get("__run_tool_promotion_recorder") is recorder
+        assert "__run_journal" not in context
+        assert context.get("agent_id") == "general-purpose"
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_narrow_tool_progress_recorder(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """Progress audit crosses the child-loop boundary without the raw journal."""
+        recorder = object()
+        executor = self._make_executor(
+            classes,
+            run_id="run-42",
+            tool_progress_recorder=recorder,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("__run_tool_progress_recorder") is recorder
         assert "__run_journal" not in context
         assert context.get("agent_id") == "general-purpose"
 

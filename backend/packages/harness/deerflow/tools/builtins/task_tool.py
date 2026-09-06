@@ -910,6 +910,7 @@ async def task_tool(
         )
         executor_kwargs["loop_detection_recorder"] = middleware_recorder
         executor_kwargs["tool_promotion_recorder"] = middleware_recorder
+        executor_kwargs["tool_progress_recorder"] = middleware_recorder
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
     if run_extensions is not None:
