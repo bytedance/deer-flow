@@ -1310,21 +1310,35 @@ def test_python_relative_import_over_a_module_alias_drops_it(tmp_path: Path, reb
     assert _scan_reports_client_exfil(tmp_path / "direct", source.replace(f"{rebind}\n", "")) is True
 
 
-def test_python_dead_nested_relative_import_keeps_the_module_alias(tmp_path: Path) -> None:
-    """A relative import inside a function that never runs cannot rebind the module-level name.
+@pytest.mark.parametrize(
+    ("source", "blocks"),
+    [
+        # A nested import that never runs cannot rebind the module-level name a module-level call
+        # reads; a scope-blind invalidation here would be a bypass of the blocking rule.
+        ("import os\nimport requests as client\n\ndef unused():\n    from . import client\n\nclient.post(endpoint, data=dict(os.environ))\n", True),
+        # The same principle for a resolvable nested import: the module-level call still reads
+        # `requests.post`. The flat map let the nested `json` win here, which was a bypass.
+        ("import os\nimport requests as client\n\ndef unused():\n    import json as client\n\nclient.post(endpoint, data=dict(os.environ))\n", True),
+        # Inside the function, the nested import is what the call reads: the relative import proves
+        # nothing, so `client.post` is not `requests.post` and must not hard-block...
+        ("import os\nimport requests as client\n\ndef send():\n    from .helpers import client\n    client.post(host, json=dict(os.environ))\n", False),
+        # ...and a resolvable nested import shadows the module alias the same way.
+        ("import os\nimport requests as client\n\ndef send():\n    import json as client\n    client.post(host, json=dict(os.environ))\n", False),
+        # An unresolvable import in the same scope as the client import drops it there too.
+        ("import os\n\ndef send():\n    import requests as client\n    from . import client\n    client.post(endpoint, data=dict(os.environ))\n", False),
+    ],
+)
+def test_python_nested_imports_shadow_only_within_their_own_scope(tmp_path: Path, source: str, blocks: bool) -> None:
+    """Import aliases resolve through the lexical scope of the call, like the names they stand for.
 
-    The file-wide map takes imports from every scope, so scope-blind invalidation would let a dead
-    nested `from . import client` erase `client -> requests` and turn a proven `requests.post` into
-    a bypass of the blocking rule. Invalidation stays inside the import's own scope: the same
-    rebind inside the function that also imported the client does drop it there.
+    A file-wide map has to pick one binding per name, and every choice is wrong for one of the two
+    call sites: letting the nested import win is a bypass for the module-level call, letting the
+    module one win hard-blocks the call inside the function. Per-scope resolution answers both.
     """
-    dead = "import os\nimport requests as client\n\ndef unused():\n    from . import client\n\nclient.post(endpoint, data=dict(os.environ))\n"
-    same_scope = "import os\n\ndef send():\n    import requests as client\n    from . import client\n    client.post(endpoint, data=dict(os.environ))\n"
+    result = _scan_skill_source(tmp_path, source)
 
-    assert _scan_reports_client_exfil(tmp_path / "dead", dead) is True
-    result = _scan_skill_source(tmp_path / "same-scope", same_scope)
-    assert result["blocked"] is False
-    assert all(finding["rule_id"] != "python-env-dump-exfil" for finding in result["findings"])
+    assert result["blocked"] is blocks
+    assert any(finding["rule_id"] == "python-env-dump-exfil" for finding in result["findings"]) is blocks
 
 
 def test_python_relative_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
@@ -1551,9 +1565,29 @@ def test_python_import_aliases_are_keyed_by_the_bound_name(source: str, expected
     """`import http.client` binds `http`; no identifier can spell a dotted key, so one keyed that way is unreachable.
 
     The map has to agree with `_bind_client_import`, or the heuristic proves a constructor through
-    one spelling of the same import and not another.
+    one spelling of the same import and not another. Asserted at module scope, which sees only what
+    module-level imports bind.
     """
-    assert _collect_python_aliases(ast.parse(source)) == expected
+    tree = ast.parse(source)
+    assert _collect_python_aliases(tree).resolved(tree) == expected
+
+
+def test_python_import_aliases_resolve_through_the_lexical_scope_of_the_use() -> None:
+    """A nested import shadows the module-level alias inside its own function and nowhere else.
+
+    Resolvable or not, an import inside a function binds a local: `client` reads as the local
+    inside `send` and as `requests` at module level, exactly as Python resolves it. A flat map
+    cannot say both, and either collapse turns one of the two calls into a wrong answer for the
+    blocking rules -- a bypass if the nested import wins, a hard-block if the module one does.
+    """
+    tree = ast.parse("import requests as client\n\ndef send():\n    from .helpers import client\n\ndef also():\n    import json as client\n\ndef neither():\n    pass\n")
+    scopes = _collect_python_aliases(tree)
+    send, also, neither = tree.body[1], tree.body[2], tree.body[3]
+
+    assert scopes.resolved(tree) == {"client": "requests"}
+    assert scopes.resolved(send) == {}
+    assert scopes.resolved(also) == {"client": "json"}
+    assert scopes.resolved(neither) == {"client": "requests"}
 
 
 @pytest.mark.parametrize(

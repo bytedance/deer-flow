@@ -357,7 +357,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
     except SyntaxError:
         return findings
 
-    aliases = _collect_python_aliases(tree)
+    scopes = _collect_python_aliases(tree)
     has_sensitive_read = False
     has_env_dump = False
     has_network_sink = False
@@ -367,7 +367,8 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
     reverse_shell_parts: set[str] = set()
     reverse_shell_node: ast.AST | None = None
 
-    for node in ast.walk(tree):
+    for node, scope in _walk_python_scopes(tree):
+        aliases = scopes.aliases(scope)
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if _SENSITIVE_PATH_RE.search(node.value):
                 has_sensitive_read = True
@@ -431,7 +432,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         # A cheap prefilter only: these flags come from the unrestricted walk above, so they are a
         # superset of what the heuristic accepts. It recomputes both under its own lazy-node
         # exclusion, because a payload the runtime never evaluates must not satisfy the rule.
-        findings.extend(_scan_python_client_heuristic(rel_path, tree, aliases))
+        findings.extend(_scan_python_client_heuristic(rel_path, tree, scopes))
     return findings
 
 
@@ -683,45 +684,97 @@ def _python_import_bindings(node: ast.Import | ast.ImportFrom) -> Iterator[tuple
             yield alias.asname or alias.name, f"{node.module}.{alias.name}" if node.module and not node.level else None
 
 
-def _collect_python_aliases(tree: ast.AST) -> dict[str, str]:
-    """File-global import map, one path per bound name; a later import of the same name wins.
+class _PythonImportScopes:
+    """Import bindings per lexical scope, resolved innermost-first like the names they stand for.
 
-    Imports from every lexical scope feed the map, because a call inside a function resolves through
-    this same map. An import whose path cannot be resolved still rebinds its name, but only within
-    its own scope: `from .helpers import client` at module level removes the module-level
-    `import requests as client`, so `client.post` stops reading as `requests.post`, while the same
-    import inside a function that never runs cannot rebind the module-level name and removes
-    nothing. Among the bindings that survive, the one the walk met last wins, as before.
+    A binding is the path an import gives a name, or `None` when the import binds the name to
+    something it cannot resolve (a relative import). Lookup walks from the scope of the use outward
+    and stops at the first scope that binds the name, so a nested import shadows a module-level
+    alias inside its own function and nowhere else, and an unresolvable import there makes the name
+    read as its bare spelling rather than as the module-level alias. Within one scope the binding
+    the walk met last wins, as the flat map always did.
     """
-    surviving: dict[tuple[int, str], tuple[int, str]] = {}
-    scopes = 0
-    order = 0
-    queue: deque[tuple[ast.AST, int]] = deque([(tree, scopes)])
+
+    def __init__(self) -> None:
+        self._bindings: dict[ast.AST, dict[str, str | None]] = {}
+        self._parents: dict[ast.AST, ast.AST] = {}
+        self._views: dict[ast.AST, _PythonScopeAliases] = {}
+
+    def enter(self, scope: ast.AST, parent: ast.AST) -> None:
+        self._parents[scope] = parent
+
+    def bind(self, scope: ast.AST, name: str, path: str | None) -> None:
+        self._bindings.setdefault(scope, {})[name] = path
+
+    def resolve(self, scope: ast.AST, name: str) -> str | None:
+        """The import path `name` reads as at `scope`, or `None` when no import proves one."""
+        current: ast.AST | None = scope
+        while current is not None:
+            bindings = self._bindings.get(current)
+            if bindings is not None and name in bindings:
+                return bindings[name]
+            current = self._parents.get(current)
+        return None
+
+    def resolved(self, scope: ast.AST) -> dict[str, str]:
+        """Every name an import proves at `scope`, innermost binding first."""
+        names = {name for current in self._chain(scope) for name in self._bindings.get(current, ())}
+        return {name: path for name in sorted(names) if (path := self.resolve(scope, name)) is not None}
+
+    def aliases(self, scope: ast.AST) -> _PythonScopeAliases:
+        if scope not in self._views:
+            self._views[scope] = _PythonScopeAliases(self, scope)
+        return self._views[scope]
+
+    def _chain(self, scope: ast.AST) -> Iterator[ast.AST]:
+        current: ast.AST | None = scope
+        while current is not None:
+            yield current
+            current = self._parents.get(current)
+
+
+@dataclass(frozen=True)
+class _PythonScopeAliases:
+    """The `get`-shaped view of one scope that the name resolvers below read."""
+
+    scopes: _PythonImportScopes
+    scope: ast.AST
+
+    def get(self, name: str, default: str = "") -> str:
+        path = self.scopes.resolve(self.scope, name)
+        return default if path is None else path
+
+
+def _walk_python_scopes(tree: ast.AST) -> Iterator[tuple[ast.AST, ast.AST]]:
+    """Yield every node with its lexical scope, in the same breadth-first order as `ast.walk`."""
+    queue: deque[tuple[ast.AST, ast.AST]] = deque([(tree, tree)])
     while queue:
         node, scope = queue.popleft()
+        yield node, scope
+        for child in ast.iter_child_nodes(node):
+            queue.append((child, child if isinstance(child, _PYTHON_SCOPE_NODES) else scope))
+
+
+def _collect_python_aliases(tree: ast.AST) -> _PythonImportScopes:
+    """Import bindings from every lexical scope, each recorded under the scope that made it.
+
+    Imports inside functions have to count, because a call inside that function resolves through
+    them; recording them under their own scope is what stops a nested import -- resolvable or not
+    -- from rebinding a module-level name it never touches at runtime, while still shadowing that
+    name for the calls inside its own function.
+    """
+    scopes = _PythonImportScopes()
+    for node, scope in _walk_python_scopes(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for name, path in _python_import_bindings(node):
-                if path is None:
-                    surviving.pop((scope, name), None)
-                else:
-                    surviving[(scope, name)] = (order, path)
-                    order += 1
+                scopes.bind(scope, name, path)
         for child in ast.iter_child_nodes(node):
             if isinstance(child, _PYTHON_SCOPE_NODES):
-                scopes += 1
-                queue.append((child, scopes))
-            else:
-                queue.append((child, scope))
-    aliases: dict[str, str] = {}
-    latest: dict[str, int] = {}
-    for (_scope, name), (seen, path) in surviving.items():
-        if seen >= latest.get(name, -1):
-            latest[name] = seen
-            aliases[name] = path
-    return aliases
+                scopes.enter(child, scope)
+    return scopes
 
 
-def _python_name(node: ast.AST, aliases: dict[str, str]) -> str:
+def _python_name(node: ast.AST, aliases: _PythonScopeAliases | dict[str, str]) -> str:
     if isinstance(node, ast.Name):
         return aliases.get(node.id, node.id)
     if isinstance(node, ast.Attribute):
@@ -730,7 +783,7 @@ def _python_name(node: ast.AST, aliases: dict[str, str]) -> str:
     return ""
 
 
-def _python_import_name(node: ast.AST, aliases: dict[str, str]) -> str:
+def _python_import_name(node: ast.AST, aliases: _PythonScopeAliases | dict[str, str]) -> str:
     """Resolve only names proven by the scope-local import map."""
     if isinstance(node, ast.Name):
         return aliases.get(node.id, "")
@@ -740,7 +793,7 @@ def _python_import_name(node: ast.AST, aliases: dict[str, str]) -> str:
     return ""
 
 
-def _python_call_name(node: ast.Call, aliases: dict[str, str]) -> str:
+def _python_call_name(node: ast.Call, aliases: _PythonScopeAliases | dict[str, str]) -> str:
     return _python_name(node.func, aliases)
 
 
@@ -1334,10 +1387,10 @@ class _ClientHeuristicHit:
     env_dump: bool
 
 
-def _scan_python_client_heuristic(rel_path: str, tree: ast.AST, aliases: dict[str, str]) -> list[SecurityFinding]:
+def _scan_python_client_heuristic(rel_path: str, tree: ast.AST, scopes: _PythonImportScopes) -> list[SecurityFinding]:
     """Warn where the blocking client-handle chain gives up but the file still shows the exfil shape."""
     try:
-        hit = _find_client_handle_heuristic_sink(tree, aliases, rel_path)
+        hit = _find_client_handle_heuristic_sink(tree, scopes, rel_path)
     except RecursionError:
         # Same contract as the blocking signal: an adversarially deep tree drops this best-effort
         # finding and leaves every deterministic finding for the file in place.
@@ -1349,10 +1402,10 @@ def _scan_python_client_heuristic(rel_path: str, tree: ast.AST, aliases: dict[st
     return [_finding_for_node("python-client-exfil-heuristic", rel_path, hit.sink, f"{payload} + unproven client egress")]
 
 
-def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], rel_path: str) -> _ClientHeuristicHit | None:
+def _find_client_handle_heuristic_sink(tree: ast.AST, scopes: _PythonImportScopes, rel_path: str) -> _ClientHeuristicHit | None:
     """Return the first supported client method call in a file that also constructs such a client.
 
-    `aliases` is the collapsed map the blocking rules resolve names with and serves the payload half
+    `scopes` is the per-scope map the blocking rules resolve names with and serves the payload half
     only. The constructor half resolves against every path an import may bind, recorded by this
     walk and matched after it, so a conditional or scoped import cannot hide a client behind the one
     that happened to be recorded last, and an import that appears after its use still counts.
@@ -1367,7 +1420,7 @@ def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], r
     rebound: set[str] = set()
     sensitive_read = False
     env_dump = False
-    stack: list[ast.AST] = [tree]
+    stack: list[tuple[ast.AST, ast.AST]] = [(tree, tree)]
     while stack:
         if remaining <= 0:
             # Report from the deterministic prefix already walked rather than scan an unbounded
@@ -1375,7 +1428,7 @@ def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], r
             logger.warning("SkillScan client-handle heuristic analysis exhausted work budget for %s", rel_path)
             break
         remaining -= 1
-        node = stack.pop()
+        node, scope = stack.pop()
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             _record_client_import_targets(node, targets)
         elif isinstance(node, ast.Call):
@@ -1389,7 +1442,7 @@ def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], r
                 candidates.append((node.func.attr, _attribute_root_name(node.func), node))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _SENSITIVE_PATH_RE.search(node.value):
             sensitive_read = True
-        elif isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, aliases) == "os.environ":
+        elif isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, scopes.aliases(scope)) == "os.environ":
             env_dump = True
         rebound.update(_heuristic_bound_names(node))
         for child in reversed(list(ast.iter_child_nodes(node))):
@@ -1398,7 +1451,7 @@ def _find_client_handle_heuristic_sink(tree: ast.AST, aliases: dict[str, str], r
                 # binding is what stops X from being treated as a stable import path below.
                 rebound.update(_heuristic_bound_names(child))
                 continue
-            stack.append(child)
+            stack.append((child, child if isinstance(child, _PYTHON_SCOPE_NODES) else scope))
     constructors = set().union(*(_python_client_import_targets(func, targets) & _PYTHON_CLIENT_CONSTRUCTORS for func in calls))
     supported = {method for constructor in constructors for method in _PYTHON_CLIENT_SPECS[constructor].methods}
     for method, root, node in candidates:
