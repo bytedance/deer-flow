@@ -44,8 +44,12 @@ test.describe("Landing page", () => {
 
     if (testInfo.project.name === "static-website") {
       // In static mode `/workspace` redirects to the demo thread, not /chats/new.
+      // The demo-thread page is a heavy client-side route; the navigation can
+      // take well over the default 5s expect timeout on a cold static server,
+      // so keep the original 30s window here.
       await expect(page).toHaveURL(
         new RegExp(`/workspace/chats/${DEMO_THREAD_IDS[0]}$`),
+        { timeout: 30_000 },
       );
     } else {
       // Full deployment: `/` redirects into the app, Get Started opens a new chat.
