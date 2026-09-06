@@ -589,3 +589,282 @@ class TestManagerArtifactResolution:
         result = _format_artifact_text(["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.txt"])
         assert "a.txt" in result
         assert "b.txt" in result
+
+
+# ---------------------------------------------------------------------------
+# URL-based inbound file reader (WeCom media / WeChat full_url fallback)
+# ---------------------------------------------------------------------------
+
+
+class _FakeStreamResponse:
+    def __init__(self, chunks: list[bytes]):
+        self._chunks = chunks
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def aiter_bytes(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _FakeStreamContext:
+    def __init__(self, response: _FakeStreamResponse):
+        self._response = response
+
+    async def __aenter__(self) -> _FakeStreamResponse:
+        return self._response
+
+    async def __aexit__(self, *exc_info) -> bool:
+        return False
+
+
+class _FakeStreamingClient:
+    def __init__(self, chunks: list[bytes]):
+        self._chunks = chunks
+
+    def stream(self, _method: str, _url: str) -> _FakeStreamContext:
+        return _FakeStreamContext(_FakeStreamResponse(self._chunks))
+
+
+class TestHttpInboundFileReader:
+    def test_joins_streamed_chunks_under_the_cap(self):
+        from app.channels.manager import _read_http_inbound_file
+
+        client = _FakeStreamingClient([b"ab", b"cd"])
+
+        result = _run(_read_http_inbound_file({"url": "https://cdn.example/x", "filename": "x.bin"}, client))  # type: ignore[arg-type]
+
+        assert result == b"abcd"
+
+    def test_aborts_when_stream_exceeds_the_cap(self, monkeypatch):
+        from app.channels import manager
+
+        monkeypatch.setattr(manager, "MAX_INBOUND_URL_FILE_BYTES", 5)
+        client = _FakeStreamingClient([b"abc", b"def"])  # 6 bytes total vs a 5-byte cap
+
+        result = _run(manager._read_http_inbound_file({"url": "https://cdn.example/x?token=1", "filename": "x.bin"}, client))  # type: ignore[arg-type]
+
+        assert result is None
+
+    def test_missing_url_returns_none(self):
+        from app.channels.manager import _read_http_inbound_file
+
+        assert _run(_read_http_inbound_file({"filename": "x.bin"}, _FakeStreamingClient([]))) is None  # type: ignore[arg-type]
+
+
+class _RecordingStreamClient(_FakeStreamingClient):
+    def __init__(self, chunks: list[bytes]):
+        super().__init__(chunks)
+        self.streamed_urls: list[str] = []
+
+    def stream(self, method: str, url: str) -> _FakeStreamContext:
+        self.streamed_urls.append(url)
+        return super().stream(method, url)
+
+
+class TestWecomMediaUrlGate:
+    def test_disallowed_host_rejected_before_fetch(self):
+        from app.channels.manager import _read_wecom_inbound_file
+
+        client = _RecordingStreamClient([b"secret-internal-response"])
+
+        result = _run(
+            _read_wecom_inbound_file(
+                {"url": "http://169.254.169.254/latest/meta-data", "filename": "x.bin"},
+                client,  # type: ignore[arg-type]
+            )
+        )
+
+        assert result is None
+        assert client.streamed_urls == []
+
+    def test_qq_host_passes_through_to_fetch(self):
+        from app.channels.manager import _read_wecom_inbound_file
+
+        client = _RecordingStreamClient([b"ab"])
+
+        result = _run(
+            _read_wecom_inbound_file(
+                {"url": "https://cdn.work.weixin.qq.com/media/x?token=1", "filename": "x.bin", "aeskey": None},
+                client,  # type: ignore[arg-type]
+            )
+        )
+
+        assert result == b"ab"
+        assert client.streamed_urls == ["https://cdn.work.weixin.qq.com/media/x?token=1"]
+
+    def test_lookalike_suffix_never_matches(self):
+        from app.channels.manager import _is_allowed_wecom_media_url
+
+        assert not _is_allowed_wecom_media_url("https://notqq.com/x")
+        assert not _is_allowed_wecom_media_url("https://qq.com.evil.io/x")
+        assert not _is_allowed_wecom_media_url("file:///etc/passwd")
+        assert _is_allowed_wecom_media_url("https://cdn.weixin.qq.com/x")
+
+    def test_realistic_wecom_cos_host_passes_gate(self):
+        """WeCom serves media from signed COS links shaped ww-aibot-img-<id>.cos.<region>.myqcloud.com.
+
+        Published callback examples (go-sphere/wecom-bot-api API.md) use exactly
+        this shape for both image.url and file.url; a bare qq.com allowlist
+        would drop every normal WeCom attachment.
+        """
+        from app.channels.manager import _is_allowed_wecom_media_url, _read_wecom_inbound_file
+
+        realistic = "https://ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com/BHoPdA3/7571665296904772241?sign=q-sign-algorithm%3Dsha1&q-signature=QuerySecret"
+        assert _is_allowed_wecom_media_url(realistic)
+
+        client = _RecordingStreamClient([b"ab"])
+        result = _run(
+            _read_wecom_inbound_file(
+                {"url": realistic, "aeskey": None},
+                client,  # type: ignore[arg-type]
+            )
+        )
+        assert result == b"ab"
+        assert client.streamed_urls == [realistic]
+
+    def test_arbitrary_cos_bucket_never_matches(self):
+        """Any Tencent Cloud account can create a COS bucket, so only the pinned
+        ww-aibot-img-<numeric id> shape matches — not a custom bucket name, a
+        non-numeric bot id, or a lookalike domain."""
+        from app.channels.manager import _is_allowed_wecom_media_url
+
+        assert not _is_allowed_wecom_media_url("https://my-own-bucket.cos.ap-guangzhou.myqcloud.com/x?sign=1")
+        assert not _is_allowed_wecom_media_url("https://attacker-prefix-1.cos.ap-guangzhou.myqcloud.com/x?sign=1")
+        assert not _is_allowed_wecom_media_url("https://ww-aibot-img-evil.cos.ap-guangzhou.myqcloud.com/x?sign=1")
+        assert not _is_allowed_wecom_media_url("https://ww-aibot-img-123.cos.ap-guangzhou.myqcloud.com.evil.io/x")
+        assert _is_allowed_wecom_media_url("https://ww-aibot-img-0.cos.ap-shanghai.myqcloud.com/x")
+
+    def test_oversize_rejection_does_not_log_url_credentials(self, monkeypatch, caplog):
+        """Signed media URLs carry credentials in path and query; only the host may be logged."""
+        import logging as _logging
+
+        from app.channels import manager
+
+        monkeypatch.setattr(manager, "MAX_INBOUND_URL_FILE_BYTES", 4)
+        url = "https://ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com/private/BearerSecret?token=QuerySecret"
+        client = _FakeStreamingClient([b"abcdef"])
+
+        with caplog.at_level(_logging.WARNING, logger="app.channels.manager"):
+            result = _run(manager._read_http_inbound_file({"url": url}, client))  # type: ignore[arg-type]
+
+        assert result is None
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "BearerSecret" not in logged
+        assert "QuerySecret" not in logged
+        assert "/private/" not in logged
+        assert "ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com" in logged  # host label is present
+
+    def test_inbound_file_label_never_contains_url(self):
+        from app.channels.manager import _inbound_file_label
+
+        # Whitespace in a webhook-supplied filename is collapsed and capped.
+        assert _inbound_file_label({"filename": "a\nb " + "x" * 100}) == "a b " + "x" * 76
+        # No filename: host-only label from whichever URL field is present.
+        assert _inbound_file_label({"url": "https://h.example/p?token=t"}) == "host=h.example"
+        assert _inbound_file_label({"full_url": "https://h2.example/p?token=t"}) == "host=h2.example"
+        # Nothing usable at all: positional label.
+        assert _inbound_file_label({}, idx=3) == "#3"
+        assert _inbound_file_label({}) == "<unnamed>"
+
+    def test_outer_warning_branches_do_not_log_url_credentials(self, tmp_path, caplog):
+        """The _ingest_inbound_files reader-exception and no-data branches use host-only labels.
+
+        A reader that raises and one that returns None for a url-bearing file
+        dict without a filename are the real shapes that reach these branches
+        (WeCom gate drop, cap abort, download failure).
+        """
+        import logging as _logging
+
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        secret_url = "https://ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com/private/BearerSecret?token=QuerySecret"
+
+        async def raising_reader(_file_info, _client):
+            raise RuntimeError("reader boom")
+
+        async def none_reader(_file_info, _client):
+            return None
+
+        with caplog.at_level(_logging.WARNING, logger="app.channels.manager"):
+            for reader in (raising_reader, none_reader):
+                msg = InboundMessage(
+                    channel_name="test-channel",
+                    chat_id="chat-1",
+                    user_id="user-1",
+                    text="see attachment",
+                    files=[{"url": secret_url}],
+                )
+                with (
+                    patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir),
+                    patch.dict(manager.INBOUND_FILE_READERS, {"test-channel": reader}, clear=False),
+                ):
+                    assert _run(manager._ingest_inbound_files("thread-1", msg)) == []
+
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "BearerSecret" not in logged
+        assert "QuerySecret" not in logged
+        assert "/private/" not in logged
+        assert "host=ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com" in logged
+
+    def test_operator_media_host_suffixes_extend_the_wecom_gate(self):
+        from app.channels.manager import _is_allowed_wecom_media_url
+
+        proxied = "https://media.mirror.example/wecom/x?sign=1"
+        assert not _is_allowed_wecom_media_url(proxied)
+        assert _is_allowed_wecom_media_url(proxied, extra_suffixes=frozenset({"mirror.example"}))
+        # Extras widen only by dot-boundary suffix, same as the built-ins.
+        assert not _is_allowed_wecom_media_url("https://mirror.example.evil.io/x", extra_suffixes=frozenset({"mirror.example"}))
+
+    def test_wecom_reader_resolves_operator_suffixes_from_live_channel(self, monkeypatch):
+        """The registry reader merges channels.wecom.allowed_media_hosts from the running channel."""
+        from types import SimpleNamespace as _NS
+
+        from app.channels import manager
+        from app.channels import service as service_module
+
+        proxied = "https://media.mirror.example/wecom/x?sign=1"
+        client = _RecordingStreamClient([b"ab"])
+
+        fake_service = _NS(get_channel=lambda name: _NS(allowed_media_host_suffixes=frozenset({"mirror.example"})) if name == "wecom" else None)
+        monkeypatch.setattr(service_module, "get_channel_service", lambda: fake_service)
+
+        result = _run(manager._read_wecom_inbound_file({"url": proxied, "aeskey": None}, client))  # type: ignore[arg-type]
+        assert result == b"ab"
+        assert client.streamed_urls == [proxied]
+
+        # Without the operator suffix (no live channel -> strict defaults only) the same URL is dropped pre-fetch.
+        monkeypatch.setattr(service_module, "get_channel_service", lambda: None)
+        strict_client = _RecordingStreamClient([b"ab"])
+        assert _run(manager._read_wecom_inbound_file({"url": proxied, "aeskey": None}, strict_client)) is None  # type: ignore[arg-type]
+        assert strict_client.streamed_urls == []
+
+    def test_wecom_channel_parses_operator_media_hosts(self):
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(
+            MessageBus(),
+            config={"bot_id": "b", "bot_secret": "s", "allowed_media_hosts": [" .Mirror.Example ", "cdn2.example", "*.wild.example", ""]},
+        )
+        assert channel.allowed_media_host_suffixes == frozenset({"mirror.example", "cdn2.example", "wild.example"})
+
+        assert WeComChannel(MessageBus(), config={"bot_id": "b", "bot_secret": "s"}).allowed_media_host_suffixes == frozenset()
+
+    def test_wechat_fallback_without_staged_path_never_fetches(self):
+        """A WeChat file dict with only full_url has no re-fetch path: the URL gate is channel-side."""
+        from app.channels.manager import _read_wechat_inbound_file
+
+        client = _RecordingStreamClient([b"secret"])
+
+        result = _run(
+            _read_wechat_inbound_file(
+                {"url": None, "full_url": "https://cdn.weixin.qq.com/image.bin"},
+                client,  # type: ignore[arg-type]
+            )
+        )
+
+        assert result is None
+        assert client.streamed_urls == []

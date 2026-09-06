@@ -46,6 +46,35 @@ class WeComChannel(Channel):
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
         self._working_message = "Working on it..."
+        raw_hosts = config.get("allowed_media_hosts")
+        if isinstance(raw_hosts, str):
+            host_values: list[Any] = [raw_hosts]
+        elif isinstance(raw_hosts, (list, tuple, set, frozenset)):
+            host_values = list(raw_hosts)
+        else:
+            host_values = []
+        # Host suffixes; a leading ``*.`` is stripped so ``*.example.com`` and
+        # ``example.com`` behave identically (mirrors WechatChannel._coerce_host_suffixes).
+        normalized_hosts: set[str] = set()
+        for host in host_values:
+            text = str(host).strip().lower().lstrip(".")
+            if text.startswith("*."):
+                text = text[2:]
+            if text:
+                normalized_hosts.add(text)
+        self._allowed_media_host_suffixes = frozenset(normalized_hosts)
+
+    @property
+    def allowed_media_host_suffixes(self) -> frozenset[str]:
+        """Operator host suffixes the manager-side inbound-media gate merges in.
+
+        ``channels.wecom.allowed_media_hosts``: extra host suffixes inbound
+        media URLs may be downloaded from, on top of the built-in ``qq.com``
+        family and the pinned WeCom COS bucket shape. Gives deployments that
+        proxy or mirror WeCom media an escape hatch that does not require
+        widening the hard-coded pattern for everyone.
+        """
+        return self._allowed_media_host_suffixes
 
     @property
     def supports_streaming(self) -> bool:

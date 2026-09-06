@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from enum import IntEnum
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from cryptography.hazmat.primitives import padding
@@ -116,6 +116,18 @@ def _encode_outbound_media_aes_key(aes_key: bytes) -> str:
     return base64.b64encode(aes_key.hex().encode("utf-8")).decode("utf-8")
 
 
+def _media_url_host(url: str) -> str:
+    """Best-effort host extraction for logging; never raises, never logs the URL.
+
+    CDN URLs can carry access tokens in their query strings, so only the host
+    is surfaced in skip warnings.
+    """
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 def _detect_image_extension_and_mime(content: bytes) -> tuple[str, str] | None:
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
         return ".png", "image/png"
@@ -138,6 +150,8 @@ class WechatChannel(Channel):
         - ``qrcode_login_enabled``: (optional) Allow first-time QR bootstrap when ``bot_token`` is missing.
         - ``base_url``: (optional) iLink API base URL.
         - ``allowed_users``: (optional) List of allowed iLink user IDs. Empty = allow all.
+        - ``allowed_media_hosts``: (optional) Extra host suffixes inbound media URLs may
+          be downloaded from, in addition to the platform CDN defaults. Default: ``qq.com``.
         - ``polling_timeout``: (optional) Long-poll timeout in seconds. Default: 35.
         - ``state_dir``: (optional) Directory used to persist the long-poll cursor.
     """
@@ -154,6 +168,7 @@ class WechatChannel(Channel):
     DEFAULT_CONFIG_TIMEOUT = 10.0
     DEFAULT_CDN_TIMEOUT = 30.0
     DEFAULT_IMAGE_DOWNLOAD_DIRNAME = "downloads"
+    DEFAULT_ALLOWED_MEDIA_HOST_SUFFIXES = ("qq.com",)
     DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
     DEFAULT_MAX_OUTBOUND_IMAGE_BYTES = 20 * 1024 * 1024
     DEFAULT_MAX_INBOUND_FILE_BYTES = 50 * 1024 * 1024
@@ -243,6 +258,7 @@ class WechatChannel(Channel):
         self._max_inbound_file_bytes = self._coerce_int(config.get("max_inbound_file_bytes"), self.DEFAULT_MAX_INBOUND_FILE_BYTES)
         self._max_outbound_file_bytes = self._coerce_int(config.get("max_outbound_file_bytes"), self.DEFAULT_MAX_OUTBOUND_FILE_BYTES)
         self._allowed_file_extensions = self._coerce_str_set(config.get("allowed_file_extensions"), self.DEFAULT_ALLOWED_FILE_EXTENSIONS)
+        self._allowed_media_hosts = self._coerce_host_suffixes(config.get("allowed_media_hosts"))
         self._allowed_users: set[str] = {str(uid).strip() for uid in config.get("allowed_users", []) if str(uid).strip()}
         self._bot_token = str(config.get("bot_token") or "").strip()
         self._ilink_bot_id = str(config.get("ilink_bot_id") or "").strip() or None
@@ -952,11 +968,43 @@ class WechatChannel(Channel):
             payload["no_need_thumb"] = True
         return payload
 
-    async def _download_cdn_bytes(self, url: str, *, timeout: float | None = None) -> bytes:
+    @staticmethod
+    def _stream_cap_for(plaintext_limit: int) -> int | None:
+        """Translate a plaintext size limit into the ciphertext stream cap.
+
+        ``max_inbound_image_bytes`` / ``max_inbound_file_bytes`` bound the
+        DECRYPTED payload, but ``_download_cdn_bytes`` measures what is still
+        encrypted — AES-128-ECB with PKCS#7 padding, up to one 16-byte block
+        larger. Capping the stream at the plaintext limit would reject a
+        boundary-sized valid attachment purely for its padding, so the cap is
+        the padded size of exactly-limit plaintext. ``None``/non-positive
+        limits keep the stream uncapped, matching the ``> 0`` checks.
+        """
+        if plaintext_limit <= 0:
+            return None
+        return _encrypted_size_for_aes_128_ecb(plaintext_limit)
+
+    async def _download_cdn_bytes(self, url: str, *, timeout: float | None = None, max_bytes: int | None = None) -> bytes | None:
+        """Stream one media download, aborting in flight once it exceeds *max_bytes*.
+
+        The bytes are buffered in memory before being decrypted and persisted,
+        so an oversized attachment must be refused before it is fully read, not
+        after (mirrors ``DingTalkChannel._download_by_code``). Returns ``None``
+        when the download was aborted by the cap; an HTTP-level failure still
+        raises for the caller's per-message error handling to log.
+        """
         client = await self._ensure_client()
-        response = await client.get(url, timeout=timeout or self.DEFAULT_CDN_TIMEOUT)
-        response.raise_for_status()
-        return response.content
+        chunks: list[bytes] = []
+        total = 0
+        async with client.stream("GET", url, timeout=timeout or self.DEFAULT_CDN_TIMEOUT) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if max_bytes is not None and max_bytes > 0 and total > max_bytes:
+                    logger.warning("[WeChat] inbound media download exceeds %d bytes, aborting before full read", max_bytes)
+                    return None
+                chunks.append(chunk)
+        return b"".join(chunks)
 
     async def _upload_cdn_bytes(
         self,
@@ -1061,6 +1109,9 @@ class WechatChannel(Channel):
         if not full_url:
             logger.warning("[WeChat] inbound image missing full_url, skipping message_id=%s", message_id)
             return None
+        if not self._is_allowed_media_url(full_url):
+            logger.warning("[WeChat] inbound image URL host is not allowed, skipping message_id=%s host=%s", message_id, _media_url_host(full_url))
+            return None
 
         aes_key = self._resolve_media_aes_key(item, image_item, media)
         if not aes_key:
@@ -1071,7 +1122,14 @@ class WechatChannel(Channel):
             )
             return None
 
-        encrypted = await self._download_cdn_bytes(full_url)
+        # The configured limit bounds the PLAINTEXT, but the stream caps the
+        # CIPHERTEXT, which PKCS#7 padding makes up to a full block larger — a
+        # boundary-sized valid attachment must not be rejected for its padding.
+        # The exact post-decryption check below remains the authority.
+        encrypted = await self._download_cdn_bytes(full_url, max_bytes=self._stream_cap_for(self._max_inbound_image_bytes))
+        if encrypted is None:
+            logger.warning("[WeChat] inbound image exceeds size limit (%d bytes), skipping message_id=%s", self._max_inbound_image_bytes, message_id)
+            return None
         decrypted = _decrypt_aes_128_ecb(encrypted, aes_key)
         if self._max_inbound_image_bytes > 0 and len(decrypted) > self._max_inbound_image_bytes:
             logger.warning("[WeChat] inbound image exceeds size limit (%d bytes), skipping message_id=%s", len(decrypted), message_id)
@@ -1109,6 +1167,9 @@ class WechatChannel(Channel):
         if not full_url:
             logger.warning("[WeChat] inbound file missing full_url, skipping message_id=%s", message_id)
             return None
+        if not self._is_allowed_media_url(full_url):
+            logger.warning("[WeChat] inbound file URL host is not allowed, skipping message_id=%s host=%s", message_id, _media_url_host(full_url))
+            return None
 
         aes_key = self._resolve_media_aes_key(item, file_item, media)
         if not aes_key:
@@ -1125,7 +1186,11 @@ class WechatChannel(Channel):
             logger.warning("[WeChat] inbound file type blocked, skipping message_id=%s filename=%s", message_id, filename)
             return None
 
-        encrypted = await self._download_cdn_bytes(full_url)
+        # Plaintext limit vs ciphertext cap: see the image path above.
+        encrypted = await self._download_cdn_bytes(full_url, max_bytes=self._stream_cap_for(self._max_inbound_file_bytes))
+        if encrypted is None:
+            logger.warning("[WeChat] inbound file exceeds size limit (%d bytes), skipping message_id=%s", self._max_inbound_file_bytes, message_id)
+            return None
         decrypted = _decrypt_aes_128_ecb(encrypted, aes_key)
         if self._max_inbound_file_bytes > 0 and len(decrypted) > self._max_inbound_file_bytes:
             logger.warning("[WeChat] inbound file exceeds size limit (%d bytes), skipping message_id=%s", len(decrypted), message_id)
@@ -1477,3 +1542,52 @@ class WechatChannel(Channel):
             return set(default)
         normalized = {str(item).strip().lower() if str(item).strip().startswith(".") else f".{str(item).strip().lower()}" for item in value if str(item).strip()}
         return normalized or set(default)
+
+    def _coerce_host_suffixes(self, value: Any) -> frozenset[str]:
+        """Resolve the inbound-media host allowlist: operator suffixes plus defaults.
+
+        The configured ``cdn_base_url`` host is always admitted so a custom CDN
+        endpoint keeps working without touching ``allowed_media_hosts``.
+        Entries are host suffixes; a leading ``*.`` (a natural DNS habit) is
+        stripped so ``*.example.com`` behaves exactly like ``example.com``
+        instead of silently never matching.
+        """
+        if isinstance(value, str):
+            values: list[Any] = [value]
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            values = list(value)
+        else:
+            values = []
+        suffixes: set[str] = set()
+        for item in values:
+            text = str(item).strip().lower().lstrip(".")
+            if text.startswith("*."):
+                text = text[2:]
+            if text:
+                suffixes.add(text)
+        suffixes.update(self.DEFAULT_ALLOWED_MEDIA_HOST_SUFFIXES)
+        cdn_host = urlparse(self._cdn_base_url).hostname
+        if cdn_host:
+            suffixes.add(cdn_host.strip().lower().lstrip("."))
+        return frozenset(suffixes)
+
+    def _is_allowed_media_url(self, url: str) -> bool:
+        """Gate inbound media fetches to the platform CDN domains.
+
+        ``full_url`` is message-payload data relayed by the platform; like the
+        DingTalk channel's ``download_code``, it is treated as untrusted input.
+        The fetch runs on the Gateway host network, so an unrestricted URL
+        would let a crafted message point it at loopback/private services.
+        Matching is dot-boundary aware, so ``notqq.com`` or
+        ``qq.com.evil.io`` never match a ``qq.com`` suffix.
+        """
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return False
+        if parsed.scheme not in ("http", "https"):
+            return False
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+        return any(host == suffix or host.endswith(f".{suffix}") for suffix in self._allowed_media_hosts)

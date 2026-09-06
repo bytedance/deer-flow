@@ -2540,6 +2540,10 @@ run_ownership:
 #     # Optional: sent as SKRouteTag header when provided
 #     route_tag: ""
 #     allowed_users: []               # empty = allow all
+#     # Optional: extra host suffixes inbound media downloads may come from,
+#     # in addition to the platform CDN defaults (*.qq.com and the cdn_base_url host).
+#     # Entries are suffixes: "example.com" and "*.example.com" are equivalent.
+#     allowed_media_hosts: []
 #     # Optional: timing values must be positive finite seconds
 #     polling_timeout: 35
 #     polling_retry_delay: 5
@@ -2579,6 +2583,9 @@ run_ownership:
 #     enabled: false
 #     bot_id: $WECOM_BOT_ID
 #     bot_secret: $WECOM_BOT_SECRET
+#     # Optional: extra host suffixes inbound media downloads may come from, in
+#     # addition to the built-in qq.com family and WeCom's COS media hosts
+#     allowed_media_hosts: []
 #
 #   dingtalk:
 #     enabled: false
