@@ -167,6 +167,39 @@ async def test_retrieve_rejects_empty_dataset_ids_before_request() -> None:
 
 
 @pytest.mark.anyio
+async def test_retrieve_sends_nonempty_document_filter_and_rejects_empty_filter() -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"code": 0, "data": {"chunks": [], "doc_aggs": [], "total": 0}},
+        )
+
+    client = RAGFlowClient(
+        base_url="http://ragflow.test",
+        api_key="ragflow-secret",
+        transport=httpx.MockTransport(handler),
+    )
+
+    await client.retrieve(
+        "annual leave",
+        dataset_ids=["dataset-1"],
+        document_ids=["document-1"],
+    )
+    assert requests[0]["document_ids"] == ["document-1"]
+
+    with pytest.raises(ValueError, match="document_ids must be omitted or non-empty"):
+        await client.retrieve(
+            "annual leave",
+            dataset_ids=["dataset-1"],
+            document_ids=[],
+        )
+    assert len(requests) == 1
+
+
+@pytest.mark.anyio
 async def test_nonzero_api_code_is_normalized_and_redacts_api_key() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

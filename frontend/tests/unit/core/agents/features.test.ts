@@ -126,6 +126,7 @@ describe("fetchKnowledgeBaseFeature", () => {
         knowledge_base: {
           enabled: true,
           management_url: "http://ragflow.example",
+          scope_selection_enabled: true,
         },
       }),
     );
@@ -139,16 +140,20 @@ describe("fetchKnowledgeBaseFeature", () => {
     await expect(fetchKnowledgeBaseFeature()).resolves.toEqual({
       enabled: true,
       managementUrl: null,
+      scopeSelectionEnabled: false,
     });
   });
 
   test("defaults to disabled when omitted", async () => {
-    mockedFetch.mockResolvedValueOnce(jsonResponse(200, { agents_api: { enabled: true } }));
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { agents_api: { enabled: true } }),
+    );
     await expect(fetchKnowledgeBaseEnabled()).resolves.toBe(false);
     mockedFetch.mockResolvedValueOnce(jsonResponse(200, {}));
     await expect(fetchKnowledgeBaseFeature()).resolves.toEqual({
       enabled: false,
       managementUrl: null,
+      scopeSelectionEnabled: false,
     });
   });
 });
