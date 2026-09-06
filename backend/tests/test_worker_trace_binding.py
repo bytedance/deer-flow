@@ -14,6 +14,7 @@ import asyncio
 
 import pytest
 
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
 from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import RunContext, _build_runtime_context, run_agent
@@ -142,6 +143,56 @@ async def test_caller_supplied_context_trace_id_is_overwritten():
 
     assert captured["context"][DEERFLOW_TRACE_METADATA_KEY] == "gateway-issued"
     assert captured["context"]["agent_name"] == "kept"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_metadata_binds_the_effective_runtime_agent():
+    """The checkpoint records the agent that actually produced its state."""
+    captured = await _run(
+        {
+            "configurable": {"thread_id": "thread-trace-binding"},
+            "context": {"agent_name": "stateless-worker"},
+        }
+    )
+
+    assert captured["metadata"][CHECKPOINT_AGENT_NAME_METADATA_KEY] == "stateless-worker"
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_agent_binding_overwrites_caller_metadata():
+    """Request metadata cannot forge the memory policy attached to state."""
+    captured = await _run(
+        {
+            "configurable": {"thread_id": "thread-trace-binding"},
+            "metadata": {CHECKPOINT_AGENT_NAME_METADATA_KEY: "memory-enabled-impostor"},
+            "context": {"agent_name": "stateless-worker"},
+        }
+    )
+
+    assert captured["metadata"][CHECKPOINT_AGENT_NAME_METADATA_KEY] == "stateless-worker"
+
+
+@pytest.mark.asyncio
+async def test_default_agent_checkpoint_binding_is_explicit():
+    """A sentinel distinguishes the default agent from unbound legacy state."""
+    captured = await _run({"configurable": {"thread_id": "thread-trace-binding"}})
+
+    assert captured["metadata"][CHECKPOINT_AGENT_NAME_METADATA_KEY] == DEFAULT_AGENT_NAME_METADATA_VALUE
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_agent_binding_falls_back_to_configurable_context():
+    """Embedded callers may still carry their effective agent only in configurable."""
+    captured = await _run(
+        {
+            "configurable": {
+                "thread_id": "thread-trace-binding",
+                "agent_name": "embedded-agent",
+            }
+        }
+    )
+
+    assert captured["metadata"][CHECKPOINT_AGENT_NAME_METADATA_KEY] == "embedded-agent"
 
 
 @pytest.mark.asyncio

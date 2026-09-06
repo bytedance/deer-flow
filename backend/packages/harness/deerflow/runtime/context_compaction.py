@@ -4,17 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 from langgraph.types import Overwrite
 
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummaryGenerationError, create_summarization_middleware
+from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
 
 logger = logging.getLogger(__name__)
 _AGENT_CONFIG_NOT_LOADED = object()
+
+
+def _checkpoint_agent_binding(metadata: object) -> tuple[bool, str | None]:
+    """Resolve the server-authored agent binding carried by a checkpoint."""
+    if not isinstance(metadata, Mapping) or CHECKPOINT_AGENT_NAME_METADATA_KEY not in metadata:
+        return False, None
+    value = metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY]
+    if value == DEFAULT_AGENT_NAME_METADATA_VALUE:
+        return True, None
+    if not isinstance(value, str):
+        logger.warning("Ignoring non-string checkpoint agent binding; memory flush will be skipped")
+        return False, None
+    try:
+        return True, validate_agent_name(value)
+    except ValueError:
+        logger.warning("Ignoring invalid checkpoint agent binding; memory flush will be skipped")
+        return False, None
 
 
 class ContextCompactionDisabled(RuntimeError):
@@ -121,28 +141,32 @@ async def compact_thread_context(
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint."""
     resolved_app_config = app_config or get_app_config()
-    agent_config = await asyncio.to_thread(_safe_load_agent_config, agent_name, user_id) if agent_name else None
-    run_model_name = await _aresolve_thread_model_name(
-        model_name,
-        agent_name,
-        user_id,
-        resolved_app_config,
-        agent_config=agent_config,
-    )
-    memory_enabled = not agent_name or (agent_config is not None and getattr(agent_config, "memory_enabled", True) is not False)
-    middleware = _create_compaction_middleware(
-        app_config=resolved_app_config,
-        keep=keep,
-        run_model_name=run_model_name,
-        skip_memory_flush=not memory_enabled,
-    )
-
     read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     snapshot = await accessor.aget(read_config)
     snapshot_config = snapshot.config or {}
     checkpoint_id = snapshot_config.get("configurable", {}).get("checkpoint_id")
     if not checkpoint_id:
         raise LookupError(f"Thread {thread_id} checkpoint not found")
+
+    binding_known, checkpoint_agent_name = _checkpoint_agent_binding(getattr(snapshot, "metadata", None))
+    # The body hint may still select a compatible summarization model for
+    # legacy state, but it never authorizes or attributes a memory write.
+    effective_agent_name = checkpoint_agent_name if binding_known else agent_name
+    agent_config = await asyncio.to_thread(_safe_load_agent_config, effective_agent_name, user_id) if effective_agent_name else None
+    run_model_name = await _aresolve_thread_model_name(
+        model_name,
+        effective_agent_name,
+        user_id,
+        resolved_app_config,
+        agent_config=agent_config,
+    )
+    memory_enabled = binding_known and (checkpoint_agent_name is None or (agent_config is not None and getattr(agent_config, "memory_enabled", True) is not False))
+    middleware = _create_compaction_middleware(
+        app_config=resolved_app_config,
+        keep=keep,
+        run_model_name=run_model_name,
+        skip_memory_flush=not memory_enabled,
+    )
 
     channel_values = snapshot.values or {}
     messages = channel_values.get("messages")
@@ -155,8 +179,8 @@ async def compact_thread_context(
     }
 
     runtime_context = {"thread_id": thread_id, "user_id": user_id}
-    if agent_name:
-        runtime_context["agent_name"] = agent_name
+    if effective_agent_name:
+        runtime_context["agent_name"] = effective_agent_name
     runtime = SimpleNamespace(context=runtime_context)
     try:
         # ``raise_on_failure`` is independent of ``force``: a manual caller always wants
@@ -173,8 +197,11 @@ async def compact_thread_context(
     if result is None:
         return ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages")
 
+    update_config = dict(snapshot.config)
+    if binding_known:
+        update_config["metadata"] = {CHECKPOINT_AGENT_NAME_METADATA_KEY: (DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name)}
     updated_config = await accessor.aupdate(
-        snapshot.config,
+        update_config,
         {
             "messages": Overwrite(list(result.preserved_messages)),
             "summary_text": result.summary_text,
