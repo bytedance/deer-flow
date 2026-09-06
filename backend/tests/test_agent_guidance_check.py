@@ -168,6 +168,18 @@ def test_local_guidance_files_contain_the_split_original_sections() -> None:
         assert "Before changing files in this directory" not in text, relative_text
 
 
+def test_mcp_task_lease_token_migration_is_documented() -> None:
+    guidance = (REPO_ROOT / "backend" / "packages" / "harness" / "deerflow" / "persistence" / "migrations" / "AGENTS.md").read_text(encoding="utf-8")
+
+    for required in (
+        "0019_mcp_task_lease_tokens.py",
+        "0016_subagent_batches",
+        "lease_token",
+        "notification_lease_token",
+    ):
+        assert required in guidance
+
+
 def test_repository_exposes_one_local_and_one_ci_entrypoint() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     workflow = (REPO_ROOT / ".github" / "workflows" / "lint-check.yml").read_text(encoding="utf-8")
