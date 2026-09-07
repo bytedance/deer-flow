@@ -12,8 +12,9 @@ from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
+from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -25,7 +26,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
-from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY, TOOL_PROMOTION_RECORDER_CONTEXT_KEY
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
@@ -65,6 +66,12 @@ _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
 # breaking agent/tool import cycles.
 _SANDBOX_LEASE_OWNER_CONTEXT_KEY = "sandbox_lease_owner_id"
 _SANDBOX_COMMAND_SCOPE_CONTEXT_KEY = "sandbox_command_scope_id"
+
+
+def _utcnow() -> datetime:
+    # SubagentResult timestamp writers must stamp UTC-aware datetimes so
+    # lifecycle metadata never depends on the host wall clock (see deerflow.utils.time).
+    return datetime.now(UTC)
 
 
 _previous_shutdown_isolated_subagent_loop = globals().get("_shutdown_isolated_subagent_loop")
@@ -242,7 +249,7 @@ class SubagentResult:
             if tool_receipts is not None:
                 self.tool_receipts = [dict(receipt) for receipt in tool_receipts]
             self.admission_failure = admission_failure
-            self.completed_at = completed_at or datetime.now()
+            self.completed_at = completed_at or _utcnow()
             self.status = status
             return True
 
@@ -766,6 +773,7 @@ class SubagentExecutor:
         parent_model: str | None = None,
         sandbox_state: SandboxState | None = None,
         thread_data: ThreadDataState | None = None,
+        uploaded_files: list[dict[str, Any]] | None = None,
         thread_id: str | None = None,
         trace_id: str | None = None,
         user_id: str | None = None,
@@ -781,6 +789,7 @@ class SubagentExecutor:
         execution_capacity: SubagentExecutionCapacity | None = None,
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
+        tool_promotion_recorder: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -793,6 +802,9 @@ class SubagentExecutor:
             parent_model: The parent agent's model name for inheritance.
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
+            uploaded_files: Snapshot of files uploaded in the parent's current
+                run. Seeded into the child graph state so ``list_uploaded_files``
+                can exclude them from historical-upload results.
             thread_id: Thread ID for sandbox operations.
             trace_id: Trace ID from parent for distributed tracing.
             user_id: User ID captured from the parent tool's runtime context.
@@ -825,6 +837,8 @@ class SubagentExecutor:
                 parent task tool. Native subagents execute on a separate event
                 loop, so this must be a proxy rather than the parent
                 ``RunJournal`` itself.
+            tool_promotion_recorder: Optional loop-safe recorder for deferred-tool
+                promotion events. It follows the same isolated-loop boundary.
         """
         self.config = config
         self.app_config = app_config
@@ -839,6 +853,7 @@ class SubagentExecutor:
             self.model_name = None
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
+        self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.thread_id = thread_id
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
@@ -872,6 +887,7 @@ class SubagentExecutor:
         # in report_contract.render_acceptance_criteria_block.
         self.acceptance_criteria = acceptance_criteria
         self.loop_detection_recorder = loop_detection_recorder
+        self.tool_promotion_recorder = tool_promotion_recorder
 
         self._base_tools = _filter_tools(
             tools,
@@ -1250,11 +1266,15 @@ class SubagentExecutor:
             "messages": messages,
         }
 
-        # Pass through sandbox and thread data from parent
+        # Pass through the parent runtime state that tools need. Each child
+        # receives fresh containers so graph writes never mutate the snapshot
+        # held by another execution.
         if self.sandbox_state is not None:
             state["sandbox"] = self.sandbox_state
         if self.thread_data is not None:
             state["thread_data"] = self.thread_data
+        if self.uploaded_files is not None:
+            state["uploaded_files"] = deepcopy(self.uploaded_files)
 
         return state, final_tools, deferred_setup
 
@@ -1281,7 +1301,7 @@ class SubagentExecutor:
                     with result._state_lock:
                         if not result.status.is_terminal:
                             result.status = SubagentStatus.RUNNING
-                            result.started_at = datetime.now()
+                            result.started_at = _utcnow()
                     return await self._aexecute_admitted(task, result)
             except SubagentCapacityError as exc:
                 result.try_set_terminal(
@@ -1311,7 +1331,7 @@ class SubagentExecutor:
                 task_id=task_id,
                 trace_id=self.trace_id,
                 status=SubagentStatus.RUNNING,
-                started_at=datetime.now(),
+                started_at=_utcnow(),
             )
         sandbox_lease_owner_id = f"subagent:{result.task_id}"
         execution_context: dict[str, Any] | None = None
@@ -1478,6 +1498,8 @@ class SubagentExecutor:
             context["agent_id"] = self.config.name
             if self.loop_detection_recorder is not None:
                 context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder
+            if self.tool_promotion_recorder is not None:
+                context[TOOL_PROMOTION_RECORDER_CONTEXT_KEY] = self.tool_promotion_recorder
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 

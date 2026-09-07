@@ -20,10 +20,12 @@ from deerflow.models.mindie_provider import (
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def _make_chat_result(content: str, tool_calls=None) -> ChatResult:
+def _make_chat_result(content: str, tool_calls=None, usage_metadata=None) -> ChatResult:
     msg = AIMessage(content=content)
     if tool_calls:
         msg.tool_calls = tool_calls
+    if usage_metadata is not None:
+        msg.usage_metadata = usage_metadata
     gen = ChatGeneration(message=msg)
     return ChatResult(generations=[gen])
 
@@ -492,3 +494,132 @@ class TestAStream:
             chunks = await self._collect(model._astream([HumanMessage(content="q")], tools=[{"type": "function", "function": {"name": "x"}}]))
 
         assert any(getattr(c.message, "tool_calls", []) for c in chunks)
+
+    # ── Issue #5192: usage_metadata dropped in tool-mode simulated stream ────
+
+    _USAGE = {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
+
+    @staticmethod
+    def _tool(name: str) -> dict:
+        return {"type": "function", "function": {"name": name}}
+
+    async def _collect_stream_with_usage(self, content, tool_calls):
+        """Collect the tool-mode simulated stream whose underlying `_agenerate`
+        result carries usage_metadata; returns (chunks, source_usage)."""
+        with patch.object(MindIEChatModel, "_agenerate", new_callable=AsyncMock) as mock_ag, patch.object(MindIEChatModel, "__init__", return_value=None):
+            mock_ag.return_value = _make_chat_result(content, tool_calls=tool_calls, usage_metadata=self._USAGE)
+            model = MindIEChatModel.__new__(MindIEChatModel)
+            chunks = await self._collect(model._astream([HumanMessage(content="q")], tools=[self._tool("fn")]))
+            source_usage = mock_ag.return_value.generations[0].message.usage_metadata
+
+        return chunks, source_usage
+
+    @staticmethod
+    def _merge_messages(chunks):
+        merged = chunks[0].message
+        for chunk in chunks[1:]:
+            merged = merged + chunk.message
+        return merged
+
+    @pytest.mark.parametrize(
+        ("content", "tool_calls"),
+        [
+            ("A" * 40, None),  # text-only simulated stream
+            ("A" * 40, [{"name": "fn", "args": {"x": 1}, "id": "c1"}]),  # text + trailing tool-call chunk
+            ("", [{"name": "fn", "args": {"x": 1}, "id": "c1"}]),  # tool-call only
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_with_tools_usage_metadata_survives_simulated_stream(self, content, tool_calls):
+        """Issue #5192 regression guard: usage must survive the simulated stream.
+
+        Chunk level: exactly the *last* emitted chunk carries the usage snapshot
+        (mirroring OpenAI's terminal usage frame, so chunk summation cannot
+        double count).  Aggregate level: merging the simulated chunks must
+        reproduce the original usage_metadata.
+        """
+        chunks, source_usage = await self._collect_stream_with_usage(content, tool_calls)
+
+        # Sanity: the underlying full response really did carry usage.
+        assert source_usage == self._USAGE
+
+        carriers = [c for c in chunks if c.message.usage_metadata is not None]
+        assert len(carriers) == 1
+        assert carriers[0] is chunks[-1]
+        assert carriers[0].message.usage_metadata == self._USAGE
+
+        merged = self._merge_messages(chunks)
+        assert merged.usage_metadata == self._USAGE
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 7.  Chain-level regression (Issue #5192): public astream() → persisted shape
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestAStreamUsageChain:
+    """End-to-end guard for the tool-mode usage path.
+
+    Drives the *public* ``astream()`` wrapper (the real BaseChatModel path that
+    LangGraph state accumulation, journal ``on_llm_end`` and the front-end
+    ``usage_metadata`` field all consume), then checks the aggregated message
+    shape that gets persisted/streamed (``model_dump()``). This covers the
+    interaction with the wrapper's trailing ``chunk_position="last"`` empty
+    chunk, which the unit-level merge above does not exercise.
+    """
+
+    _USAGE = {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
+    _TOOLS = [{"type": "function", "function": {"name": "fn"}}]
+
+    @pytest.mark.asyncio
+    async def test_public_astream_keeps_usage_for_text_and_tool_call(self):
+        usage = self._USAGE
+        tool_calls = [{"name": "fn", "args": {"x": 1}, "id": "c1"}]
+        long_text = "A" * 40
+
+        with patch.object(MindIEChatModel, "_agenerate", new_callable=AsyncMock) as mock_ag:
+            mock_ag.return_value = _make_chat_result(long_text, tool_calls=tool_calls, usage_metadata=usage)
+            model = MindIEChatModel(model="mindie-test", api_key="test-key")
+
+            # Collect from the public wrapper, exactly as a graph node would.
+            chunks = []
+            async for chunk in model.astream([HumanMessage(content="q")], tools=self._TOOLS):
+                chunks.append(chunk)
+
+        assert chunks, "public astream() yielded nothing"
+        merged = chunks[0]
+        for chunk in chunks[1:]:
+            merged = merged + chunk
+
+        # Text and tool calls survive the simulated stream untouched. Note the
+        # aggregated AIMessage normalises tool calls to include ``type``.
+        assert merged.content == long_text
+        assert merged.tool_calls == [{**tool_calls[0], "type": "tool_call"}]
+        # Usage survives the wrapper aggregation exactly once (no chunk-count
+        # multiplication even with the synthetic trailing empty chunk), and is
+        # present in the exact shape journal/persistence/front-end consume.
+        assert merged.usage_metadata == usage
+        dumped = merged.model_dump()
+        assert dumped.get("usage_metadata") == usage
+
+    @pytest.mark.asyncio
+    async def test_public_astream_keeps_usage_for_tool_call_only(self):
+        usage = self._USAGE
+        tool_calls = [{"name": "fn", "args": {"x": 1}, "id": "c2"}]
+
+        with patch.object(MindIEChatModel, "_agenerate", new_callable=AsyncMock) as mock_ag:
+            mock_ag.return_value = _make_chat_result("", tool_calls=tool_calls, usage_metadata=usage)
+            model = MindIEChatModel(model="mindie-test", api_key="test-key")
+
+            chunks = []
+            async for chunk in model.astream([HumanMessage(content="q")], tools=self._TOOLS):
+                chunks.append(chunk)
+
+        assert chunks
+        merged = chunks[0]
+        for chunk in chunks[1:]:
+            merged = merged + chunk
+
+        assert merged.tool_calls == [{**tool_calls[0], "type": "tool_call"}]
+        assert merged.usage_metadata == usage
+        assert merged.model_dump().get("usage_metadata") == usage

@@ -48,9 +48,7 @@ drift.
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
-`DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services. All return types align with the Gateway API response schemas, so consumer code works identically in HTTP and embedded modes.
-
-**Architecture**: Imports the same `deerflow` modules that Gateway API uses. Shares the same config files and data directories. No FastAPI dependency.
+`DeerFlowClient` provides in-process access without HTTP or a FastAPI dependency. It shares Gateway's `deerflow` modules, config files, data directories, and response schemas for compatible consumers.
 
 **Agent Conversation**:
 - `chat(message, thread_id)` — synchronous, accumulates streaming deltas per message-id and returns the final AI text
@@ -61,6 +59,7 @@ drift.
   - `"end"` — stream finished (carries cumulative `usage` counted once per message id)
 - **Custom-event invariant** — production DeerFlow emitters must use `emit_custom_event` / `aemit_custom_event`, not call `StreamWriter` alone. Every built-in payload must carry a non-empty string `type`; typeless payloads remain writer-only and are intentionally absent from `astream_events`. The writer runs first and remains authoritative for Gateway, Web UI, and embedded-client compatibility; callback dispatch is best-effort and must not break that path. Async graph hooks must await the async helper rather than invoking synchronous dispatch on a running event loop.
 - Agent created lazily via `create_agent()` + `build_middlewares()`, same as `make_lead_agent`
+- Cache graphs by effective storage `user_id` in every auth mode because prompts and middleware bind user SOUL, skills, and storage. `stream()` must materialize it before worker or isolated-loop boundaries.
 - Supports `checkpointer` parameter for state persistence across turns
 - `reset_agent()` forces agent recreation (e.g. after memory or skill changes)
 - See [docs/STREAMING.md](../../../docs/STREAMING.md) for the full design: why Gateway and DeerFlowClient are parallel paths, LangGraph's `stream_mode` semantics, the per-id dedup invariants, and regression testing strategy
@@ -77,30 +76,33 @@ drift.
 | Uploads | `upload_files(thread_id, files)`, `list_uploads(thread_id)`, `delete_upload(thread_id, filename)` | `{"success": true, "files": [...]}`, `{"files": [...], "count": N}` |
 | Artifacts | `get_artifact(thread_id, path)` → `(bytes, mime_type)` | tuple |
 
-**Key difference from Gateway**: Upload accepts local `Path` objects instead of HTTP `UploadFile`, rejects directory paths before copying, and reuses a single worker when document conversion must run inside an active event loop. Artifact returns `(bytes, mime_type)` instead of HTTP Response. The new Gateway-only thread cleanup route deletes `.deer-flow/threads/{thread_id}` after LangGraph thread deletion; there is no matching `DeerFlowClient` method yet. `update_mcp_config()` and `update_skill()` automatically invalidate the cached agent.
+**Gateway differences**: Upload takes local `Path`, not `UploadFile`, rejects directories before copying, and reuses one conversion worker inside an active event loop. Artifacts return `(bytes, mime_type)`, not HTTP Response. Gateway alone deletes `.deer-flow/threads/{thread_id}` after LangGraph thread deletion; the client has no equivalent. `update_mcp_config()` and `update_skill()` invalidate the cached agent.
 
-**Tests**: `tests/test_client.py` (offline unit tests including
-`TestGatewayConformance`), `tests/test_client_live.py` (live integration tests,
-requires a root `config.yaml`, valid API credentials, and explicit opt-in via
-`make test-live` or `DEER_FLOW_RUN_LIVE_TESTS=1`). The live suite calls real
-external APIs and may incur API costs or create local sandboxes, artifacts, and
-files. It is marked `live`, excluded from `make test`, and skipped in default
-CI.
+**Tests**: `tests/test_client.py` is offline, including `TestGatewayConformance`.
+`tests/test_client_live.py` requires root `config.yaml`, valid API credentials,
+and opt-in via `make test-live` or `DEER_FLOW_RUN_LIVE_TESTS=1`. It calls real
+APIs (possible costs) and may create local sandboxes, artifacts, and files.
+Marked `live`, it is excluded from `make test` and skipped in default CI.
 
-**Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
+**Gateway Conformance Tests** (`TestGatewayConformance`): Parse every dict-returning client method's output through its Gateway Pydantic model so missing required fields raise `ValidationError` in CI. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
+
+### AIO Sandbox Network Policy
+
+Restricted AIO keeps sandboxes internal; a per-sandbox, ICC-disabled sidecar
+handles egress and its token-authenticated API relay. Parse headers strictly;
+reject policy-denied names before DNS and try all validated answers. Claim the
+oldest unsurfaced denial; subagent/non-interactive runs drain and deny. Approvals
+never replay tools; policy labels fence reuse. CONNECT/SNI cannot inspect
+encrypted authority. Discovery and enumeration are read-only, including on a
+policy or network-mode mismatch; only the provider may replace it after the
+orphan grace, local teardown reservation, and cross-instance teardown lease.
+Destroy the sandbox, sidecar, and both networks together.
 
 ### E2B Mount Uploads
 
-The E2B provider uploads host mounts during sandbox creation. It passes binary file objects to the E2B SDK.
-
-Each mount has these fixed limits:
-
-- 100 MiB for one file.
-- 512 MiB for all files.
-- 2,000 files.
-
-The full sandbox creation pass also allows 512 MiB and 2,000 files. Skill
-projections and configured mounts share this budget.
+E2B uploads host mounts during sandbox creation using binary file objects.
+Per-mount limits: 100 MiB/file, 512 MiB total, 2,000 files. The full creation
+pass shares a 512 MiB / 2,000-file budget across skill projections and mounts.
 
 The pass has a cooperative deadline controlled by
 ``mount_upload_deadline_seconds`` (default: 120 seconds). The provider checks it before
@@ -121,3 +123,19 @@ An invalid mount does not block later mounts.
 Each successful upload logs its source, destination, file count, byte count, and elapsed time.
 
 A stopped pass logs its limit reason and elapsed time. It reports attempted and completed upload totals separately.
+
+After creation, ``E2BSandbox.mount_upload_result`` holds a ``MountUploadResult``.
+``result.truncated`` is true only for resource-limit stops (deadline, file count,
+bytes), not logged mount failures (missing paths, SDK errors). A provider-level
+map preserves creation results within the Gateway process; ``None`` on a
+reclaimed sandbox means unavailable.
+
+### Workspace Snapshot Cancellation (`workspace_changes/recorder.py`)
+
+After `_prepare_capture()` hands off roots, cancellation must drain text scans
+(`include_text=True`) before removing the cache the worker may still access.
+Metadata scans (`include_text=False`) own no cache: cancel promptly, let the worker
+continue, and consume/log its outcome in a completion callback. Prepare-stage
+cancellation retains its handoff/reclaim path. Regressions in
+`tests/blocking_io/test_workspace_changes_cancellation.py` must cover prompt
+metadata cancellation and text-cache drain/cleanup.

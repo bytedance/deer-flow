@@ -316,6 +316,16 @@ class BrowserSession:
         self._input_live_frame_generation = 0
         self._input_live_frame_pending = False
         self._page_listener_bound = False
+        # The event loop only holds weak references to tasks, so a fire-and-forget
+        # task can be collected mid-execution. The schedulers below clear their
+        # ``*_pending`` guards in a ``finally`` block, which would then never run.
+        self._background_tasks: set[asyncio.Future[Any]] = set()
+
+    def _spawn_background(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Run *coro* detached, keeping a strong reference until it settles."""
+        task = asyncio.ensure_future(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     @property
     def active_refs(self) -> int:
@@ -403,7 +413,7 @@ class BrowserSession:
         """
         self._page = page
         if self._on_frame is not None and not self._screencast_binding and page is not self._screencast_page:
-            asyncio.ensure_future(self._rebind_screencast_safe())
+            self._spawn_background(self._rebind_screencast_safe())
 
     def _bind_new_page_listener(self) -> None:
         """Follow popups/new tabs so auth flows stay visible and controllable.
@@ -570,7 +580,7 @@ class BrowserSession:
         if self._settle_live_frames_pending:
             return
         self._settle_live_frames_pending = True
-        asyncio.ensure_future(self._settle_live_frames())
+        self._spawn_background(self._settle_live_frames())
 
     async def _push_live_frame(self) -> None:
         if self._on_frame is None:
@@ -604,7 +614,7 @@ class BrowserSession:
         if self._input_live_frame_pending:
             return
         self._input_live_frame_pending = True
-        asyncio.ensure_future(self._flush_input_live_frames())
+        self._spawn_background(self._flush_input_live_frames())
 
     async def _back(self) -> PageSnapshot:
         page = await self._ensure_page()

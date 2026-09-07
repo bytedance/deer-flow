@@ -38,8 +38,13 @@ import {
   branchThreadFromTurn,
   fetchThreadTokenUsage,
   patchThreadMetadata,
+  searchThreadsByArchive,
   type ThreadMetadataPatch,
 } from "./api";
+import {
+  hasRenderedThreadStateUpdate,
+  reduceThreadStateUpdates,
+} from "./stream-state";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -659,8 +664,8 @@ export function mergeMessages(
 /**
  * Keep messages from a locally submitted turn behind that turn's user input.
  * LangGraph `messages-tuple` events can publish the first AI/tool steps before
- * the `values` event containing the user message. Those steps are not part of
- * the pre-submit baseline, so move only that visible pending segment behind the
+ * canonical history contains the user message. Those steps are not part of the
+ * pre-submit baseline, so move only that visible pending segment behind the
  * first new human message without disturbing established history or hidden
  * checkpoint controls. The caller keeps the baseline after stream completion
  * because the SDK may retain its transient event order until the next submit.
@@ -1434,10 +1439,20 @@ export function upsertThreadInInfiniteCache(
   queryClient: QueryClient,
   thread: AgentThread,
 ) {
+  // Run-created snapshots do not carry archive metadata. Let the server
+  // decide membership instead of injecting a running chat into both views.
+  const hasArchiveFilter = ({ queryKey }: { queryKey: readonly unknown[] }) =>
+    typeof (queryKey[2] as InfiniteThreadsParams | undefined)?.archived ===
+    "boolean";
+  void queryClient.invalidateQueries({
+    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+    predicate: hasArchiveFilter,
+  });
   queryClient.setQueriesData(
     {
       queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
       exact: false,
+      predicate: (query) => !hasArchiveFilter(query),
     },
     (oldData: InfiniteData<AgentThread[]> | undefined) => {
       if (!oldData) {
@@ -1774,7 +1789,11 @@ export function useThreadStream({
           .catch(() => ({}));
       }
     },
-    onUpdateEvent(data) {
+    onUpdateEvent(data, { mutate }) {
+      if (hasRenderedThreadStateUpdate(data)) {
+        mutate((previous) => reduceThreadStateUpdates(previous, data) ?? {});
+      }
+
       const _messages = getSummarizationMiddlewareMessages(data);
       if (_messages && _messages.length >= 2) {
         for (const m of _messages) {
@@ -2062,9 +2081,9 @@ export function useThreadStream({
 
   // Clear optimistic when server messages arrive.
   // For messages with a human optimistic message, wait until the server's
-  // human message has arrived to avoid clearing before the input message
-  // appears in the stream (the input message may arrive via "values" events
-  // after individual "messages-tuple" events for AI messages).
+  // human message has arrived to avoid clearing before canonical history (or
+  // replay-gap recovery) reports the input after individual messages-tuple
+  // events for AI messages.
   const optimisticMessageCount = optimisticMessages.length;
   const hasHumanOptimistic = optimisticMessages.some((m) => m.type === "human");
   useEffect(() => {
@@ -2772,9 +2791,9 @@ const INFINITE_THREADS_NEXT_PAGE_PARAM = Symbol(
 );
 
 type InfiniteThreadsParams = Omit<
-  Parameters<ThreadsClient["search"]>[0],
+  NonNullable<Parameters<ThreadsClient["search"]>[0]>,
   "limit" | "offset"
->;
+> & { archived?: boolean };
 
 type InfiniteThreadsSearchClient = {
   threads: {
@@ -2808,11 +2827,20 @@ export async function fetchInfiniteThreadsPage(
 
   while (threads.length < pageSize) {
     const currentLimit = pageSize - threads.length;
-    const response = (await apiClient.threads.search<AgentThreadState>({
-      ...params,
-      limit: currentLimit,
-      offset,
-    })) as AgentThread[];
+    const response =
+      params.archived === undefined
+        ? ((await apiClient.threads.search<AgentThreadState>({
+            ...params,
+            limit: currentLimit,
+            offset,
+          })) as AgentThread[])
+        : await searchThreadsByArchive({
+            ...params,
+            archived: params.archived,
+            metadata: params.metadata ?? undefined,
+            limit: currentLimit,
+            offset,
+          });
 
     threads.push(...filterThreadSearchResults(response, params));
     offset += response.length;
@@ -2945,7 +2973,7 @@ function setThreadInCaches(
   );
 }
 
-function setThreadMetadataInCaches(
+export function setThreadMetadataInCaches(
   queryClient: QueryClient,
   threadId: string,
   metadata: ThreadMetadataPatch,
@@ -3108,9 +3136,8 @@ export function usePinThread() {
       patchThreadMetadata(threadId, {
         [THREAD_PINNED_METADATA_KEY]: pinned,
       }),
-    onSuccess(response, { threadId, pinned }) {
+    onSuccess(_response, { threadId, pinned }) {
       setThreadMetadataInCaches(queryClient, threadId, {
-        ...(response.metadata ?? {}),
         [THREAD_PINNED_METADATA_KEY]: pinned,
       });
     },

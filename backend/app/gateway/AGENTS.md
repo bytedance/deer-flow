@@ -1,6 +1,6 @@
 ### Gateway API (`app/gateway/`)
 
-FastAPI listens on port 8001; health: `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable the default `/docs`, `/redoc`, and `/openapi.json` endpoints.
+FastAPI listens on port 8001; health: `GET /health` (liveness) and `GET /health/ready` (readiness; concurrently probes the ORM engine behind `database:` plus the effective LangGraph checkpointer/Store backend - the legacy `checkpointer:` section, otherwise derived from `database:`, resolved from the startup config snapshot recorded on `app.state` - beneath a single bounded deadline, with connection-opening probes serialized behind a strict per-process gate, 503 while either is unreachable or the startup backend cannot be resolved, `not_configured` for process-local backends such as `backend=memory`). Set `GATEWAY_ENABLE_DOCS=false` to disable the default `/docs`, `/redoc`, and `/openapi.json` endpoints.
 
 Durable MCP notifications use internal Agent runs. Keep their trusted delivery instruction outside the user-input boundary, and frame serialized remote events as untrusted before model invocation. Strict thread existence/ownership admission dead-letters events whose task outlives its deleted chat instead of recreating the thread.
 
@@ -134,26 +134,7 @@ startup gate rejects process-local memory and JSONL event stores when
 
 Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
 
-**Branch/regenerate checkpoint invariant**: `app/gateway/checkpoint_lineage.py`
-walks `parent_config` rather than globally ordered checkpoint history so replay
-anchors stay on the selected lineage after regenerations create sibling branches.
-New conversation branches persist the pre-user replay anchor before their visible
-head through the state mutation graph, which preserves materialized state in both
-full and delta checkpoint modes. Only an explicitly absent legacy parent link may
-use chronological compatibility lookup; cycles, dangling links, and depth-limit
-exhaustion fail closed. Existing single-checkpoint branches are never repaired by
-copying a raw checkpoint because delta state is not self-contained in one tuple.
-Both lookups additionally require the replay base to be a **settled** checkpoint
-(`has_pending_tasks` — no scheduled `next` tasks). A checkpoint with pending tasks
-is a mid-run snapshot: resuming from it replays the writes of the node that was
-about to run. Message ids alone cannot exclude those, because middleware may
-rewrite a message's id inside the run that produced it — `DynamicContextMiddleware`
-moves the first user turn to `{id}__user` and gives `{id}` to the injected
-reminder, so every checkpoint written before it holds the same prompt under an
-unmatched id. Selecting one of those re-added the original prompt *after* the
-edited one, and the model answered the question the edit was replacing (#4531).
-`next` is not derivable on the degraded raw-checkpoint read path, which reports no
-tasks; absence of evidence stays permissive there rather than failing closed.
-Edit replay resolves its base through the same lineage-first path as regenerate;
-it must pass `head_checkpoint` or it silently degrades to the chronological scan
-that cannot tell sibling branches apart.
+**Thread lifecycle**: Before changing branching, regeneration, edit replay, or
+archive/search behavior, read [Thread lifecycle invariants](../../docs/THREAD_LIFECYCLE.md).
+It owns lineage and settled-checkpoint rules, legacy fallback boundaries, archive
+filtering before pagination, owner isolation, and activity-time preservation.

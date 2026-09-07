@@ -496,3 +496,21 @@ describe("invalidateStoppedThreadCaches", () => {
     }
   });
 });
+
+test("run-created snapshots without archive metadata cannot insert into filtered lists", () => {
+  const client = new QueryClient();
+  const recentKey = [...INFINITE_THREADS_QUERY_KEY_PREFIX, { archived: false }];
+  const archivedKey = [
+    ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+    { archived: true },
+  ];
+  const empty = makeInfiniteData([[]]);
+  client.setQueryData(recentKey, empty);
+  client.setQueryData(archivedKey, empty);
+  upsertThreadInInfiniteCache(client, makeThread("running-thread"));
+  expect(client.getQueryData(recentKey)).toEqual(empty);
+  expect(client.getQueryData(archivedKey)).toEqual(empty);
+  expect(client.getQueryState(recentKey)?.isInvalidated).toBe(true);
+  expect(client.getQueryState(archivedKey)?.isInvalidated).toBe(true);
+  client.clear();
+});
