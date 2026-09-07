@@ -1947,6 +1947,20 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["checked"] is False
 
+    @pytest.mark.parametrize(
+        ("criterion_target", "additional_target", "ignored_target"),
+        (
+            ("/tests/security", "/tests/unit", "D:/tests/security"),
+            ("D:/WS/tests/security", "D:/WS/tests/unit", "/WS/tests/security"),
+            ("//srv/share/tests/security", "//srv/share/tests/unit", "D:/tests/security"),
+        ),
+    )
+    def test_cross_family_absolute_exclusion_fails_closed(self, criterion_target, additional_target, ignored_target):
+        executions = [_bash_execution(f"pytest {criterion_target} {additional_target} --ignore {ignored_target}", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {criterion_target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
     def test_unc_case_alias_exclusion_is_unprovable(self):
         target = "//SERVER/Share/tests/security"
         executions = [_bash_execution(f"pytest {target} //SERVER/Share/tests/unit --ignore //server/share/tests/security", output_tail="12 passed")]

@@ -718,8 +718,10 @@ def _uses_windows_selection_semantics(value: str, *, windows_path_context: bool)
 def _selection_path_kind(value: str) -> str:
     path, _nodeid = _selection_path_parts(value)
     slash_path = path.replace("\\", "/")
-    if _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path) or _WINDOWS_UNC_ABSOLUTE_RE.match(slash_path):
-        return "windows_absolute"
+    if _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path):
+        return "windows_drive_absolute"
+    if _WINDOWS_UNC_ABSOLUTE_RE.match(slash_path):
+        return "windows_unc_absolute"
     if slash_path.startswith("/"):
         return "posix_absolute"
     return "relative"
@@ -772,18 +774,16 @@ def _negation_overlaps(criterion_token: str, negated_value: str, *, windows_path
     selection never ran, so the passing summary may not cover it; unrelated
     exclusions (``--ignore tests/slow`` against ``pytest tests/unit``) do not
     overlap and keep matching. Safe lexical aliases are normalized, while
-    mixed absolute/relative forms fail closed because evidence does not carry
-    the runner's cwd."""
+    mixed path families fail closed because evidence does not carry enough
+    filesystem provenance to prove that their spellings are distinct."""
     a_kind = _selection_path_kind(criterion_token)
     b_kind = _selection_path_kind(negated_value)
     if a_kind != b_kind:
-        # Relative selections resolve against the runner's cwd, which is not
-        # carried in the evidence, and a Windows local sandbox can map the
-        # virtual POSIX prefix onto its drive path. Mixed spellings can
-        # therefore alias even when their lexical prefixes differ.
-        if "relative" in {a_kind, b_kind} or windows_path_context:
-            return True
-        return False
+        # Relative selections resolve against an unrecorded cwd, and Windows
+        # can resolve POSIX-rooted spellings against the current drive or map
+        # a drive onto a UNC share. Cross-family spellings can therefore alias
+        # even when their lexical prefixes differ.
+        return True
     if a_kind == "relative":
         a_path, _a_nodeid = _selection_path_parts(criterion_token)
         b_path, _b_nodeid = _selection_path_parts(negated_value)
