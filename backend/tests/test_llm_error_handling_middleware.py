@@ -288,6 +288,120 @@ def test_async_model_call_propagates_graph_bubble_up() -> None:
         asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("cancel_during", ["provider", "backoff", "queue"])
+async def test_cancelled_recovery_probe_allows_next_model_call(cancel_during: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=1, circuit_failure_threshold=1, circuit_recovery_timeout_sec=0, max_concurrent_llm_calls=1)
+
+    async def unavailable(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    await middleware.awrap_model_call(SimpleNamespace(), unavailable)
+    middleware.retry_max_attempts = 2
+    entered = asyncio.Event()
+
+    async def retry_sleep(_delay: float) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    if cancel_during == "backoff":
+        monkeypatch.setattr(asyncio, "sleep", retry_sleep)
+
+    async def recovering(_request) -> AIMessage:
+        assert cancel_during != "queue", "A queued request must not reach the provider"
+        if cancel_during == "backoff":
+            raise FakeError("Service unavailable", status_code=503)
+        entered.set()
+        await asyncio.Event().wait()
+        return AIMessage(content="unreachable")
+
+    occupied = asyncio.Event()
+    release_slot = asyncio.Event()
+
+    async def occupying_handler(_request) -> AIMessage:
+        occupied.set()
+        await release_slot.wait()
+        return AIMessage(content="other call finished")
+
+    async def run_probe():
+        if cancel_during == "queue":
+            entered.set()
+        return await middleware.awrap_model_call(SimpleNamespace(), recovering)
+
+    blocker = None
+    probe = None
+    try:
+        if cancel_during == "queue":
+            other_middleware = _build_middleware(max_concurrent_llm_calls=1)
+            blocker = asyncio.create_task(other_middleware.awrap_model_call(SimpleNamespace(), occupying_handler))
+            await asyncio.wait_for(occupied.wait(), timeout=1)
+        probe = asyncio.create_task(run_probe())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        probe.cancel("user stopped recovery")
+        with pytest.raises(asyncio.CancelledError, match="user stopped recovery"):
+            await probe
+    finally:
+        if probe is not None:
+            probe.cancel()
+            await asyncio.gather(probe, return_exceptions=True)
+        release_slot.set()
+        if blocker is not None:
+            await asyncio.wait_for(blocker, timeout=1)
+
+    async def healthy(_request) -> AIMessage:
+        return AIMessage(content="recovered")
+
+    result = await asyncio.wait_for(middleware.awrap_model_call(SimpleNamespace(), healthy), timeout=1)
+    assert result.content == "recovered"
+
+
+@pytest.mark.anyio
+async def test_cancelling_older_call_does_not_release_another_recovery_probe() -> None:
+    middleware = _build_middleware(retry_max_attempts=1, circuit_failure_threshold=1, circuit_recovery_timeout_sec=0)
+    old_entered = asyncio.Event()
+    probe_entered = asyncio.Event()
+    finish_probe = asyncio.Event()
+
+    async def old_handler(_request) -> AIMessage:
+        old_entered.set()
+        await asyncio.Event().wait()
+        return AIMessage(content="unreachable")
+
+    async def unavailable(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    async def recovering(_request) -> AIMessage:
+        probe_entered.set()
+        await finish_probe.wait()
+        return AIMessage(content="recovered")
+
+    async def extra_handler(_request) -> AIMessage:
+        pytest.fail("Only the existing recovery probe may reach the provider")
+
+    old_call = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), old_handler))
+    probe = None
+    try:
+        await asyncio.wait_for(old_entered.wait(), timeout=1)
+        await middleware.awrap_model_call(SimpleNamespace(), unavailable)
+        probe = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(), recovering))
+        await asyncio.wait_for(probe_entered.wait(), timeout=1)
+
+        old_call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await old_call
+
+        blocked = await middleware.awrap_model_call(SimpleNamespace(), extra_handler)
+        assert blocked.additional_kwargs["error_type"] == "CircuitBreakerOpen"
+        finish_probe.set()
+        result = await probe
+        assert result.content == "recovered"
+    finally:
+        tasks = [old_call] if probe is None else [old_call, probe]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def test_circuit_half_open_graph_bubble_up_resets_probe() -> None:
     """Verify that GraphBubbleUp in half_open state resets probe_in_flight."""
     middleware = _build_middleware()
