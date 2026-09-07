@@ -375,6 +375,27 @@ class ChannelService:
             logger.exception("Error stopping channel for removal")
             return False
 
+    async def _stop_and_discard_channel(self, name: str, channel: Channel) -> None:
+        """Stop a channel whose startup did not complete, then drop it.
+
+        ``start()`` subscribes the outbound listener before the transport is
+        up, so an instance that never reaches ``is_running`` (or raises
+        mid-start) must be ``stop()``-ed before it is discarded: otherwise the
+        bus keeps a strong reference to the dead listener and every future
+        outbound for this channel name fans out to it, while repeated
+        readiness attempts accumulate more stale listeners the service can no
+        longer clean up (the instances are untracked by then). Discord's
+        fail-fast ``is_running`` makes this reachable for a client thread that
+        dies immediately (invalid token); the same hygiene applies to any
+        channel that subscribes before its transport is confirmed.
+        """
+        if self._channels.get(name) is channel:
+            self._channels.pop(name, None)
+        try:
+            await channel.stop()
+        except Exception:
+            logger.exception("Error stopping channel after failed startup")
+
     async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Instantiate and start a single channel."""
         import_path = _CHANNEL_REGISTRY.get(name)
@@ -390,6 +411,7 @@ class ChannelService:
             logger.exception("Failed to import channel class")
             return False
 
+        channel: Channel | None = None
         try:
             config = dict(config)
             config["channel_store"] = self.store
@@ -407,14 +429,17 @@ class ChannelService:
             self._channels[name] = channel
             await channel.start()
             if not channel.is_running:
-                self._channels.pop(name, None)
                 logger.error("Channel did not enter a running state after start()")
+                await self._stop_and_discard_channel(name, channel)
                 return False
             logger.info("Channel started")
             return True
         except Exception:
-            self._channels.pop(name, None)
             logger.exception("Failed to start channel")
+            if channel is not None:
+                await self._stop_and_discard_channel(name, channel)
+            else:
+                self._channels.pop(name, None)
             return False
 
     def get_status(self) -> dict[str, Any]:

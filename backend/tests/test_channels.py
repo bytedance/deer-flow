@@ -7273,6 +7273,115 @@ class TestChannelService:
 
         _run(go())
 
+    def test_failed_channel_startup_is_transactional(self, monkeypatch):
+        """A channel that never reaches is_running must be stopped before discard.
+
+        start() subscribes the outbound listener before the transport is
+        confirmed up, so a client thread that dies immediately (the Discord
+        invalid-token shape) must not leave a stale listener behind on the
+        bus — repeated readiness attempts would otherwise accumulate dead
+        listeners the service can no longer clean up.
+        """
+        import deerflow.reflection as reflection_module
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            created = []
+
+            class DeadOnArrivalChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__(name="telegram", bus=bus, config=config)
+                    self.stop_calls = 0
+                    created.append(self)
+
+                async def start(self):
+                    # Every adapter subscribes outbound before its transport is up.
+                    self.bus.subscribe_outbound(self._on_outbound)
+                    self._running = True
+
+                @property
+                def is_running(self) -> bool:
+                    return False
+
+                async def stop(self):
+                    self.stop_calls += 1
+                    self._running = False
+                    self.bus.unsubscribe_outbound(self._on_outbound)
+
+                async def send(self, msg):
+                    raise NotImplementedError
+
+                async def _on_outbound(self, msg):
+                    raise AssertionError("a dead listener must never receive outbounds")
+
+            monkeypatch.setattr(reflection_module, "resolve_class", lambda path, base_class=None: DeadOnArrivalChannel)
+
+            ready = await service.ensure_channel_ready("telegram", attempts=3)
+
+            assert ready is False
+            assert len(created) == 3
+            assert all(channel.stop_calls == 1 for channel in created)
+            assert service.bus._outbound_listeners == []
+            assert "telegram" not in service._channels
+
+            await service.stop()
+
+        _run(go())
+
+    def test_start_channel_exception_stops_and_discards(self, monkeypatch):
+        """A start() that raises mid-way must also stop the half-started channel."""
+        import deerflow.reflection as reflection_module
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            created = []
+
+            class StartRaisesChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__(name="telegram", bus=bus, config=config)
+                    self.stop_calls = 0
+                    created.append(self)
+
+                async def start(self):
+                    self.bus.subscribe_outbound(self._on_outbound)
+                    self._running = True
+                    raise RuntimeError("simulated invalid token")
+
+                async def stop(self):
+                    self.stop_calls += 1
+                    self._running = False
+                    self.bus.unsubscribe_outbound(self._on_outbound)
+
+                async def send(self, msg):
+                    raise NotImplementedError
+
+                async def _on_outbound(self, msg):
+                    raise AssertionError("a discarded listener must never receive outbounds")
+
+            monkeypatch.setattr(reflection_module, "resolve_class", lambda path, base_class=None: StartRaisesChannel)
+
+            ready = await service.ensure_channel_ready("telegram", attempts=2)
+
+            assert ready is False
+            assert len(created) == 2
+            assert all(channel.stop_calls == 1 for channel in created)
+            assert service.bus._outbound_listeners == []
+            assert "telegram" not in service._channels
+
+            await service.stop()
+
+        _run(go())
+
     def test_session_config_is_forwarded_to_manager(self):
         from app.channels.service import ChannelService
 
