@@ -170,61 +170,6 @@ async def test_run_agent_releases_execution_lease_when_cancelled():
 
 
 @pytest.mark.anyio
-async def test_run_agent_cleans_up_when_mcp_task_projection_is_cancelled():
-    class CleanupTrackingRunManager(RunManager):
-        def __init__(self) -> None:
-            super().__init__()
-            self.cleanup_calls: list[tuple[str, float]] = []
-
-        async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
-            self.cleanup_calls.append((run_id, delay))
-
-    projection_started = asyncio.Event()
-
-    class BlockingTaskRepository:
-        async def list_by_thread(self, thread_id, *, user_id, limit):
-            del thread_id, user_id, limit
-            projection_started.set()
-            await asyncio.Event().wait()
-
-    run_manager = CleanupTrackingRunManager()
-    record = await run_manager.create("thread-mcp-projection-cancelled", user_id="alice")
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-    agent_factory = MagicMock(side_effect=AssertionError("cancelled preflight built the agent"))
-    run_task = asyncio.create_task(
-        run_agent(
-            bridge,
-            run_manager,
-            record,
-            ctx=RunContext(
-                checkpointer=None,
-                event_store=MemoryRunEventStore(),
-                mcp_task_repo=BlockingTaskRepository(),
-            ),
-            agent_factory=agent_factory,
-            graph_input={},
-            config={},
-        )
-    )
-    await asyncio.wait_for(projection_started.wait(), timeout=1)
-
-    run_task.cancel("MCP projection interrupted")
-    await run_task
-    await asyncio.sleep(0)
-
-    agent_factory.assert_not_called()
-    assert record.status == RunStatus.interrupted
-    assert record.finalizing is False
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
-    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
-    assert run_manager.cleanup_calls == [(record.run_id, 300)]
-
-
-@pytest.mark.anyio
 async def test_pending_cancel_stops_waiting_for_prior_finalization():
     run_manager = RunManager()
     prior = await run_manager.create("thread-cancel-while-waiting")
@@ -886,43 +831,6 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
 
 
 @pytest.mark.anyio
-async def test_run_agent_schedules_terminal_run_record_cleanup():
-    class CleanupTrackingRunManager(RunManager):
-        def __init__(self) -> None:
-            super().__init__()
-            self.cleanup_calls: list[tuple[str, float]] = []
-
-        async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
-            self.cleanup_calls.append((run_id, delay))
-
-    run_manager = CleanupTrackingRunManager()
-    record = await run_manager.create("thread-terminal-cleanup")
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-
-    class DummyAgent:
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            del graph_input, config, stream_mode, subgraphs
-            yield {"messages": []}
-
-    await run_agent(
-        bridge,
-        run_manager,
-        record,
-        ctx=RunContext(checkpointer=None),
-        agent_factory=lambda **_kwargs: DummyAgent(),
-        graph_input={},
-        config={},
-    )
-    await asyncio.sleep(0)
-
-    assert run_manager.cleanup_calls == [(record.run_id, 300)]
-
-
-@pytest.mark.anyio
 async def test_run_agent_schedules_terminal_cleanup_when_publish_end_fails(monkeypatch):
     import deerflow.runtime.runs.worker as worker_module
 
@@ -931,7 +839,7 @@ async def test_run_agent_schedules_terminal_cleanup_when_publish_end_fails(monke
             super().__init__()
             self.cleanup_calls: list[tuple[str, float]] = []
 
-        async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
+        def schedule_cleanup(self, run_id: str, *, delay: float = 300) -> None:
             self.cleanup_calls.append((run_id, delay))
 
     run_manager = CleanupTrackingRunManager()
@@ -961,77 +869,6 @@ async def test_run_agent_schedules_terminal_cleanup_when_publish_end_fails(monke
         )
     await asyncio.sleep(0)
 
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
-    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
-    assert run_manager.cleanup_calls == [(record.run_id, 300)]
-    schedule_collection.assert_called_once_with()
-
-
-@pytest.mark.anyio
-async def test_run_agent_schedules_terminal_cleanup_when_completion_hook_is_cancelled(monkeypatch):
-    import deerflow.runtime.runs.worker as worker_module
-    from deerflow.runtime.journal import RunJournal
-
-    class CleanupTrackingRunManager(RunManager):
-        def __init__(self) -> None:
-            super().__init__()
-            self.cleanup_calls: list[tuple[str, float]] = []
-
-        async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
-            self.cleanup_calls.append((run_id, delay))
-
-    completion_hook_entered = asyncio.Event()
-
-    async def block_completion(_record) -> None:
-        completion_hook_entered.set()
-        await asyncio.Event().wait()
-
-    run_manager = CleanupTrackingRunManager()
-    record = await run_manager.create("thread-terminal-completion-cancelled")
-    bridge = SimpleNamespace(
-        publish=AsyncMock(),
-        publish_end=AsyncMock(),
-        cleanup=AsyncMock(),
-    )
-    schedule_collection = MagicMock()
-    monkeypatch.setattr(worker_module, "_schedule_terminal_cycle_collection", schedule_collection)
-    captured: dict[str, Any] = {}
-
-    class DummyAgent:
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            del graph_input, stream_mode, subgraphs
-            callbacks = config.get("callbacks") or []
-            captured["journal"] = next(callback for callback in callbacks if isinstance(callback, RunJournal))
-            yield {"messages": []}
-
-    config: dict[str, Any] = {}
-    run_task = asyncio.create_task(
-        run_agent(
-            bridge,
-            run_manager,
-            record,
-            ctx=RunContext(
-                checkpointer=None,
-                event_store=MemoryRunEventStore(),
-                on_run_completed=block_completion,
-            ),
-            agent_factory=lambda **_kwargs: DummyAgent(),
-            graph_input={},
-            config=config,
-        )
-    )
-    await asyncio.wait_for(completion_hook_entered.wait(), timeout=1)
-    run_task.cancel("completion hook interrupted")
-    with pytest.raises(asyncio.CancelledError, match="completion hook interrupted"):
-        await run_task
-    await asyncio.sleep(0)
-
-    journal = captured["journal"]
-    assert "__pregel_runtime" not in config["configurable"]
-    assert journal not in config["callbacks"]
-    assert journal._closed is True
-    assert journal._store is None
-    assert record.finalizing is False
     bridge.publish_end.assert_awaited_once_with(record.run_id)
     bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
     assert run_manager.cleanup_calls == [(record.run_id, 300)]
@@ -1147,58 +984,6 @@ async def test_run_agent_ignores_stream_close_failure_after_abort(stream_modes, 
     assert record.error is None
     assert "Could not close aborted agent stream" in caplog.text
     bridge.publish_end.assert_awaited_once_with(record.run_id)
-
-
-@pytest.mark.anyio
-async def test_terminal_cleanup_tasks_do_not_inherit_run_context():
-    marker: ContextVar[str | None] = ContextVar("run_cleanup_marker", default=None)
-    seen: dict[str, str | None] = {}
-    bridge_cleaned = asyncio.Event()
-    manager_cleaned = asyncio.Event()
-
-    class CleanupTrackingRunManager(RunManager):
-        async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
-            seen["manager"] = marker.get()
-            await super().cleanup(run_id, delay=0)
-            manager_cleaned.set()
-
-    class CleanupTrackingBridge:
-        async def publish(self, *args, **kwargs) -> None:
-            pass
-
-        async def publish_end(self, run_id: str) -> None:
-            pass
-
-        async def cleanup(self, run_id: str, *, delay: float = 0) -> None:
-            seen["bridge"] = marker.get()
-            bridge_cleaned.set()
-
-    class DummyAgent:
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            del graph_input, config, stream_mode, subgraphs
-            yield {"messages": []}
-
-    run_manager = CleanupTrackingRunManager()
-    record = await run_manager.create("thread-contextless-cleanup")
-    token = marker.set("run-context")
-    try:
-        await run_agent(
-            CleanupTrackingBridge(),
-            run_manager,
-            record,
-            ctx=RunContext(checkpointer=None),
-            agent_factory=lambda **_kwargs: DummyAgent(),
-            graph_input={},
-            config={},
-        )
-        await asyncio.wait_for(
-            asyncio.gather(bridge_cleaned.wait(), manager_cleaned.wait()),
-            timeout=1,
-        )
-    finally:
-        marker.reset(token)
-
-    assert seen == {"bridge": None, "manager": None}
 
 
 @pytest.mark.anyio

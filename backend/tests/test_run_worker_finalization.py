@@ -6,15 +6,23 @@ after ``run_agent`` finishes a run, it must call ``RunManager.schedule_cleanup``
 for that run id so store-backed managers evict the terminal record. Deleting or
 relocating the ``run_manager.schedule_cleanup(run_id)`` call in ``worker.py``
 fails this test.
+
+The two cancellation scenarios — the completion hook being cancelled and the
+preflight MCP task projection being cancelled — are pinned here as well: the
+outer teardown guard must still schedule eviction on those paths.
 """
 
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.runs.manager import RunManager, RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
 
@@ -149,3 +157,132 @@ async def test_run_agent_finalization_schedules_eviction_when_publish_end_fails(
     scheduled_ids = [run_id for run_id, _kwargs in run_manager.scheduled_cleanup_calls]
     assert scheduled_ids == ["run-publish-end-fails"]
     assert run_manager.direct_cleanup_calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_agent_finalization_schedules_eviction_when_completion_hook_is_cancelled(monkeypatch):
+    """Eviction is still scheduled when the completion hook is cancelled."""
+    import deerflow.runtime.runs.worker as worker_module
+    from deerflow.runtime.journal import RunJournal
+
+    class CleanupTrackingRunManager(RunManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleanup_calls: list[tuple[str, float]] = []
+
+        def schedule_cleanup(self, run_id: str, *, delay: float = 300) -> None:
+            self.cleanup_calls.append((run_id, delay))
+
+    completion_hook_entered = asyncio.Event()
+
+    async def block_completion(_record) -> None:
+        completion_hook_entered.set()
+        await asyncio.Event().wait()
+
+    run_manager = CleanupTrackingRunManager()
+    record = await run_manager.create("thread-terminal-completion-cancelled")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    schedule_collection = MagicMock()
+    monkeypatch.setattr(worker_module, "_schedule_terminal_cycle_collection", schedule_collection)
+    captured: dict[str, Any] = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, stream_mode, subgraphs
+            callbacks = config.get("callbacks") or []
+            captured["journal"] = next(callback for callback in callbacks if isinstance(callback, RunJournal))
+            yield {"messages": []}
+
+    config: dict[str, Any] = {}
+    run_task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(
+                checkpointer=None,
+                event_store=MemoryRunEventStore(),
+                on_run_completed=block_completion,
+            ),
+            agent_factory=lambda **_kwargs: DummyAgent(),
+            graph_input={},
+            config=config,
+        )
+    )
+    await asyncio.wait_for(completion_hook_entered.wait(), timeout=1)
+    run_task.cancel("completion hook interrupted")
+    with pytest.raises(asyncio.CancelledError, match="completion hook interrupted"):
+        await run_task
+    await asyncio.sleep(0)
+
+    journal = captured["journal"]
+    assert "__pregel_runtime" not in config["configurable"]
+    assert journal not in config["callbacks"]
+    assert journal._closed is True
+    assert journal._store is None
+    assert record.finalizing is False
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+    assert run_manager.cleanup_calls == [(record.run_id, 300)]
+    schedule_collection.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_run_agent_finalization_schedules_eviction_when_mcp_task_projection_is_cancelled():
+    """Eviction is still scheduled when the preflight MCP projection is cancelled."""
+
+    class CleanupTrackingRunManager(RunManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleanup_calls: list[tuple[str, float]] = []
+
+        def schedule_cleanup(self, run_id: str, *, delay: float = 300) -> None:
+            self.cleanup_calls.append((run_id, delay))
+
+    projection_started = asyncio.Event()
+
+    class BlockingTaskRepository:
+        async def list_by_thread(self, thread_id, *, user_id, limit):
+            del thread_id, user_id, limit
+            projection_started.set()
+            await asyncio.Event().wait()
+
+    run_manager = CleanupTrackingRunManager()
+    record = await run_manager.create("thread-mcp-projection-cancelled", user_id="alice")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    agent_factory = MagicMock(side_effect=AssertionError("cancelled preflight built the agent"))
+    run_task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(
+                checkpointer=None,
+                event_store=MemoryRunEventStore(),
+                mcp_task_repo=BlockingTaskRepository(),
+            ),
+            agent_factory=agent_factory,
+            graph_input={},
+            config={},
+        )
+    )
+    await asyncio.wait_for(projection_started.wait(), timeout=1)
+
+    run_task.cancel("MCP projection interrupted")
+    await run_task
+    await asyncio.sleep(0)
+
+    agent_factory.assert_not_called()
+    assert record.status == RunStatus.interrupted
+    assert record.finalizing is False
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+    assert run_manager.cleanup_calls == [(record.run_id, 300)]
