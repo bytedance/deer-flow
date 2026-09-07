@@ -496,6 +496,8 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "fastcrw": "CRW_API_KEY",
                 "brave": "BRAVE_SEARCH_API_KEY",
                 "serper": "SERPER_API_KEY",
+                "serply": "SERPLY_API_KEY",
+                "tencent_wsa": "TENCENTCLOUD_WSA_APIKEY",
             },
             "web_fetch": {
                 "infoquest": "INFOQUEST_API_KEY",

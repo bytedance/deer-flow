@@ -14,6 +14,9 @@ from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import Next, Prev, RuntimeFeatures
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import DeltaThreadState, ThreadState
+from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.subagents import SubagentRuntime
 
 
 def _make_mock_model():
@@ -239,6 +242,57 @@ def test_subagent_injects_task_tool(mock_create_agent):
     call_kwargs = mock_create_agent.call_args[1]
     tool_names = [t.name for t in call_kwargs["tools"]]
     assert "task" in tool_names
+
+
+@patch("deerflow.agents.factory.create_agent")
+def test_explicit_subagent_runtime_aligns_factory_middleware_and_tools(mock_create_agent):
+    mock_create_agent.return_value = MagicMock()
+    submitter = MagicMock()
+    runtime = SubagentRuntime(
+        SubagentRuntimeConfig(max_running=7),
+        max_total_per_run=12,
+        batch_submitter=submitter,
+    )
+
+    create_deerflow_agent(
+        _make_mock_model(),
+        features=RuntimeFeatures(subagent=True, sandbox=False),
+        subagent_runtime=runtime,
+    )
+
+    call_kwargs = mock_create_agent.call_args.kwargs
+    limit = next(middleware for middleware in call_kwargs["middleware"] if type(middleware).__name__ == "SubagentLimitMiddleware")
+    assert limit.max_concurrent == 7
+    assert limit.max_total == 12
+    tool_names = {tool.name for tool in call_kwargs["tools"]}
+    assert {"task", "batch_task", "batch_status", "cancel_batch"} <= tool_names
+
+
+def test_explicit_subagent_runtime_requires_the_subagent_feature() -> None:
+    runtime = SubagentRuntime(SubagentRuntimeConfig(max_running=4))
+
+    with pytest.raises(ValueError, match="subagent_runtime.*features.subagent"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(subagent=False, sandbox=False),
+            subagent_runtime=runtime,
+        )
+
+
+def test_factory_rejects_configured_batch_runtime_before_worker_start() -> None:
+    runtime = SubagentRuntime(
+        SubagentRuntimeConfig(max_running=4),
+        batch_repository=MagicMock(),
+        batch_config=SubagentBatchesConfig(enabled=True),
+        app_config=MagicMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="await subagent_runtime.start"):
+        create_deerflow_agent(
+            _make_mock_model(),
+            features=RuntimeFeatures(subagent=True, sandbox=False),
+            subagent_runtime=runtime,
+        )
 
 
 # ---------------------------------------------------------------------------

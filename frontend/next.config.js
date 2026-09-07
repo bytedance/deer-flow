@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 /**
  * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially useful
  * for Docker builds.
@@ -24,6 +26,9 @@ const config = {
   i18n: {
     locales: ["en", "zh"],
     defaultLocale: "en",
+  },
+  turbopack: {
+    root: fileURLToPath(new URL(".", import.meta.url)),
   },
   devIndicators: false,
   allowedDevOrigins: getAllowedDevOrigins(),

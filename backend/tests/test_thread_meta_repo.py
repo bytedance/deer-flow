@@ -47,6 +47,21 @@ class TestThreadMetaRepository:
         assert record["metadata"] == {"key": "value"}
 
     @pytest.mark.anyio
+    async def test_update_display_name_can_remove_stale_metadata_atomically(self, repo):
+        await repo.create("t1", display_name="Original (2)", metadata={"branch_title_sequence": 2, "keep": True})
+
+        await repo.update_display_name(
+            "t1",
+            "Report Q4",
+            remove_metadata_keys=("branch_title_sequence",),
+        )
+
+        record = await repo.get("t1")
+        assert record is not None
+        assert record["display_name"] == "Report Q4"
+        assert record["metadata"] == {"keep": True}
+
+    @pytest.mark.anyio
     async def test_get_nonexistent(self, repo):
         assert await repo.get("nonexistent") is None
 
@@ -417,6 +432,20 @@ class TestThreadMetaRepository:
         assert hits == {"t1", "t3"}
 
     @pytest.mark.anyio
+    async def test_search_metadata_float_matches_integer_but_not_boolean(self, repo):
+        await repo.create("int", metadata={"score": 1})
+        await repo.create("float", metadata={"score": 1.0})
+        await repo.create("bool", metadata={"score": True})
+
+        bool_hits = {record["thread_id"] for record in await repo.search(metadata={"score": True})}
+        int_hits = {record["thread_id"] for record in await repo.search(metadata={"score": 1})}
+        float_hits = {record["thread_id"] for record in await repo.search(metadata={"score": 1.0})}
+
+        assert bool_hits == {"bool"}
+        assert int_hits == {"int"}
+        assert float_hits == {"float", "int"}
+
+    @pytest.mark.anyio
     async def test_search_metadata_mixed_types_same_key(self, repo):
         """Each type query only matches its own type, even when the key is shared."""
         await repo.create("str_row", metadata={"x": "hello"})
@@ -608,3 +637,16 @@ class TestJsonMatchCompilation:
 
         with pytest.raises(ValueError, match="Key escaped validation"):
             str(elem.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+
+class TestJsonValueMatches:
+    def test_distinguishes_missing_null_bool_int_and_float(self):
+        from deerflow.persistence.json_compat import json_value_matches
+
+        assert json_value_matches({}, "value", None) is False
+        assert json_value_matches({"value": None}, "value", None) is True
+        assert json_value_matches({"value": 1}, "value", True) is False
+        assert json_value_matches({"value": True}, "value", 1) is False
+        assert json_value_matches({"value": 1.0}, "value", 1) is False
+        assert json_value_matches({"value": 1}, "value", 1.0) is True
+        assert json_value_matches({"value": 1.0}, "value", 1.0) is True

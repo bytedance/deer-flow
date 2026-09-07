@@ -81,7 +81,7 @@ def test_model_settings_are_managed_fields() -> None:
     # preserve_non_managed_fields helper must not also carry them. Surfaces that
     # do not expose them directly, such as the harness update_agent tool, need a
     # dedicated carry-forward path instead.
-    for field in ("model_settings", "thinking_enabled", "reasoning_effort"):
+    for field in ("model_settings", "thinking_enabled", "reasoning_effort", "allowed_subagents"):
         assert field in MANAGED_AGENT_CONFIG_FIELDS
 
 

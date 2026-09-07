@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import html
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, override, runtime_checkable
 
+from deerflow_extension_api import CompactionEvent, canonical_hash
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, get_buffer_string, trim_messages
@@ -17,10 +19,15 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
+from deerflow.config.summarization_config import DEFAULT_KEEP
+from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
+from deerflow.utils.messages import is_real_user_message
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
+_COMPACTION_TRANSFORM_KIND = "summarization"
+_COMPACTION_TRANSFORM_VERSION = "1"
 _UNSET = object()
 # Valid non-generated summaries for the empty / too-long-to-summarize edges; these
 # short-circuit model invocation (and must not be treated as generation failures).
@@ -149,6 +156,28 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # that failed, so a broken candidate config is not retried every turn and does
         # not escape the fail-open boundary).
         self._model_cache: dict[str | None, Any] = {}
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        """Return the effective compaction policy used for release identity."""
+
+        def plain_size(value: object) -> object:
+            if isinstance(value, tuple):
+                return [plain_size(child) for child in value]
+            if isinstance(value, list):
+                return [plain_size(child) for child in value]
+            return value
+
+        return {
+            "trigger": plain_size(self.trigger),
+            "keep": plain_size(self.keep),
+            "trim_tokens_to_summarize": self.trim_tokens_to_summarize,
+            "summary_prompt_hash": canonical_hash(self.summary_prompt),
+            # self.model is a chat-model object and is not JSON-serialisable; the
+            # anchor model name is the identity that actually drives compaction
+            # behaviour (token counting/profile inspection and, absent an
+            # explicit configured summary model, generation itself).
+            "summary_model": self._anchor_model_name,
+        }
 
     def _tag_nostream(self, model: Any) -> Any:
         """Return a copy of ``model`` carrying TAG_NOSTREAM without clobbering tags.
@@ -524,11 +553,68 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if cutoff_index <= 0:
             return None
 
+        # The latest real user message (the current request) must survive: peer
+        # rescue no longer covers it (see _preserve_dynamic_context_reminders), so
+        # lock its id here and rescue by exact id. This keeps the current request
+        # without "moving cutoff" — which would also retain early AI/Tool turns and
+        # never compress a first-turn long analysis.
+        latest_user_id: str | None = None
+        for msg in reversed(messages):
+            if is_real_user_message(msg):
+                latest_user_id = msg.id
+                break
+
         messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
+        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages, latest_user_id=latest_user_id)
         if not messages_to_summarize:
             return None
         return messages_to_summarize, preserved_messages, previous_summary, total_tokens
+
+    def _freeze_compaction_sources(self, messages_to_summarize: list[AnyMessage]) -> tuple[str, ...]:
+        """Hash each about-to-be-removed message's content before the summary call.
+
+        Returns empty when no ``ContextCompactionObserver`` is registered. The
+        hashing is an O(context-size) canonical-JSON pass, and
+        ``notify_context_compacted`` would discard the event anyway; an install
+        with no observer must not pay for one, the same rule ``_complete_assembly``
+        follows for descriptor construction. The check cannot live only in the
+        notify call — by then the work is already done.
+
+        Once the summary call returns, ``messages_to_summarize`` is gone from state —
+        only the produced summary remains. The mapping from "these messages" to "this
+        summary" exists only in this stack frame, so it must be captured now rather
+        than reconstructed later.
+
+        Hashes ``message.content`` directly, never ``str(message.content)``:
+        DeerFlow messages are routinely multimodal (``list[dict]`` content, e.g.
+        ``view_image_middleware``'s injected image payloads), and ``str()`` on a
+        dict renders insertion order, so pre-stringifying would make two
+        logically identical messages hash differently. ``canonical_hash`` exists
+        precisely to normalize that away (sorted keys via ``canonical_json``);
+        stringifying first throws the normalization away before it runs.
+        """
+        extensions = getattr(self, "_extensions", None)
+        if extensions is None or not extensions.context_compaction_observers:
+            return ()
+        return tuple(canonical_hash(message.content) for message in messages_to_summarize)
+
+    def _record_compaction(
+        self,
+        source_content_hashes: tuple[str, ...],
+        *,
+        summary: str,
+        compacted_message_count: int,
+        kept_message_count: int,
+    ) -> None:
+        event = CompactionEvent(
+            transform_kind=_COMPACTION_TRANSFORM_KIND,
+            transform_version=_COMPACTION_TRANSFORM_VERSION,
+            source_content_hashes=source_content_hashes,
+            output_content_hash=canonical_hash(summary),
+            compacted_message_count=compacted_message_count,
+            kept_message_count=kept_message_count,
+        )
+        notify_context_compacted(event, extensions=self._extensions)
 
     def compact_state(
         self,
@@ -550,6 +636,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
+        source_content_hashes = self._freeze_compaction_sources(messages_to_summarize)
         summary = self._summarize_with(messages_to_summarize, previous_summary=previous_summary)
         if summary is None:
             if raise_on_failure:
@@ -560,6 +647,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # duplicate that work on the next attempt. Messages are still removed after
         # this returns (in _maybe_summarize), so hooks run before they are gone.
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        self._record_compaction(
+            source_content_hashes,
+            summary=summary,
+            compacted_message_count=len(messages_to_summarize),
+            kept_message_count=len(preserved_messages),
+        )
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
@@ -582,6 +675,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
         from deerflow_extension_api import task_store_from_runtime
 
+        source_content_hashes = self._freeze_compaction_sources(messages_to_summarize)
         summary = await self._asummarize_with(
             messages_to_summarize,
             previous_summary=previous_summary,
@@ -593,6 +687,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
         # Fire hooks only once a replacement summary exists (see compact_state).
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        self._record_compaction(
+            source_content_hashes,
+            summary=summary,
+            compacted_message_count=len(messages_to_summarize),
+            kept_message_count=len(preserved_messages),
+        )
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
@@ -628,51 +728,24 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         self,
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
+        *,
+        latest_user_id: str | None = None,
     ) -> tuple[list[AnyMessage], list[AnyMessage]]:
-        """Keep hidden dynamic-context reminders and their ID-swap peers out of summary compression.
+        """Keep tagged dynamic-context reminders and the current user request out of compression.
 
-        These reminders carry the current date and optional memory. If summarization
-        removes them, DynamicContextMiddleware can lose the already-injected reminder
-        and inject a replacement into the wrong point of the conversation.
-
-        The ID-swap triplet produced by ``_make_reminder_and_user_messages`` contains
-        three messages: ``SystemMessage(id=X)`` and ``HumanMessage(id=X__memory)`` are
-        both tagged with ``dynamic_context_reminder=True``, but ``HumanMessage(id=X__user)``
-        carries the original user content and is **not** tagged. Without peer rescue,
-        ``__user`` would stay in ``to_summarize`` and be compressed into prose — orphaning
-        the tagged messages and losing the user question from the model's direct context.
-
-        This method rescues tagged reminders and also rescues any untagged messages whose
-        ``id`` shares the same ``stable_id`` prefix (i.e. ``X__user``, ``X__memory``).
+        Only tagged reminders (date ``SystemMessage`` + optional ``__memory`` peer,
+        both carrying ``dynamic_context_reminder=True``) and the latest real user
+        message are rescued. The untagged ``__user`` peer is deliberately NOT
+        rescued by ID-swap prefix: it is a stale historical request that must be
+        allowed to compress — the source of cross-turn prompt contamination. The
+        *current* request is instead identified by ``latest_user_id``, so a
+        first-turn long analysis keeps its ``__user`` request while its early
+        AI/Tool turns still compress.
         """
-        reminders = [msg for msg in messages_to_summarize if is_dynamic_context_reminder(msg)]
-        if not reminders:
-            return messages_to_summarize, preserved_messages
-
-        # Collect the base IDs (the stable_id prefix) from tagged reminders.
-        # For a reminder with id="ctx-001__memory", the base is "ctx-001".
-        # For a reminder with id="ctx-001" (SystemMessage), the base is "ctx-001".
-        # removesuffix is suffix-only — it won't strip a "__" that sits in the
-        # middle of a stable_id (e.g. "ctx__001" stays intact, unlike rsplit
-        # which would mis-derive "ctx").  Only known ID-swap suffixes (__memory,
-        # __user) are stripped; __user is not tagged so won't appear in reminders,
-        # but is included defensively.
-        reminder_base_ids: set[str] = set()
-        for msg in reminders:
-            if msg.id:
-                base = msg.id.removesuffix("__memory").removesuffix("__user")
-                reminder_base_ids.add(base)
-
-        # Single-pass partition: walk messages_to_summarize in chronological order
-        # and rescue both tagged reminders and untagged ID-swap peers (whose id
-        # starts with a known base + "__").  This preserves the original message
-        # order within rescued — critical when multiple triplets land in one
-        # summarization window — and eliminates the need for id(m)-based dedup
-        # that the previous reminders+peers concatenation required.
         rescued: list[AnyMessage] = []
         remaining: list[AnyMessage] = []
         for msg in messages_to_summarize:
-            if is_dynamic_context_reminder(msg) or (msg.id and any(msg.id.startswith(b + "__") for b in reminder_base_ids)):
+            if is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id):
                 rescued.append(msg)
             else:
                 remaining.append(msg)
@@ -726,6 +799,73 @@ def _build_summary_anchor(candidate_names: list[str | None], app_config: Any) ->
             continue
         return model.with_config(tags=["middleware:summarize"]), name
     return None, None
+
+
+def _anchor_profile_max_input_tokens(model: Any) -> int | None:
+    """Pre-construction mirror of the parent's ``_get_profile_limits`` validation.
+
+    Same rules the parent will apply moments later: ``model.profile`` must be a
+    ``Mapping`` carrying an ``int`` ``max_input_tokens``. Anything else counts as
+    "no usable profile".
+    """
+    profile = getattr(model, "profile", None)
+    if not isinstance(profile, Mapping):
+        return None
+    max_input_tokens = profile.get("max_input_tokens")
+    return max_input_tokens if isinstance(max_input_tokens, int) else None
+
+
+def _drop_unusable_fraction_clauses(
+    anchor_model: Any,
+    trigger: Any,
+    keep: tuple[str, int | float],
+) -> tuple[Any, tuple[str, int | float], bool]:
+    """Drop fraction clauses the anchor model cannot resolve (no usable profile).
+
+    LangChain's parent constructor raises ``ValueError`` for a fraction clause when
+    ``profile["max_input_tokens"]`` is unavailable, which on a third-party
+    OpenAI-compatible model without a declared ``context_window`` would otherwise
+    fail the whole agent build (#3103). Fraction trigger clauses are dropped
+    (absolute clauses survive), and a fraction ``keep`` falls back to the messages
+    default.
+
+    Returns ``(trigger, keep, has_usable_trigger)``; ``has_usable_trigger`` is
+    ``False`` only when trigger clauses were configured and every one of them was
+    a dropped fraction clause. A ``trigger`` that was ``None`` to begin with passes
+    through unchanged with ``has_usable_trigger=True``, preserving the long-standing
+    "enabled but never auto-triggers" configuration.
+    """
+    clauses = list(trigger) if isinstance(trigger, list) else ([] if trigger is None else [trigger])
+    has_fraction_trigger = any(isinstance(clause, tuple) and clause[0] == "fraction" for clause in clauses)
+    keep_is_fraction = isinstance(keep, tuple) and keep[0] == "fraction"
+    if not (has_fraction_trigger or keep_is_fraction):
+        return trigger, keep, True
+    if _anchor_profile_max_input_tokens(anchor_model) is not None:
+        return trigger, keep, True
+
+    kept = [clause for clause in clauses if not (isinstance(clause, tuple) and clause[0] == "fraction")]
+    dropped = [clause for clause in clauses if isinstance(clause, tuple) and clause[0] == "fraction"]
+    if dropped:
+        logger.warning(
+            "Dropped summarization fraction trigger clause(s) %s: the summary model exposes no context window to resolve them against. Declare `context_window` on the model in config.yaml, or use absolute token/message thresholds.",
+            dropped,
+        )
+    new_keep = keep
+    if keep_is_fraction:
+        # The shared constant keeps this fallback identical to SummarizationConfig's
+        # documented default keep.
+        new_keep = DEFAULT_KEEP
+        logger.warning(
+            "Summarization keep %s is unusable without a model context window; falling back to %s. Declare `context_window` on the model in config.yaml to use fraction retention.",
+            keep,
+            new_keep,
+        )
+    if not kept:
+        # No trigger clause survived, but only treat that as "nothing usable" when
+        # clauses were configured at all: a trigger of None keeps constructing the
+        # never-firing middleware, exactly as it does outside this degradation path.
+        return None, new_keep, not clauses
+    return (kept if isinstance(trigger, list) else kept[0]), new_keep, True
 
 
 def create_summarization_middleware(
@@ -787,10 +927,32 @@ def create_summarization_middleware(
         logger.warning("Summarization is enabled but no summary model could be constructed; compaction is unavailable for this build")
         return None
 
+    # LangChain's SummarizationMiddleware raises ValueError at construction when a
+    # fraction clause is configured but the anchor exposes no usable profile
+    # (``profile["max_input_tokens"]``) — the default for any third-party
+    # OpenAI-compatible model whose ``context_window`` was not declared in
+    # config.yaml (#3103: `trigger: fraction` used to fail the whole agent build).
+    # Degrade instead: drop the unusable fraction clauses (absolute ones survive)
+    # and fall the keep policy back to its messages default. When every configured
+    # trigger clause is dropped, construction continues with ``trigger=None`` —
+    # the never-firing shape — so manual compaction (``/compact``, which runs with
+    # ``force=True`` and never consults trigger clauses) keeps working for a
+    # profile-less model instead of reporting "compaction is disabled". The factory
+    # attaches a profile from a declared ``context_window``, so this path is
+    # reached only when the model's capacity is genuinely unknown.
+    trigger, keep_tuple, has_usable_trigger = _drop_unusable_fraction_clauses(anchor_model, trigger, keep or config.keep.to_tuple())
+    if not has_usable_trigger:
+        logger.warning(
+            "Every configured summarization trigger is fraction-based but anchor model %r "
+            "exposes no context window (no `context_window` on the model in config.yaml, no provider profile); "
+            "auto-compaction will not fire for this build. Declare `context_window` on the model to enable fraction "
+            "triggers. Manual compaction (/compact) remains available.",
+            anchor_name,
+        )
     kwargs: dict[str, Any] = {
         "model": anchor_model,
         "trigger": trigger,
-        "keep": keep or config.keep.to_tuple(),
+        "keep": keep_tuple,
     }
     if config.trim_tokens_to_summarize is not None:
         kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize

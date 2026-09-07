@@ -1,10 +1,10 @@
 """Route-level authorization tests for the Gateway permission decorators."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
@@ -16,6 +16,7 @@ from app.gateway.authz import (
     require_permission,
     resolve_route_permissions,
 )
+from app.gateway.routers import runs, scheduled_tasks
 from deerflow.authz.provider import AuthzDecision, AuthzReason
 from deerflow.authz.rbac import RbacAuthorizationProvider
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
@@ -266,6 +267,107 @@ def test_auth_middleware_marks_internal_route_principal(monkeypatch):
     assert response.status_code == 200
     permission_resolver.assert_awaited_once()
     assert permission_resolver.await_args.kwargs == {"is_internal": True}
+
+
+_STATELESS_RUN_PATHS = ("/api/runs/stream", "/api/runs/wait")
+
+
+def _enable_auth_disabled_for_route_test(monkeypatch) -> None:
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.delenv("DEER_FLOW_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+
+
+def _make_stateless_runs_app() -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+    app.include_router(runs.router)
+    app.state.stream_bridge = MagicMock()
+    app.state.run_manager = MagicMock()
+    return app
+
+
+@pytest.mark.parametrize("path", _STATELESS_RUN_PATHS)
+def test_stateless_run_creation_requires_runs_create(monkeypatch, path):
+    _enable_auth_disabled_for_route_test(monkeypatch)
+    monkeypatch.setattr(
+        "app.gateway.auth_middleware.resolve_route_permissions",
+        AsyncMock(return_value=[Permissions.RUNS_READ]),
+    )
+    start_run = AsyncMock(side_effect=HTTPException(status_code=418, detail="run creation reached"))
+    monkeypatch.setattr(runs, "start_run", start_run)
+
+    with TestClient(_make_stateless_runs_app()) as client:
+        response = client.post(path, json={})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Permission denied: runs:create"}
+    start_run.assert_not_awaited()
+
+
+@pytest.mark.parametrize("path", _STATELESS_RUN_PATHS)
+def test_stateless_run_creation_allows_runs_create(monkeypatch, path):
+    _enable_auth_disabled_for_route_test(monkeypatch)
+    monkeypatch.setattr(
+        "app.gateway.auth_middleware.resolve_route_permissions",
+        AsyncMock(return_value=[Permissions.RUNS_CREATE]),
+    )
+    start_run = AsyncMock(side_effect=HTTPException(status_code=418, detail="run creation reached"))
+    monkeypatch.setattr(runs, "start_run", start_run)
+
+    with TestClient(_make_stateless_runs_app()) as client:
+        response = client.post(path, json={})
+
+    assert response.status_code == 418
+    assert response.json() == {"detail": "run creation reached"}
+    start_run.assert_awaited_once()
+
+
+_SCHEDULED_RUN_CREATION_REQUESTS = (
+    (
+        "POST",
+        "/api/scheduled-tasks",
+        {
+            "title": "Daily summary",
+            "prompt": "Summarize the latest activity",
+            "schedule_type": "cron",
+            "schedule_spec": {"cron": "0 9 * * *"},
+            "timezone": "UTC",
+        },
+    ),
+    ("PATCH", "/api/scheduled-tasks/task-1", {"title": "Updated summary"}),
+    ("POST", "/api/scheduled-tasks/task-1/resume", None),
+    ("POST", "/api/scheduled-tasks/task-1/trigger", None),
+)
+
+
+def _make_scheduled_tasks_app() -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+    app.include_router(scheduled_tasks.router)
+    return app
+
+
+@pytest.mark.parametrize(("method", "path", "payload"), _SCHEDULED_RUN_CREATION_REQUESTS)
+@pytest.mark.parametrize(
+    ("permissions", "denied_permission"),
+    [
+        ([Permissions.THREADS_WRITE], Permissions.RUNS_CREATE),
+        ([Permissions.RUNS_CREATE], Permissions.THREADS_WRITE),
+    ],
+)
+def test_scheduled_run_creation_requires_thread_write_and_runs_create(monkeypatch, method, path, payload, permissions, denied_permission):
+    _enable_auth_disabled_for_route_test(monkeypatch)
+    monkeypatch.setattr(
+        "app.gateway.auth_middleware.resolve_route_permissions",
+        AsyncMock(return_value=permissions),
+    )
+
+    with TestClient(_make_scheduled_tasks_app()) as client:
+        response = client.request(method, path, json=payload)
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": f"Permission denied: {denied_permission}"}
 
 
 # ── Provider cache tests ────────────────────────────────────────────────

@@ -22,7 +22,7 @@ class ScheduledTaskRow(Base):
     schedule_spec: Mapped[dict] = mapped_column(JSON, default=dict)
     timezone: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16), default="enabled", index=True)
-    overlap_policy: Mapped[str] = mapped_column(String(16), default="skip")
+    overlap_policy: Mapped[str] = mapped_column(String(16), default="enqueue")
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

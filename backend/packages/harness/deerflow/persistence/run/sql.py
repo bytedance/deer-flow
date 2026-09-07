@@ -12,11 +12,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import case, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.runs.store.base import (
     LeaseRenewal,
+    RunIdempotencyConflict,
     RunStore,
     StatusFinalization,
 )
@@ -106,6 +108,7 @@ class RunRepository(RunStore):
         follow_up_to_run_id=None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
+        idempotency_key: str | None = None,
     ):
         """Insert or update a run row.
 
@@ -132,6 +135,7 @@ class RunRepository(RunStore):
             "follow_up_to_run_id": follow_up_to_run_id,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
+            "idempotency_key": idempotency_key,
             "updated_at": now,
         }
         async with self._sf() as session:
@@ -686,6 +690,7 @@ class RunRepository(RunStore):
         kwargs: dict[str, Any] | None = None,
         created_at: str | None = None,
         grace_seconds: int = 10,
+        idempotency_key: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -720,6 +725,7 @@ class RunRepository(RunStore):
             "kwargs_json": self._safe_json(kwargs) or {},
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
+            "idempotency_key": idempotency_key,
             "created_at": created,
             "updated_at": now,
         }
@@ -768,7 +774,15 @@ class RunRepository(RunStore):
                     claimed.append(self._row_to_dict(row))
 
             session.add(RunRow(run_id=run_id, **values))
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                if idempotency_key is not None:
+                    existing = (await session.execute(select(RunRow).where(RunRow.idempotency_key == idempotency_key))).scalar_one_or_none()
+                    if existing is not None:
+                        raise RunIdempotencyConflict(self._row_to_dict(existing)) from exc
+                raise
 
             new_row = await session.get(RunRow, run_id)
             return self._row_to_dict(new_row), claimed

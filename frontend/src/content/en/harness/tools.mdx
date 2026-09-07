@@ -113,7 +113,7 @@ Community tools connect the agent to external services. They are configured in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -139,6 +139,18 @@ tools:
     api_key: $BRAVE_SEARCH_API_KEY
 ```
 Results from Brave's independent index via the official [Brave Search API](https://brave.com/search/api/). Requires an API key. `max_results` is capped at 20.
+
+No extra dependency required.
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.serply.tools:web_search_tool
+    api_key: $SERPLY_API_KEY
+    # vertical: news   # or scholar; defaults to regular Google Search
+```
+Live Google results as JSON. Requires a [Serply](https://serply.io) API key. Set `vertical: news` or `vertical: scholar` to search Google News or Google Scholar with the same key; `gl` and `hl` set the result country and language. See the [Serply docs](https://serply.io/docs) for details.
 
 No extra dependency required.
 

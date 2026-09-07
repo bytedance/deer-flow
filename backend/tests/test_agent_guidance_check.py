@@ -66,7 +66,7 @@ def test_normalized_utf8_size_uses_lf_and_counts_non_ascii_bytes() -> None:
     ("path", "soft", "hard"),
     [
         ("AGENTS.md", 16 * 1024, 20 * 1024),
-        ("backend/AGENTS.md", 24 * 1024, 32 * 1024),
+        ("backend/AGENTS.md", 28 * 1024, 32 * 1024),
         ("backend/app/gateway/AGENTS.md", 40 * 1024, 48 * 1024),
     ],
 )

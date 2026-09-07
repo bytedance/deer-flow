@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from copy import copy
 from typing import Any
 
-_UPLOAD_BLOCK_RE = re.compile(r"<(?P<tag>uploaded_files|current_uploads)>[\s\S]*?</(?P=tag)>\n*", re.IGNORECASE)
+_UPLOAD_BLOCK_RE = re.compile(r"<current_uploads>[\s\S]*?</current_uploads>\n*", re.IGNORECASE)
 
 
 def extract_message_text(message: Any) -> str:
@@ -70,7 +70,7 @@ def filter_messages_for_memory(messages: list[Any]) -> list[Any]:
             if additional_kwargs.get("hide_from_ui") and not _is_human_clarification_response(additional_kwargs):
                 continue
             text = extract_message_text(msg)
-            if "<uploaded_files>" in text.lower() or "<current_uploads>" in text.lower():
+            if "<current_uploads>" in text.lower():
                 stripped = _UPLOAD_BLOCK_RE.sub("", text).strip()
                 if not stripped:
                     # Upload-only turn: the following AI ack carries no user content.

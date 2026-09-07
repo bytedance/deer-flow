@@ -72,7 +72,12 @@ def _build_engine(url: str) -> Engine:
     return engine
 
 
-def _get_sessionmaker(url: str) -> sessionmaker[Session]:
+def get_sync_sessionmaker(url: str) -> sessionmaker[Session]:
+    """Return the process-wide synchronous session factory for ``url``.
+
+    Managed subagents use the same SQL engine because both stores are read by
+    synchronous graph construction code as well as Gateway worker threads.
+    """
     engine = _engines.get(url)
     if engine is None:
         with _engines_lock:
@@ -83,6 +88,11 @@ def _get_sessionmaker(url: str) -> sessionmaker[Session]:
     return sessionmaker(engine, expire_on_commit=False)
 
 
+# Compatibility for existing internal callers; new shared stores use the
+# public name above.
+_get_sessionmaker = get_sync_sessionmaker
+
+
 def _config_document(config: dict) -> dict:
     """Strip the natural key from the stored document (``name`` is its own column)."""
     return {k: v for k, v in config.items() if k != "name"}
@@ -90,7 +100,7 @@ def _config_document(config: dict) -> dict:
 
 class SqlAgentStore(AgentStore):
     def __init__(self, url: str) -> None:
-        self._Session = _get_sessionmaker(url)
+        self._Session = get_sync_sessionmaker(url)
 
     def _row(self, session: Session, name: str, user_id: str) -> AgentRow | None:
         stmt = select(AgentRow).where(AgentRow.user_id == user_id, AgentRow.name == name.lower())

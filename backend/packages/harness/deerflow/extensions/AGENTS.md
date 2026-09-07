@@ -137,9 +137,9 @@ entry, the manager owns the controlled locked sync.
 
 The public package is `packages/extension-api/` and must never import `deerflow` or carry
 framework dependencies. Extensions declare any FastAPI, LangChain, or LangGraph imports
-themselves. Its registry contract exposes five contribution kinds: middleware
-contributors, task-lifecycle contributors, system-model-call observers, Gateway-lifetime
-services, and eager routers. Middleware contributions declare lead/subagent scope, stable
+themselves. Its registry contract exposes seven contribution kinds: middleware
+contributors, task-lifecycle contributors, system-model-call observers, agent-assembly
+observers, context-compaction observers, Gateway-lifetime services, and eager routers. Middleware contributions declare lead/subagent scope, stable
 order, and a semantic placement (`MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBLE`,
 `TOOL_RAW`, or `STANDARD`) rather than a fragile list index. `extensions/stack.py` is the
 single final composition point; do not inject inside
@@ -153,6 +153,42 @@ on first use — `ordering.py::core_ordering_constraints()` and `stack.py::_anch
 which is `assert_ordering` / composition time, already inside the middleware builder.
 Defer by deferring the *call*; do not fake a resolved value with a lazy container
 subclass, which reports one answer when iterated and another when measured.
+
+**Agent assembly observation.** `assemble_lead_agent()` returns
+`LeadAgentAssembly(graph, descriptor)`; `make_lead_agent()` remains the
+graph-only LangGraph Server ABI declared in `langgraph.json` and must keep that
+signature. The descriptor
+(`deerflow_extension_api.assembly.AgentAssemblyDescriptor`) captures the
+resolved model, rendered prompt hash, authorization-filtered tool list,
+composed middleware stack with each middleware's declared policy, deferred tool
+names, enabled skills, and effective policies — all of which are decided inside
+the factory and are unrecoverable afterwards. Its `fingerprint` sorts tools and
+skills (assembly order is incidental) but preserves middleware order (stack
+order decides what wraps what). It also excludes `build` and `requested_model`:
+the fingerprint answers "did this agent's assembly change", so folding in the
+host build would move every agent's fingerprint on every redeploy and make that
+finer question unanswerable — `build` stays a reported field a consumer can
+compare directly. Registered `AgentAssemblyObserver`s are notified
+synchronously at the end of construction; failures are contained per observer.
+Gateway `resolve_agent_factory()` now returns `assemble_lead_agent`, so every
+consumer must unwrap `.graph` — a third-party factory returning a bare graph
+stays supported.
+
+`SubagentExecutor` publishes the same descriptor kind for each delegated agent
+on `self.assembly_descriptor`. The projection itself lives in
+`deerflow/agents/assembly_descriptor.py`: a middleware that implements
+`release_policy_parameters()` owns its own identity, and probing private
+attributes is the marked fallback for the ones that do not.
+
+Because `IsolatedMiddleware`'s cached subclasses all carry the wrapper's own
+class name and module, and the wrapper forwards no `release_policy_parameters`,
+describing a contributed middleware directly would collapse every extension's
+contribution into one identical descriptor and hide policy changes inside them.
+`describe_middleware()` therefore unwraps to `.inner` and records `.source` as
+the descriptor's `extension` field, which participates in the fingerprint. It
+duck-types on those attributes rather than importing `extensions/isolation.py`:
+`extensions/` sits below `agents/`, so importing it there would point the
+dependency backwards.
 
 Contributed middlewares are wrapped by `IsolatedMiddleware`: extension failures emit
 diagnostics and fail open without repeating a downstream model/tool side effect. The
@@ -215,6 +251,26 @@ subagent's isolated loop, while synchronous system callbacks submit fire-and-for
 there. Shutdown stops accepting detached observations before the memory shutdown flush and
 resets the loop only after in-flight run/subagent drain ordering is complete.
 
+`ContextCompactionObserver` reports the one moment a lossy context transform can still be
+described: `DeerFlowSummarizationMiddleware.compact_state()` / `acompact_state()` hash each
+about-to-be-removed message's content before the summary model call, then — once a summary
+is produced and the pre-compaction hooks have run — build a `CompactionEvent` (transform
+kind/version, source content hashes, the produced summary's content hash, and the
+compacted/kept message counts) and call `notify_context_compacted()`. Once
+`_maybe_summarize`/`_amaybe_summarize` remove the source messages from state, that mapping
+cannot be reconstructed, so the event is the only record of it. The event is keyed on
+`canonical_hash(message.content)` directly — never a stringified copy, which would defeat
+`canonical_hash`'s key-order normalization for multimodal (`list[dict]`) content — rather
+than a producer-stamped identity key: nothing currently mints a stable per-message identity
+for compaction's source messages or its summary, so an identity-keyed field would ship
+permanently empty. `notify_context_compacted()` is a
+synchronous, fire-and-forget entry point — both the sync and async compaction paths call it
+without an `await` — that dispatches to the same registered extension-notification loop
+system-model-call cancellation uses, reusing `_notify_each`'s per-observer fail-open
+containment. There is no live task to attach at that call site, so observers receive a
+detached task store, the same fallback `notify_system_model_call` uses when its caller
+supplies none.
+
 Gateway services start in registration order after the persistence engine and session
 factory are ready. Each receives the same `ExtensionRuntimeDeps` snapshot containing the
 app store, projected host policy, and session factory. Start failures are attributed and
@@ -255,6 +311,22 @@ Any preflight, conflict, or include failure rolls back the whole router without 
 later routers from mounting. Do not introduce a framework-bound `RouterContributor`
 contract: the public registry accepts `Sequence[Any]`
 to keep extension-api dependency-free.
+
+Contributed routes are session-authenticated and cannot opt out. Within that, an extension
+distinguishes an ordinary user from an administrator through `deerflow_extension_api.auth`:
+`resolve_principal(request)` returns the caller, `require_admin(request)` raises
+`PermissionError` for anyone else and fails closed when identity cannot be determined.
+Extensions receive a projection — user id, admin flag, internal flag, roles — never the
+host's auth context. The host installs the resolver on `app.state` (keyed by
+`EXTENSION_PRINCIPAL_RESOLVER_KEY`) in `app.gateway.app.create_app()`, after
+`AuthMiddleware` is added and before contributed routers are mounted; `resolve_principal`
+reads it back at call time, since the router objects a contribution builds during
+`install()` exist long before any request (or its identity) does. The host's projection
+reads `request.state.user` synchronously (the same field `AuthMiddleware` stamps and
+`require_admin_user` in `app/gateway/deps.py` reads as its primary path) rather than the
+async, exception-based accessors that exist there for tests and alternative ASGI
+compositions — keeping the resolver synchronous keeps it usable from both sync and async
+route handlers.
 
 The memory kind reaches those observers through a different shape, and the difference is
 deliberate rather than an oversight to be "aligned" away. DeerMem must stay vendorable and

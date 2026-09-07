@@ -207,11 +207,13 @@ def test_run_case_fails_when_warm_cache_is_not_hit(tmp_path, monkeypatch) -> Non
 
     gateway_services._state_accessor_graph_cache.clear()
     # Bypass the cache entirely: every accessor resolution rebuilds the graph,
-    # so warm reads trip the contract assertion.
+    # so warm reads trip the contract assertion. The factory returns a
+    # LeadAgentAssembly, so this stub unwraps it exactly as the real accessor
+    # does — the point here is the missing cache, not a different return shape.
     monkeypatch.setattr(
         gateway_services,
         "_state_accessor_graph",
-        lambda agent_factory, assistant_id, mode, snapshot_frequency, config: agent_factory(config=config),
+        lambda agent_factory, assistant_id, mode, snapshot_frequency, config: agent_factory(config=config).graph,
     )
     case = bench.ProductionCase(
         mode="full",

@@ -1,5 +1,27 @@
 # DeerFlow Development Environment
-# Usage: docker-compose -f docker-compose-dev.yaml up --build
+#
+# Requires Docker Compose >= 2.24. The env_file entries below use the long-form
+# path/required syntax so a missing ../.env or ../frontend/.env does not abort
+# Compose on Windows ("file not found" / "Le fichier spécifique est
+# introuvable"). Clients older than 2.24 do not understand that field and
+# reject this file with:
+#   validating docker-compose-dev.yaml: services.gateway.env_file.0 must be a string
+# make docker-start checks the version and says so; direct `docker compose`
+# callers get the message above instead.
+#
+# Supported entry: from the repository root, run `make docker-start`. That
+# wrapper checks the Compose version, creates missing .env files, exports
+# DEER_FLOW_ROOT, and invokes Compose from this directory with a relative
+# filename.
+#
+# Running Compose yourself works too, but export DEER_FLOW_ROOT as the absolute
+# checkout path first (see CONTRIBUTING.md for the Windows form). Unset, the
+# DEER_FLOW_HOST_BASE_DIR and THREADS_HOST_PATH values below render as
+# /backend/.deer-flow, so the provisioner bind-mounts the wrong host paths:
+#   DEER_FLOW_ROOT="$PWD" docker compose -f docker/docker-compose-dev.yaml up --build
+# The -f path resolves against your shell's directory, not against this file:
+# from the repository root use docker/docker-compose-dev.yaml; from inside
+# docker/ use the bare docker-compose-dev.yaml, as make docker-start does.
 #
 # Services:
 #   - nginx: Reverse proxy (port 2026)
@@ -57,6 +79,12 @@ services:
       # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
       # Set these in your shell before running docker-compose:
       #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
+      # Deliberately left without a ${DEER_FLOW_ROOT:-...} fallback. The obvious
+      # candidate, $PWD, is exported by POSIX shells but not by PowerShell or
+      # cmd, so the default would resolve to an empty string on Windows — the
+      # platform this variable exists to get right. A wrong-but-plausible host
+      # path mounts an empty directory instead of failing, so we require the
+      # caller to be explicit; make docker-start sets it for you.
       - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
       # Per-user data base directory for user-scoped skill mounts
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
@@ -74,7 +102,8 @@ services:
       # The same value must be set on the gateway side via config.yaml sandbox.provisioner_api_key.
       - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
     env_file:
-      - ../.env
+      - path: ../.env
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -138,8 +167,10 @@ services:
       - WATCHPACK_POLLING=true
       - CI=true
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
+      - DEER_FLOW_DEV_ALLOWED_ORIGINS=${DEER_FLOW_DEV_ALLOWED_ORIGINS:-127.0.0.1,::1}
     env_file:
-      - ../frontend/.env
+      - path: ../frontend/.env
+        required: false
     networks:
       - deer-flow-dev
     restart: unless-stopped
@@ -212,7 +243,8 @@ services:
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
       - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
     env_file:
-      - ../.env
+      - path: ../.env
+        required: false
     extra_hosts:
       # For Linux: map host.docker.internal to host gateway
       - "host.docker.internal:host-gateway"

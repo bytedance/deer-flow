@@ -57,6 +57,10 @@ class BoxliteBox(Sandbox):
             per-call ``env`` (request-scoped secrets).
     """
 
+    #: Every call is a fresh ``sh -lc`` exec in the box — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
+
     TERMINAL_ERROR_MARKERS = (
         "vsock",
         "disconnected",
@@ -199,8 +203,10 @@ class BoxliteBox(Sandbox):
             output = f"{stdout}\n{stderr}"
         else:
             output = stdout or stderr
-        if result.exit_code not in (0, None) and not output:
-            output = f"Command exited with code {result.exit_code}"
+        if result.exit_code not in (0, None):
+            # Mirror LocalSandbox: preserve a nonzero exit in the output text
+            # even when the command produced output (see e2b_sandbox).
+            output = f"{output}\nExit Code: {result.exit_code}" if output else f"Command exited with code {result.exit_code}"
         return output if output else "(no output)"
 
     # ── file operations ─────────────────────────────────────────────────
@@ -285,7 +291,9 @@ class BoxliteBox(Sandbox):
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
         r = self._sh(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        return [line.strip() for line in (r.stdout or "").splitlines() if line.strip()]
+        # splitlines() already removed the terminators; do NOT strip entries —
+        # a filename that legitimately ends in whitespace would be corrupted.
+        return [line for line in (r.stdout or "").splitlines() if line]
 
     def glob(
         self,
@@ -305,7 +313,7 @@ class BoxliteBox(Sandbox):
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
         for entry in (r.stdout or "").splitlines():
-            entry = entry.strip()
+            # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
             if should_ignore_path(entry):

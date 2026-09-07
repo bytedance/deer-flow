@@ -184,4 +184,24 @@ describe("updateAgent", () => {
       reasoning_effort: "high",
     });
   });
+
+  test("serializes an explicit null subagent allowlist as unrestricted", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        name: "delegator",
+        description: "",
+        model: null,
+        tool_groups: null,
+        skills: null,
+        allowed_subagents: null,
+      }),
+    );
+
+    await updateAgent("delegator", { allowed_subagents: null });
+
+    const [, init] = mockedFetch.mock.calls[0]!;
+    expect(JSON.parse(init?.body as string)).toEqual({
+      allowed_subagents: null,
+    });
+  });
 });

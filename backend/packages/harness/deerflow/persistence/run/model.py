@@ -20,6 +20,7 @@ class RunRow(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending")
     # "pending" | "running" | "success" | "error" | "timeout" | "interrupted"
     operation_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="run", server_default=text("'run'"))
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     model_name: Mapped[str | None] = mapped_column(String(128))
     multitask_strategy: Mapped[str] = mapped_column(String(20), default="reject")
@@ -60,6 +61,7 @@ class RunRow(Base):
     __table_args__ = (
         Index("ix_runs_thread_status", "thread_id", "status"),
         Index("ix_runs_lease", "lease_expires_at"),
+        Index("uq_runs_idempotency_key", "idempotency_key", unique=True),
         # Cross-process atomicity guarantee: at most one pending/running run per
         # thread. Must live in ORM ``__table_args__`` (not just the migration)
         # because the empty-DB bootstrap path runs ``create_all`` + ``stamp head``

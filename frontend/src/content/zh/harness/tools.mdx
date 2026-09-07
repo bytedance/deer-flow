@@ -110,7 +110,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -136,6 +136,18 @@ tools:
     api_key: $BRAVE_SEARCH_API_KEY
 ```
 通过官方 [Brave Search API](https://brave.com/search/api/) 返回 Brave 独立索引的结果。需要 API Key，`max_results` 上限为 20。
+
+无需额外依赖。
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.serply.tools:web_search_tool
+    api_key: $SERPLY_API_KEY
+    # vertical: news   # 或 scholar；默认为普通 Google 搜索
+```
+以 JSON 形式返回实时 Google 搜索结果。需要 [Serply](https://serply.io) API Key。设置 `vertical: news` 或 `vertical: scholar` 可用同一个 Key 搜索 Google News 或 Google Scholar；`gl` 和 `hl` 用于设置结果的国家和语言。详见 [Serply 文档](https://serply.io/docs)。
 
 无需额外依赖。
 

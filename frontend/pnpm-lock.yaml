@@ -152,6 +152,9 @@ importers:
       gsap:
         specifier: ^3.13.0
         version: 3.14.2
+      github-slugger:
+        specifier: ^2.0.0
+        version: 2.0.0
       h3:
         specifier: 1.15.9
         version: 1.15.9
@@ -200,6 +203,9 @@ importers:
       rehype-katex:
         specifier: ^7.0.1
         version: 7.0.1
+      rehype-sanitize:
+        specifier: ^6.0.0
+        version: 6.0.0
       rehype-raw:
         specifier: ^7.0.0
         version: 7.0.0

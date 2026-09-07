@@ -215,9 +215,9 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
         client = _CollectingClient()
         cmd = agent_config.command
         args = agent_config.args or []
-        physical_cwd = _get_work_dir(thread_id)
+        physical_cwd = await asyncio.to_thread(_get_work_dir, thread_id)
         try:
-            mcp_servers = _build_acp_mcp_servers()
+            mcp_servers = await asyncio.to_thread(_build_acp_mcp_servers)
         except ValueError as exc:
             logger.warning(
                 "Invalid MCP server configuration for ACP agent '%s'; continuing without MCP servers: %s",
@@ -268,7 +268,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             return result or "(no response)"
         except Exception as e:
             logger.error("ACP agent '%s' invocation failed: %s", agent, e)
-            return _format_invocation_error(agent, cmd, e)
+            return await asyncio.to_thread(_format_invocation_error, agent, cmd, e)
 
     return StructuredTool.from_function(
         name="invoke_acp_agent",

@@ -53,10 +53,11 @@ _NULLISH_STRINGS = frozenset({"null", "none", "undefined"})
 # expose self-mutation over a webhook.
 _UNTRUSTED_CHANNELS: frozenset[str] = frozenset({"github"})
 
-_MODEL_BEHAVIOR_FIELDS: tuple[str, ...] = (
+_UI_OWNED_CONFIG_FIELDS: tuple[str, ...] = (
     "model_settings",
     "thinking_enabled",
     "reasoning_effort",
+    "allowed_subagents",
 )
 
 
@@ -209,12 +210,12 @@ def update_agent(
     if skills is not None and skills != existing_cfg.skills:
         updated_fields.append("skills")
 
-    # This tool intentionally does not expose the #4336 model-behavior fields
-    # as LLM-callable arguments yet, but it still rewrites config.yaml when any
-    # of its supported fields changes. Carry those values forward explicitly so
-    # an agent refining its description/model/skills cannot erase UI/API-owned
-    # defaults such as temperature or reasoning effort.
-    for key in _MODEL_BEHAVIOR_FIELDS:
+    # This tool intentionally does not expose these UI/API-owned fields as
+    # LLM-callable arguments, but it still rewrites config.yaml when any of its
+    # supported fields changes. Carry them forward explicitly so an agent
+    # refining its description/model/skills cannot erase model defaults or its
+    # server-enforced subagent policy.
+    for key in _UI_OWNED_CONFIG_FIELDS:
         value = getattr(existing_cfg, key, None)
         if value is None:
             continue

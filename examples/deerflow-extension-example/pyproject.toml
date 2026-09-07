@@ -5,7 +5,7 @@ description = "A compact standalone example covering every DeerFlow extension co
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "deerflow-extension-api>=0.1.2,<0.2",
+    "deerflow-extension-api>=0.2,<0.3",
     "fastapi>=0.115.0,<1",
     "langchain>=1.3,<2",
     "langgraph>=1.2.9,<1.3",

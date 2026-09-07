@@ -412,7 +412,12 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
         Custom and managed integration skills live outside ``_host_root``, so
         the default implementation's single-root check would reject them.
+        One-level package-directory symlinks under either configured custom-skill
+        category root retain the operator-managed external-skill compatibility
+        of the base storage.
         """
+        if skill_file.is_symlink():
+            raise ValueError(f"Resolved skill file {skill_file} must stay within the configured skill roots and cannot be a symlink.")
         resolved_file = skill_file.resolve()
         allowed_roots = (
             self._host_root.resolve(),
@@ -425,6 +430,8 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 return resolved_file
             except ValueError:
                 continue
+        if any(self._is_external_skill_directory_symlink(skill_file, custom_root) for custom_root in (self._user_custom_root, self._global_custom_root)):
+            return resolved_file
         raise ValueError(
             f"Resolved skill file {resolved_file} must stay within the global skills root "
             f"({self._host_root.resolve()}), the per-user custom root "
