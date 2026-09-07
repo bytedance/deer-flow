@@ -1,5 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
+import { PROJECTS_QUERY_KEY } from "../projects/api";
+
 import { patchThreadMetadata, type ThreadMetadataPatchResponse } from "./api";
 import {
   INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -54,6 +56,13 @@ export function useArchiveThread(options: ArchiveThreadOptions = {}) {
         queryClient.invalidateQueries({ queryKey: ["threads", "search"] }),
         queryClient.invalidateQueries({
           queryKey: ["thread", "metadata", threadId],
+        }),
+        // The project page's own thread list
+        // ([...PROJECTS_QUERY_KEY, "threads", id, ...]) changes membership
+        // with the archive flag; every other thread mutation (pin, rename,
+        // delete, move, stop) invalidates this prefix, so archive must too.
+        queryClient.invalidateQueries({
+          queryKey: [...PROJECTS_QUERY_KEY, "threads"],
         }),
       ]);
       options.onSuccess?.(_response, { threadId, archived });
