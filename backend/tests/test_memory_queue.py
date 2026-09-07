@@ -521,10 +521,11 @@ def test_queue_refuses_older_generation_overwrite_of_newer_fenced_work() -> None
 
     assert kept.messages == ["after clear"]
     assert kept.clear_generation == (2, 0)
+    assert kept.signals == frozenset({"correction"})
     assert queue.pending_count == 1
     assert queue._items[0].messages == ["after clear"]
     assert queue._items[0].clear_generation == (2, 0)
-    assert queue._items[0].signals == frozenset()
+    assert queue._items[0].signals == frozenset({"correction"})
     mock_updater.mark_feed_consumed.assert_called_once_with(
         ["between clears"],
         thread_id="thread-1",

@@ -69,10 +69,13 @@ Public agent names use lowercase canonical form.
 `MemoryMiddleware` queues filtered user and final assistant messages.
 It captures `user_id` and the scope clear-generation fence when it enqueues work.
 Both survive the background timer boundary.
-The fence peek reads JSON counters only, not fact files, and runs before the queue lock.
+The fence peek is a cheap counter read and runs before the queue lock.
+File storage reads JSON counters only, not fact files.
+Custom `storage_class` providers must override `peek_clear_generation` with an equally cheap read; `create_storage` rejects a provider that leaves the base peek in place.
 Same-key merges keep the earlier token unless a newer clear is already visible.
 A visible newer clear consumes the pre-clear snapshot and starts a fresh fence.
 An incoming peek older than the queued context cannot inherit the newer token.
+That refused add still unions its signals onto the queued snapshot.
 
 `memory.mode: tool` registers the four memory tools.
 The model chooses when to search or change facts.
@@ -103,8 +106,8 @@ Use the typed conflict classes instead of matching exception text.
 A clear bumps `clearGeneration` / `agentClearGenerations` in the same locked commit as the wipe.
 User-wide `clear_all` raises the user generation before per-agent wipes.
 `apply_changes` and `clear_all` must honor `expected_clear_generation` atomically.
-Custom `storage_class` providers must override `capabilities()` to advertise `clear-generation`.
-`create_storage` rejects providers that only pass those values through `**scope`.
+Custom `storage_class` providers must override `capabilities()` to advertise `clear-generation`, and `peek_clear_generation` so enqueue does not load fact files.
+`create_storage` rejects providers that only pass those values through `**scope` or that leave the base peek in place.
 Snapshot-derived writes never rebase extracted facts onto an emptied document.
 
 The weak lock cache must not retain inactive user scopes.
@@ -189,6 +192,7 @@ The enqueue token is the commit fence.
 Direct `update_memory` callers without a queue token fence from the pre-LLM snapshot.
 A generation-fenced drop still advances the conversation watermark.
 The next turn must not replay the same pre-clear messages against the newer generation.
+Manual `create_memory_fact` retries a concurrent clear: it re-reads the fence each attempt and stores the new fact on the emptied document instead of raising `MemoryClearGenerationConflict`.
 
 #### Capacity and review
 
@@ -290,4 +294,4 @@ Keep these cross-component constraints in sync:
 - Eviction weights must total `1.0`.
 - `watermark_max_keys: 0` makes the conversation watermark cache unbounded.
 - A dropped watermark can re-extract one batch on the next turn.
-- Custom `storage_class` providers must advertise `clear-generation` and bump it atomically on clear.
+- Custom `storage_class` providers must advertise `clear-generation`, override `peek_clear_generation`, and bump the fence atomically on clear.

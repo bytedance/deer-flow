@@ -561,6 +561,42 @@ def test_out_of_order_enqueue_does_not_restore_facts_after_clear(tmp_path: Path)
     assert "User prefers typed Python" in facts
 
 
+def test_create_memory_fact_retries_after_cross_worker_clear(tmp_path: Path) -> None:
+    """A clear between create's snapshot and first commit must still store the new fact.
+
+    Extraction drops on MemoryClearGenerationConflict so pre-clear chat cannot
+    restore wiped facts. Manual create upserts a brand-new fact_id, so the same
+    exception is retried with the post-clear fence.
+    """
+    storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)))
+    updater = _updater(storage, lambda *_args, **_kwargs: _extraction_json("unused"))
+    assert storage.save(_memory_with_fact(), "researcher", user_id="alice")
+
+    real_apply = storage.apply_changes
+    apply_calls = {"n": 0}
+
+    def apply_after_concurrent_clear(*args, **kwargs):
+        apply_calls["n"] += 1
+        if apply_calls["n"] == 1:
+            FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path))).clear_all(user_id="alice")
+        return real_apply(*args, **kwargs)
+
+    storage.apply_changes = apply_after_concurrent_clear
+    memory, fact_id = updater.create_memory_fact(
+        content="I live in Beijing",
+        category="context",
+        confidence=0.9,
+        agent_name="researcher",
+        user_id="alice",
+    )
+
+    assert fact_id is not None
+    assert apply_calls["n"] == 2
+    contents = {fact["content"] for fact in memory["facts"]}
+    assert "I live in Beijing" in contents
+    assert "User likes Python" not in contents
+
+
 class IgnoringClearGenerationStorage(MemoryStorage):
     """Custom provider that swallows fence kwargs through ``**scope``."""
 
@@ -624,6 +660,16 @@ class NamedFenceOmittingCapabilityStorage(NamedFenceWithoutCapabilitiesStorage):
 
     def capabilities(self) -> set[str]:
         return {"custom"}
+
+    def peek_clear_generation(self, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        return (0, 0)
+
+
+class NamedFenceWithoutPeekStorage(NamedFenceWithoutCapabilitiesStorage):
+    """Satisfies apply/clear_all/capabilities but inherits the base peek."""
+
+    def capabilities(self) -> set[str]:
+        return {CLEAR_GENERATION_CAPABILITY}
 
 
 class TransactionalClearGenerationStorage(MemoryStorage):
@@ -754,6 +800,22 @@ def test_create_storage_rejects_provider_that_omits_clear_generation_capability(
             create_storage(DeerMemConfig(storage_class="clear_generation_fakes.Storage"))
     finally:
         sys.modules.pop("clear_generation_fakes", None)
+
+
+def test_create_storage_rejects_provider_without_peek_clear_generation() -> None:
+    assert declares_clear_generation_fence(NamedFenceWithoutPeekStorage) is False
+    _install_storage_module("clear_generation_fakes", Storage=NamedFenceWithoutPeekStorage)
+    try:
+        with pytest.raises(ValueError, match="clear-generation"):
+            create_storage(DeerMemConfig(storage_class="clear_generation_fakes.Storage"))
+    finally:
+        sys.modules.pop("clear_generation_fakes", None)
+
+
+def test_base_peek_clear_generation_does_not_load_the_document() -> None:
+    storage = NamedFenceWithoutPeekStorage()
+    with pytest.raises(NotImplementedError):
+        storage.peek_clear_generation("researcher", user_id="alice")
 
 
 def test_create_storage_accepts_transactional_clear_generation_provider() -> None:

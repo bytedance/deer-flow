@@ -75,8 +75,9 @@ class ConversationContext:
     # Same-key merges keep the earlier value unless a newer clear is already
     # visible; then the queue consumes the pre-clear snapshot and starts a
     # fresh fence. An incoming peek older than the queued context is refused
-    # so that snapshot cannot inherit the newer fence. A missing token and
-    # emergency (bypass) snapshots are never refreshed.
+    # so that snapshot cannot inherit the newer fence, but its signals still
+    # union onto the queued item. A missing token and emergency (bypass)
+    # snapshots are never refreshed.
     clear_generation: tuple[int, int] | None = None
 
 
@@ -232,6 +233,9 @@ class MemoryUpdateQueue:
             )
             if not self._consume_pre_clear_feed(incoming):
                 existing.clear_generation = captured_clear_generation
+            # Keep the queued snapshot and fence, but do not drop signals from
+            # the refused add: a signal seen on any update for this key stays.
+            existing.signals = merged_signals
             return existing
         elif existing.bypass_watermark or existing.clear_generation is None:
             enqueued_clear_generation = existing.clear_generation

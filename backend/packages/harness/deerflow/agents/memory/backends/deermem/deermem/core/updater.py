@@ -1083,10 +1083,15 @@ class MemoryUpdater:
 
         Duplicate rejection is enforced here (not only by callers): the
         candidate's normalized content key is checked against the fresh
-        memory snapshot inside the revision-conflict retry loop of both
-        storage paths (apply_changes and legacy single-file save), so
-        concurrent creators cannot both store the same content. Raises
+        memory snapshot inside the conflict-retry loop of both storage
+        paths (apply_changes and legacy single-file save), so concurrent
+        creators cannot both store the same content. Raises
         ``ValueError("Duplicate fact")`` on a normalized-content match.
+
+        A concurrent clear is not a drop: this path upserts a brand-new
+        ``fact_id`` and cannot restore a wiped fact. Reload the scope fence
+        on every attempt and retry ``MemoryClearGenerationConflict`` the
+        same way as a manifest revision conflict.
         """
         if agent_name is None:
             raise ValueError("agent_name")
@@ -1107,16 +1112,16 @@ class MemoryUpdater:
             "source": "manual",
         }
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
-            captured_clear_generation: tuple[int, int] | None = None
             for attempt in range(3):
                 memory_data = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
-                if captured_clear_generation is None:
-                    captured_clear_generation = scope_clear_generation(memory_data, agent_name)
+                captured_clear_generation = scope_clear_generation(memory_data, agent_name)
                 # Duplicate rejection lives inside the conflict-retry loop so
                 # it is re-evaluated against the fresh snapshot after every
-                # revision conflict: two concurrent creators of the same
-                # content cannot both store it (the loser reloads, sees the
-                # winner's fact, and is rejected here).
+                # revision or clear-generation conflict: two concurrent
+                # creators of the same content cannot both store it (the
+                # loser reloads, sees the winner's fact, and is rejected
+                # here). A concurrent clear empties the snapshot; retrying
+                # with the new fence stores this brand-new fact_id.
                 _raise_if_duplicate_fact_content(memory_data, candidate_key)
                 updated_memory = dict(memory_data)
                 updated_memory["facts"], capacity_decision, shadow_decision = self._select_for_capacity(
@@ -1148,10 +1153,10 @@ class MemoryUpdater:
                     fresh_memory = self.reload_memory_data(agent_name, user_id=user_id)
                     stored = any(fact.get("id") == fact_id for fact in fresh_memory.get("facts", []))
                     return fresh_memory, (fact_id if stored else None)
-                except MemoryManifestRevisionConflict:
+                except (MemoryManifestRevisionConflict, MemoryClearGenerationConflict):
                     if attempt == 2:
                         raise
-                    logger.info("Retrying capped fact creation from a fresh snapshot after a revision conflict")
+                    logger.info("Retrying capped fact creation from a fresh snapshot after a revision or clear-generation conflict")
             raise AssertionError("bounded create retry did not return or raise")
         # Legacy single-file path: same duplicate-rejection contract as the
         # apply_changes path above. A revision-conflicted save (False) reloads
