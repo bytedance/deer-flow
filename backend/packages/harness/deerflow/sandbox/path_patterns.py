@@ -47,6 +47,18 @@ _SEGMENT_BOUNDARY_CHAR = re.compile(r"[^\w./-]")
 _PATH_TAIL_TERMINATORS = frozenset("\"';&|<>()")
 
 
+def normalize_mask_tail(tail: str) -> str:
+    """Normalize a matched output tail for splicing onto a virtual prefix.
+
+    Virtual paths are always POSIX-style, so drop leading separators and
+    convert any remaining backslashes (Windows-spelled output) to forward
+    slashes. Shared by the static-pattern closure in ``sandbox.tools`` and
+    the direct scanner here so the splicing rule exists in exactly one copy
+    and the two sites can only drift in their *matching* logic.
+    """
+    return tail.lstrip("/\\").replace("\\", "/")
+
+
 def build_output_mask_pattern(base: str, *, separator_agnostic: bool = False) -> re.Pattern[str]:
     """Compile the matcher for one host ``base`` in model-visible output.
 
@@ -118,7 +130,7 @@ def replace_output_path_matches(
         if callable(replacement):
             replaced_path = replacement(matched_path)
         else:
-            relative = matched_path[len(base) :].lstrip("/\\").replace("\\", "/")
+            relative = normalize_mask_tail(matched_path[len(base) :])
             replaced_path = f"{replacement}/{relative}" if relative else replacement
 
         chunks.append(output[copied_until:match_start])
