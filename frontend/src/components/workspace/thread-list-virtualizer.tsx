@@ -9,7 +9,11 @@ import {
   type ReactNode,
 } from "react";
 
-import type { AgentThread } from "@/core/threads/types";
+/**
+ * Minimal row shape the virtualizer keys on; list items only need a stable
+ * ``thread_id`` (sidebar rows, /workspace/chats rows, project page rows).
+ */
+type ThreadListRow = { thread_id: string };
 
 const VIRTUALIZATION_THRESHOLD = 60;
 
@@ -21,7 +25,7 @@ export function calculateScrollMargin(
   return Math.max(0, rootTop - scrollParentTop + scrollTop);
 }
 
-export function VirtualThreadList({
+export function VirtualThreadList<T extends ThreadListRow>({
   estimateSize,
   gap = 0,
   items,
@@ -30,8 +34,8 @@ export function VirtualThreadList({
 }: {
   estimateSize: number;
   gap?: number;
-  items: readonly AgentThread[];
-  renderItem: (thread: AgentThread, index: number) => ReactNode;
+  items: readonly T[];
+  renderItem: (item: T, index: number) => ReactNode;
   scrollParentSelector: string;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);

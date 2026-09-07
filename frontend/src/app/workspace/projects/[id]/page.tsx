@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { VirtualThreadList } from "@/components/workspace/thread-list-virtualizer";
 import {
   WorkspaceBody,
   WorkspaceContainer,
@@ -160,28 +161,39 @@ function ProjectThreadsSection({
             {t.projects.empty}
           </div>
         ) : (
-          threads.map((thread) => (
-            <Link
-              key={thread.thread_id}
-              href={pathOfThread({
-                thread_id: thread.thread_id,
-                metadata: thread.metadata,
-              })}
-            >
-              <div className="hover:bg-muted/50 flex min-w-0 items-center gap-2 border-b p-4 transition-colors last:border-b-0">
-                <div className="min-w-0 flex-1 truncate">
-                  {thread.display_name?.trim()
-                    ? thread.display_name
-                    : t.projects.untitled}
-                </div>
-                {thread.updated_at && (
-                  <div className="text-muted-foreground shrink-0 text-sm">
-                    {formatTimeAgo(thread.updated_at)}
+          // The page scrolls inside this ScrollArea; the list windows rows
+          // against its viewport so paging through a long-lived project never
+          // grows unbounded DOM (same windowing the sidebar and
+          // /workspace/chats use).
+          <VirtualThreadList
+            estimateSize={56}
+            items={threads}
+            scrollParentSelector='[data-slot="scroll-area-viewport"]'
+            renderItem={(thread, index) => (
+              <Link
+                key={thread.thread_id}
+                href={pathOfThread({
+                  thread_id: thread.thread_id,
+                  metadata: thread.metadata,
+                })}
+              >
+                <div
+                  className={`hover:bg-muted/50 flex min-w-0 items-center gap-2 p-4 transition-colors${index === threads.length - 1 ? "" : "border-b"}`}
+                >
+                  <div className="min-w-0 flex-1 truncate">
+                    {thread.display_name?.trim()
+                      ? thread.display_name
+                      : t.projects.untitled}
                   </div>
-                )}
-              </div>
-            </Link>
-          ))
+                  {thread.updated_at && (
+                    <div className="text-muted-foreground shrink-0 text-sm">
+                      {formatTimeAgo(thread.updated_at)}
+                    </div>
+                  )}
+                </div>
+              </Link>
+            )}
+          />
         )}
       </div>
       {query.hasNextPage && (
