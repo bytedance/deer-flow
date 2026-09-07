@@ -68,7 +68,10 @@ from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
-from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.audit_context import (
+    LOOP_DETECTION_RECORDER_CONTEXT_KEY,
+    resolve_audit_recorder,
+)
 from deerflow.runtime.events.catalog import MIDDLEWARE_LOOP_DETECTION_TAG
 
 if TYPE_CHECKING:
@@ -646,13 +649,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         runtime: Runtime,
     ) -> None:
         """Persist a loop-detection transition without sensitive tool data."""
-        context = getattr(runtime, "context", None)
-        is_subagent = isinstance(context, dict) and context.get("is_subagent") is True
-        recorder = context.get(LOOP_DETECTION_RECORDER_CONTEXT_KEY) if isinstance(context, dict) else None
-        if recorder is None and isinstance(context, dict):
-            # Lead-agent runs expose the ordinary RunJournal. Native task-tool
-            # subagents receive only the narrow, loop-safe recorder key above.
-            recorder = context.get("__run_journal")
+        recorder, is_subagent, agent_id = resolve_audit_recorder(
+            getattr(runtime, "context", None),
+            recorder_key=LOOP_DETECTION_RECORDER_CONTEXT_KEY,
+        )
         if recorder is None:
             return
 
@@ -664,7 +664,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 action=decision.action,
                 changes={
                     "is_subagent": is_subagent,
-                    "agent_id": context.get("agent_id") if is_subagent else None,
+                    "agent_id": agent_id,
                     "detection_layer": decision.detection_layer,
                     "tool_names": list(decision.tool_names),
                     "count": decision.count,

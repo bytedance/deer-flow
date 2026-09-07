@@ -64,7 +64,10 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.audit_context import TOOL_PROGRESS_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.audit_context import (
+    TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
+    resolve_audit_recorder,
+)
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, ToolResultMeta
 from deerflow.runtime.events.catalog import MIDDLEWARE_TOOL_PROGRESS_TAG
 
@@ -324,19 +327,10 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         hook: Literal["wrap_tool_call", "awrap_tool_call"],
     ) -> None:
         """Persist one effective transition without copying tool content."""
-        context = getattr(runtime, "context", None)
-        if not isinstance(context, dict):
-            return
-        # Only native task-tool subagents receive the narrow recorder.  The
-        # public runtime context may contain caller-supplied ``is_subagent`` or
-        # ``agent_id`` values, so those fields must not decide durable
-        # attribution for an ordinary lead run.
-        recorder = context.get(TOOL_PROGRESS_RECORDER_CONTEXT_KEY)
-        is_subagent = recorder is not None
-        if not is_subagent:
-            # Lead runs own a RunJournal. Ordinary task-tool subagents receive
-            # only the narrow, loop-safe recorder key above.
-            recorder = context.get("__run_journal")
+        recorder, is_subagent, agent_id = resolve_audit_recorder(
+            getattr(runtime, "context", None),
+            recorder_key=TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
+        )
         if recorder is None:
             return
 
@@ -358,7 +352,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 action=action,
                 changes={
                     "is_subagent": is_subagent,
-                    "agent_id": context.get("agent_id") if is_subagent else None,
+                    "agent_id": agent_id,
                     "tool_name": tool_name,
                     "from_phase": state.phase,
                     "to_phase": new_state.phase,
