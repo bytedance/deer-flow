@@ -287,6 +287,7 @@ export function KnowledgeScopeSelector({
               counts.documents,
             )
           : t.knowledge.scope.buttonDatasets(counts.datasets);
+  const active = selection.mode !== "disabled";
   const draftInvalid =
     draft.mode === "selected" &&
     (draft.datasets.length === 0 ||
@@ -331,25 +332,26 @@ export function KnowledgeScopeSelector({
   const trigger = (
     <Button
       aria-label={label}
-      className="h-8 max-w-48 gap-1.5 px-2 text-xs"
+      aria-pressed={active}
+      className={cn(
+        "text-muted-foreground border border-transparent",
+        active &&
+          "border-primary/20 bg-primary/10 text-primary hover:bg-primary/15",
+      )}
       data-testid="knowledge-scope-trigger"
       disabled={disabled || Boolean(unavailableReason)}
+      size="icon-sm"
       type="button"
       variant="ghost"
       onClick={() => setOpen(true)}
     >
-      <DatabaseIcon className="size-3" />
-      <span className="truncate">{label}</span>
+      <DatabaseIcon className="size-4" />
     </Button>
   );
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      {unavailableReason ? (
-        <Tooltip content={unavailableReason}>{trigger}</Tooltip>
-      ) : (
-        trigger
-      )}
+      <Tooltip content={unavailableReason ?? label}>{trigger}</Tooltip>
       <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t.knowledge.scope.title}</DialogTitle>

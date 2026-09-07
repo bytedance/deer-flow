@@ -101,7 +101,10 @@ payload containing one may enter frontend state, logs, or rendered copy.
 Custom-agent chats may receive the page-local knowledge-scope capability from
 `/api/features -> knowledge_base.scope_selection_enabled`. Only
 `AgentChatPage` passes `KnowledgeScopeSelector` into the optional `InputBox`
-slot immediately after the mode selector; ordinary chat and static demo pages
+slot immediately after the mode selector. The trigger is icon-only: a persistent
+highlight means retrieval is active (`all` or `selected`), while its neutral
+state means retrieval is disabled; its accessible label and tooltip retain the
+human-readable scope summary. Ordinary chat and static demo pages
 must not create selector state, load the retrieval catalog, or attach a scope.
 Applied selection lives only in component memory, resets to `all` on refresh or
 a real conversation/agent switch, and survives only the first-send route

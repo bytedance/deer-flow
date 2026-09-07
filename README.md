@@ -1043,8 +1043,10 @@ copy. Parsing progress is available through process-local SSE at
 `GET /api/knowledge/events` while a browser is subscribed. For Docker or
 Kubernetes, set `base_url` to an address reachable from the Gateway container.
 
-Custom-agent chats can optionally expose a page-local **Knowledge** selector
-beside the mode control. Set `knowledge_base.scope_selection_enabled: true` in
+Custom-agent chats can optionally expose a page-local, icon-only **Knowledge**
+selector beside the mode control. Its persistent highlight indicates that
+knowledge retrieval is active; the neutral state means retrieval is off. Set
+`knowledge_base.scope_selection_enabled: true` in
 `config.yaml` while using the built-in RAGFlow `knowledge_search` provider to
 allow all permitted datasets, selected datasets/files, or no retrieval for a
 turn. The choice resets to all when the page is refreshed or another
