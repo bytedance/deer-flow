@@ -449,6 +449,15 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
 
+        # Record the checkpointer/Store backend selected from this startup
+        # snapshot so GET /health/ready probes what the running process
+        # actually uses. These singletons are restart-required by design and
+        # are never rebuilt on config.yaml hot reload, so the probe must not
+        # re-resolve process-wide configuration per request.
+        from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, resolve_checkpointer_config
+
+        setattr(app.state, READINESS_CHECKPOINTER_CONFIG_ATTR, resolve_checkpointer_config(config))
+
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:

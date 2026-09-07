@@ -25,8 +25,8 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Callable, Coroutine, Mapping
+from contextlib import AbstractAsyncContextManager
 from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -73,6 +73,7 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
@@ -90,8 +91,7 @@ from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
 
-_checkpoint_locks_guard = threading.Lock()
-_checkpoint_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+_checkpoint_locks = AsyncKeyedLockTable[str]()
 
 # Completed LangGraph runs can leave callback Contexts and AsyncPregelLoop
 # instances in unreachable reference cycles. They are collectable, but a busy
@@ -229,22 +229,9 @@ def _release_run_scoped_references(
             runtime_context.pop(key, None)
 
 
-@asynccontextmanager
-async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
+def _checkpoint_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]:
     """Serialize checkpoint mutations for one thread without blocking goal commands."""
-    loop = asyncio.get_running_loop()
-    with _checkpoint_locks_guard:
-        locks = _checkpoint_locks_by_loop.get(loop)
-        if locks is None:
-            locks = {}
-            _checkpoint_locks_by_loop[loop] = locks
-        lock = locks.get(thread_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            locks[thread_id] = lock
-
-    async with lock:
-        yield
+    return _checkpoint_locks.hold(thread_id)
 
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
@@ -741,6 +728,36 @@ def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
     return trace_id
 
 
+def _defer_finalization_interrupt(
+    deferred: BaseException | None,
+    interrupt: BaseException,
+) -> BaseException:
+    """Preserve the first interrupt while allowing terminal awaits to finish."""
+    if isinstance(interrupt, asyncio.CancelledError):
+        task = asyncio.current_task()
+        if task is not None:
+            while task.cancelling():
+                task.uncancel()
+    return deferred if deferred is not None else interrupt
+
+
+async def _await_task_stop_after_host_cancellation(
+    task: asyncio.Task[None],
+    deferred: BaseException | None,
+) -> BaseException | None:
+    """Wait for one task-stop fan-out despite repeated host cancellation."""
+    while True:
+        try:
+            await asyncio.shield(task)
+            return deferred
+        except asyncio.CancelledError as exc:
+            host = asyncio.current_task()
+            if host is None or not host.cancelling():
+                # The fan-out task itself was cancelled rather than the host.
+                raise
+            deferred = _defer_finalization_interrupt(deferred, exc)
+
+
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -781,7 +798,7 @@ async def run_agent(
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
     task_store: ExtensionData | None = None
     task_info: TaskInfo | None = None
-    deferred_stop_interrupt: BaseException | None = None
+    deferred_finalization_interrupt: BaseException | None = None
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
@@ -1169,7 +1186,7 @@ async def run_agent(
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
-            file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
+            file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
                     if len(lg_modes) == 1 and not stream_subgraphs:
@@ -1547,12 +1564,23 @@ async def run_agent(
                     await ctx.on_run_completed(record)
                 except Exception:
                     logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
+                except BaseException as exc:
+                    # A terminal hook must not leave replacement runs blocked or
+                    # stream consumers waiting indefinitely.
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(
+                        deferred_finalization_interrupt,
+                        exc,
+                    )
+                    logger.warning(
+                        "Run completion hook interrupted for %s; completing finalization first",
+                        run_id,
+                    )
 
             if task_info is not None and task_store is not None:
                 # Keep the finalizing barrier held until stop observers finish, so
                 # a same-thread replacement cannot overlap this task's lifecycle.
-                try:
-                    await notify_task_stop(
+                task_stop = asyncio.create_task(
+                    notify_task_stop(
                         extensions,
                         task_store,
                         task_info,
@@ -1561,6 +1589,13 @@ async def run_agent(
                             succeeded=record.status == RunStatus.success,
                         ),
                         timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                    ),
+                    name=f"extension-task-stop-{run_id}",
+                )
+                try:
+                    deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(
+                        task_stop,
+                        deferred_finalization_interrupt,
                     )
                 except Exception:
                     logger.warning(
@@ -1571,7 +1606,10 @@ async def run_agent(
                 except BaseException as exc:
                     # Cancellation here must not strand the finalizing barrier or
                     # leave stream consumers waiting for the end frame.
-                    deferred_stop_interrupt = exc
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(
+                        deferred_finalization_interrupt,
+                        exc,
+                    )
                     logger.warning(
                         "Extension task-stop notification interrupted for run %s; completing cleanup first",
                         run_id,
@@ -1581,8 +1619,8 @@ async def run_agent(
 
             await bridge.publish_end(run_id)
 
-            if deferred_stop_interrupt is not None:
-                raise deferred_stop_interrupt
+            if deferred_finalization_interrupt is not None:
+                raise deferred_finalization_interrupt
         finally:
             try:
                 if journal is not None:

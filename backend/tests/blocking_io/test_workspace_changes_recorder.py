@@ -16,8 +16,10 @@ rmtree this anchor exists to guard.
 
 Because ``mkdtemp`` must be offloaded, its worker handoff is also a cancellation
 hazard: a run cancelled after ``mkdtemp`` but before the coroutine receives the
-path would orphan the dir. The last test pins the shield+reclaim guard that
-removes such a dir instead of leaking it.
+path would orphan the dir. The prepare-handoff tests pin the shield+reclaim guard;
+the scan-cancellation tests pin the symmetric requirement to keep the cache alive
+until the already-running scan worker drains, then remove it before cancellation
+propagates.
 
 Imports are kept at module top so any import-time IO runs at collection (outside
 the gate); the surface under test runs on the event loop inside the gated test.
@@ -207,3 +209,148 @@ async def test_capture_workspace_snapshot_repeated_cancellation_leaks_no_text_ca
 
     leftovers = await asyncio.to_thread(lambda: sorted(cache_root.glob("deerflow-workspace-changes-*")))
     assert leftovers == [], f"repeated-cancel capture leaked a text cache dir: {leftovers}"
+
+
+async def test_capture_workspace_snapshot_cancelled_scan_drains_before_cleanup(tmp_path: Path, monkeypatch) -> None:
+    """A cancelled scan keeps its text cache until its worker is finished."""
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    import deerflow.config.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "_paths", None)
+
+    cache_root = tmp_path / "tmp"
+    cache_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(cache_root))
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocking_scan(*_args: Any, text_cache_dir: str | Path | None = None, **_kwargs: Any) -> WorkspaceSnapshot:
+        assert text_cache_dir is not None
+        cache_dir = Path(text_cache_dir)
+        assert cache_dir.exists()
+        entered.set()
+        release.wait(timeout=5)
+        assert cache_dir.exists(), "scan cache was removed while the worker was still running"
+        return WorkspaceSnapshot(files={}, truncated=False, text_cache_dir=str(cache_dir))
+
+    monkeypatch.setattr(recorder, "scan_workspace_roots", _blocking_scan)
+
+    task = asyncio.create_task(recorder.capture_workspace_snapshot("t1", include_text=True))
+    assert await asyncio.to_thread(entered.wait, 5), "scan worker did not start"
+
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not task.done(), "cancelled capture abandoned the still-running scan worker"
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    leftovers = await asyncio.to_thread(lambda: sorted(cache_root.glob("deerflow-workspace-changes-*")))
+    assert leftovers == [], f"cancelled scan leaked a text cache dir: {leftovers}"
+
+
+async def test_capture_workspace_snapshot_repeated_cancel_during_scan_still_cleans_up(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Repeated cancellation cannot abandon scan draining or cache cleanup."""
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    import deerflow.config.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "_paths", None)
+
+    cache_root = tmp_path / "tmp"
+    cache_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(cache_root))
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocking_scan(*_args: Any, text_cache_dir: str | Path | None = None, **_kwargs: Any) -> WorkspaceSnapshot:
+        assert text_cache_dir is not None
+        cache_dir = Path(text_cache_dir)
+        entered.set()
+        release.wait(timeout=5)
+        assert cache_dir.exists(), "scan cache was removed before the worker drained"
+        return WorkspaceSnapshot(files={}, truncated=False, text_cache_dir=str(cache_dir))
+
+    monkeypatch.setattr(recorder, "scan_workspace_roots", _blocking_scan)
+
+    task = asyncio.create_task(recorder.capture_workspace_snapshot("t1", include_text=True))
+    assert await asyncio.to_thread(entered.wait, 5), "scan worker did not start"
+
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not task.done(), "second cancellation abandoned the still-running scan worker"
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    leftovers = await asyncio.to_thread(lambda: sorted(cache_root.glob("deerflow-workspace-changes-*")))
+    assert leftovers == [], f"repeated-cancel scan leaked a text cache dir: {leftovers}"
+
+
+async def test_capture_workspace_snapshot_repeated_cancel_during_cleanup_still_cleans_up(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A second cancellation cannot abandon cleanup after the scan has drained."""
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    import deerflow.config.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "_paths", None)
+
+    cache_root = tmp_path / "tmp"
+    cache_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(cache_root))
+
+    scan_entered = threading.Event()
+    scan_release = threading.Event()
+    cleanup_entered = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    real_remove_text_cache_dir = recorder._remove_text_cache_dir
+
+    def _blocking_scan(*_args: Any, text_cache_dir: str | Path | None = None, **_kwargs: Any) -> WorkspaceSnapshot:
+        assert text_cache_dir is not None
+        cache_dir = Path(text_cache_dir)
+        scan_entered.set()
+        scan_release.wait(timeout=5)
+        assert cache_dir.exists(), "scan cache was removed before the worker drained"
+        return WorkspaceSnapshot(files={}, truncated=False, text_cache_dir=str(cache_dir))
+
+    async def _blocking_cleanup(text_cache_dir: str | Path) -> None:
+        cleanup_entered.set()
+        await cleanup_release.wait()
+        await real_remove_text_cache_dir(text_cache_dir)
+
+    monkeypatch.setattr(recorder, "scan_workspace_roots", _blocking_scan)
+    monkeypatch.setattr(recorder, "_remove_text_cache_dir", _blocking_cleanup)
+
+    task = asyncio.create_task(recorder.capture_workspace_snapshot("t1", include_text=True))
+    assert await asyncio.to_thread(scan_entered.wait, 5), "scan worker did not start"
+
+    task.cancel()
+    scan_release.set()
+    await asyncio.wait_for(cleanup_entered.wait(), timeout=5)
+
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not task.done(), "second cancellation abandoned the in-progress cache cleanup"
+    parked = await asyncio.to_thread(lambda: sorted(cache_root.glob("deerflow-workspace-changes-*")))
+    assert parked, "cache should remain until the owned cleanup task is released"
+
+    cleanup_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    leftovers = await asyncio.to_thread(lambda: sorted(cache_root.glob("deerflow-workspace-changes-*")))
+    assert leftovers == [], f"repeated cancellation during cleanup leaked a text cache dir: {leftovers}"

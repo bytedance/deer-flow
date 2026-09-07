@@ -541,6 +541,14 @@ def build_middlewares(
         )
     )
 
+    # Observe the final tool_search Command after every inner policy/result
+    # transformer has run. Tool wrappers are first-in-list outermost, so this
+    # must be registered before SkillToolPolicyMiddleware.
+    if deferred_setup is not None and deferred_setup.deferred_names:
+        from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
+
+        middlewares.append(DeferredToolPromotionAuditMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
+
     # Enabled skills are only discoverable metadata. Apply allowed-tools at
     # runtime after explicit slash activation or an actual skill-file load.
     from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
