@@ -35,6 +35,23 @@ def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
     }
 
 
+def _execution_teardown_complete(result: Any) -> bool:
+    """True when a dispatched child is gone or has finished execution teardown.
+
+    A cancel request or terminal business status is not enough when the result
+    exposes ``execution_done_event`` — that event is the stream-close teardown
+    primitive. Without it, a terminal status (or ``completed_at``) is the local
+    confirmation available on current main.
+    """
+    if result is None:
+        return True
+    done_event = getattr(result, "execution_done_event", None)
+    terminal = bool(result.status.is_terminal or getattr(result, "completed_at", None) is not None)
+    if done_event is not None:
+        return bool(done_event.is_set()) and terminal
+    return terminal
+
+
 class SubagentBatchService:
     """Lease, execute, and recover durable native-subagent batch items."""
 
@@ -313,6 +330,18 @@ class SubagentBatchService:
                 "Durable subagent batch item failed (item_id=%s)",
                 item_id,
             )
+            if execution_id is not None:
+                request_cancel_background_task(execution_id)
+                torn_down = await self._await_dispatched_execution_teardown(
+                    item_id,
+                    execution_id,
+                )
+                if not torn_down:
+                    logger.error(
+                        "Refusing immediate retry; dispatched child teardown was not confirmed (item_id=%s)",
+                        item_id,
+                    )
+                    return
             await self._repository.finalize_item(
                 item_id,
                 lease_owner=self._lease_owner,
@@ -367,3 +396,43 @@ class SubagentBatchService:
             # The checklist's sandbox offload drains before releasing its
             # holder, even when shutdown or a lost lease cancels this task.
             await asyncio.gather(check, return_exceptions=True)
+
+    async def _await_dispatched_execution_teardown(
+        self,
+        item_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Hold ownership until the dispatched child has torn down.
+
+        Renews the durable lease while waiting so a slow teardown cannot be
+        reclaimed as a concurrent retry. Process shutdown raises
+        ``CancelledError`` and skips the ordinary immediate-retry path.
+        """
+        renew_every = max(1.0, self._config.lease_seconds / 3)
+        status_poll_every = min(self._config.poll_interval_seconds, renew_every)
+        loop = asyncio.get_running_loop()
+        next_renew_at = loop.time() + renew_every
+        while True:
+            if _execution_teardown_complete(get_background_task_result(execution_id)):
+                return True
+            now_monotonic = loop.time()
+            if now_monotonic >= next_renew_at:
+                lease = await self._repository.renew_item_lease(
+                    item_id,
+                    lease_owner=self._lease_owner,
+                    lease_seconds=self._config.lease_seconds,
+                    now=datetime.now(UTC),
+                )
+                next_renew_at = loop.time() + renew_every
+                if not lease["valid"]:
+                    request_cancel_background_task(execution_id)
+            try:
+                until_renew = max(0.0, next_renew_at - loop.time())
+                await asyncio.wait_for(
+                    self._stop.wait(),
+                    timeout=min(status_poll_every, until_renew),
+                )
+                if self._stop.is_set():
+                    raise asyncio.CancelledError
+            except TimeoutError:
+                pass
