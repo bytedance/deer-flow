@@ -37,7 +37,7 @@ from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middle
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
-from deerflow.config.agents_config import AGENT_NAME_PATTERN
+from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
@@ -280,6 +280,10 @@ class DeerFlowClient:
         if context is not None:
             cfg.update(context)
 
+        effective_user_id = cfg.get("user_id") or get_effective_user_id()
+        agent_config = load_agent_config(self._agent_name, user_id=effective_user_id) if self._agent_name is not None else None
+        memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
+
         authorization_identity = None
         if self._app_config.authorization.enabled:
             principal = build_principal_from_context(
@@ -303,6 +307,8 @@ class DeerFlowClient:
             cfg.get("max_concurrent_subagents"),
             cfg.get("max_total_subagents"),
             self._agent_name,
+            effective_user_id,
+            memory_enabled,
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
             self._checkpoint_snapshot_frequency,
@@ -379,8 +385,6 @@ class DeerFlowClient:
         )
         mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=deferred_setup.deferred_names)
 
-        effective_user_id = cfg.get("user_id") or get_effective_user_id()
-
         kwargs: dict[str, Any] = {
             # attach_tracing=False because ``stream()`` injects tracing
             # callbacks at the graph invocation root so a single embedded run
@@ -394,6 +398,7 @@ class DeerFlowClient:
                     model_name=model_name,
                     agent_name=self._agent_name,
                     available_skills=self._available_skills,
+                    memory_enabled=memory_enabled,
                     custom_middlewares=self._middlewares,
                     app_config=self._app_config,
                     deferred_setup=deferred_setup,
@@ -417,6 +422,7 @@ class DeerFlowClient:
                 user_id=effective_user_id,
                 skill_names=skill_setup.skill_names or None,
                 subagent_execution_capacity=subagent_execution_capacity,
+                memory_enabled=memory_enabled,
             ),
             "state_schema": get_thread_state_schema(self._checkpoint_channel_mode, self._checkpoint_snapshot_frequency),
         }
