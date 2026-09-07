@@ -1250,12 +1250,22 @@ def _write_lark_cli_sandbox_launcher(staging: Path) -> None:
     launcher.chmod(0o755)
 
 
+def _is_symlink_or_junction(path: Path) -> bool:
+    """True for a symlink or an NTFS junction (``IO_REPARSE_TAG_MOUNT_POINT``).
+
+    ``Path.is_symlink()`` is False for junctions: ``st_mode`` looks like
+    ``S_IFDIR``. ``copytree(..., symlinks=False)`` then treats the junction as a
+    real directory and copies the target's contents into the sandbox runtime.
+    """
+    return path.is_symlink() or path.is_junction()
+
+
 def _validate_lark_cli_sandbox_runtime(root: Path) -> None:
-    if root.is_symlink() or not root.is_dir():
-        raise ValueError("Managed Lark CLI sandbox runtime root must be a regular directory, not a symlink.")
+    if _is_symlink_or_junction(root) or not root.is_dir():
+        raise ValueError("Managed Lark CLI sandbox runtime root must be a regular directory, not a symlink or junction.")
     for path in root.rglob("*"):
-        if path.is_symlink():
-            raise ValueError(f"Managed Lark CLI sandbox runtime must not contain a symlink: {path.as_posix()}")
+        if _is_symlink_or_junction(path):
+            raise ValueError(f"Managed Lark CLI sandbox runtime must not contain a symlink or junction: {path.as_posix()}")
         if not (path.is_dir() or path.is_file()):
             raise ValueError(f"Managed Lark CLI sandbox runtime contains an unsupported file type: {path.as_posix()}")
     for relative in (Path("bin/lark-cli"), *(Path(f"linux-{arch}/lark-cli") for arch in LARK_CLI_LINUX_ARCHES)):

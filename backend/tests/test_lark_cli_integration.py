@@ -407,6 +407,43 @@ def test_managed_sandbox_runtime_rejects_any_symlink_in_prestaged_tree(monkeypat
     assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
 
 
+def _patch_path_is_junction(monkeypatch, target: Path) -> None:
+    """Pretend *target* is an NTFS junction without requiring a Windows host."""
+    real_is_junction = Path.is_junction
+
+    def _is_junction(self: Path) -> bool:
+        try:
+            return self.resolve() == target.resolve() or real_is_junction(self)
+        except OSError:
+            return real_is_junction(self)
+
+    monkeypatch.setattr(Path, "is_junction", _is_junction)
+
+
+def test_managed_sandbox_runtime_rejects_any_junction_in_prestaged_tree(monkeypatch, tmp_path) -> None:
+    """copytree(symlinks=False) would descend a junction; reject it before copy."""
+    _patch_paths(monkeypatch, tmp_path / "home")
+    source = tmp_path / "pre-staged"
+    for arch in ("amd64", "arm64"):
+        binary = source / f"linux-{arch}" / "lark-cli"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(f"{arch}-binary".encode())
+        binary.chmod(0o755)
+    launcher = source / "bin" / "lark-cli"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    junction = source / "extra-mount"
+    junction.mkdir()
+    _patch_path_is_junction(monkeypatch, junction)
+    monkeypatch.setenv(lark_cli.LARK_CLI_SANDBOX_RUNTIME_SOURCE_ENV, str(source))
+
+    with pytest.raises(ValueError, match="junction"):
+        lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
+
+    assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX executable bits unavailable")
 def test_managed_sandbox_runtime_rejects_non_executable_prestaged_binary(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
@@ -457,6 +494,24 @@ def test_validate_lark_cli_sandbox_runtime_rejects_non_executable_files_on_posix
     _stage_non_executable_sandbox_runtime(root)
 
     with pytest.raises(ValueError, match="executable"):
+        lark_cli._validate_lark_cli_sandbox_runtime(root)
+
+
+def test_validate_lark_cli_sandbox_runtime_rejects_ntfs_junction_root(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "runtime"
+    _stage_non_executable_sandbox_runtime(root)
+    _patch_path_is_junction(monkeypatch, root)
+
+    with pytest.raises(ValueError, match="junction"):
+        lark_cli._validate_lark_cli_sandbox_runtime(root)
+
+
+def test_validate_lark_cli_sandbox_runtime_rejects_ntfs_junction_member(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "runtime"
+    _stage_non_executable_sandbox_runtime(root)
+    _patch_path_is_junction(monkeypatch, root / "linux-amd64")
+
+    with pytest.raises(ValueError, match="junction"):
         lark_cli._validate_lark_cli_sandbox_runtime(root)
 
 
