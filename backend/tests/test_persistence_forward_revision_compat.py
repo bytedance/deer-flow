@@ -26,10 +26,12 @@ from deerflow.persistence.bootstrap import (
     bootstrap_schema,
 )
 from deerflow.persistence.engine import close_engine, get_engine, init_engine_from_config
-from deerflow.persistence.mcp_tasks import McpTaskRepository
-from deerflow.persistence.thread_meta import ThreadMetaRepository
+from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 
-HEAD = "0021_batch_acceptance"
+CURRENT_HEAD = "0019_thread_incarnations"
+ROLLBACK_HEAD = "0020_threads_meta_project_id"
+INCARNATION_PARENT = "0021_batch_acceptance"
+ORIGINAL_INCARNATION_PARENT = "0018_oauth_identity_pg_partial"
 POSTGRES_URL = os.environ.get("TEST_POSTGRES_URI")
 
 
@@ -54,9 +56,34 @@ async def _set_database_revision(engine, revision: str) -> None:
         await conn.execute(sa.text("UPDATE alembic_version SET version_num = :revision"), {"revision": revision})
 
 
-async def _seed_head(engine) -> None:
+async def _seed_current_head(engine) -> None:
     await bootstrap_schema(engine, backend="sqlite")
-    assert await _database_revision(engine) == HEAD
+    assert await _database_revision(engine) == CURRENT_HEAD
+
+
+async def _seed_rollback_head(engine) -> None:
+    cfg = _get_alembic_config(engine)
+    await asyncio.to_thread(_upgrade, cfg, ROLLBACK_HEAD)
+    assert await _database_revision(engine) == ROLLBACK_HEAD
+
+
+async def _add_forward_columns(engine) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(sa.text("ALTER TABLE threads_meta ADD COLUMN incarnation VARCHAR(32)"))
+        await conn.execute(sa.text("ALTER TABLE mcp_tasks ADD COLUMN thread_incarnation VARCHAR(32)"))
+
+
+def _simulate_rollback_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    current_head, current_revisions = bootstrap_mod._get_revision_metadata()
+    assert current_head == CURRENT_HEAD == _FORWARD_COMPATIBLE_REVISION
+    assert ROLLBACK_HEAD in current_revisions
+    assert INCARNATION_PARENT in current_revisions
+    assert CURRENT_HEAD in current_revisions
+    monkeypatch.setattr(
+        bootstrap_mod,
+        "_get_revision_metadata",
+        lambda: (ROLLBACK_HEAD, current_revisions - {INCARNATION_PARENT, CURRENT_HEAD}),
+    )
 
 
 async def _seed_original_forward_schema(engine) -> None:
@@ -104,7 +131,7 @@ async def test_original_forward_schema_fails_closed(tmp_path: Path, monkeypatch:
 async def test_forward_revision_rejects_partial_project_schema(tmp_path: Path, ddl: str, missing: str) -> None:
     engine = create_async_engine(_url(tmp_path, "partial-projects.db"))
     try:
-        await _seed_head(engine)
+        await _seed_rollback_head(engine)
         await _add_forward_columns(engine)
         async with engine.begin() as conn:
             if "DROP COLUMN project_id" in ddl:
@@ -135,7 +162,7 @@ async def test_audited_original_forward_schema_can_upgrade_preserving_incarnatio
         await asyncio.to_thread(alembic_command.stamp, _get_alembic_config(engine), "0018_oauth_identity_pg_partial", purge=True)
         await bootstrap_schema(engine, backend="sqlite")
 
-        assert await _database_revision(engine) == HEAD
+        assert await _database_revision(engine) == CURRENT_HEAD
         repository = ThreadMetaRepository(async_sessionmaker(engine, expire_on_commit=False))
         assert [row["thread_id"] for row in await repository.search(user_id=None)] == ["existing"]
         assert (await repository.create("new", user_id=None))["thread_id"] == "new"
@@ -156,7 +183,7 @@ async def test_known_older_revision_upgrades_normally(tmp_path: Path) -> None:
 
         await bootstrap_schema(engine, backend="sqlite")
 
-        assert await _database_revision(engine) == HEAD
+        assert await _database_revision(engine) == CURRENT_HEAD
     finally:
         await engine.dispose()
 
@@ -164,12 +191,13 @@ async def test_known_older_revision_upgrades_normally(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_exact_forward_revision_skips_upgrade_with_warning(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     engine = create_async_engine(_url(tmp_path, "forward.db"))
     try:
-        await _seed_head(engine)
-        await _set_database_revision(engine, _FORWARD_COMPATIBLE_REVISION)
+        await _seed_current_head(engine)
+        _simulate_rollback_binary(monkeypatch)
 
         with caplog.at_level("WARNING", logger="deerflow.persistence.bootstrap"):
             await bootstrap_schema(engine, backend="sqlite")
@@ -184,7 +212,7 @@ async def test_exact_forward_revision_skips_upgrade_with_warning(
 async def test_other_unknown_revision_fails_closed(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "unknown.db"))
     try:
-        await _seed_head(engine)
+        await _seed_current_head(engine)
         await _set_database_revision(engine, "9999_unknown")
 
         with pytest.raises(RuntimeError, match="not known to this build"):
@@ -204,23 +232,24 @@ async def test_sqlite_upgrade_race_recovers_when_other_process_applies_forward_r
     new_gateway = create_async_engine(url)
     upgrade_started = threading.Event()
     continue_upgrade = threading.Event()
-    original_upgrade = bootstrap_mod._upgrade
 
-    def delayed_upgrade(cfg, revision):
+    def delayed_old_upgrade(_cfg, revision):
+        assert revision == "head"
         upgrade_started.set()
         if not continue_upgrade.wait(timeout=5):
             raise TimeoutError("timed out waiting for the forward migration")
-        return original_upgrade(cfg, revision)
+        raise CommandError(f"Can't locate revision identified by '{CURRENT_HEAD}'")
 
     try:
-        await _seed_head(old_gateway)
-        monkeypatch.setattr(bootstrap_mod, "_upgrade", delayed_upgrade)
+        await _seed_rollback_head(old_gateway)
+        _simulate_rollback_binary(monkeypatch)
+        monkeypatch.setattr(bootstrap_mod, "_upgrade", delayed_old_upgrade)
 
         old_bootstrap = asyncio.create_task(bootstrap_schema(old_gateway, backend="sqlite"))
         assert await asyncio.to_thread(upgrade_started.wait, 5)
 
-        await _add_forward_columns(new_gateway)
-        await _set_database_revision(new_gateway, _FORWARD_COMPATIBLE_REVISION)
+        new_cfg = _get_alembic_config(new_gateway)
+        await asyncio.to_thread(_upgrade, new_cfg, CURRENT_HEAD)
 
         with caplog.at_level("WARNING", logger="deerflow.persistence.bootstrap"):
             continue_upgrade.set()
@@ -240,7 +269,8 @@ async def test_sqlite_upgrade_error_stays_fatal_without_forward_revision(
 ) -> None:
     engine = create_async_engine(_url(tmp_path, "upgrade-error.db"))
     try:
-        await _seed_head(engine)
+        await _seed_rollback_head(engine)
+        _simulate_rollback_binary(monkeypatch)
 
         def fail_upgrade(_cfg, _revision):
             raise CommandError("broken migration")
@@ -259,12 +289,7 @@ async def test_local_forward_migration_error_stays_fatal(
 ) -> None:
     engine = create_async_engine(_url(tmp_path, "local-forward-error.db"))
     try:
-        await _seed_head(engine)
-        monkeypatch.setattr(
-            bootstrap_mod,
-            "_get_revision_metadata",
-            lambda: (_FORWARD_COMPATIBLE_REVISION, frozenset({HEAD, _FORWARD_COMPATIBLE_REVISION})),
-        )
+        await _seed_rollback_head(engine)
 
         def fail_upgrade(_cfg, _revision):
             raise CommandError("local 0019 migration failed")
@@ -280,7 +305,7 @@ async def test_local_forward_migration_error_stays_fatal(
 async def test_empty_alembic_version_fails_closed(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "empty-version.db"))
     try:
-        await _seed_head(engine)
+        await _seed_current_head(engine)
         async with engine.begin() as conn:
             await conn.execute(sa.text("DELETE FROM alembic_version"))
 
@@ -294,7 +319,7 @@ async def test_empty_alembic_version_fails_closed(tmp_path: Path) -> None:
 async def test_multiple_alembic_versions_fail_closed(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "multiple-versions.db"))
     try:
-        await _seed_head(engine)
+        await _seed_current_head(engine)
         async with engine.begin() as conn:
             await conn.execute(
                 sa.text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
@@ -307,24 +332,39 @@ async def test_multiple_alembic_versions_fail_closed(tmp_path: Path) -> None:
         await engine.dispose()
 
 
-async def _add_forward_columns(engine) -> None:
-    async with engine.begin() as conn:
-        await conn.execute(sa.text("ALTER TABLE threads_meta ADD COLUMN incarnation VARCHAR(32)"))
-        await conn.execute(sa.text("ALTER TABLE mcp_tasks ADD COLUMN thread_incarnation VARCHAR(32)"))
-
-
 @pytest.mark.asyncio
-async def test_old_thread_repository_tolerates_forward_nullable_column(tmp_path: Path) -> None:
+async def test_rollback_thread_writer_tolerates_forward_nullable_column(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "thread-repository.db"))
     try:
-        await _seed_head(engine)
-        await _add_forward_columns(engine)
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        repository = ThreadMetaRepository(session_factory)
-
-        created = await repository.create("thread-1", user_id=None)
-        assert created["thread_id"] == "thread-1"
-        assert "incarnation" not in created
+        await _seed_current_head(engine)
+        # This is the complete 0018 table shape. Keeping it independent from
+        # the current ORM prevents a future model change from silently making
+        # this rollback-writer test aware of the forward column.
+        old_threads = sa.table(
+            "threads_meta",
+            sa.column("thread_id"),
+            sa.column("assistant_id"),
+            sa.column("user_id"),
+            sa.column("display_name"),
+            sa.column("status"),
+            sa.column("metadata_json", sa.JSON()),
+            sa.column("created_at", sa.DateTime(timezone=True)),
+            sa.column("updated_at", sa.DateTime(timezone=True)),
+        )
+        now = datetime.now(UTC)
+        async with engine.begin() as conn:
+            await conn.execute(
+                old_threads.insert().values(
+                    thread_id="thread-1",
+                    assistant_id=None,
+                    user_id=None,
+                    display_name=None,
+                    status="idle",
+                    metadata_json={},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
 
         async with engine.begin() as conn:
             await conn.execute(
@@ -332,54 +372,110 @@ async def test_old_thread_repository_tolerates_forward_nullable_column(tmp_path:
                 {"incarnation": "a" * 32, "thread_id": "thread-1"},
             )
 
-        fetched = await repository.get("thread-1", user_id=None)
-        assert fetched is not None
-        assert "incarnation" not in fetched
-        await repository.update_status("thread-1", "busy", user_id=None)
+            fetched = (await conn.execute(sa.select(*old_threads.c).where(old_threads.c.thread_id == "thread-1"))).mappings().one()
+            assert fetched["thread_id"] == "thread-1"
+            assert "incarnation" not in fetched
+            await conn.execute(old_threads.update().where(old_threads.c.thread_id == "thread-1").values(status="busy", updated_at=datetime.now(UTC)))
 
         async with engine.connect() as conn:
-            incarnation = (
+            row = (
                 await conn.execute(
-                    sa.text("SELECT incarnation FROM threads_meta WHERE thread_id = :thread_id"),
+                    sa.text("SELECT status, incarnation FROM threads_meta WHERE thread_id = :thread_id"),
                     {"thread_id": "thread-1"},
                 )
-            ).scalar_one()
-        assert incarnation == "a" * 32
+            ).one()
+        assert row == ("busy", "a" * 32)
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_old_mcp_task_repository_tolerates_forward_nullable_column(tmp_path: Path) -> None:
+async def test_rollback_mcp_task_writer_tolerates_forward_nullable_column(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "mcp-repository.db"))
     try:
-        await _seed_head(engine)
-        await _add_forward_columns(engine)
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        repository = McpTaskRepository(session_factory)
+        await _seed_current_head(engine)
+        # This is the complete 0018 table shape, deliberately excluding only
+        # 0019's thread_incarnation column.
+        old_tasks = sa.table(
+            "mcp_tasks",
+            sa.column("id"),
+            sa.column("user_id"),
+            sa.column("thread_id"),
+            sa.column("run_id"),
+            sa.column("tool_call_id"),
+            sa.column("server_name"),
+            sa.column("driver_name"),
+            sa.column("remote_task_id"),
+            sa.column("task_name"),
+            sa.column("status"),
+            sa.column("result", sa.JSON()),
+            sa.column("result_preview"),
+            sa.column("result_truncated", sa.Boolean()),
+            sa.column("result_artifact", sa.JSON()),
+            sa.column("error"),
+            sa.column("input_required", sa.JSON()),
+            sa.column("driver_data", sa.JSON()),
+            sa.column("notification_status"),
+            sa.column("event_fingerprint"),
+            sa.column("event_version", sa.Integer()),
+            sa.column("notified_version", sa.Integer()),
+            sa.column("dispatch_version", sa.Integer()),
+            sa.column("dispatch_attempt", sa.Integer()),
+            sa.column("dispatch_event", sa.JSON()),
+            sa.column("notification_run_id"),
+            sa.column("notification_error"),
+            sa.column("notification_attempt_count", sa.Integer()),
+            sa.column("next_notification_at", sa.DateTime(timezone=True)),
+            sa.column("notification_lease_owner"),
+            sa.column("notification_lease_expires_at", sa.DateTime(timezone=True)),
+            sa.column("next_poll_at", sa.DateTime(timezone=True)),
+            sa.column("last_polled_at", sa.DateTime(timezone=True)),
+            sa.column("last_poll_error"),
+            sa.column("poll_attempt_count", sa.Integer()),
+            sa.column("consecutive_poll_error_count", sa.Integer()),
+            sa.column("lease_owner"),
+            sa.column("lease_expires_at", sa.DateTime(timezone=True)),
+            sa.column("cancel_requested_at", sa.DateTime(timezone=True)),
+            sa.column("cancel_attempt_count", sa.Integer()),
+            sa.column("next_cancel_at", sa.DateTime(timezone=True)),
+            sa.column("last_cancel_error"),
+            sa.column("completed_at", sa.DateTime(timezone=True)),
+            sa.column("created_at", sa.DateTime(timezone=True)),
+            sa.column("updated_at", sa.DateTime(timezone=True)),
+        )
         now = datetime.now(UTC)
 
-        created = await repository.create(
-            task_id="task-1",
-            user_id="user-1",
-            thread_id="thread-1",
-            run_id="run-1",
-            tool_call_id="call-1",
-            server_name="reports",
-            driver_name="fake",
-            remote_task_id="remote-1",
-            task_name="Generate report",
-            status="working",
-            result=None,
-            result_preview=None,
-            result_truncated=False,
-            result_artifact=None,
-            error=None,
-            input_required=None,
-            next_poll_at=now - timedelta(seconds=1),
-        )
-        assert created["id"] == "task-1"
-        assert "thread_incarnation" not in created
+        async with engine.begin() as conn:
+            await conn.execute(
+                old_tasks.insert().values(
+                    id="task-1",
+                    user_id="user-1",
+                    thread_id="thread-1",
+                    run_id="run-1",
+                    tool_call_id="call-1",
+                    server_name="reports",
+                    driver_name="fake",
+                    remote_task_id="remote-1",
+                    task_name="Generate report",
+                    status="working",
+                    result=None,
+                    error=None,
+                    input_required=None,
+                    driver_data={},
+                    notification_status="none",
+                    next_poll_at=now - timedelta(seconds=1),
+                    last_polled_at=None,
+                    last_poll_error=None,
+                    poll_attempt_count=0,
+                    consecutive_poll_error_count=0,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    cancel_requested_at=None,
+                    completed_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
 
         async with engine.begin() as conn:
             await conn.execute(
@@ -387,32 +483,52 @@ async def test_old_mcp_task_repository_tolerates_forward_nullable_column(tmp_pat
                 {"incarnation": "b" * 32, "task_id": "task-1"},
             )
 
-        fetched = await repository.get("task-1", user_id="user-1")
-        assert fetched is not None
-        assert "thread_incarnation" not in fetched
-        claimed = await repository.claim_due_tasks(
-            now=now,
-            lease_owner="worker-1",
-            lease_seconds=60,
-            limit=1,
-        )
-        assert [task["id"] for task in claimed] == ["task-1"]
+            fetched = (
+                (
+                    await conn.execute(
+                        sa.select(*old_tasks.c).where(
+                            old_tasks.c.id == "task-1",
+                            old_tasks.c.user_id == "user-1",
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            assert fetched["id"] == "task-1"
+            assert "thread_incarnation" not in fetched
+            await conn.execute(
+                old_tasks.update()
+                .where(
+                    old_tasks.c.id == "task-1",
+                    old_tasks.c.status == "working",
+                    old_tasks.c.next_poll_at <= now,
+                )
+                .values(
+                    lease_owner="worker-1",
+                    lease_expires_at=now + timedelta(seconds=60),
+                    poll_attempt_count=old_tasks.c.poll_attempt_count + 1,
+                    updated_at=now,
+                )
+            )
 
         async with engine.connect() as conn:
-            incarnation = (
+            row = (
                 await conn.execute(
-                    sa.text("SELECT thread_incarnation FROM mcp_tasks WHERE id = :task_id"),
+                    sa.text("SELECT lease_owner, poll_attempt_count, thread_incarnation FROM mcp_tasks WHERE id = :task_id"),
                     {"task_id": "task-1"},
                 )
-            ).scalar_one()
-        assert incarnation == "b" * 32
+            ).one()
+        assert row == ("worker-1", 1, "b" * 32)
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not POSTGRES_URL, reason="requires TEST_POSTGRES_URI for a real PostgreSQL restart")
-async def test_old_gateway_restarts_against_forward_postgres_revision() -> None:
+async def test_old_gateway_restarts_against_forward_postgres_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     assert POSTGRES_URL is not None
     schema = f"forward_revision_{uuid.uuid4().hex}"
     config = DatabaseConfig(
@@ -424,15 +540,10 @@ async def test_old_gateway_restarts_against_forward_postgres_revision() -> None:
         await init_engine_from_config(config)
         engine = get_engine()
         assert engine is not None
-        async with engine.begin() as conn:
-            await conn.execute(sa.text("ALTER TABLE threads_meta ADD COLUMN incarnation VARCHAR(32)"))
-            await conn.execute(sa.text("ALTER TABLE mcp_tasks ADD COLUMN thread_incarnation VARCHAR(32)"))
-            await conn.execute(
-                sa.text("UPDATE alembic_version SET version_num = :revision"),
-                {"revision": _FORWARD_COMPATIBLE_REVISION},
-            )
+        assert await _database_revision(engine) == CURRENT_HEAD
 
         await close_engine()
+        _simulate_rollback_binary(monkeypatch)
         await init_engine_from_config(config)
 
         restarted_engine = get_engine()

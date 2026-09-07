@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0019_thread_incarnations"
+HEAD = _get_head_revision()
 BASELINE = "0001_baseline"
 
 

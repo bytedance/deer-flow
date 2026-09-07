@@ -1,3 +1,4 @@
+import contextlib
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
@@ -181,25 +182,26 @@ async def test_create_observes_delete_and_recreate_at_insert_boundary(tmp_path):
             return
         replaced = True
         insert_statement = statement
-        with sqlite3.connect(tmp_path / "deerflow.db") as connection:
-            connection.execute("DELETE FROM threads_meta WHERE thread_id = ?", ("thread-1",))
-            connection.execute(
-                """
-                INSERT INTO threads_meta (
-                    thread_id, incarnation, user_id, status, metadata_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "thread-1",
-                    "replacement-incarnation",
-                    "user-1",
-                    "idle",
-                    "{}",
-                    now.isoformat(),
-                    now.isoformat(),
-                ),
-            )
+        with contextlib.closing(sqlite3.connect(tmp_path / "deerflow.db")) as connection:
+            with connection:
+                connection.execute("DELETE FROM threads_meta WHERE thread_id = ?", ("thread-1",))
+                connection.execute(
+                    """
+                    INSERT INTO threads_meta (
+                        thread_id, incarnation, user_id, status, metadata_json,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "thread-1",
+                        "replacement-incarnation",
+                        "user-1",
+                        "idle",
+                        "{}",
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
 
     event.listen(engine.sync_engine, "before_cursor_execute", replace_thread_before_task_insert)
     try:

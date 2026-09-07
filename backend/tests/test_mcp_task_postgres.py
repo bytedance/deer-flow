@@ -8,6 +8,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import pytest
 import pytest_asyncio
 from sqlalchemy import event, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
@@ -92,6 +93,9 @@ async def test_postgres_task_create_serializes_with_thread_mutation(postgres_rep
         await asyncio.sleep(0.1)
         assert not mutation_task.done()
 
+        # PostgreSQL grants the mutation's earlier queued row-lock request
+        # before this later FOR SHARE request. The task therefore observes the
+        # committed delete/owner change rather than the pre-mutation row.
         create_task = asyncio.create_task(_create_task(task_repo, f"task-{mutation}"))
         await asyncio.sleep(0.1)
         assert not create_task.done()
@@ -128,33 +132,85 @@ async def test_postgres_task_create_uses_share_lock(postgres_repositories) -> No
 
 
 @pytest.mark.asyncio
-async def test_postgres_share_lock_blocks_legacy_owner_update(postgres_repositories) -> None:
+async def test_postgres_repository_holds_share_lock_until_task_commit(postgres_repositories) -> None:
     thread_repo, _task_repo, session_factory = postgres_repositories
     created = await thread_repo.create("thread-1", user_id="user-1")
+    engine = get_engine()
+    assert engine is not None
+    task_commit_entered = asyncio.Event()
+    allow_task_commit = asyncio.Event()
+    owner_update_started = asyncio.Event()
+    task_backend_pid: int | None = None
+    owner_backend_pid: int | None = None
 
-    async with session_factory() as task_writer:
-        incarnation = await task_writer.scalar(
-            select(ThreadMetaRow.incarnation)
-            .where(
-                ThreadMetaRow.thread_id == "thread-1",
-                ThreadMetaRow.user_id == "user-1",
-            )
-            .with_for_update(read=True)
-        )
-        assert incarnation == created["incarnation"]
+    class PausingTaskCommitSession(AsyncSession):
+        async def commit(self) -> None:
+            nonlocal task_backend_pid
+            contains_target_task = any(isinstance(instance, McpTaskRow) and instance.id == "task-lock-lifetime" for instance in self.new)
+            if contains_target_task:
+                task_backend_pid = await self.scalar(text("SELECT pg_backend_pid()"))
+                task_commit_entered.set()
+                await allow_task_commit.wait()
+            await super().commit()
 
-        async def legacy_update_owner() -> None:
-            async with session_factory() as legacy_writer:
-                await legacy_writer.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == "thread-1").values(user_id="user-2"))
-                await legacy_writer.commit()
+    task_session_factory = async_sessionmaker(
+        engine,
+        expire_on_commit=False,
+        class_=PausingTaskCommitSession,
+    )
+    task_repo = McpTaskRepository(task_session_factory)
 
+    def observe_owner_update(_conn, _cursor, statement, _parameters, _context, _executemany):
+        normalized = " ".join(statement.upper().split())
+        if normalized.startswith("UPDATE THREADS_META SET USER_ID"):
+            owner_update_started.set()
+
+    async def legacy_update_owner() -> None:
+        nonlocal owner_backend_pid
+        async with session_factory() as legacy_writer:
+            owner_backend_pid = await legacy_writer.scalar(text("SELECT pg_backend_pid()"))
+            await legacy_writer.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == "thread-1").values(user_id="user-2"))
+            await legacy_writer.commit()
+
+    event.listen(engine.sync_engine, "before_cursor_execute", observe_owner_update)
+    task_create = asyncio.create_task(_create_task(task_repo, "task-lock-lifetime"))
+    owner_update = None
+    try:
+        await asyncio.wait_for(task_commit_entered.wait(), timeout=5)
         owner_update = asyncio.create_task(legacy_update_owner())
-        await asyncio.sleep(0.1)
-        assert not owner_update.done()
-        await task_writer.commit()
+        await asyncio.wait_for(owner_update_started.wait(), timeout=5)
+        assert task_backend_pid is not None
+        assert owner_backend_pid is not None
+        async with session_factory() as observer:
+            async with asyncio.timeout(5):
+                while True:
+                    if owner_update.done():
+                        await owner_update
+                        pytest.fail("owner update completed before the task transaction committed")
+                    blockers = await observer.scalar(
+                        text("SELECT pg_blocking_pids(:pid)"),
+                        {"pid": owner_backend_pid},
+                    )
+                    if task_backend_pid in blockers:
+                        break
+                    await asyncio.sleep(0.01)
+        allow_task_commit.set()
+        await asyncio.wait_for(task_create, timeout=5)
+        await asyncio.wait_for(owner_update, timeout=5)
+    finally:
+        allow_task_commit.set()
+        event.remove(engine.sync_engine, "before_cursor_execute", observe_owner_update)
+        if not task_create.done():
+            task_create.cancel()
+            await asyncio.gather(task_create, return_exceptions=True)
+        if owner_update is not None and not owner_update.done():
+            owner_update.cancel()
+            await asyncio.gather(owner_update, return_exceptions=True)
 
-    await asyncio.wait_for(owner_update, timeout=5)
     async with session_factory() as session:
-        row = await session.get(ThreadMetaRow, "thread-1")
-    assert row is not None
-    assert row.user_id == "user-2"
+        thread = await session.get(ThreadMetaRow, "thread-1")
+        task = await session.get(McpTaskRow, "task-lock-lifetime")
+    assert thread is not None
+    assert thread.user_id == "user-2"
+    assert task is not None
+    assert task.thread_incarnation == created["incarnation"]

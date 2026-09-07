@@ -16,7 +16,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateTable
 
-from deerflow.persistence.bootstrap import _get_alembic_config
+from deerflow.persistence.bootstrap import _FORWARD_COMPATIBLE_REVISION, _get_alembic_config
 
 _PREVIOUS = "0020_threads_meta_project_id"
 _REVISION = "0019_thread_incarnations"
@@ -33,6 +33,37 @@ def _asyncpg_url(url: str | None) -> str | None:
 
 
 _POSTGRES_URL = _asyncpg_url(os.getenv("DEERFLOW_TEST_POSTGRES_URL") or os.getenv("TEST_POSTGRES_URI"))
+
+
+def test_0019_matches_reviewed_rollback_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    migration = importlib.import_module(_MIGRATION_MODULE)
+    events: list[tuple[str, str, str, int | None, bool, object]] = []
+
+    def capture_preflight(table: str, column_name: str) -> None:
+        events.append(("preflight", table, column_name, None, True, None))
+
+    def capture_add(table: str, column: sa.Column) -> None:
+        assert isinstance(column.type, sa.VARCHAR)
+        events.append(("add", table, str(column.name), column.type.length, bool(column.nullable), column.server_default))
+
+    class NoAdditionalOperations:
+        def __getattr__(self, name: str):
+            raise AssertionError(f"0019 rollback contract does not allow direct Alembic operation: {name}")
+
+    monkeypatch.setattr(migration, "_assert_existing_column_compatible", capture_preflight)
+    monkeypatch.setattr(migration, "safe_add_column", capture_add)
+    monkeypatch.setattr(migration, "op", NoAdditionalOperations())
+
+    migration.upgrade()
+
+    assert migration.revision == _FORWARD_COMPATIBLE_REVISION == _REVISION
+    assert migration.down_revision == _PREVIOUS
+    assert events == [
+        ("preflight", "threads_meta", "incarnation", None, True, None),
+        ("preflight", "mcp_tasks", "thread_incarnation", None, True, None),
+        ("add", "threads_meta", "incarnation", 32, True, None),
+        ("add", "mcp_tasks", "thread_incarnation", 32, True, None),
+    ]
 
 
 @pytest.mark.asyncio
