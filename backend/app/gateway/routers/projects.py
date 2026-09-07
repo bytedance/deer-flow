@@ -1,14 +1,15 @@
 """CRUD API for projects (Phase 1: organization only — no documents/trash)."""
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_project_repo, get_thread_store
 from deerflow.runtime.secret_context import redact_metadata_secrets
+from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -40,6 +41,29 @@ class ProjectPatchRequest(BaseModel):
 
 class ProjectListResponse(BaseModel):
     projects: list[ProjectResponse]
+
+
+class ProjectThreadResponse(BaseModel):
+    """A thread row from ``GET /api/projects/{id}/threads``.
+
+    Deliberately narrow — only the fields ``ProjectThread`` declares in
+    ``frontend/src/core/projects/types.ts``. Store rows carry ownership
+    columns (``user_id``, ``assistant_id``) and ``ThreadMetaRow`` may grow;
+    without this model those would leak onto the wire and the route's
+    OpenAPI schema stays empty. Metadata is redacted here exactly as the
+    surrounding thread endpoints redact it via ``_MetadataRedactingResponse``.
+    """
+
+    thread_id: str
+    display_name: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("metadata", mode="before", check_fields=False)
+    @classmethod
+    def _redact_metadata_secrets(cls, value: Any) -> Any:
+        return redact_metadata_secrets(value)
 
 
 def _to_response(row: dict) -> ProjectResponse:
@@ -116,13 +140,28 @@ async def delete_project(project_id: str, request: Request) -> None:
         raise _not_found()
 
 
-@router.get("/{project_id}/threads")
+@router.get("/{project_id}/threads", response_model=list[ProjectThreadResponse])
 @require_permission("projects", "read")
 @require_permission("threads", "read")
-async def list_project_threads(project_id: str, request: Request, limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0)) -> list[dict]:
+async def list_project_threads(project_id: str, request: Request, limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0)) -> list[ProjectThreadResponse]:
     if await get_project_repo(request).get(project_id) is None:
         raise _not_found()
-    rows = await get_thread_store(request).search(project_id=project_id, limit=limit, offset=offset)
-    for row in rows:
-        row["metadata"] = redact_metadata_secrets(row.get("metadata"))
-    return rows
+    # Active members only, mirroring the sidebar's `archived: false` lists:
+    # an archived chat leaves the project's pages the same way it leaves the
+    # sidebar and returns only via the global Archived tab.
+    rows = await get_thread_store(request).search(
+        project_id=project_id,
+        archived=False,
+        limit=limit,
+        offset=offset,
+    )
+    return [
+        ProjectThreadResponse(
+            thread_id=r["thread_id"],
+            display_name=r.get("display_name"),
+            created_at=coerce_iso(r.get("created_at", "")),
+            updated_at=coerce_iso(r.get("updated_at", "")),
+            metadata=r.get("metadata", {}),
+        )
+        for r in rows
+    ]

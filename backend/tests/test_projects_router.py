@@ -22,7 +22,7 @@ from app.gateway.authz import AuthContext, Permissions
 from app.gateway.routers import projects
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 from deerflow.persistence.projects import ProjectRepository
-from deerflow.persistence.thread_meta import THREAD_PROJECT_METADATA_KEY, ThreadMetaRepository
+from deerflow.persistence.thread_meta import THREAD_ARCHIVED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadMetaRepository
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 _STUB_PERMISSIONS: list[str] = [
@@ -311,3 +311,45 @@ def test_memory_backend_unavailable(tmp_path):
     with TestClient(app) as client:
         assert client.get("/api/projects").status_code == 503
         assert client.post("/api/projects", json={"name": "p"}).status_code == 503
+
+
+def test_project_threads_wire_shape_is_narrow(tmp_path):
+    """The listing must not leak store-row internals: ownership columns
+    (``user_id``/``assistant_id``) and any future ``ThreadMetaRow`` column
+    stay off the wire, and the OpenAPI schema is no longer empty. The model
+    pins exactly the fields ``ProjectThread`` declares."""
+    app = _build_projects_app(tmp_path)
+    with TestClient(app) as client:
+        project = client.post("/api/projects", json={"name": "p"}).json()
+        pid = project["id"]
+        _seed_thread(app, "thread-1", user_id="user-a", project_id=pid, metadata={"keep": "x"})
+
+        response = client.get(f"/api/projects/{pid}/threads")
+        assert response.status_code == 200
+        rows = response.json()
+        assert len(rows) == 1
+        row = rows[0]
+        assert set(row) == {"thread_id", "display_name", "created_at", "updated_at", "metadata"}
+        assert row["thread_id"] == "thread-1"
+        assert row["metadata"] == {"keep": "x", THREAD_PROJECT_METADATA_KEY: pid}
+
+
+def test_project_threads_excludes_archived_members(tmp_path):
+    """Archived chats leave the project listing the same way they leave the
+    sidebar (``archived: false`` semantics): no silent normal-row rendering
+    of a retired chat on the project page. The store keeps the row; restore
+    flows through the global Archived tab as elsewhere."""
+    app = _build_projects_app(tmp_path)
+    with TestClient(app) as client:
+        project = client.post("/api/projects", json={"name": "p"}).json()
+        pid = project["id"]
+        _seed_thread(app, "active-1", user_id="user-a", project_id=pid)
+        _seed_thread(app, "archived-1", user_id="user-a", project_id=pid, metadata={THREAD_ARCHIVED_METADATA_KEY: True})
+
+        response = client.get(f"/api/projects/{pid}/threads")
+        assert response.status_code == 200
+        assert [t["thread_id"] for t in response.json()] == ["active-1"]
+
+        # The archived row still exists in the store (unfiltered search).
+        stored = _search_threads(app, user_id="user-a", project_id=pid)
+        assert {t["thread_id"] for t in stored} == {"active-1", "archived-1"}
