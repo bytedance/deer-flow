@@ -188,6 +188,67 @@ def test_scoped_clear_does_not_fence_another_agent(tmp_path: Path) -> None:
     assert storage.load("agent-a", user_id="alice")["facts"] == []
 
 
+def test_clear_all_raises_generation_before_per_agent_wipes(tmp_path: Path) -> None:
+    """A stale writer must be fenced before the first interior agent wipe.
+
+    ``clear_all`` used to delete each agent with the user generation still at
+    0 and bump only in the final summaries commit. A same-process extraction
+    could then reload the emptied agent, rebase, and restore facts the rest of
+    the loop never re-wipes.
+    """
+    config = DeerMemConfig(storage_path=str(tmp_path))
+    storage = FileMemoryStorage(config)
+    assert storage.save(_memory_with_fact("A likes Python"), "planner", user_id="alice")
+    researcher_fact = copy.deepcopy(_memory_with_fact("User likes Python")["facts"][0])
+    researcher_fact["id"] = "fact_researcher"
+    assert storage.save(_memory_with_fact() | {"facts": [researcher_fact]}, "researcher", user_id="alice")
+    loaded = storage.load("researcher", user_id="alice")
+    old_generation = scope_clear_generation(loaded, "researcher")
+
+    path = storage._get_memory_file_path(user_id="alice")
+    real_commit = storage._commit_changes_locked
+    probing = False
+    fenced_commits = 0
+
+    def wrapped(*args, **kwargs):
+        nonlocal probing, fenced_commits
+        result = real_commit(*args, **kwargs)
+        if probing:
+            return result
+        probing = True
+        try:
+            # Probe inside the held locks: a same-process writer on Linux can
+            # enter _commit_changes_locked while clear_all still owns flock.
+            restored = copy.deepcopy(_memory_with_fact("restored during clear_all")["facts"][0])
+            restored["id"] = "fact_restored"
+            current = storage._load_memory_file(path)
+            with pytest.raises(MemoryClearGenerationConflict):
+                real_commit(
+                    path,
+                    user_id="alice",
+                    agent_name="researcher",
+                    upserts=[restored],
+                    deletes=[],
+                    summaries=None,
+                    expected_revision=int((current or {}).get("revision") or 0),
+                    upsert_revisions={"fact_restored": None},
+                    expected_clear_generation=old_generation,
+                )
+            fenced_commits += 1
+        finally:
+            probing = False
+        return result
+
+    storage._commit_changes_locked = wrapped  # type: ignore[method-assign]
+    storage.clear_all(user_id="alice")
+
+    assert fenced_commits >= 1
+    assert storage.load("planner", user_id="alice")["facts"] == []
+    assert storage.load("researcher", user_id="alice")["facts"] == []
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["clearGeneration"] == 1
+
+
 def test_user_wide_clear_fences_every_agent(tmp_path: Path) -> None:
     storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)))
     assert storage.save(_memory_with_fact(), "agent-a", user_id="alice")
@@ -254,6 +315,35 @@ def test_in_flight_extraction_does_not_restore_facts_after_cross_worker_clear(tm
     fresh = FileMemoryStorage(config).load("researcher", user_id="alice")
     assert result is False
     assert fresh["facts"] == []
+
+    later = updater.update_memory(conversation, thread_id="thread-1", agent_name="researcher", user_id="alice")
+    assert later is True
+    assert updater._llm.invoke.call_count == 1
+    assert FileMemoryStorage(config).load("researcher", user_id="alice")["facts"] == []
+
+
+def test_in_flight_extraction_does_not_restore_facts_after_cross_worker_clear_all(tmp_path: Path) -> None:
+    config = DeerMemConfig(storage_path=str(tmp_path), fact_confidence_threshold=0.7, max_facts=100)
+    storage = FileMemoryStorage(config)
+    assert storage.save(_memory_with_fact("A likes Python"), "planner", user_id="alice")
+    researcher_fact = copy.deepcopy(_memory_with_fact("User likes Python")["facts"][0])
+    researcher_fact["id"] = "fact_researcher"
+    assert storage.save(_memory_with_fact() | {"facts": [researcher_fact]}, "researcher", user_id="alice")
+    other = DeerMem(backend_config={"storage_path": str(tmp_path)})
+
+    def invoke_and_clear_all(prompt, config=None):
+        other.clear_memory(user_id="alice")
+        response = MagicMock()
+        response.content = _extraction_json("User likes Python")
+        return response
+
+    updater = _updater(storage, invoke_and_clear_all)
+    conversation = _conversation()
+    result = updater.update_memory(conversation, thread_id="thread-1", agent_name="researcher", user_id="alice")
+
+    assert result is False
+    assert FileMemoryStorage(config).load("planner", user_id="alice")["facts"] == []
+    assert FileMemoryStorage(config).load("researcher", user_id="alice")["facts"] == []
 
     later = updater.update_memory(conversation, thread_id="thread-1", agent_name="researcher", user_id="alice")
     assert later is True

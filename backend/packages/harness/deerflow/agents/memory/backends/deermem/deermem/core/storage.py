@@ -539,8 +539,10 @@ class MemoryStorage(abc.ABC):
     def clear_all(self, *, user_id: str | None = None) -> dict[str, Any]:
         """Clear global summaries and every agent fact bucket for one user.
 
-        Implementations must bump the user-wide clear generation in the same
-        atomic commit as the clear so in-flight writers cannot restore facts.
+        Implementations must raise the user-wide clear generation before or
+        with the first per-scope wipe so in-flight writers cannot restore
+        facts onto an emptied bucket while the rest of the clear is still
+        running.
         """
         raise NotImplementedError
 
@@ -1564,7 +1566,12 @@ class FileMemoryStorage(MemoryStorage):
         return True
 
     def clear_all(self, *, user_id: str | None = None) -> dict[str, Any]:
-        """Clear one user's summaries and all agent facts, preserving agent configs."""
+        """Clear one user's summaries and all agent facts, preserving agent configs.
+
+        Raise the user clear-generation fence before per-agent wipes so an
+        in-flight writer cannot rebase onto an emptied agent while later
+        buckets are still being deleted.
+        """
         path = self._get_memory_file_path(user_id=user_id)
         key = self._cache_key(user_id=user_id)
         notifications_by_agent: list[ScopedRetrievalNotifications] = []
@@ -1577,6 +1584,18 @@ class FileMemoryStorage(MemoryStorage):
             ),
         ):
             self._recover_if_needed(path)
+            empty = create_empty_memory()
+            current_memory = self._load_memory_file(path)
+            self._commit_changes_locked(
+                path,
+                user_id=user_id,
+                agent_name=None,
+                upserts=[],
+                deletes=[],
+                summaries={"user": empty["user"], "history": empty["history"]},
+                expected_revision=int((current_memory or {}).get("revision") or 0),
+                bump_clear_generation="user",
+            )
             agents_root = path.parent / "agents"
             if agents_root.exists():
                 for agent_dir in sorted(child for child in agents_root.iterdir() if child.is_dir()):
@@ -1609,19 +1628,6 @@ class FileMemoryStorage(MemoryStorage):
                         delete_revisions={str(fact["id"]): int(fact.get("revision") or 1) for fact in facts},
                     )
                     notifications_by_agent.append((agent_name, notifications))
-
-            empty = create_empty_memory()
-            current_memory = self._load_memory_file(path)
-            self._commit_changes_locked(
-                path,
-                user_id=user_id,
-                agent_name=None,
-                upserts=[],
-                deletes=[],
-                summaries={"user": empty["user"], "history": empty["history"]},
-                expected_revision=int((current_memory or {}).get("revision") or 0),
-                bump_clear_generation="user",
-            )
 
         for agent_name, notifications in notifications_by_agent:
             self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name)

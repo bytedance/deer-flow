@@ -20,6 +20,8 @@ Broader cancellation must iterate known user scopes.
 A durable clear generation in `memory.json` fences that in-flight window and other Gateway workers.
 The queue captures the generation at enqueue, before the process-local queue lock.
 A later clear bumps the generation in the same locked commit as the wipe.
+User-wide `clear_all` raises that generation before per-agent wipes so an
+in-flight writer cannot rebase onto an emptied agent.
 Extraction drops before the LLM call, and again at commit, when a newer clear exists.
 
 Focused updater tests live in `backend/tests/test_memory_updater.py`.
@@ -99,6 +101,7 @@ Point operations can rebase only when all original fact preconditions still hold
 Snapshot operations must reload and recompute after a manifest conflict.
 Use the typed conflict classes instead of matching exception text.
 A clear bumps `clearGeneration` / `agentClearGenerations` in the same locked commit as the wipe.
+User-wide `clear_all` raises the user generation before per-agent wipes.
 `apply_changes` and `clear_all` must honor `expected_clear_generation` atomically.
 Custom `storage_class` providers must override `capabilities()` to advertise `clear-generation`.
 `create_storage` rejects providers that only pass those values through `**scope`.
