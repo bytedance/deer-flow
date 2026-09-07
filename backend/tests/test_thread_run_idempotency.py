@@ -235,6 +235,39 @@ def test_wait_reused_store_only_run_does_not_return_stale_checkpoint(monkeypatch
     assert "PREVIOUS_TURN" not in response.text
 
 
+def test_stream_reused_store_only_running_run_returns_409(monkeypatch):
+    """A reused running record on a process-local bridge must not hang on an empty stream."""
+
+    async def fake_start_run(body, thread_id, request, *, idempotency_key=None, require_existing_thread=False):
+        del body, request, idempotency_key, require_existing_thread
+        return RunRecord(
+            run_id="run-live",
+            thread_id=thread_id,
+            assistant_id=None,
+            status=RunStatus.running,
+            on_disconnect=DisconnectMode.continue_,
+            store_only=True,
+            idempotency_reused=True,
+        )
+
+    monkeypatch.setattr(thread_runs, "start_run", fake_start_run)
+
+    app = make_authed_test_app(user_factory=lambda: _user("alice@example.com"))
+    app.include_router(thread_runs.router)
+    app.state.stream_bridge = _LocalBridge()
+    app.state.run_manager = MagicMock()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/threads/thread-1/runs/stream",
+            json={"input": {"messages": []}},
+            headers={"Idempotency-Key": "send-message-1"},
+        )
+
+    assert response.status_code == 409, response.text
+    assert "not active on this worker" in response.json()["detail"]
+
+
 @pytest.mark.anyio
 async def test_sse_consumer_reused_terminal_missing_stream_yields_gap():
     from app.gateway.services import sse_consumer
