@@ -307,6 +307,41 @@ make down   # 停止并移除容器
 
 5. **访问地址**：http://localhost:2026
 
+#### LangGraph Studio（可选）
+
+默认的 `make dev` 拓扑使用 DeerFlow 内嵌于 Gateway 的运行时，无需 LangGraph Studio。
+如需用独立开发服务器检查和测试已注册的 lead-agent 图，请在 `backend/` 目录下运行
+以下命令，以便 CLI 发现 `langgraph.json`：
+
+```bash
+cd backend
+uv run langgraph dev --allow-blocking
+```
+
+该命令会打印本地 API 与 Studio UI 地址。这个内存态服务器仅用于开发与测试；
+该标志允许 DeerFlow 在处理本地 Studio 请求时执行同步的配置加载与图工厂初始化，
+不能当作生产服务器设置使用。本地 Studio 的认证会自动处理，连接无需自定义请求头。
+生产负载请使用 DeerFlow 文档中的生产启动模式或受支持的 LangSmith 部署。在这种
+独立模式下，assistant 的归属与来源由服务器管理：Studio 可以发现已注册的图及其
+创建的 assistants，正常的 assistant 版本选择依然可用。在锁定态本地运行时加载其
+持久化开发存储之前，DeerFlow 会修复历史遗留的 assistant 行与版本历史，防止历史
+客户端元数据恢复服务器权限，或被运行时的启动清理流程丢弃。请用 `uv sync` 保持
+后端依赖同步；该兼容路径依赖已声明的 LangGraph 运行时版本，若持久化存储契约
+与预期不再匹配会记录警告。文档中的命令使用 LangGraph 基于文件的自定义应用加载器，
+DeerFlow 的回归测试也直接覆盖了它。
+
+对通过 LangGraph Studio 或直连 LangGraph Server 调用 `backend/langgraph.json`
+的工作流，DeerFlow 会消费该运行时发布的已认证身份，并将其用于 custom-agent
+配置/SOUL、用户技能与技能策略、上传、线程数据以及记忆读写。这使经过认证的运行
+不会落入共享的 `default` 文件系统桶，且服务器管理的身份优先于普通客户端提供的
+`user_id` 值。诸如邮箱地址之类的外部身份会在访问 DeerFlow 存储前，被映射为稳定、
+抗碰撞且目录安全的用户 ID。默认的 DeerFlow 服务拓扑仍是上文描述的 Gateway 内嵌
+运行时。
+
+Gateway 运行时会自动强制对 `/mnt/user-data/outputs` 下创建或修改的产物执行原生交付：`present_files` 必须至少展示一个由当前运行产出的输出，且终止时的 `run.delivery` 回执必须被持久化记录。虚拟产物路径会在产出该输出的同一已认证用户与线程范围内解析，然后再校验输出目录边界。未产出产物文件的运行保持普通对话行为。
+
+DeerFlow 的内置自定义事件同时通过两种 LangGraph 流式接口提供：原生客户端可以继续订阅 `stream_mode="custom"`，基于回调的集成则可以从 `astream_events(version="v2")` 以 `on_custom_event` 记录的形式消费相同载荷。回调事件名与载荷的 `type` 字段一致。
+
 ### 进阶配置
 #### Sandbox 模式
 
@@ -506,6 +541,29 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 
 > 没有命令前缀的消息会被当作普通聊天处理。DeerFlow 会自动创建 thread，并以对话方式回复。
 
+#### 请求链路关联
+
+每个 Gateway HTTP 响应都携带 `X-Trace-Id` 响应头。若调用方传入了入站 `X-Trace-Id` 则继承之，否则自动生成，代理或上游服务可以借此跨服务固定同一个 id。该行为无需配置，也无法关闭。
+
+同一 id 会附着在生命周期超出 HTTP 响应的工作上：分离出的运行任务、它委派的 subagent，以及后台记忆更新线程。它以 `deerflow_trace_id` 的形式记录在 run 记录上（runs API 可见）、thread 的 checkpoint 元数据中，以及 Langfuse 追踪里。定时任务、MCP 任务通知运行和 IM 渠道消息不经 HTTP 启动，会为每次出现自行铸造一个 id。
+
+仅当增强日志开启时，日志记录才会携带该 id：
+
+```yaml
+logging:
+  enhance:
+    enabled: true   # 将 trace_id 打印进日志记录
+    format: text    # 或 json
+```
+
+该开关默认关闭，因为开启会改变日志格式。`logging` 配置需要重启才能生效，所以请编辑 `config.yaml` 并重启 Gateway。该设置只影响日志输出——id、响应头和运行元数据不受影响。
+
+`deerflow_trace_id` 是 DeerFlow 的链路关联 id：它不是 run id，也不是 provider 的原生追踪 id，同样不是查询键——没有任何逻辑用它反查 thread 或 run；它只用于关联日志行。在 run 请求的 `metadata` 或 `config.context` 中传入的 `deerflow_trace_id` 会被忽略并覆盖，因此响应头、日志和持久化的运行记录永远不会相互矛盾。要固定关联 id，请发送 `X-Trace-Id` 请求头。
+
+Gateway 的运行历史还会为每次运行记录一条终止时的 `run.delivery` 回执，包括零产出与崩溃恢复的运行。正常执行时，该回执会在持久化终止运行状态之前写入。孤儿恢复会先原子地认领过期租约，再幂等地回填回执，因此过期的恢复扫描不会覆盖仍在运行的详细交付事实。在事件存储中断期间，回执持久化保持尽力而为。对 checkpoint 预检失败（或在等待前序 finalization 时被取消）的运行，保持既有的完成数据行为：它们会收到零交付回执，但不会用空快照覆盖 RunStore 的完成字段。
+
+同一份运行事件历史还会为 lead agent 与普通 task subagent 记录 loop-detection 判定和延迟 MCP 工具晋升。晋升事件会标识新晋升的延迟工具名称，以及是路由元数据还是 `tool_search` 选中了它们，但不会把搜索查询、路由关键词、schema、参数、结果或目录哈希复制进晋升事件本身。
+
 #### LangSmith 链路追踪
 
 DeerFlow 内置了 [LangSmith](https://smith.langchain.com) 集成，用于可观测性。启用后，所有 LLM 调用、agent 运行和工具执行都会被追踪，并在 LangSmith 仪表盘中展示。
@@ -625,6 +683,12 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 完整 API 说明见 [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md)。
 
 Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 时，麦克风按钮会把语音转写为本地草稿；DeerFlow 只接收转写后的文本，音频处理交由浏览器或操作系统语音识别服务按其环境策略完成。用户可以在发送前继续检查和编辑文本。
+
+### 会话归档
+
+在侧栏最近会话的菜单中点击「归档」，可以隐藏已完成的会话，同时保留消息、文件和原链接。成功提示提供「撤销」。在「对话 → 已归档」中查看并逐条恢复；已打开的归档会话也会在顶部显示恢复入口。搜索匹配已加载会话的标题，较早记录可通过「加载更多」查找。
+
+归档与恢复保留会话原有的活动时间和置顶状态。归档不会停止运行中的任务或暂停定时任务，新消息也不会自动恢复会话。需要移除会话及其文件时，使用原有的删除操作。
 
 ### Session Goals
 

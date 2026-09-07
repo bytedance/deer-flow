@@ -636,6 +636,21 @@ export const enUS: Translations = {
 
   // Chats
   chats: {
+    noActiveChats: "No recent chats",
+    activeChats: "Recent chats",
+    archivedChats: "Archived",
+    archiveChat: "Archive chat",
+    restoreChat: "Restore chat",
+    archiveSuccess: "Chat archived",
+    restoreSuccess: "Chat restored",
+    archiveFailed: "Failed to update archived chat",
+    archiveDescription:
+      "Archiving keeps messages and files. Running and scheduled tasks continue.",
+    undoArchive: "Undo",
+    noArchivedChats: "No archived chats",
+    noMatchingChats: "No matching chats in the loaded conversations",
+    loadChatsFailed: "Failed to load conversations",
+    retryLoadChats: "Retry",
     searchChats: "Search chats",
     branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
     loadMoreToSearch: "Load more to search older conversations",
