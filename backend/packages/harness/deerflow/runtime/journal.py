@@ -33,6 +33,7 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.runtime.cancellation import wait_for_task_until
 from deerflow.runtime.events.catalog import (
     LLM_AI_RESPONSE_EVENT,
     LLM_ERROR_EVENT,
@@ -53,6 +54,8 @@ logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification", "sandbox_network"})
+_CANCELLATION_DRAIN_TIMEOUT_SECONDS = 5.0
+_cancelling_progress_tasks: set[asyncio.Future[Any]] = set()
 
 
 @dataclass
@@ -61,6 +64,12 @@ class _PendingLlmResponse:
     events: list[dict]
     message_count: int
     last_ai_message: str | None
+
+
+@dataclass
+class _DetachedFlush:
+    batch: list[dict]
+    started: bool = False
 
 
 def _should_persist_human_input_message(message: BaseMessage) -> bool:
@@ -255,6 +264,8 @@ class RunJournal(BaseCallbackHandler):
         self._buffer: list[dict] = []
         self._pending_llm_response: _PendingLlmResponse | None = None
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
+        self._detached_write_tasks: dict[asyncio.Future[Any], list[dict]] = {}
+        self._flush_lock = asyncio.Lock()
         self._pending_progress_task: asyncio.Task[None] | None = None
         self._pending_progress_delayed = False
         self._progress_dirty = False
@@ -829,26 +840,129 @@ class RunJournal(BaseCallbackHandler):
             return
         # Skip if a flush is already in flight — avoids concurrent writes
         # to the same SQLite file from multiple fire-and-forget tasks.
-        if self._pending_flush_tasks:
+        if self._pending_flush_tasks or self._detached_write_tasks:
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             # No event loop — keep events in buffer for later async flush.
             return
-        batch = self._buffer.copy()
+        detached = _DetachedFlush(self._buffer.copy())
         self._buffer.clear()
-        task = loop.create_task(self._flush_async(batch))
+        task = loop.create_task(self._flush_async(detached.batch, detached=detached))
         self._pending_flush_tasks.add(task)
-        task.add_done_callback(self._on_flush_done)
+        task.add_done_callback(lambda completed: self._on_flush_done(completed, detached=detached))
 
-    async def _flush_async(self, batch: list[dict]) -> None:
+    async def _put_batch_cancellation_safe(self, batch: list[dict]) -> bool:
+        """Write one batch without guessing the outcome of an interrupted write."""
+        store = self._store
+        if store is None:
+            return True
+        write_task = asyncio.create_task(store.put_batch(batch))
+        write_task.set_name(f"deerflow-journal-put-batch-{self.run_id}")
+        deadline = asyncio.get_running_loop().time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
+        current_task = asyncio.current_task()
+        cancelling_on_entry = current_task.cancelling() if current_task is not None else 0
+        completed = await wait_for_task_until(write_task, deadline=deadline)
+        caller_cancelling = current_task is not None and current_task.cancelling() > cancelling_on_entry
+        if not completed:
+            self._track_detached_write(write_task, batch)
+            logger.warning(
+                "Timed out after %.1f seconds waiting for journal write for run %s; %d events continue in the background",
+                _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                self.run_id,
+                len(batch),
+            )
+            if caller_cancelling:
+                raise asyncio.CancelledError
+            return False
+
+        if caller_cancelling:
+            try:
+                write_task.result()
+            except asyncio.CancelledError:
+                self._buffer = batch + self._buffer
+            except BaseException as error:
+                logger.warning(
+                    "Journal write failed while draining cancellation for run %s; returning %d events to buffer",
+                    self.run_id,
+                    len(batch),
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+                self._buffer = batch + self._buffer
+            else:
+                self._feed_generation += 1
+            raise asyncio.CancelledError
+
         try:
-            store = self._store
-            if store is None:
-                return
-            await store.put_batch(batch)
+            write_task.result()
+        except asyncio.CancelledError:
+            self._buffer = batch + self._buffer
+            raise
+        self._feed_generation += 1
+        return True
+
+    def _track_detached_write(self, task: asyncio.Future[Any], batch: list[dict]) -> None:
+        """Retain an ambiguous write until its terminal outcome is known."""
+        if task in self._detached_write_tasks:
+            return
+        self._detached_write_tasks[task] = batch
+        task.add_done_callback(self._resolve_detached_write)
+
+    def _resolve_detached_write(self, task: asyncio.Future[Any]) -> None:
+        """Apply one late write outcome exactly once."""
+        batch = self._detached_write_tasks.pop(task, None)
+        if batch is None:
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError as exc:
+            error = exc
+        if error is None:
             self._feed_generation += 1
+            return
+        logger.warning(
+            "Detached journal write failed for run %s; returning %d events to buffer",
+            self.run_id,
+            len(batch),
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        self._buffer = batch + self._buffer
+
+    async def _await_write_predecessors(self, *, settle: bool) -> bool:
+        """Observe predecessor writes without cancelling or overtaking them."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
+        current_task = asyncio.current_task()
+        cancelling_on_entry = current_task.cancelling() if current_task is not None else 0
+        while True:
+            detached = tuple(self._detached_write_tasks)
+            pending = tuple(self._pending_flush_tasks)
+            if not detached and not pending:
+                return True
+            for task in detached:
+                if settle:
+                    await asyncio.wait({task})
+                    self._resolve_detached_write(task)
+                elif await wait_for_task_until(task, deadline=deadline):
+                    self._resolve_detached_write(task)
+            for task in pending:
+                if settle:
+                    await asyncio.wait({task})
+                else:
+                    await wait_for_task_until(task, deadline=deadline)
+            await asyncio.sleep(0)
+            if not settle:
+                if current_task is not None and current_task.cancelling() > cancelling_on_entry:
+                    raise asyncio.CancelledError
+                if loop.time() >= deadline:
+                    return not self._detached_write_tasks and not self._pending_flush_tasks
+
+    async def _flush_async(self, batch: list[dict], *, detached: _DetachedFlush | None = None) -> None:
+        if detached is not None:
+            detached.started = True
+        try:
+            await self._put_batch_cancellation_safe(batch)
         except Exception:
             logger.warning(
                 "Failed to flush %d events for run %s — returning to buffer",
@@ -859,9 +973,11 @@ class RunJournal(BaseCallbackHandler):
             # Return failed events to buffer for retry on next flush
             self._buffer = batch + self._buffer
 
-    def _on_flush_done(self, task: asyncio.Task) -> None:
+    def _on_flush_done(self, task: asyncio.Task, *, detached: _DetachedFlush) -> None:
         self._pending_flush_tasks.discard(task)
         if task.cancelled():
+            if not detached.started:
+                self._buffer = detached.batch + self._buffer
             return
         exc = task.exception()
         if exc:
@@ -1066,41 +1182,102 @@ class RunJournal(BaseCallbackHandler):
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""
+        async with self._flush_lock:
+            await self._flush_locked()
+
+    async def flush_until_settled(self) -> None:
+        """Flush in order after every ambiguous predecessor has settled."""
+        async with self._flush_lock:
+            await self._flush_locked(settle_predecessors=True)
+
+    async def _flush_locked(self, *, settle_predecessors: bool = False) -> None:
         if self._closed:
             return
         self._commit_pending_llm_response()
-        if self._pending_flush_tasks:
-            await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
-        while self._pending_progress_task is not None:
-            pending_progress_task = self._pending_progress_task
-            if pending_progress_task.done():
-                if self._pending_progress_task is pending_progress_task:
-                    self._pending_progress_task = None
-                break
-            if self._pending_progress_delayed:
-                pending_progress_task.cancel()
-                await asyncio.gather(pending_progress_task, return_exceptions=True)
-                if self._pending_progress_task is pending_progress_task:
-                    self._pending_progress_task = None
-                self._progress_dirty = False
-                self._pending_progress_delayed = False
-                break
-            await asyncio.gather(pending_progress_task, return_exceptions=True)
-            if self._pending_progress_task is pending_progress_task:
-                self._pending_progress_task = None
+        while True:
+            predecessors_settled = await self._await_write_predecessors(settle=settle_predecessors)
+            if not predecessors_settled:
+                return
+            await self._quiesce_progress()
 
-        while self._buffer:
-            batch = self._buffer[: self._flush_threshold]
-            del self._buffer[: self._flush_threshold]
-            try:
-                store = self._store
-                if store is None:
+            while self._buffer:
+                batch = self._buffer[: self._flush_threshold]
+                del self._buffer[: self._flush_threshold]
+                try:
+                    settled = await self._put_batch_cancellation_safe(batch)
+                except Exception:
+                    self._buffer = batch + self._buffer
+                    raise
+                if not settled:
+                    break
+                if settle_predecessors and (self._detached_write_tasks or self._pending_flush_tasks):
+                    break
+
+            if not settle_predecessors or not (self._buffer or self._detached_write_tasks or self._pending_flush_tasks):
+                return
+
+    async def _quiesce_progress(self) -> None:
+        while True:
+            progress_task = self._pending_progress_task
+            if progress_task is None:
+                return
+            if self._pending_progress_delayed and not progress_task.done():
+                self._cancel_and_retain_progress_task(progress_task)
+                await asyncio.gather(progress_task, return_exceptions=True)
+                if self._pending_progress_task is progress_task:
+                    self._pending_progress_task = None
+                    self._pending_progress_delayed = False
+                    self._progress_dirty = False
                     return
-                await store.put_batch(batch)
-                self._feed_generation += 1
-            except Exception:
-                self._buffer = batch + self._buffer
-                raise
+                continue
+            if not progress_task.done():
+                try:
+                    done, _ = await asyncio.wait(
+                        {asyncio.shield(progress_task)},
+                        timeout=_CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                    )
+                except asyncio.CancelledError:
+                    self._cancel_and_retain_progress_task(progress_task)
+                    raise
+                if not done:
+                    logger.warning(
+                        "Timed out after %.1f seconds waiting for run progress snapshot for run %s; cancelling it and retaining ownership until cancellation settles",
+                        _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                        self.run_id,
+                    )
+                    self._cancel_and_retain_progress_task(progress_task)
+                    await asyncio.sleep(0)
+                    if not progress_task.done():
+                        return
+                try:
+                    progress_task.exception()
+                except asyncio.CancelledError:
+                    pass
+            else:
+                try:
+                    progress_task.exception()
+                except asyncio.CancelledError:
+                    pass
+
+            await asyncio.sleep(0)
+            if self._pending_progress_task is progress_task:
+                self._pending_progress_task = None
+                self._pending_progress_delayed = False
+                self._progress_dirty = False
+                return
+
+    def _on_progress_task_done(self, task: asyncio.Future[Any]) -> None:
+        if self._pending_progress_task is not task:
+            return
+        self._pending_progress_task = None
+        self._pending_progress_delayed = False
+        self._progress_dirty = False
+
+    def _cancel_and_retain_progress_task(self, task: asyncio.Future[Any]) -> None:
+        if task not in _cancelling_progress_tasks:
+            _cancelling_progress_tasks.add(task)
+            task.add_done_callback(_cancelling_progress_tasks.discard)
+        task.cancel()
 
     def _detach_runtime_dependencies(self) -> None:
         """Drop every external or potentially cyclic run-scoped reference."""
@@ -1110,6 +1287,7 @@ class RunJournal(BaseCallbackHandler):
         self._buffer.clear()
         self._pending_llm_response = None
         self._pending_flush_tasks.clear()
+        self._detached_write_tasks.clear()
         self._pending_progress_task = None
         self._pending_progress_delayed = False
         self._progress_dirty = False
@@ -1136,7 +1314,7 @@ class RunJournal(BaseCallbackHandler):
             # A failed terminal write returns its batch to ``_buffer``. Keep the
             # store and all buffered state attached so a later close/flush can retry
             # instead of silently discarding the tail of the run event stream.
-            await self.flush()
+            await self.flush_until_settled()
             self._detach_runtime_dependencies()
             return
 
@@ -1179,6 +1357,7 @@ class RunJournal(BaseCallbackHandler):
             return
         self._progress_dirty = False
         self._pending_progress_task = loop.create_task(self._flush_progress_async(snapshot=self.get_completion_data()))
+        self._pending_progress_task.add_done_callback(self._on_progress_task_done)
 
     def _schedule_delayed_progress_flush(self, delay: float) -> None:
         if self._pending_progress_task is not None and not self._pending_progress_task.done():
@@ -1190,6 +1369,7 @@ class RunJournal(BaseCallbackHandler):
         delay = max(0.0, delay)
         self._pending_progress_delayed = delay > 0
         self._pending_progress_task = loop.create_task(self._flush_progress_async(delay=delay))
+        self._pending_progress_task.add_done_callback(self._on_progress_task_done)
 
     async def _flush_progress_async(self, *, snapshot: dict | None = None, delay: float = 0.0) -> None:
         if self._progress_reporter is None:
