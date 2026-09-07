@@ -1034,15 +1034,6 @@ embedding models do not cause a provider error. Dataset IDs and API keys are
 never exposed to the model. The optional `list_knowledge_bases` tool returns
 names only.
 
-The same `knowledge_base.enabled` switch exposes the authenticated
-`/api/knowledge` management proxy and `/workspace/knowledge` UI for listing and
-creating datasets, streaming document uploads, starting parsing, and (for
-admins) deleting shared data. Uploads are forwarded directly to RAGFlow (50 MiB
-per file, 100 MiB per request, at most 10 files); DeerFlow does not persist a
-copy. Parsing progress is available through process-local SSE at
-`GET /api/knowledge/events` while a browser is subscribed. For Docker or
-Kubernetes, set `base_url` to an address reachable from the Gateway container.
-
 Custom-agent chats can optionally expose a page-local, icon-only **Knowledge**
 selector beside the mode control. Its persistent highlight indicates that
 knowledge retrieval is active; the neutral state means retrieval is off. Set
@@ -1055,6 +1046,9 @@ snapshot for replay and history. Ordinary chats never show or submit this
 selector. The Gateway validates every snapshot, intersects it with the
 operator's dataset allowlist, propagates the execution-only scope to native and
 durable subagents, and removes it from model inputs and external traces.
+This release does not add an independent Knowledge item to the workspace
+sidebar or a DeerFlow knowledge-management page; create, upload, parse, and
+delete datasets and documents directly in RAGFlow.
 
 Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. Every HTTP route that starts or enables a future Agent run requires `runs:create`: this includes the stateless `POST /api/runs/stream` and `POST /api/runs/wait` endpoints plus scheduled-task create, update, resume, and manual-trigger mutations. Scheduled-task mutations retain their existing `threads:write` requirement, and the stateless routes separately enforce ownership when the optional thread ID is supplied in the request body. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. Model access follows the same provider: the Gateway `models` list is filtered per principal, `model:use` is enforced on model detail requests and again when the runtime resolves the agent's model, and a denied default model falls back to the first remaining candidate that also passes `model:use`. The built-in RBAC provider supports per-role `tools`, `routes`, `models`, `skills`, and `sandbox` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
 

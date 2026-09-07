@@ -252,7 +252,7 @@ config: |
   config_version: 42
   log_level: info
 
-  # Optional tenant-shared RAGFlow retrieval and human management proxy.
+  # Optional tenant-shared RAGFlow retrieval and custom-agent scope selector.
   knowledge_base:
     enabled: false
     scope_selection_enabled: false
@@ -265,8 +265,6 @@ config: |
     top_k: 256
     max_chars_per_chunk: 800
     max_total_chars: 8000
-    watch_interval_seconds: 3
-    idle_interval_seconds: 15
 
   models: []
   # Example (uncomment & set the matching secret in `secrets`):

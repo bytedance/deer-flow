@@ -392,17 +392,12 @@ For models with `supports_vision: true`:
 `deerflow.community.ragflow` provides opt-in, read-only Agent tools for listing
 tenant-shared knowledge bases and retrieving compact cited chunks; RAGFlow is
 the source of truth, with no DeerFlow ORM mirror. `knowledge_base.enabled`
-gates the tool group and authenticated `/api/knowledge` management UI. Deletes
-are admin-only; uploads stream to RAGFlow after enforcing 50 MiB/file,
-100 MiB/request, and 10-file limits. Keep API keys out of model schemas, logs,
-tool errors, and HTTP errors. Custom-chat scope selection is admitted
-by Gateway and enforced in harness; see the Gateway, middleware, subagent, and
-frontend module guides for those boundaries.
-
-`app.gateway.knowledge.watcher` fans one process-local RAGFlow polling loop to
-`/api/knowledge/events`: no subscriber means no task, upload/parse wakes it,
-and it has no cross-worker coordination. Tests use `test_ragflow_*`
-and `test_knowledge_*` modules.
+gates the tool group. Gateway exposes only the authenticated, read-only
+`/api/knowledge/retrieval-catalog` routes needed by custom-agent chat scope
+selection; dataset and document management remains in RAGFlow. Keep API keys
+out of model schemas, logs, tool errors, and HTTP errors. Custom-chat scope
+selection is admitted by Gateway and enforced in harness; see the Gateway,
+middleware, subagent, and frontend module guides for those boundaries.
 
 ## Code Style
 

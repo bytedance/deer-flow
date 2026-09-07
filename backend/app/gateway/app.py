@@ -816,7 +816,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # First-party integrations API is mounted at /api/integrations
     app.include_router(integrations.router)
 
-    # RAGFlow knowledge management API is mounted at /api/knowledge
+    # Read-only RAGFlow catalog for custom-agent knowledge-scope selection.
     app.include_router(knowledge.router)
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts

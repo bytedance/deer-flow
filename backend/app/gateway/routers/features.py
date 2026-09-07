@@ -7,8 +7,6 @@ request, while startup-scoped capabilities report the runtime that actually
 started.
 """
 
-from urllib.parse import urlsplit, urlunsplit
-
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
@@ -50,16 +48,11 @@ class SubagentBatchesFeature(BaseModel):
 
 
 class KnowledgeBaseFeature(BaseModel):
-    """Availability of tenant-shared RAGFlow knowledge management."""
+    """Availability of RAGFlow retrieval in custom-agent chat."""
 
-    enabled: bool = Field(..., description="Whether the RAGFlow knowledge routes and UI are available")
     scope_selection_enabled: bool = Field(
         ...,
         description="Whether custom-agent chat may select a per-message RAGFlow retrieval scope",
-    )
-    management_url: str | None = Field(
-        default=None,
-        description="Credential-free RAGFlow origin for unsupported management operations",
     )
 
 
@@ -100,22 +93,9 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             max_running=configured_subagent_max_running(),
         ),
         knowledge_base=KnowledgeBaseFeature(
-            enabled=config.knowledge_base.enabled,
             scope_selection_enabled=_knowledge_scope_selection_enabled(config),
-            management_url=_knowledge_management_url(config),
         ),
     )
-
-
-def _knowledge_management_url(config: AppConfig) -> str | None:
-    """Expose only a credential-free RAGFlow URL, never connection secrets."""
-    if not config.knowledge_base.enabled:
-        return None
-    raw_url = str(config.knowledge_base.base_url).rstrip("/")
-    parsed = urlsplit(raw_url)
-    if parsed.username is not None or parsed.password is not None:
-        return None
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")).rstrip("/")
 
 
 def _knowledge_scope_selection_enabled(config: AppConfig) -> bool:

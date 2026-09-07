@@ -104,7 +104,6 @@ export type MockAPIOptions = {
     agentsApiEnabled?: boolean;
     browserControlEnabled?: boolean;
     mcpTasksEnabled?: boolean;
-    knowledgeBaseEnabled?: boolean;
     knowledgeScopeSelectionEnabled?: boolean;
   };
   runStreamHandler?: (route: Route) => Promise<void>;
@@ -326,7 +325,6 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
     mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
-    knowledgeBaseEnabled: options?.features?.knowledgeBaseEnabled ?? true,
     knowledgeScopeSelectionEnabled:
       options?.features?.knowledgeScopeSelectionEnabled ?? false,
   };
@@ -1407,12 +1405,8 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           browser_control: { enabled: featureFlags.browserControlEnabled },
           mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
           knowledge_base: {
-            enabled: featureFlags.knowledgeBaseEnabled,
             scope_selection_enabled:
               featureFlags.knowledgeScopeSelectionEnabled,
-            management_url: featureFlags.knowledgeBaseEnabled
-              ? "http://ragflow.example"
-              : null,
           },
         }),
       });

@@ -55,12 +55,9 @@ provide write operations. `knowledge_base.enabled=false` removes the whole
 group during tool assembly. Retrieval output is bounded at both the individual
 chunk and full-response levels, and every error path must redact the configured
 tenant API key before logging or returning model-visible text.
-The shared client also contains the narrowly scoped management calls consumed
-by Gateway's human-facing reverse proxy; importing those client methods must
-never be confused with registering them as Agent tools. The Gateway watcher
-uses the client's paginated `include_parsing_status=true` dataset listing and
-only expands to a paginated document listing when it needs failed-document
-detail.
+The shared client also exposes read-only document listing for Gateway's
+custom-agent retrieval catalog. Dataset/document creation, upload, parsing,
+and deletion remain outside DeerFlow and are performed directly in RAGFlow.
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 

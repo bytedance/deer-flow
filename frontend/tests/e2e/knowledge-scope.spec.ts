@@ -52,6 +52,7 @@ test.describe("custom-agent knowledge scope", () => {
     });
 
     await page.goto("/workspace/agents/researcher/chats/new");
+    await expect(page.getByRole("link", { name: "Knowledge" })).toHaveCount(0);
     const trigger = page.getByTestId("knowledge-scope-trigger");
     await expect(trigger).toHaveText("");
     await expect(trigger).toHaveAttribute("aria-pressed", "true");
