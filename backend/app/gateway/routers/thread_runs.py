@@ -12,6 +12,7 @@ works without modification.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import uuid
@@ -19,7 +20,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
@@ -64,6 +65,22 @@ _artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
+
+
+def _scope_http_run_idempotency_key(request: Request, thread_id: str, key: str | None) -> str | None:
+    """Namespace a caller key for the process-wide run idempotency index."""
+    if key is None:
+        return None
+    key = key.strip()
+    if not key:
+        raise HTTPException(status_code=422, detail="Idempotency-Key must not be blank")
+    owner_id = get_trusted_internal_owner_user_id(request)
+    if owner_id is None:
+        user = getattr(request.state, "user", None)
+        user_id = getattr(user, "id", None)
+        owner_id = str(user_id) if user_id is not None else get_effective_user_id()
+    digest = hashlib.sha256(f"{owner_id}\0{thread_id}\0{key}".encode()).hexdigest()
+    return f"http-run:{digest}"
 
 
 def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
@@ -861,15 +878,40 @@ async def prepare_edit_regenerate_run(
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def create_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> RunResponse:
+async def create_run(
+    thread_id: ThreadId,
+    body: RunCreateRequest,
+    request: Request,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        max_length=255,
+        description="Retry key for idempotent run admission within this thread",
+    ),
+) -> RunResponse:
     """Create a background run (returns immediately)."""
-    record = await start_run(body, thread_id, request)
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+    )
     return _record_to_response(record)
 
 
 @router.post("/{thread_id}/runs/stream")
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def stream_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> StreamingResponse:
+async def stream_run(
+    thread_id: ThreadId,
+    body: RunCreateRequest,
+    request: Request,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        max_length=255,
+        description="Retry key for idempotent run admission within this thread",
+    ),
+) -> StreamingResponse:
     """Create a run and stream events via SSE.
 
     The response includes a ``Content-Location`` header with the run's
@@ -878,7 +920,12 @@ async def stream_run(thread_id: ThreadId, body: RunCreateRequest, request: Reque
     """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(body, thread_id, request)
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+    )
 
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
@@ -897,11 +944,26 @@ async def stream_run(thread_id: ThreadId, body: RunCreateRequest, request: Reque
 
 @router.post("/{thread_id}/runs/wait", response_model=dict)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def wait_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> dict:
+async def wait_run(
+    thread_id: ThreadId,
+    body: RunCreateRequest,
+    request: Request,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        max_length=255,
+        description="Retry key for idempotent run admission within this thread",
+    ),
+) -> dict:
     """Create a run and block until it completes, returning the final state."""
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(body, thread_id, request)
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+    )
 
     completed = True
     if record.task is not None:

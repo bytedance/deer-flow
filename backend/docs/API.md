@@ -189,7 +189,17 @@ Execute the agent with input.
 ```http
 POST /api/langgraph/threads/{thread_id}/runs
 Content-Type: application/json
+Idempotency-Key: <unique key for this logical request>  # optional
 ```
+
+The thread-scoped create, stream, and wait endpoints accept an optional
+`Idempotency-Key` header. Retrying the same endpoint with the same authenticated
+user, `thread_id`, and key reuses the existing run instead of executing the
+input again. Generate a new key for every intentional user action; reuse a key
+only when retrying that same action after an uncertain HTTP result. Keys may be
+at most 255 characters. Stateless `/api/langgraph/runs/*` endpoints do not
+support this header because requests without an explicit thread create a new
+temporary conversation.
 
 **Request Body:**
 ```json
@@ -290,6 +300,7 @@ Stream responses in real-time.
 ```http
 POST /api/langgraph/threads/{thread_id}/runs/stream
 Content-Type: application/json
+Idempotency-Key: <unique key for this logical request>  # optional
 ```
 
 Same request body as Create Run. Returns SSE stream.
