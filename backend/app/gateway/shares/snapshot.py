@@ -180,7 +180,7 @@ def _is_complete_tag_line(content: str) -> bool:
     indent = 0
     while indent < len(content) and content[indent] == " " and indent < 3:
         indent += 1
-    body = content[indent:].strip()
+    body = content[indent:].strip(" \t")
     if not body:
         return False
     return _HTML_OPEN_TAG_RE.fullmatch(body) is not None or _HTML_CLOSE_TAG_RE.fullmatch(body) is not None
@@ -650,9 +650,19 @@ def _indent_columns(content: str) -> int:
     return columns
 
 
+def _is_commonmark_blank(content: str) -> bool:
+    """A blank line contains only spaces and tabs (spec §2.2). Python's
+    ``str.strip()`` treats every Unicode whitespace — ``\\f``, NBSP, VT,
+    NEL — as blank, but the renderer keeps such lines as paragraph content;
+    trusting ``strip()`` manufactured phantom blank-line boundaries that
+    opened indented-code/HTML-block/fence regions the renderer does not
+    see, protecting reasoning that is really prose."""
+    return content.strip(" \t") == ""
+
+
 def _fence_closes(content: str, char: str, min_len: int) -> bool:
     """A closing fence: up to three spaces of indent, at least *min_len*
-    copies of the opening fence character, nothing but whitespace after."""
+    copies of the opening fence character, nothing but spaces/tabs after."""
     indent = 0
     while indent < len(content) and content[indent] == " " and indent < 3:
         indent += 1
@@ -660,7 +670,7 @@ def _fence_closes(content: str, char: str, min_len: int) -> bool:
     length = 0
     while length < len(body) and body[length] == char:
         length += 1
-    return length >= min_len and body[length:].strip() == ""
+    return length >= min_len and body[length:].strip(" \t") == ""
 
 
 def _html_block_close(content: str, kind: str, tag: str | None) -> bool:
@@ -801,7 +811,7 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
             continue
         if html_kind is not None:
             if html_blank_end:
-                if content.strip() == "":
+                if _is_commonmark_blank(content):
                     html_kind = None
                     # The blank that ends the block leaves no open paragraph.
                     indented_eligible = True
@@ -818,7 +828,7 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
                 indented_eligible = True
             else:
                 if container_html_blank_end:
-                    if container_body.strip() == "":
+                    if _is_commonmark_blank(container_body):
                         container_html_kind = None
                         indented_eligible = True
                 elif _html_block_close(container_body, container_html_kind, container_html_tag):
@@ -826,12 +836,12 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
                     indented_eligible = True
                 continue
         if indented_start is not None:
-            if content.strip() == "" or _indent_columns(content) >= 4:
+            if _is_commonmark_blank(content) or _indent_columns(content) >= 4:
                 indented_end = line_end
-                indented_eligible = content.strip() == ""
+                indented_eligible = _is_commonmark_blank(content)
                 continue
             close_indented()
-        if content.strip() == "":
+        if _is_commonmark_blank(content):
             flush_segment()
             indented_eligible = True
             continue
@@ -922,7 +932,13 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
             segment_end = line_end
             indented_eligible = False
             continue
-        if _HEADING_RE.match(content) is not None or _THEMATIC_RE.match(content) is not None or _SETEXT_UNDERLINE_RE.match(content) is not None:
+        # A setext underline exists only under an open paragraph (spec
+        # §4.3): with no paragraph to underline, ``===``/``-``-only lines
+        # are ordinary paragraph/list text and a following 4-column line is
+        # lazy continuation — treating them as leaf boundaries opened
+        # phantom indented-code regions that protected reasoning the
+        # renderer serves as prose.
+        if _HEADING_RE.match(content) is not None or _THEMATIC_RE.match(content) is not None or (_SETEXT_UNDERLINE_RE.match(content) is not None and segment_start is not None):
             # Leaf-block lines end the paragraph an inline span lives in;
             # the span can never reach across one. A heading's own inline
             # code is still code to the renderer, so it is protected too
@@ -1809,7 +1825,20 @@ def _collect_workspace_edits(text: str, edits: list[tuple[int, int, str]]) -> No
         if start <= 0:
             return True
         previous = value[start - 1]
-        if previous in "@_":
+        if previous == "_":
+            # An underscore run can open Markdown emphasis at the start of
+            # a token or after punctuation (``y_,_/workspace/…`` — the
+            # delimiters flank commas), but inside a route id it is
+            # ordinary id data (``id_https://`` is one route). Mirrors the
+            # http-boundary rule: the byte before the run decides, and a
+            # punctuation/whitespace flank may not shield a later route.
+            run_start = start - 1
+            while run_start > 0 and value[run_start - 1] == "_":
+                run_start -= 1
+            if run_start == 0:
+                return True
+            return re.match(r"[A-Za-z0-9+.-]", value[run_start - 1]) is None
+        if previous == "@":
             return False
         return previous.isspace() or previous in _WORKSPACE_REFERENCE_TRAILING_PUNCTUATION or unicodedata.category(previous).startswith("P")
 

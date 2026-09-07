@@ -2220,3 +2220,95 @@ def test_strip_closing_type6_tags_interrupt_paragraphs():
 
     attack = "paragraph\n</div>\n```\n<think>secret-close-type6</think>\n```"
     assert "secret-close-type6" not in strip(attack)
+
+
+def test_strip_setext_without_paragraph_is_not_a_leaf_boundary():
+    """Adversarial round (post-13): a setext underline exists only under an
+    open paragraph (spec §4.3). A bare ``===``/``-`` line with no paragraph
+    above it is ordinary text — ``===`` starts a paragraph, a lone ``-`` is
+    an empty list item whose content column is 2 — so the following
+    4-column line is paragraph/item text and its ``<think>`` block must be
+    stripped, not protected behind a phantom indented-code region. A real
+    setext underline (paragraph open) keeps its leaf-block boundary."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    for head in ("===", "   ===", "====", "para\n\n===", "-", "--", "para\n\n---"[:0] + "==="):
+        leaked = f"{head}\n    <think>secret-setext</think>"
+        out = strip(leaked)
+        assert "secret-setext" not in out, (head, out)
+
+    # A thematic break (3+) is a real leaf without a paragraph: the
+    # indented line after it IS indented code and stays protected.
+    kept = "---\n    <think>secret-thematic</think>"
+    out = strip(kept)
+    assert "secret-thematic" in out, out
+
+    # A real setext underline (paragraph open above) is a leaf boundary:
+    # the indented line after it is indented code, protected verbatim.
+    real = "para\n===\n    <think>secret-real-setext</think>"
+    out = strip(real)
+    assert "secret-real-setext" in out, out
+
+
+def test_strip_non_space_whitespace_lines_are_not_blank():
+    """Adversarial round (post-13): a CommonMark blank line contains only
+    spaces and tabs (spec §2.2). Python ``str.strip()`` also treats ``\\f``,
+    NBSP, VT, and NEL as blank — manufacturing phantom blank-line
+    boundaries that opened indented-code regions across real paragraph
+    breaks, ended HTML blocks early, and let type-7 tag tails carry
+    non-space whitespace, each protecting reasoning the renderer serves as
+    prose. Blank checks now strip spaces/tabs only."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    for filler in ("\f", "\xa0", "\x0b", "\x85"):
+        leaked = f"para\n{filler}\n    <think>secret-blank</think>"
+        out = strip(leaked)
+        assert "secret-blank" not in out, (repr(filler), out)
+
+    # A fake blank INSIDE indented code no longer bridges the renderer's
+    # real paragraph boundary: the code block ends, the think is prose.
+    leaked = "    code\n\f\n    <think>secret-blank</think>"
+    out = strip(leaked)
+    assert "secret-blank" not in out, out
+
+    # A non-blank filler line does not end a blank-line-ended HTML block,
+    # so the fence behind it is HTML content, not a real fence.
+    leaked = "<div>\n\f\n```ruby\n<think>secret-blank</think>\n```"
+    out = strip(leaked)
+    assert "secret-blank" not in out, out
+
+    # A type-7 tag line may carry only spaces/tabs after the tag; a
+    # trailing \\f does not complete the tag line, so the fence behind it
+    # is real and the think after its closer is stripped.
+    leaked = "<span>\f\n```ruby\n\n```\n<think>secret-blank</think>"
+    out = strip(leaked)
+    assert "secret-blank" not in out, out
+
+    # Real blank lines (spaces/tabs only) keep their meaning: the indented
+    # line after one is indented code and stays protected.
+    kept = "para\n\t\n    <think>secret-real-blank</think>"
+    out = strip(kept)
+    assert "secret-real-blank" in out, out
+
+
+def test_underscore_delimiter_flank_cannot_shield_workspace_routes():
+    """Adversarial round (post-13): ``y_,_/workspace/chats/{id}`` hid the
+    route behind its emphasis delimiters — the underscore before the root
+    rejected the anchor split, and nothing else cuts workspace routes
+    mid-token, so the thread id published. An underscore run flanked by
+    punctuation/whitespace is an emphasis delimiter (a real boundary),
+    mirroring the http-boundary rule; only an intra-identifier run
+    (``id_https://``) keeps shielding as id data."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    assert neutralize("x,/api/runs/8f3a/x,/docs/y_,_/workspace/chats/THREAD7q") == ("x,[private artifact omitted],/docs/y_,_[private artifact omitted]")
+    assert neutralize("x,/docs/y_,_/workspace/chats/THREAD7q") == "x,/docs/y_,_[private artifact omitted]"
+    assert neutralize("/api/threads/TT/x_,_/workspace/chats/THREAD7q") == ("[private artifact omitted]_,_[private artifact omitted]")
+    # Intra-identifier underscore stays id data: one route, cut as a whole.
+    assert neutralize("/workspace/chats/id_https://a/SECRET") == "[private artifact omitted]://a/SECRET"
+    # Emphasis-flanked routes still cut (pinned round-12 shape).
+    assert neutralize(f"__/workspace/chats/{'a' * 64}__") == "__[private artifact omitted]"
