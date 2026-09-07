@@ -517,7 +517,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
         trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
         if not trimmed_messages:
-            trimmed_messages = messages_to_summarize[-1:]
+            # The inherited trimmer requires a HumanMessage. Rescuing the current
+            # request can leave an AI/Tool-only window, even below the budget.
+            # Keep that window here; _build_summary_input_text still bounds it.
+            trimmed_messages = messages_to_summarize
         if not trimmed_messages:
             return None
         # Format messages to avoid token inflation from metadata when str() is called on
@@ -953,9 +956,8 @@ def create_summarization_middleware(
         "model": anchor_model,
         "trigger": trigger,
         "keep": keep_tuple,
+        "trim_tokens_to_summarize": config.trim_tokens_to_summarize,
     }
-    if config.trim_tokens_to_summarize is not None:
-        kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize
     if config.summary_prompt is not None:
         kwargs["summary_prompt"] = config.summary_prompt
 

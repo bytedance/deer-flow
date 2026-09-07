@@ -1,5 +1,11 @@
 ### Middleware Chain
 
+Summarization input can contain only AI/Tool messages after latest-user rescue.
+If the inherited human-anchored trimmer returns nothing, format that window and
+apply `_build_summary_input_text`'s bounded text trimming instead of retaining
+only its final message. The factory must pass `trim_tokens_to_summarize=None`
+through explicitly, since omitting it restores LangChain's 4000-token default.
+
 Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares` appends lead-only entries. Optional entries require their config/runtime condition.

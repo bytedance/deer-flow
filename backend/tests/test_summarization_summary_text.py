@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
@@ -82,6 +83,61 @@ class TestSummaryFailureSafety:
 
 
 class TestSummaryWritesChannel:
+    @pytest.mark.parametrize("async_mode", [False, True])
+    @pytest.mark.asyncio
+    async def test_rescued_user_does_not_drop_earlier_tool_exchanges(self, async_mode):
+        model = _RecordingSummaryModel()
+        middleware = DeerFlowSummarizationMiddleware(
+            model=model,
+            trigger=("messages", 4),
+            keep=("messages", 2),
+            token_counter=_char_count,
+            trim_tokens_to_summarize=4000,
+        )
+        user = HumanMessage(content="CURRENT_REQUEST", id="user")
+        history = [user]
+        for i in range(3):
+            history.extend(
+                [
+                    AIMessage(content=f"PLAN_{i}", id=f"ai-{i}", tool_calls=[{"name": "bash", "args": {}, "id": f"call-{i}"}]),
+                    ToolMessage(content=f"RESULT_{i}", id=f"tool-{i}", tool_call_id=f"call-{i}"),
+                ]
+            )
+        runtime = SimpleNamespace(context={})
+        if async_mode:
+            result = await middleware.acompact_state({"messages": history}, runtime, force=True)
+        else:
+            result = middleware.compact_state({"messages": history}, runtime, force=True)
+
+        assert result is not None
+        assert user in result.preserved_messages
+        assert list(result.messages_to_summarize) == history[1:5]
+        assert len(model.prompts) == 1
+        for sentinel in ("PLAN_0", "RESULT_0", "PLAN_1", "RESULT_1"):
+            assert sentinel in model.prompts[0]
+        assert "CURRENT_REQUEST" not in model.prompts[0]
+        assert "RESULT_2" not in model.prompts[0]
+
+    def test_tool_only_fallback_remains_bounded_with_previous_summary(self):
+        middleware = DeerFlowSummarizationMiddleware(
+            model=_StaticChatModel(),
+            trigger=("messages", 4),
+            keep=("messages", 2),
+            token_counter=_char_count,
+            trim_tokens_to_summarize=80,
+        )
+        prompt = middleware._build_summary_prompt(
+            [ToolMessage(content="TOOL_START " + "X" * 1000, tool_call_id="call")],
+            previous_summary="Y" * 1000 + " OLD_END",
+        )
+
+        assert prompt is not None
+        new_text = prompt.split("<new_messages>\n", 1)[1].split("\n</new_messages>", 1)[0]
+        old_text = prompt.split("<existing_summary>\n", 1)[1].split("\n</existing_summary>", 1)[0]
+        assert len(new_text) + len(old_text) <= 80
+        assert "TOOL_START" in new_text
+        assert "OLD_END" in old_text
+
     def _middleware(self) -> DeerFlowSummarizationMiddleware:
         return DeerFlowSummarizationMiddleware(
             model=_StaticChatModel(text="COMPRESSED_SUMMARY"),
