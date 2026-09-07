@@ -1026,6 +1026,30 @@ def build_checkpoint_state_accessor(
     return accessor, config
 
 
+async def abuild_checkpoint_state_accessor(
+    request: Request,
+    *,
+    thread_id: str,
+    assistant_id: str | None = None,
+    checkpoint_id: str | None = None,
+) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
+    """Async variant of :func:`build_checkpoint_state_accessor`.
+
+    Identical accessor construction, but the agent-factory assembly — which
+    re-enters ``get_available_tools()`` and may block on MCP cache
+    initialization — runs off-loop via ``asyncio.to_thread`` so the Gateway
+    event loop keeps making progress (issue #5172). Repeat calls hit
+    ``_state_accessor_graph_cache`` and only pay the thread hop.
+    """
+    return await asyncio.to_thread(
+        build_checkpoint_state_accessor,
+        request,
+        thread_id=thread_id,
+        assistant_id=assistant_id,
+        checkpoint_id=checkpoint_id,
+    )
+
+
 async def resolve_thread_assistant_id(
     request: Request,
     thread_id: str,
@@ -1065,7 +1089,7 @@ async def build_thread_checkpoint_state_accessor(
     ``AgentMiddleware.state_schema`` from the response.
     """
     assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=fail_closed)
-    return build_checkpoint_state_accessor(
+    return await abuild_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=assistant_id,
@@ -1196,7 +1220,7 @@ async def ensure_checkpoint_history_seeded(
     if await get_checkpointer(request).aget_tuple(checkpoint_config) is None:
         return
 
-    accessor, config = build_checkpoint_state_accessor(
+    accessor, config = await abuild_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=assistant_id,

@@ -247,7 +247,10 @@ def _patch_checkpoint_state_builder(monkeypatch):
     async def _mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None):
         return _mutation_builder(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id)
 
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", _builder)
+    async def _abuild(request, *, thread_id, assistant_id=None, checkpoint_id=None):
+        return _builder(request, thread_id=thread_id, assistant_id=assistant_id, checkpoint_id=checkpoint_id)
+
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", _abuild)
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", _mutation_builder)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", _read_boundary)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", _mutation_boundary)
@@ -1028,9 +1031,8 @@ def test_latest_thread_readers_use_materialized_snapshot_values() -> None:
 
     with (
         patch(
-            "app.gateway.routers.threads.build_checkpoint_state_accessor",
-            create=True,
-            return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}),
+            "app.gateway.routers.threads.abuild_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
         ),
         patch(
             "app.gateway.routers.threads.build_thread_checkpoint_state_accessor",
@@ -1085,8 +1087,8 @@ def test_get_thread_status_uses_raw_pending_writes_for_materialized_checkpoint()
 
     with (
         patch(
-            "app.gateway.routers.threads.build_checkpoint_state_accessor",
-            return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}),
+            "app.gateway.routers.threads.abuild_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
         ),
         TestClient(app) as client,
     ):
@@ -1129,8 +1131,8 @@ def test_get_thread_preserves_metadata_status_without_checkpoint(stored_status: 
 
     with (
         patch(
-            "app.gateway.routers.threads.build_checkpoint_state_accessor",
-            return_value=(accessor, snapshot.config),
+            "app.gateway.routers.threads.abuild_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(accessor, snapshot.config)),
         ),
         TestClient(app) as client,
     ):
@@ -2601,7 +2603,7 @@ def test_branch_thread_uses_materialized_history_and_overwrites_fresh_seed(monke
             }
         }
 
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", AsyncMock(side_effect=build_accessor))
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", build_mutation_accessor)
 
     with TestClient(app) as client:
@@ -2720,7 +2722,7 @@ def test_branch_thread_preserves_unlinked_legacy_histories(
             }
         }
 
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", AsyncMock(side_effect=build_accessor))
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", build_mutation_accessor)
 
     with TestClient(app) as client:
@@ -2849,7 +2851,7 @@ def test_branch_thread_real_mutation_graph_finishes_without_scheduling(monkeypat
         }
 
     real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", source_builder)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", AsyncMock(side_effect=source_builder))
     monkeypatch.setattr(
         threads,
         "build_checkpoint_state_mutation_accessor",
@@ -2922,7 +2924,7 @@ def _wire_extension_agent(monkeypatch, app, checkpointer, mode):
     ctx = SimpleNamespace(checkpointer=checkpointer, store=None, checkpoint_channel_mode=mode, app_config=None)
     monkeypatch.setattr(gateway_services, "get_run_context", lambda _request: ctx)
     monkeypatch.setattr(gateway_services, "resolve_agent_factory", selective_factory)
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", gateway_services.build_checkpoint_state_accessor)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", gateway_services.abuild_checkpoint_state_accessor)
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", gateway_services.build_checkpoint_state_mutation_accessor)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", gateway_services.build_thread_checkpoint_state_accessor)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", gateway_services.build_thread_checkpoint_state_mutation_accessor)

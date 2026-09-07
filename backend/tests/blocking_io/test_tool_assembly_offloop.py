@@ -26,10 +26,15 @@ import threading
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import ToolMessage
 
+from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.subagents.config import SubagentConfig
 
 # importlib.import_module binds the real module: the package attribute
@@ -229,6 +234,41 @@ async def test_batch_item_assembles_off_loop(monkeypatch, tmp_path):
     assert all(thread is not threading.main_thread() for thread in observed_threads)
 
 
+async def test_run_agent_assembles_off_loop(monkeypatch, tmp_path):
+    """run_agent dispatches agent_factory (lead-agent assembly) to a worker thread."""
+    cfg = tmp_path / "extensions_config.json"
+    cfg.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    observed_threads: list = []
+
+    class _DummyStreamAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+    def _factory(*, config):
+        observed_threads.append(threading.current_thread())
+        # Real production blocking read (executed inside a deerflow.* frame):
+        # trips the strict gate when the factory runs on the loop.
+        ExtensionsConfig.from_file()
+        return _DummyStreamAgent()
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+
+    await run_agent(
+        SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock()),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=MemoryRunEventStore()),
+        agent_factory=_factory,
+        graph_input={},
+        config={},
+    )
+
+    assert observed_threads, "agent assembly must be invoked"
+    assert all(thread is not threading.main_thread() for thread in observed_threads)
+
+
 async def test_extensions_config_read_trips_the_gate(monkeypatch, tmp_path):
     """Meta-check: reading the extensions config from ``deerflow.*`` code on
     the event loop must raise BlockingError — the exact syscall class issue
@@ -237,8 +277,6 @@ async def test_extensions_config_read_trips_the_gate(monkeypatch, tmp_path):
     the production reader instead of a test-file stack, which the
     ``scanned_modules`` filter would ignore.)"""
     from blockbuster import BlockingError
-
-    from deerflow.config.extensions_config import ExtensionsConfig
 
     cfg = tmp_path / "extensions_config.json"
     cfg.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
