@@ -535,3 +535,53 @@ class TestReceiptVerdictRendering:
 
         assert "write report" in rendered
         assert "citations:" not in rendered
+
+
+def _acceptance_verdict() -> dict:
+    return {
+        "source": "acceptance_checklist",
+        "requirement": "delegation_acceptance_criteria",
+        "leaves": [
+            {"criterion": "file:../outputs/r.md exists", "family": "file_exists", "checked": True, "holds": True, "detail": "exists, 5 bytes"},
+            {"criterion": "tests_passed:make test", "family": "tests_passed", "checked": True, "holds": False, "detail": "latest matching run recorded status=error"},
+            {"criterion": "open ended", "family": "undecidable", "checked": False, "holds": False, "detail": "not deterministically checkable"},
+        ],
+        "unchecked": ["open ended"],
+        "all_hold": False,
+    }
+
+
+class TestAcceptanceVerdictRendering:
+    def test_entry_carries_verdict_and_renders_segment(self):
+        from deerflow.subagents.status_contract import make_subagent_additional_kwargs
+
+        messages = [
+            _ai_task_call("c1", "write report"),
+            ToolMessage(
+                content="Task Succeeded. Result: done",
+                tool_call_id="c1",
+                name="task",
+                additional_kwargs=make_subagent_additional_kwargs("completed", result="done", acceptance_verdict=_acceptance_verdict()),
+            ),
+        ]
+        entries = extract_delegations(messages)
+        assert entries[0]["acceptance_verdict"]["all_hold"] is False
+
+        rendered = render_delegation_ledger(entries)
+        assert "acceptance: 1 hold, 1 does not hold, 1 UNVERIFIED — execution evidence only, does not validate claim correctness" in rendered
+
+    def test_legacy_entries_without_verdict_render_unchanged(self):
+        messages = [_ai_task_call("c1", "write report"), _completed_task_message("c1", None)]
+        rendered = render_delegation_ledger(extract_delegations(messages))
+        assert "acceptance:" not in rendered
+
+    def test_malformed_persisted_acceptance_verdict_is_ignored(self):
+        entry = {
+            **_entry("c1", "completed", description="write report"),
+            "acceptance_verdict": {"all_hold": True},
+        }
+
+        rendered = render_delegation_ledger([entry])
+
+        assert "write report" in rendered
+        assert "acceptance:" not in rendered

@@ -45,4 +45,7 @@ def test_after_agent_queues_memory_under_runtime_user(monkeypatch):
     )
     assert call.kwargs["agent_name"] == "researcher"
     assert call.kwargs["user_id"] == "runtime-user"
-    assert call.kwargs["trace_id"] is None
+    # Entry points always bind a trace id, so the memory queue -- which fires
+    # on a Timer thread that inherits no ContextVars -- always gets a real one
+    # captured at enqueue time rather than a None it would have to guard.
+    assert call.kwargs["trace_id"]

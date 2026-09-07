@@ -47,6 +47,105 @@ test.describe("Agent chat", () => {
     ).toBeVisible();
   });
 
+  test("continues an IM-selected thread with the same agent from the sidebar", async ({
+    page,
+  }) => {
+    const threadId = "00000000-0000-0000-0000-000000000168";
+    let streamBody: Record<string, unknown> | undefined;
+    mockLangGraphAPI(page, {
+      agents: [
+        {
+          name: "researcher",
+          description: "Research agent selected from an IM channel",
+        },
+      ],
+      threads: [
+        {
+          thread_id: threadId,
+          title: "IM research conversation",
+          metadata: {
+            channel_source: { type: "im_channel", provider: "telegram" },
+            channel_agent_name: "researcher",
+            agent_name: "researcher",
+          },
+        },
+      ],
+      runStreamHandler: async (route) => {
+        streamBody = route.request().postDataJSON() as Record<string, unknown>;
+        await handleRunStream(route);
+      },
+    });
+
+    await page.goto("/workspace/chats/new");
+    const threadLink = page
+      .locator("[data-sidebar='sidebar']")
+      .locator(`a[href='/workspace/agents/researcher/chats/${threadId}']`);
+    await expect(threadLink).toBeVisible({ timeout: 15_000 });
+    await threadLink.click();
+    await page.waitForURL(`**/workspace/agents/researcher/chats/${threadId}`);
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Continue this research");
+    await textarea.press("Enter");
+
+    await expect.poll(() => streamBody).toBeDefined();
+    expect(streamBody).toMatchObject({
+      context: {
+        agent_name: "researcher",
+        thread_id: threadId,
+      },
+    });
+  });
+
+  test("mobile agent welcome keeps the sidebar trigger clickable", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 664 });
+    mockLangGraphAPI(page, {
+      agents: [
+        {
+          ...MOCK_AGENTS[0]!,
+          description: "这是一个用于验证移动端欢迎页布局的测试智能体。".repeat(
+            16,
+          ),
+        },
+      ],
+    });
+
+    await page.goto("/workspace/agents/test-agent/chats/new");
+    await page.evaluate(() => {
+      document.cookie = "locale=zh-CN; path=/; SameSite=Lax";
+    });
+    await page.reload();
+
+    const sidebarTrigger = page
+      .locator("[data-sidebar='trigger']:visible")
+      .first();
+    await expect(sidebarTrigger).toBeVisible({ timeout: 15_000 });
+    const triggerBox = await sidebarTrigger.boundingBox();
+    expect(triggerBox).not.toBeNull();
+    const triggerReceivesPointerEvents = await page.evaluate(
+      ({ x, y }) => {
+        const trigger = document.elementFromPoint(x, y);
+        return trigger?.closest("[data-sidebar='trigger']") !== null;
+      },
+      {
+        x: triggerBox!.x + triggerBox!.width / 2,
+        y: triggerBox!.y + triggerBox!.height / 2,
+      },
+    );
+    expect(triggerReceivesPointerEvents).toBe(true);
+    await page.mouse.click(
+      triggerBox!.x + triggerBox!.width / 2,
+      triggerBox!.y + triggerBox!.height / 2,
+    );
+
+    await expect(
+      page.locator("[data-mobile='true'][data-sidebar='sidebar']"),
+    ).toBeVisible();
+  });
+
   test("keeps new-chat drafts isolated between agents", async ({ page }) => {
     mockLangGraphAPI(page, { agents: MOCK_AGENTS });
 

@@ -13,16 +13,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
+from app.gateway.artifact_archive import ArtifactArchiveError, ArtifactArchiveResult, build_artifact_archive
 from app.gateway.authz import require_cancel_permission_if, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
@@ -35,13 +38,17 @@ from app.gateway.checkpoint_lineage import (
 )
 from app.gateway.context_usage import build_context_usage
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
-from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
+from deerflow.authz.sandbox_authz import safe_app_config_async
+from deerflow.config.paths import get_paths, make_safe_user_id
+from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
+from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
 from deerflow.workspace_changes import get_workspace_changes_response
@@ -53,6 +60,7 @@ REGENERATE_HISTORY_SCAN_LIMIT = 200
 # (one per successful run in steady state) consume roughly half of history.
 REGENERATE_HISTORY_RAW_SCAN_LIMIT = REGENERATE_HISTORY_SCAN_LIMIT * 2
 THREAD_MESSAGE_PAGE_SCAN_BATCH = 201
+_artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
@@ -166,6 +174,10 @@ class RunResponse(BaseModel):
     middleware_tokens: int = 0
     message_count: int = 0
     stop_reason: str | None = None
+
+
+class ArtifactArchiveManifestResponse(BaseModel):
+    file_count: int
 
 
 class ThreadTokenUsageModelBreakdown(BaseModel):
@@ -1019,26 +1031,34 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
     )
 
 
-# Register GET and POST as separate routes so each method gets a unique OpenAPI
-# operationId. ``api_route(methods=["GET", "POST"])`` shares one route registration
-# across both methods, which makes FastAPI emit the same ``operationId`` twice and
-# warn about a duplicate operation id during OpenAPI generation.
-@router.get("/{thread_id}/runs/{run_id}/stream", response_model=None)
-@router.post("/{thread_id}/runs/{run_id}/stream", response_model=None)
-@require_permission("runs", "read", owner_check=True)
-async def stream_existing_run(
+def _reject_get_stream_action(
+    action: Literal["interrupt", "rollback"] | None = Query(default=None, include_in_schema=False),
+) -> None:
+    """Keep the GET join read-only before thread ownership or run lookup."""
+    if action is not None:
+        # SameSite=Lax still sends the session cookie on a cross-site top-level
+        # safe navigation. Reject the state-changing action before the endpoint
+        # wrapper performs its thread ownership lookup.
+        raise HTTPException(
+            status_code=405,
+            detail="`action` is only supported on POST requests",
+            headers={"Allow": "POST"},
+        )
+
+
+async def _stream_existing_run(
     thread_id: ThreadId,
     run_id: str,
     request: Request,
-    action: Literal["interrupt", "rollback"] | None = Query(default=None, description="Cancel action"),
-    wait: int = Query(default=0, description="Block until cancelled (1) or return immediately (0)"),
-):
-    """Join an existing run's SSE stream (GET), or cancel-then-stream (POST).
+    *,
+    action: Literal["interrupt", "rollback"] | None,
+    wait: int,
+) -> Response:
+    """Join an existing run's SSE stream, optionally cancelling it first.
 
-    The LangGraph SDK's ``joinStream`` and ``useStream`` stop button both use
-    ``POST`` to this endpoint.  When ``action=interrupt`` or ``action=rollback``
-    is present the run is cancelled first; the response then streams any
-    remaining buffered events so the client observes a clean shutdown.
+    When ``action=interrupt`` or ``action=rollback`` is present the run is
+    cancelled first; the response then streams any remaining buffered events
+    so the client observes a clean shutdown.
     """
     require_cancel_permission_when_action(request, action)
 
@@ -1097,6 +1117,34 @@ async def stream_existing_run(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# Register POST before GET to preserve the historical route precedence and
+# Allow header, while separate signatures keep cancel-only parameters off the
+# GET schema. The shared route name keeps generated operationIds stable.
+@router.post("/{thread_id}/runs/{run_id}/stream", response_model=None, name="stream_existing_run")
+@require_permission("runs", "read", owner_check=True)
+async def stream_existing_run(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+    action: Literal["interrupt", "rollback"] | None = Query(default=None, description="Cancel action"),
+    wait: int = Query(default=0, description="Block until cancelled (1) or return immediately (0)"),
+) -> Response:
+    """Join an existing run's SSE stream, optionally cancelling it first."""
+    return await _stream_existing_run(thread_id, run_id, request, action=action, wait=wait)
+
+
+@router.get(
+    "/{thread_id}/runs/{run_id}/stream",
+    response_model=None,
+    dependencies=[Depends(_reject_get_stream_action)],
+    name="stream_existing_run",
+)
+@require_permission("runs", "read", owner_check=True)
+async def join_existing_run_stream(thread_id: ThreadId, run_id: str, request: Request) -> Response:
+    """Join an existing run's observation-only SSE stream."""
+    return await _stream_existing_run(thread_id, run_id, request, action=None, wait=0)
 
 
 # ---------------------------------------------------------------------------
@@ -1424,6 +1472,153 @@ async def list_run_messages(
                 stamp_turn_duration_on_last_ai(data, durations)
 
     return {"data": data, "has_more": has_more}
+
+
+def _archive_response_chunks(result: ArtifactArchiveResult):
+    try:
+        while chunk := result.file.read(1024 * 1024):
+            yield chunk
+    finally:
+        result.file.close()
+
+
+async def _build_archive_without_abandoning_worker(
+    outputs_dir,
+    user_data_dir,
+    presented_paths: list[str],
+    *,
+    extra_reserved_dir_names: set[str],
+) -> ArtifactArchiveResult:
+    if _artifact_archive_slots.locked():
+        raise ArtifactArchiveError("Too many artifact archives are being created; try again shortly", 429)
+    await _artifact_archive_slots.acquire()
+    build_task = asyncio.create_task(
+        asyncio.to_thread(
+            build_artifact_archive,
+            outputs_dir,
+            presented_paths,
+            user_data_dir=user_data_dir,
+            extra_reserved_dir_names=extra_reserved_dir_names,
+        )
+    )
+    try:
+        return await asyncio.shield(build_task)
+    except asyncio.CancelledError:
+        while not build_task.done():
+            try:
+                await asyncio.shield(build_task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not build_task.cancelled():
+            try:
+                build_task.result().file.close()
+            except Exception:
+                pass
+        raise
+    finally:
+        _artifact_archive_slots.release()
+
+
+def _presented_files_from_delivery(events: list[dict]) -> list[str]:
+    if len(events) != 1:
+        raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
+    content = events[0].get("content")
+    by_tool = content.get("by_tool") if isinstance(content, dict) else None
+    presented = by_tool.get("present_files") if isinstance(by_tool, dict) else None
+    if not isinstance(presented, list) or not presented or any(not isinstance(path, str) for path in presented):
+        raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
+    return presented
+
+
+async def _archive_presented_paths(thread_id: ThreadId, run_id: str, request: Request) -> list[str]:
+    run = await get_run_store(request).get(run_id)
+    if run is None or run.get("thread_id") != thread_id or run.get("operation_kind", "run") != "run":
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    if run.get("status") in {RunStatus.pending.value, RunStatus.running.value}:
+        raise HTTPException(status_code=409, detail="This run has not finished")
+
+    events = await get_run_event_store(request).list_events(
+        thread_id,
+        run_id,
+        event_types=["run.delivery"],
+        limit=2,
+    )
+    return _presented_files_from_delivery(events)
+
+
+@router.get(
+    "/{thread_id}/runs/{run_id}/artifacts/archive",
+    response_model=ArtifactArchiveManifestResponse,
+)
+@require_permission("runs", "read", owner_check=True, require_existing=True)
+async def get_run_artifact_archive_manifest(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+) -> ArtifactArchiveManifestResponse:
+    """Return the verified terminal delivery count used by the archive."""
+    presented_paths = await _archive_presented_paths(thread_id, run_id, request)
+    return ArtifactArchiveManifestResponse(file_count=len(dict.fromkeys(presented_paths)))
+
+
+@router.post("/{thread_id}/runs/{run_id}/artifacts/archive")
+@require_permission("runs", "read", owner_check=True, require_existing=True)
+async def create_run_artifact_archive(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+) -> StreamingResponse:
+    """Download the current contents of the files presented by one terminal run."""
+    presented_paths = await _archive_presented_paths(thread_id, run_id, request)
+
+    raw_owner_user_id = get_trusted_internal_owner_user_id(request)
+    effective_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else get_effective_user_id()
+    app_config = await safe_app_config_async()
+    custom_tool_output_dir = getattr(getattr(app_config, "tool_output", None), "storage_subdir", None)
+    extra_reserved_dir_names = {custom_tool_output_dir} if isinstance(custom_tool_output_dir, str) else set()
+    paths = get_paths()
+    user_data_dir = paths.sandbox_user_data_dir(thread_id, user_id=effective_user_id)
+    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id)
+
+    try:
+        async with get_run_manager(request).reserve_thread_operation(
+            thread_id,
+            kind=ThreadOperationKind.artifact_archive,
+            user_id=effective_user_id,
+        ):
+            result = await _build_archive_without_abandoning_worker(
+                outputs_dir,
+                user_data_dir,
+                presented_paths,
+                extra_reserved_dir_names=extra_reserved_dir_names,
+            )
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail="Artifacts are currently being modified; try again shortly") from exc
+    except ArtifactArchiveError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    safe_run_id = re.sub(r"[^A-Za-z0-9_-]", "", run_id)[:32] or "run"
+    logger.info(
+        "Created artifact archive thread_id=%s run_id=%s members=%d input_bytes=%d output_bytes=%d",
+        sanitize_log_param(thread_id),
+        sanitize_log_param(run_id),
+        result.member_count,
+        result.input_bytes,
+        result.size,
+    )
+    return StreamingResponse(
+        _archive_response_chunks(result),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="artifacts-{safe_run_id}.zip"',
+            "Content-Length": str(result.size),
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+        background=BackgroundTask(result.file.close),
+    )
 
 
 @router.get("/{thread_id}/runs/{run_id}/events")

@@ -20,8 +20,8 @@ This design keeps the agent core simple and stable while allowing rich, composab
 <Callout type="info">
   Each subagent runs its own agent loop and gets its own middleware chain. The
   loop-detection, token-budget, and summarization guards below are mirrored on
-  the subagent chain (#3875); the other middlewares are Lead-Agent-specific
-  (e.g. memory, title generation, clarification). See
+  the subagent chain (#3875); other Lead-Agent-specific middlewares such as
+  memory, title generation, and clarification do not run there. See
   [Subagents → Runaway guards](/docs/harness/subagents#runaway-guards).
 </Callout>
 
@@ -29,24 +29,28 @@ This design keeps the agent core simple and stable while allowing rich, composab
 
 The middleware chain is built once per agent invocation, based on the current configuration and request parameters. The middlewares run in a defined order:
 
-1. Runtime middlewares (error handling, thread data, uploads, dangling tool call patching)
+1. Runtime middlewares (`InputSanitizationMiddleware` for input sanitization → `ToolOutputBudgetMiddleware` for output-budget truncation → `ToolResultSanitizationMiddleware` for tool-result sanitization, then thread data, uploads, sandbox, dangling tool-call patching, and LLM error handling; tool receipts (if enabled), authorization/guardrail (if enabled), sandbox audit, read-before-write (if enabled), tool progress (if enabled), and tool error handling follow)
 2. `DynamicContextMiddleware` — current date and optional memory context
 3. `SkillActivationMiddleware` — slash-skill activation
-4. `DurableContextMiddleware` — captures durable summary, delegation, and skill-reference state
-5. `SummarizationMiddleware` — context compression (if enabled)
-6. `TodoMiddleware` — task list management (plan mode only)
-7. `TokenUsageMiddleware` — token tracking (if enabled)
-8. `TitleMiddleware` — automatic thread title generation
-9. `MemoryMiddleware` — cross-session memory injection and queuing
-10. `ViewImageMiddleware` — image details injection (if model supports vision)
-11. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
-12. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
-13. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
-14. `LoopDetectionMiddleware` — breaks repetitive tool call loops
-15. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
-16. Custom middlewares (if any)
-17. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
-18. `ClarificationMiddleware` — intercepts clarification requests (always last)
+4. `SkillToolPolicyMiddleware` — filters skill tools to the active skill
+5. `DurableContextMiddleware` — captures durable summary, delegation, and skill-reference state
+6. `SummarizationMiddleware` — context compression (if enabled)
+7. `TodoMiddleware` — task list management (plan mode only)
+8. `TokenUsageMiddleware` — token tracking (if enabled)
+9. `TitleMiddleware` — automatic thread title generation
+10. `MemoryMiddleware` — cross-session memory injection and queuing
+11. `ViewImageMiddleware` — image details injection (if model supports vision)
+12. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
+13. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
+14. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
+15. `LoopDetectionMiddleware` — breaks repetitive tool call loops
+16. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
+17. Custom middlewares (if any)
+18. Configured extension middlewares (if any)
+19. `TerminalResponseMiddleware` — retries an empty final response once
+20. `ModelLengthFinishReasonMiddleware` — records a length-capped completion
+21. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
+22. `ClarificationMiddleware` — intercepts clarification requests (always last)
 
 The ordering is significant. Durable context capture runs before summarization so delegated task dispatches, terminal delegation results, and loaded skill references survive compaction. Clarification always runs last so it can intercept after all other middlewares have had their turn.
 
@@ -175,6 +179,8 @@ When tool search is enabled, this middleware hides deferred tool schemas from th
 
 **Configuration**: `tool_search.enabled: true` in `config.yaml`.
 
+For `create_deerflow_agent`, an `@Next` or `@Prev` anchor must name a middleware that this smaller chain actually contains; anchors from the full middleware list otherwise fail to resolve.
+
 ## Summarization configuration
 
 The `SummarizationMiddleware` is one of the most impactful middlewares for long-horizon tasks. Here is the full configuration reference:
@@ -232,16 +238,33 @@ Custom middlewares can be injected into the chain for specialized use cases. A m
 The basic structure is:
 
 ```python
+from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langgraph.runtime import Runtime
 
-class MyMiddleware(AgentMiddleware):
-    def before_model(self, state, runtime) -> dict | None:
-        """Runs before each model call."""
+class MyMiddleware(AgentMiddleware[AgentState]):
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        print(f"Model input contains {len(state.get('messages', []))} messages")
         return None
 
-    def after_model(self, state, runtime) -> dict | None:
-        """Runs after each model call."""
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        messages = state.get("messages", [])
+        last_message = messages[-1] if messages else None
+        print(f"Last message type: {type(last_message).__name__ if last_message else 'none'}")
         return None
 ```
 
-Custom middlewares are passed to `make_lead_agent` via the `custom_middlewares` parameter in `build_middlewares`. They are injected immediately before `ClarificationMiddleware` at the end of the chain.
+Lifecycle hooks can return a dictionary of state updates, which LangChain merges
+into the agent state, or `None` when they only observe state.
+
+For operator-managed deployments, register a zero-argument class by import path:
+
+```yaml
+extensions:
+  middlewares:
+    - my_company.deerflow_middlewares:MyMiddleware
+```
+
+Configured middleware runs after the built-in middleware and optional loop/token guards. On the lead-agent pipeline, it runs before the terminal-response, model-length, safety, and clarification tail; subagents have no terminal-response, model-length, or clarification stage, so configured middleware is followed by the optional safety guard, `DurableContextMiddleware`, optional `SummarizationMiddleware`, then `SubagentDateContextMiddleware` and `SystemMessageCoalescingMiddleware`. Treat middleware paths as trusted configuration because loading one executes Python code. Embedded callers can instead use `DeerFlowClient(middlewares=[...])`, which builds the full lead-agent chain and places middleware before its terminal-response, model-length, safety, and clarification tail. `create_deerflow_agent(extra_middleware=[...])` instead builds a smaller feature-based lead-agent chain; unanchored extras are placed immediately before `ClarificationMiddleware` (anchored extras follow their `@Next`/`@Prev` placement). Neither API forwards middleware to subagents.
+
+Choose the registration path by ownership and placement. The fixed-slot (not deprecated) `extensions.middlewares` list is accepted in `config.yaml` and `extensions_config.json` (`config.yaml` wins) and applies to both lead and subagent pipelines. Packaged extensions registered through the top-level `plugins:` list contribute middleware at semantic extension points. Contributor code that needs committed, programmatic lead-only wiring can use `build_middlewares(..., custom_middlewares=[MyMiddleware()])`.

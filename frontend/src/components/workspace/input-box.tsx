@@ -2297,15 +2297,6 @@ export function InputBox({
         </div>
         <PromptInputFooter className="flex flex-wrap gap-2 sm:flex-nowrap">
           <PromptInputTools className="min-w-0 flex-1 flex-wrap">
-            {/* TODO: Add more connectors here
-          <PromptInputActionMenu>
-            <PromptInputActionMenuTrigger className="px-2!" />
-            <PromptInputActionMenuContent>
-              <PromptInputActionAddAttachments
-                label={t.inputBox.addAttachments}
-              />
-            </PromptInputActionMenuContent>
-          </PromptInputActionMenu> */}
             <AddAttachmentsButton
               className="px-2!"
               disabled={composerLocked}

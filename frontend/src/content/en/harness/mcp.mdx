@@ -140,7 +140,9 @@ discovery.
 - **Fail-closed by default**: a user with no mapped credential — or a mapped
   `$ENV_VAR` that is unset — gets a clear error instead of another user's
   credential. Set `"on_missing": "passthrough"` to instead forward such calls
-  with the server's static headers.
+  with the server's static headers. A mapped credential that cannot travel as
+  an HTTP header (for example one with a trailing newline) is always rejected
+  with an error that never repeats the value.
 - Combined with per-`(user, thread)` MCP session scoping, users cannot reach
   each other's authenticated sessions or credentials.
 - The Gateway API masks `user_auth.users` values in GET responses and preserves
@@ -208,6 +210,12 @@ conversation:
   call fails with an error naming the missing key rather than falling back to
   the discovery credential — which would send one tenant's request under
   another tenant's authority. Set `"on_missing": "passthrough"` to opt out.
+- A value that cannot travel as an HTTP header — a stray newline picked up when
+  reading a token from a file, leading/trailing whitespace, characters outside
+  ASCII — is always rejected, regardless of `on_missing`. The error names the
+  offending key but never repeats the value; without this check a newline or
+  stray whitespace would reach the HTTP client, whose rejection echoes the full
+  credential into a model-visible tool error.
 - For a server declaring several sources, precedence is static `headers` <
   `oauth` < `user_auth` < `headers_from_context`: the value chosen for this one
   request is the most specific, so it wins.

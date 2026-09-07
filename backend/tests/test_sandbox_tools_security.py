@@ -16,6 +16,7 @@ from deerflow.sandbox.tools import (
     _is_acp_workspace_path,
     _is_custom_mount_path,
     _is_skills_path,
+    _mask_source_roots,
     _reject_path_traversal,
     _resolve_acp_workspace_path,
     _resolve_and_validate_user_data_path,
@@ -232,6 +233,55 @@ def test_mask_local_paths_compiled_patterns_are_cached() -> None:
     first = _compiled_mask_patterns(sources)
     second = _compiled_mask_patterns(sources)
     assert first is second  # cache hit -> identical object, not rebuilt
+
+
+def test_mask_local_paths_cache_does_not_retain_per_thread_sources() -> None:
+    """Unique thread paths must not become process-lifetime regex-cache keys."""
+    _compiled_mask_patterns.cache_clear()
+
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/srv/deer-flow/skills"),
+        patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=None),
+    ):
+        for index in range(32):
+            root = f"/tmp/deer-flow/threads/thread-{index}/user-data"
+            thread_data = {
+                "workspace_path": f"{root}/workspace",
+                "uploads_path": f"{root}/uploads",
+                "outputs_path": f"{root}/outputs",
+            }
+            masked = mask_local_paths_in_output(f"created {root}/workspace/result.txt", thread_data)
+            assert masked == "created /mnt/user-data/workspace/result.txt"
+
+    cache_info = _compiled_mask_patterns.cache_info()
+    assert cache_info.currsize == 1
+    assert cache_info.misses == 1
+
+
+def test_mask_local_paths_caches_dynamic_source_resolution_per_root() -> None:
+    """A batched glob/grep must not repeat ``realpath`` for every match."""
+    _compiled_mask_patterns.cache_clear()
+    _mask_source_roots.cache_clear()
+
+    try:
+        with (
+            patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+            patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/srv/deer-flow/skills"),
+            patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=None),
+            patch("deerflow.config.paths.get_paths", side_effect=RuntimeError("skip user paths")),
+            patch("deerflow.sandbox.tools.os.path.realpath", side_effect=lambda path: path) as realpath,
+        ):
+            for _ in range(200):
+                masked = mask_local_paths_in_output("created /tmp/deer-flow/threads/t1/user-data/workspace/result.txt", _THREAD_DATA)
+                assert masked == "created /mnt/user-data/workspace/result.txt"
+
+        # One stable skills root plus the workspace/uploads/outputs/thread roots.
+        assert realpath.call_count == 5
+        assert _mask_source_roots.cache_info().maxsize == 256
+    finally:
+        _compiled_mask_patterns.cache_clear()
+        _mask_source_roots.cache_clear()
 
 
 def test_mask_local_paths_stable_across_repeated_and_batched_calls() -> None:
@@ -563,6 +613,17 @@ def test_validate_local_bash_command_paths_blocks_host_paths() -> None:
         validate_local_bash_command_paths("cat /etc/passwd", _THREAD_DATA)
 
 
+@pytest.mark.parametrize("command", ["cat /etc/os-release", "curl file:///etc/os-release"])
+def test_validate_local_bash_command_paths_guides_environment_probe_recovery(command: str) -> None:
+    with pytest.raises(PermissionError) as exc_info:
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+    message = str(exc_info.value)
+    assert "For environment questions, use command-only probes" in message
+    assert "otherwise use an allowed virtual path" in message
+    assert "Do not repeat the rejected path" in message
+
+
 def test_validate_local_bash_command_paths_allows_https_urls() -> None:
     """URLs like https://github.com/... must not be flagged as unsafe absolute paths."""
     validate_local_bash_command_paths(
@@ -770,6 +831,38 @@ def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> 
     )
 
     assert "Host bash execution is disabled" in result
+
+
+def test_bash_tool_description_scopes_environment_detection_to_local_host_bash() -> None:
+    description = bash_tool.description
+
+    assert "local host via host bash" in description
+    assert "inspect the current environment instead of" in description
+    assert "`uname -s`" in description
+    assert "`sw_vers`" in description
+    assert "`uname -a`" in description
+    assert "`/etc/os-release` only when the active" in description
+    assert "sandbox policy permits it" in description
+    assert "do not repeat the rejected command" in description
+    assert "otherwise use allowed virtual paths or explain the restriction" in description
+
+
+def test_bash_tool_guides_recovery_after_host_path_rejection(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+        context={"thread_id": "thread-1"},
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("unsafe command should not execute")),
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+    result = bash_tool.func(runtime=runtime, description="detect the OS", command="cat /etc/os-release")
+
+    assert "For environment questions, use command-only probes" in result
+    assert "Do not repeat the rejected path" in result
 
 
 def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) -> None:

@@ -149,6 +149,8 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
     sbx._lock = __import__("threading").Lock()
     sbx._client = SimpleNamespace(shell=_FakeShell())
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30
+    sbx._recovery_session_id = None
+    sbx._default_shell_corrupted = False
 
     sbx.execute_command("echo hello")
 
@@ -392,6 +394,55 @@ def test_bash_tool_no_env_without_token(monkeypatch: pytest.MonkeyPatch) -> None
 
     bash_tool.func(runtime=runtime, description="ls", command="ls")
     assert captured["env"] is None
+
+
+def test_bash_tool_routes_subagent_command_to_its_shell_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "aio:xyz"}},
+        context={
+            "thread_id": "t1",
+            "sandbox_command_scope_id": "subagent:task-1",
+        },
+        config={},
+    )
+    captured: dict = {}
+
+    class _Sandbox:
+        def execute_command(self, command, env=None, timeout=None):
+            pytest.fail("subagent command must use its scoped shell session")
+
+        def execute_command_in_scope(
+            self,
+            command,
+            env=None,
+            timeout=None,
+            *,
+            scope_id=None,
+        ):
+            captured.update(
+                command=command,
+                env=env,
+                timeout=timeout,
+                scope_id=scope_id,
+            )
+            return "done"
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: _Sandbox(),
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        lambda runtime: None,
+    )
+
+    result = bash_tool.func(runtime=runtime, description="ls", command="ls")
+
+    assert result == "done"
+    assert captured["scope_id"] == "subagent:task-1"
+    assert captured["command"] == "cd /mnt/user-data/workspace; ls"
 
 
 # ---------------------------------------------------------------------------

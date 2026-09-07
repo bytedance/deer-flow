@@ -2,6 +2,7 @@
 
 import logging
 import re
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, NotRequired, override
 
 from langchain.agents import AgentState
@@ -13,6 +14,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -106,7 +108,18 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     def _get_title_user_message(self, state: TitleMiddlewareState) -> str:
         messages = state.get("messages") or []
-        user_msg_content = next((self._message_content(m) for m in messages if self._is_user_message_for_title(m)), "")
+        user_message = next((m for m in messages if self._is_user_message_for_title(m)), None)
+        if user_message is None:
+            return ""
+        if isinstance(user_message, dict):
+            additional_kwargs = user_message.get("additional_kwargs")
+        else:
+            additional_kwargs = getattr(user_message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, Mapping) and isinstance(additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY), str):
+            user_msg_content = get_original_user_content_text(self._message_content(user_message), additional_kwargs)
+        else:
+            # Keep TitleMiddleware's richer normalization for ordinary structured content.
+            user_msg_content = self._message_content(user_message)
         return self._normalize_content(user_msg_content)
 
     def _should_generate_title(self, state: TitleMiddlewareState, *, allow_partial_exchange: bool = False) -> bool:
@@ -170,6 +183,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return title[: config.max_chars] if len(title) > config.max_chars else title
 
     def _fallback_title(self, user_msg: str) -> str:
+        if not user_msg.strip():
+            return "New Conversation"
+
         config = self._get_title_config()
         fallback_chars = min(config.max_chars, 50)
         if len(user_msg) > fallback_chars:
@@ -178,7 +194,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             ellipsis = "..."
             body = min(fallback_chars, config.max_chars - len(ellipsis))
             return user_msg[:body].rstrip() + ellipsis
-        return user_msg if user_msg else "New Conversation"
+        return user_msg
 
     def _get_runnable_config(self) -> dict[str, Any]:
         """Inherit the parent RunnableConfig and add middleware tag.
@@ -217,12 +233,15 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         if not self._should_generate_title(state):
             return None
 
-        config = self._get_title_config()
-        if not config.model_name:
-            user_msg = self._get_title_user_message(state)
+        user_msg = self._get_title_user_message(state)
+        # An attachment-only first turn has no user-authored text. Do not let a
+        # configured title model infer a title from the assistant response.
+        if not user_msg.strip():
             return {"title": self._fallback_title(user_msg)}
 
-        user_msg = self._get_title_user_message(state)
+        config = self._get_title_config()
+        if not config.model_name:
+            return {"title": self._fallback_title(user_msg)}
 
         try:
             prompt, user_msg = self._build_title_prompt(state)

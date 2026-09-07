@@ -1,11 +1,14 @@
 import asyncio
 import logging
 import tempfile
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Literal
+from typing import BinaryIO, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from starlette.datastructures import FormData, Headers, UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
@@ -39,6 +42,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["skills"])
 
 _ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage skills."
+_MAX_SKILL_ARCHIVE_UPLOAD_BYTES = 100 * 1024 * 1024
+_MAX_SKILL_ARCHIVE_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+_UPLOAD_COPY_CHUNK_BYTES = 1024 * 1024
+
+
+class _SkillArchiveUploadTooLargeError(MultiPartException):
+    """Abort multipart parsing while Starlette can still close spool files."""
+
+
+class _BoundedSkillArchiveMultiPartParser(MultiPartParser):
+    """Apply a byte limit to file parts before Starlette writes them to disk."""
+
+    def __init__(self, headers: Headers, stream: AsyncGenerator[bytes, None], *, max_file_bytes: int) -> None:
+        super().__init__(headers, stream, max_files=1, max_fields=0)
+        self._max_file_bytes = max_file_bytes
+        self._current_file_bytes = 0
+
+    def on_part_begin(self) -> None:
+        super().on_part_begin()
+        self._current_file_bytes = 0
+
+    def on_part_data(self, data: bytes, start: int, end: int) -> None:
+        if self._current_part.file is not None:
+            self._current_file_bytes += end - start
+            if self._current_file_bytes > self._max_file_bytes:
+                raise _SkillArchiveUploadTooLargeError(_skill_archive_upload_limit_message())
+        super().on_part_data(data, start, end)
 
 
 class SkillResponse(BaseModel):
@@ -148,6 +178,92 @@ def _get_user_skill_storage(config: AppConfig) -> SkillStorage:
     return get_or_new_user_skill_storage(get_effective_user_id(), app_config=config)
 
 
+def _copy_uploaded_skill_archive(source: BinaryIO) -> Path:
+    """Copy an uploaded archive to a bounded temporary file off the event loop."""
+    destination: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="deerflow-skill-", suffix=".skill", delete=False) as target:
+            destination = Path(target.name)
+            total = 0
+            while chunk := source.read(_UPLOAD_COPY_CHUNK_BYTES):
+                total += len(chunk)
+                if total > _MAX_SKILL_ARCHIVE_UPLOAD_BYTES:
+                    raise _SkillArchiveUploadTooLargeError(_skill_archive_upload_limit_message())
+                target.write(chunk)
+        return destination
+    except Exception:
+        if destination is not None:
+            destination.unlink(missing_ok=True)
+        raise
+
+
+def _skill_archive_upload_limit_message() -> str:
+    return f"Skill archive exceeds the {_MAX_SKILL_ARCHIVE_UPLOAD_BYTES // (1024 * 1024)} MiB upload limit"
+
+
+async def _bounded_skill_archive_request_stream(request: Request) -> AsyncGenerator[bytes, None]:
+    """Reject oversized multipart bodies while they are still being received."""
+    request_limit = _MAX_SKILL_ARCHIVE_UPLOAD_BYTES + _MAX_SKILL_ARCHIVE_MULTIPART_OVERHEAD_BYTES
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > request_limit:
+            raise _SkillArchiveUploadTooLargeError(_skill_archive_upload_limit_message())
+
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > request_limit:
+            raise _SkillArchiveUploadTooLargeError(_skill_archive_upload_limit_message())
+        yield chunk
+
+
+async def _parse_skill_archive_form(request: Request) -> FormData:
+    content_type = request.headers.get("content-type", "")
+    media_type = content_type.partition(";")[0].strip().casefold()
+    if media_type != "multipart/form-data":
+        raise HTTPException(status_code=422, detail="Expected a multipart form upload")
+
+    parser = _BoundedSkillArchiveMultiPartParser(
+        request.headers,
+        _bounded_skill_archive_request_stream(request),
+        max_file_bytes=_MAX_SKILL_ARCHIVE_UPLOAD_BYTES,
+    )
+    return await parser.parse()
+
+
+async def _install_skill_archive(archive_path: Path, config: AppConfig) -> SkillInstallResponse:
+    try:
+        result = await _get_user_skill_storage(config).ainstall_skill_from_archive(archive_path)
+        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+        return SkillInstallResponse(**result)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except SkillAlreadyExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except SkillSecurityScanError as e:
+        if e.findings:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": str(e),
+                    "skill_name": e.skill_name,
+                    "findings": e.findings,
+                },
+            ) from e
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to install skill: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to install skill: {str(e)}") from e
+
+
 @router.get(
     "/skills",
     response_model=SkillsListResponse,
@@ -174,31 +290,63 @@ async def install_skill(request: Request, body: SkillInstallRequest, config: App
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_file_path = resolve_thread_virtual_path(body.thread_id, body.path)
-        result = await _get_user_skill_storage(config).ainstall_skill_from_archive(skill_file_path)
-        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
-        return SkillInstallResponse(**result)
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except SkillAlreadyExistsError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except SkillSecurityScanError as e:
-        if e.findings:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "message": str(e),
-                    "skill_name": e.skill_name,
-                    "findings": e.findings,
-                },
-            )
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to install skill: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to install skill: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return await _install_skill_archive(skill_file_path, config)
+
+
+@router.post(
+    "/skills/install/upload",
+    response_model=SkillInstallResponse,
+    summary="Upload and Install Skill",
+    description="Upload a local .skill archive and install it for the current user.",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["archive"],
+                        "properties": {"archive": {"type": "string", "format": "binary"}},
+                    }
+                }
+            },
+        }
+    },
+)
+async def upload_and_install_skill(
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> SkillInstallResponse:
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+
+    form: FormData | None = None
+    temporary_path: Path | None = None
+    try:
+        form = await _parse_skill_archive_form(request)
+        archive = form.get("archive")
+        if not isinstance(archive, UploadFile):
+            raise HTTPException(status_code=422, detail="Multipart field 'archive' must contain a file")
+
+        filename = archive.filename or ""
+        if not filename.casefold().endswith(".skill"):
+            raise HTTPException(status_code=400, detail="Skill archive filename must end with .skill")
+
+        await archive.seek(0)
+        temporary_path = await asyncio.to_thread(_copy_uploaded_skill_archive, archive.file)
+        return await _install_skill_archive(temporary_path, config)
+    except _SkillArchiveUploadTooLargeError as e:
+        raise HTTPException(status_code=413, detail=e.message) from e
+    except MultiPartException as e:
+        raise HTTPException(status_code=400, detail=e.message) from e
+    finally:
+        if form is not None:
+            await form.close()
+        if temporary_path is not None:
+            await asyncio.to_thread(temporary_path.unlink, missing_ok=True)
 
 
 @router.post(

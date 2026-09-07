@@ -58,7 +58,8 @@ import threading
 from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
-from typing import TYPE_CHECKING, override
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -67,6 +68,8 @@ from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
+from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY
+from deerflow.runtime.events.catalog import MIDDLEWARE_LOOP_DETECTION_TAG
 
 if TYPE_CHECKING:
     from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -184,6 +187,22 @@ _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. P
 _TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."
 
 
+@dataclass(frozen=True)
+class _LoopDecision:
+    """A loop-detection transition that may be persisted for audit."""
+
+    message: str
+    action: Literal["warn", "hard_stop"]
+    detection_layer: Literal["identical_call_set", "tool_frequency"]
+    tool_names: tuple[str, ...]
+    count: int
+    threshold: int
+
+    @property
+    def hard_stop(self) -> bool:
+        return self.action == "hard_stop"
+
+
 class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     """Detects and breaks repetitive tool call loops.
 
@@ -234,6 +253,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self.max_tracked_threads = max_tracked_threads
         self.tool_freq_warn = tool_freq_warn
         self.tool_freq_hard_limit = tool_freq_hard_limit
+        self._default_tool_freq_thresholds = (tool_freq_warn, tool_freq_hard_limit)
         self._tool_freq_overrides: dict[str, tuple[int, int]] = tool_freq_overrides or {}
         # Layer 2's windowed frequency count can never exceed the deque length,
         # so the deque MUST be at least as long as the largest hard limit it is
@@ -416,7 +436,11 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._touch_pending_warning_key_locked(pending_key)
             self._prune_pending_warning_state_locked(protected_key=pending_key)
 
-    def _track_and_check(self, state: AgentState, runtime: Runtime) -> tuple[str | None, bool]:
+    def _track_and_check(
+        self,
+        state: AgentState,
+        runtime: Runtime,
+    ) -> _LoopDecision | None:
         """Track tool calls and check for loops.
 
         Two detection layers:
@@ -426,19 +450,19 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
              on 40 different files).
 
         Returns:
-            (warning_message_or_none, should_hard_stop)
+            A structured decision when a warning or hard stop is triggered.
         """
         messages = state.get("messages", [])
         if not messages:
-            return None, False
+            return None
 
         last_msg = messages[-1]
         if getattr(last_msg, "type", None) != "ai":
-            return None, False
+            return None
 
         tool_calls = getattr(last_msg, "tool_calls", None)
         if not tool_calls:
-            return None, False
+            return None
 
         thread_id = self._get_thread_id(runtime)
         call_hash = _hash_tool_calls(tool_calls)
@@ -463,7 +487,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     self._warned.pop(thread_id, None)
 
             count = history.count(call_hash)
-            tool_names = [tc.get("name", "?") for tc in tool_calls]
+            tool_names = [str(tc.get("name") or "?") for tc in tool_calls]
 
             # --- Layer 1: hash-based (identical call sets) ---
             if count >= self.hard_limit:
@@ -476,22 +500,30 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                         "tools": tool_names,
                     },
                 )
-                return _HARD_STOP_MSG, True
+                return _LoopDecision(
+                    message=_HARD_STOP_MSG,
+                    action="hard_stop",
+                    detection_layer="identical_call_set",
+                    tool_names=tuple(tool_names),
+                    count=count,
+                    threshold=self.hard_limit,
+                )
 
-            if count >= self.warn_threshold:
-                warned = self._warned[thread_id]
-                if call_hash not in warned:
-                    warned.add(call_hash)
-                    logger.warning(
-                        "Repetitive tool calls detected — injecting warning",
-                        extra={
-                            "thread_id": thread_id,
-                            "call_hash": call_hash,
-                            "count": count,
-                            "tools": tool_names,
-                        },
-                    )
-                    return _WARNING_MSG, False
+            # Warnings admit the whole batch, so they must not skip frequency
+            # accounting or hide a later hard limit. Keep one candidate (hash
+            # warnings retain priority over frequency warnings) until every
+            # admitted call has been checked. Only the selected warning is
+            # marked/logged; a hard stop may supersede it below.
+            warning: _LoopDecision | None = None
+            if count >= self.warn_threshold and call_hash not in self._warned.get(thread_id, set()):
+                warning = _LoopDecision(
+                    message=_WARNING_MSG,
+                    action="warn",
+                    detection_layer="identical_call_set",
+                    tool_names=tuple(tool_names),
+                    count=count,
+                    threshold=self.warn_threshold,
+                )
 
             # --- Layer 2: per-tool-type frequency (windowed) ---
             tool_name_history = self._tool_name_history[thread_id]
@@ -514,12 +546,15 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                         del name_counter[old]
                     else:
                         name_counter[old] = c
+                    old_warn = self._tool_freq_overrides.get(old, self._default_tool_freq_thresholds)[0]
+                    if c < old_warn:
+                        # Any tool can evict an older name from the shared
+                        # window. Rearm that name as soon as its burst decays,
+                        # even when the current call belongs to another tool.
+                        self._tool_freq_warned[thread_id].discard(old)
                 freq_count = name_counter.get(name, 0)
 
-                if name in self._tool_freq_overrides:
-                    eff_warn, eff_hard = self._tool_freq_overrides[name]
-                else:
-                    eff_warn, eff_hard = self.tool_freq_warn, self.tool_freq_hard_limit
+                eff_warn, eff_hard = self._tool_freq_overrides.get(name, self._default_tool_freq_thresholds)
 
                 if freq_count >= eff_hard:
                     logger.error(
@@ -530,27 +565,58 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                             "count": freq_count,
                         },
                     )
-                    return _TOOL_FREQ_HARD_STOP_MSG.format(tool_name=name, count=freq_count), True
+                    return _LoopDecision(
+                        message=_TOOL_FREQ_HARD_STOP_MSG.format(tool_name=name, count=freq_count),
+                        action="hard_stop",
+                        detection_layer="tool_frequency",
+                        tool_names=(name,),
+                        count=freq_count,
+                        threshold=eff_hard,
+                    )
 
                 if freq_count >= eff_warn:
                     freq_warned = self._tool_freq_warned[thread_id]
-                    if name not in freq_warned:
-                        freq_warned.add(name)
-                        logger.warning(
-                            "Tool frequency warning — too many calls to same tool type",
-                            extra={
-                                "thread_id": thread_id,
-                                "tool_name": name,
-                                "count": freq_count,
-                            },
+                    if warning is None and name not in freq_warned:
+                        warning = _LoopDecision(
+                            message=_TOOL_FREQ_WARNING_MSG.format(tool_name=name, count=freq_count),
+                            action="warn",
+                            detection_layer="tool_frequency",
+                            tool_names=(name,),
+                            count=freq_count,
+                            threshold=eff_warn,
                         )
-                        return _TOOL_FREQ_WARNING_MSG.format(tool_name=name, count=freq_count), False
                 else:
                     # Windowed count decayed below the warn threshold; allow a
                     # future burst of this tool to warn again.
                     self._tool_freq_warned[thread_id].discard(name)
 
-        return None, False
+            if warning is not None:
+                if warning.detection_layer == "identical_call_set":
+                    self._warned[thread_id].add(call_hash)
+                    logger.warning(
+                        "Repetitive tool calls detected — injecting warning",
+                        extra={
+                            "thread_id": thread_id,
+                            "call_hash": call_hash,
+                            "count": warning.count,
+                            "tools": list(warning.tool_names),
+                        },
+                    )
+                else:
+                    warned_name = warning.tool_names[0]
+                    # Later calls in this batch may already have decayed this
+                    # burst. Do not suppress the next burst with a stale mark.
+                    if name_counter.get(warned_name, 0) >= warning.threshold:
+                        self._tool_freq_warned[thread_id].add(warned_name)
+                    logger.warning(
+                        "Tool frequency warning — too many calls to same tool type",
+                        extra={
+                            "thread_id": thread_id,
+                            "tool_name": warned_name,
+                            "count": warning.count,
+                        },
+                    )
+            return warning
 
     @staticmethod
     def _append_text(content: str | list | None, text: str) -> str | list:
@@ -589,10 +655,55 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
         return update
 
-    def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
-        warning, hard_stop = self._track_and_check(state, runtime)
+    def _record_audit_event(
+        self,
+        decision: _LoopDecision,
+        runtime: Runtime,
+    ) -> None:
+        """Persist a loop-detection transition without sensitive tool data."""
+        context = getattr(runtime, "context", None)
+        is_subagent = isinstance(context, dict) and context.get("is_subagent") is True
+        recorder = context.get(LOOP_DETECTION_RECORDER_CONTEXT_KEY) if isinstance(context, dict) else None
+        if recorder is None and isinstance(context, dict):
+            # Lead-agent runs expose the ordinary RunJournal. Native task-tool
+            # subagents receive only the narrow, loop-safe recorder key above.
+            recorder = context.get("__run_journal")
+        if recorder is None:
+            return
 
-        if hard_stop:
+        try:
+            recorder.record_middleware(
+                tag=MIDDLEWARE_LOOP_DETECTION_TAG,
+                name=type(self).__name__,
+                hook="after_model",
+                action=decision.action,
+                changes={
+                    "is_subagent": is_subagent,
+                    "agent_id": context.get("agent_id") if is_subagent else None,
+                    "detection_layer": decision.detection_layer,
+                    "tool_names": list(decision.tool_names),
+                    "count": decision.count,
+                    "threshold": decision.threshold,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            # Audit persistence must never break the agent run.
+            logger.warning(
+                "Failed to record middleware:loop_detection event",
+                exc_info=True,
+            )
+
+    def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
+        decision = self._track_and_check(state, runtime)
+        if decision is None:
+            return None
+
+        # Keep the shared loop-detection lock's critical section bounded; the
+        # journal append is cheap and non-blocking but does not belong under it.
+        self._record_audit_event(decision, runtime)
+        warning = decision.message
+
+        if decision.hard_stop:
             # Record the stop reason so the executor can surface
             # ``stop_reason=loop_capped`` after the run returns (#3875 Phase 2).
             # The hard stop does not raise — it strips tool_calls and lets the
@@ -619,7 +730,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             stripped_msg = last_msg.model_copy(update=self._build_hard_stop_update(last_msg, content))
             return {"messages": [stripped_msg]}
 
-        if warning:
+        if decision.action == "warn":
             # Defer injection to the next model call. We must NOT alter the
             # AIMessage(tool_calls=...) here (would put framework words in
             # the model's mouth, polluting downstream consumers like

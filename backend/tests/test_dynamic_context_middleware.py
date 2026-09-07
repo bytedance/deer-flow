@@ -800,3 +800,168 @@ def test_no_recursive_id_swap_in_full_middleware_flow():
     msgs_v2 = result_v2["messages"]
     assert msgs_v2[0].id == "msg-2"  # reminder takes new message's ID
     assert msgs_v2[1].id == "msg-2__user"  # user content gets derived ID
+
+
+# ---------------------------------------------------------------------------
+# Date timezone formatting
+# ---------------------------------------------------------------------------
+
+
+def test_format_current_date_defaults_to_server_local_without_env(monkeypatch):
+    """Without DEER_FLOW_DATE_TIMEZONE the formatter keeps the legacy server-local behavior."""
+    from datetime import datetime
+
+    from deerflow.agents.middlewares.dynamic_context_middleware import _format_current_date
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 5, 8, 9, 0)
+        monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
+
+        assert _format_current_date() == "2026-05-08, Friday"
+        mock_dt.now.assert_called_once_with()
+
+
+def test_format_current_date_honors_configured_timezone(monkeypatch):
+    """A UTC instant must be rendered in the IANA zone named by DEER_FLOW_DATE_TIMEZONE."""
+    from datetime import UTC, datetime
+
+    from deerflow.agents.middlewares.dynamic_context_middleware import _format_current_date
+
+    # 2026-09-02 20:30 UTC is 2026-09-03 04:30 in Asia/Shanghai: a UTC-only
+    # formatter would report the wrong day for a Shanghai user.
+    fixed_utc = datetime(2026, 9, 2, 20, 30, 0, tzinfo=UTC)
+
+    def fake_now(tz=None):
+        # datetime.now(tz) semantics: the fixed instant expressed in *tz*.
+        return fixed_utc.astimezone(tz) if tz is not None else fixed_utc.replace(tzinfo=None)
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.side_effect = fake_now
+        monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Asia/Shanghai")
+
+        assert _format_current_date() == "2026-09-03, Thursday"
+
+
+def test_format_current_date_invalid_timezone_falls_back(monkeypatch, caplog):
+    """An unparseable IANA name must warn and degrade to the server-local timezone."""
+    from datetime import datetime
+
+    from deerflow.agents.middlewares.dynamic_context_middleware import _format_current_date
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 5, 8, 9, 0)
+        monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Not/A_Zone")
+
+        assert _format_current_date() == "2026-05-08, Friday"
+    assert "DEER_FLOW_DATE_TIMEZONE" in caplog.text
+
+
+def _declared_date_timezone_policies():
+    from deerflow.agents.middlewares.dynamic_context_middleware import (
+        DynamicContextMiddleware,
+        SubagentDateContextMiddleware,
+    )
+
+    return [
+        DynamicContextMiddleware().release_policy_parameters(),
+        SubagentDateContextMiddleware().release_policy_parameters(),
+    ]
+
+
+def test_date_middlewares_declare_configured_timezone(monkeypatch):
+    """Assembly identity must reflect the zone the injected date follows."""
+    monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Asia/Shanghai")
+
+    assert _declared_date_timezone_policies() == [
+        {"current_date_timezone": "Asia/Shanghai"},
+        {"current_date_timezone": "Asia/Shanghai"},
+    ]
+
+
+def test_date_middlewares_declare_utc_timezone(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "UTC")
+
+    assert _declared_date_timezone_policies() == [
+        {"current_date_timezone": "UTC"},
+        {"current_date_timezone": "UTC"},
+    ]
+
+
+def test_date_middlewares_declare_resolved_local_zone_without_env(monkeypatch):
+    """Without the knob the declaration resolves the actual local zone, so two
+    hosts that render different dates still get different assembly fingerprints."""
+    from deerflow.agents.middlewares.dynamic_context_middleware import _effective_date_timezone_name
+
+    monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
+    expected = {"current_date_timezone": _effective_date_timezone_name()}
+    assert expected["current_date_timezone"]
+
+    assert _declared_date_timezone_policies() == [expected, expected]
+
+
+def test_date_middlewares_declare_resolved_local_zone_for_invalid_env(monkeypatch, caplog):
+    """An invalid IANA name degrades to server-local and is declared as such."""
+    from deerflow.agents.middlewares.dynamic_context_middleware import _effective_date_timezone_name
+
+    monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Not/A_Zone")
+    expected = {"current_date_timezone": _effective_date_timezone_name()}
+
+    assert _declared_date_timezone_policies() == [expected, expected]
+    assert "DEER_FLOW_DATE_TIMEZONE" in caplog.text
+
+
+def test_server_local_timezone_name_reads_tz_env(monkeypatch):
+    """A POSIX TZ env var naming a real zone resolves to its IANA key."""
+    from deerflow.agents.middlewares.dynamic_context_middleware import _server_local_timezone_name
+
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    assert _server_local_timezone_name() == "Asia/Shanghai"
+
+
+def test_server_local_timezone_name_reads_direct_macos_symlink_target(monkeypatch):
+    """macOS /etc/localtime points at the unversioned zoneinfo dir; the direct
+    symlink target must be read instead of a fully resolved path."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(module.os, "readlink", lambda _path: "/var/db/timezone/zoneinfo/Asia/Shanghai")
+
+    assert module._server_local_timezone_name() == "Asia/Shanghai"
+
+
+def test_server_local_timezone_name_reads_apple_versioned_symlink_target(monkeypatch):
+    """Apple's canonical versioned zoneinfo path must still yield the zone key."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(
+        module.os,
+        "readlink",
+        lambda _path: "/private/var/db/timezone/tz/2026c.1.0/zoneinfo/America/New_York",
+    )
+
+    assert module._server_local_timezone_name() == "America/New_York"
+
+
+def test_server_local_timezone_name_normalizes_relative_symlink_target(monkeypatch):
+    """A relative /etc/localtime target is resolved against /etc."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(module.os, "readlink", lambda _path: "../usr/share/zoneinfo/Etc/UTC")
+
+    assert module._server_local_timezone_name() == "Etc/UTC"
+
+
+def test_effective_timezone_sentinel_uses_offset_when_local_zone_is_not_resolvable(monkeypatch):
+    """Without a recoverable IANA key the declaration pins a stable sentinel."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.setattr(module, "_server_local_timezone_name", lambda: None)
+    monkeypatch.setattr(module, "_server_local_utc_offset_minutes", lambda: 8 * 60)
+    monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
+
+    assert module._effective_date_timezone_name() == "server-local(+08:00)"
+
+    monkeypatch.setattr(module, "_server_local_utc_offset_minutes", lambda: -5 * 60 - 30)
+    assert module._effective_date_timezone_name() == "server-local(-05:30)"

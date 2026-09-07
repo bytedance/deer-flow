@@ -314,3 +314,41 @@ class TestToolReceiptTransport:
         assert structured is not None
         assert "tool_receipts" not in structured
         assert "receipt_verdict" not in structured
+
+    def _acceptance_verdict(self) -> dict:
+        return {
+            "source": "acceptance_checklist",
+            "requirement": "delegation_acceptance_criteria",
+            "leaves": [
+                {"criterion": "file:../outputs/r.md exists", "family": "file_exists", "checked": True, "holds": True, "detail": "exists, 5 bytes"},
+                {"criterion": "open ended", "family": "undecidable", "checked": False, "holds": False, "detail": "not deterministically checkable"},
+            ],
+            "unchecked": ["open ended"],
+            "all_hold": False,
+        }
+
+    def test_round_trip_acceptance_verdict(self):
+        kwargs = make_subagent_additional_kwargs(
+            "completed",
+            result="done",
+            acceptance_verdict=self._acceptance_verdict(),
+        )
+        assert kwargs["subagent_acceptance_verdict"] == self._acceptance_verdict()
+
+        structured = read_subagent_result_metadata(kwargs)
+        assert structured is not None
+        assert structured["acceptance_verdict"] == self._acceptance_verdict()
+
+    def test_malformed_acceptance_verdict_dropped(self):
+        kwargs = make_subagent_additional_kwargs(
+            "completed",
+            result="done",
+            acceptance_verdict={"all_hold": "yes"},
+        )
+        assert "subagent_acceptance_verdict" not in kwargs
+
+    def test_old_payloads_have_no_acceptance_verdict(self):
+        kwargs = make_subagent_additional_kwargs("completed", result="done")
+        structured = read_subagent_result_metadata(kwargs)
+        assert structured is not None
+        assert "acceptance_verdict" not in structured

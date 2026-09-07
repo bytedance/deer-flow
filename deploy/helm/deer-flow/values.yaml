@@ -234,7 +234,13 @@ ingress:
   enabled: true
   className: "nginx"
   host: "deer-flow.example.com"
-  annotations: {}
+  annotations:
+    # Allows a 100 MiB .skill archive plus multipart framing at the outer ingress.
+    nginx.ingress.kubernetes.io/proxy-body-size: "101m"
+    # Streams request bodies to nginx instead of spooling them at the outer ingress.
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    # Skill validation may perform multiple sequential LLM calls.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
   tls:
     enabled: false
     secretName: ""
@@ -243,7 +249,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 38
+  config_version: 40
   log_level: info
 
   models: []
@@ -329,6 +335,25 @@ config: |
     #   similarity_threshold: 0.2
     #   vector_similarity_weight: 0.3
     #   top_k: 256
+    #   max_chars_per_chunk: 800
+    #   max_total_chars: 8000
+    # Optional tenant-shared, read-only LightRAG retrieval; alternative
+    # provider for the same knowledge_search tool (duplicate names keep the
+    # first entry, so configure exactly one). Requires LightRAG v1.4.9+. Put
+    # LIGHTRAG_API_KEY in `secrets` when the server enables API-key auth;
+    # omit `api_key` only for unauthenticated trusted-network deployments.
+    # Searches the single indexed workspace through the data-retrieval
+    # endpoint with no LLM generation inside LightRAG. Internal chunk and
+    # reference identifiers stay hidden from the Agent.
+    # - name: knowledge_search
+    #   group: knowledge
+    #   use: deerflow.community.lightrag.tools:knowledge_search_tool
+    #   base_url: http://lightrag:9621
+    #   api_key: $LIGHTRAG_API_KEY
+    #   mode: mix
+    #   timeout: 30
+    #   top_k: 60
+    #   chunk_top_k: 8  # Optional; omit to use the server default
     #   max_chars_per_chunk: 800
     #   max_total_chars: 8000
     - name: web_search

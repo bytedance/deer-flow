@@ -141,7 +141,8 @@ function buildJSONMessage(
 ): JSONExportMessage | null {
   // Run the same sanitiser the Markdown path uses so the JSON `content`
   // field never carries inline `<think>...</think>` wrappers, content-array
-  // thinking blocks, `<uploaded_files>` markers, or other internal payloads.
+  // thinking blocks, `<current_uploads>`/`<uploaded_files>` markers, or other
+  // internal payloads.
   const content = formatMessageContent(msg);
   const reasoning =
     options.includeReasoning && msg.type === "ai"

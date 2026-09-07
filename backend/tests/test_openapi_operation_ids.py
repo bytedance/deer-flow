@@ -77,3 +77,17 @@ def test_stream_existing_run_exposes_distinct_get_and_post(openapi_spec: dict) -
     post_op_id = path_item["post"].get("operationId")
     assert get_op_id and post_op_id, "Both GET and POST must have operationIds"
     assert get_op_id != post_op_id, f"GET and POST share operationId {get_op_id!r}, which breaks OpenAPI codegen"
+
+
+def test_stream_existing_run_exposes_method_specific_query_parameters(openapi_spec: dict) -> None:
+    """Only POST advertises the cancel-then-stream query contract."""
+    path = "/api/threads/{thread_id}/runs/{run_id}/stream"
+    path_item = openapi_spec["paths"][path]
+
+    get_parameters = {(parameter["in"], parameter["name"]) for parameter in path_item["get"].get("parameters", [])}
+    post_parameters = {(parameter["in"], parameter["name"]) for parameter in path_item["post"].get("parameters", [])}
+
+    assert ("query", "action") not in get_parameters
+    assert ("query", "wait") not in get_parameters
+    assert ("query", "action") in post_parameters
+    assert ("query", "wait") in post_parameters

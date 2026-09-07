@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.sandbox import path_patterns as path_patterns_module
+from deerflow.sandbox.local import local_sandbox as local_sandbox_module
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.tools import _compiled_mask_patterns
@@ -98,13 +100,42 @@ def test_boundary_still_rejects_prefix_siblings_and_accepts_real_segments() -> N
     assert pattern.search("/host/skills2/file.md") is None
 
 
-def test_local_sandbox_reverse_patterns_route_through_the_helper(tmp_path: Path) -> None:
-    """Call-site wiring: a re-inlined copy that *diverges* from the shared rule goes red.
+def test_direct_replacer_matches_the_shared_boundary_and_tail_contract() -> None:
+    replacer = getattr(path_patterns_module, "replace_output_path_matches", None)
+    assert replacer is not None
 
-    It does not (and cannot) catch a byte-identical re-inline — that is not yet a
-    defect. What it catches is the shape of the actual regression: #4035 changed
-    one copy of the rule and left the other behind.
-    """
+    assert replacer("see /host/skills/a.md", "/host/skills", "/mnt/skills", separator_agnostic=True) == "see /mnt/skills/a.md"
+    assert replacer("see \\host\\skills\\a.md", "/host/skills", "/mnt/skills", separator_agnostic=True) == "see /mnt/skills/a.md"
+    assert replacer("see /host/skills-extra/a.md", "/host/skills", "/mnt/skills", separator_agnostic=True) == "see /host/skills-extra/a.md"
+    assert replacer("root /host/skills, done", "/host/skills", "/mnt/skills", separator_agnostic=True) == "root /mnt/skills, done"
+
+
+def test_separator_agnostic_replacer_avoids_normalization_without_backslashes() -> None:
+    class ReplaceTrackingString(str):
+        def __init__(self, value: str) -> None:
+            del value
+            self.replace_calls = 0
+
+        def replace(self, old: str, new: str, count: int = -1) -> str:
+            self.replace_calls += 1
+            return super().replace(old, new, count)
+
+    output = ReplaceTrackingString("see /host/skills/a.md")
+    base = ReplaceTrackingString("/host/skills")
+
+    result = path_patterns_module.replace_output_path_matches(
+        output,
+        base,
+        "/mnt/skills",
+        separator_agnostic=True,
+    )
+
+    assert result == "see /mnt/skills/a.md"
+    assert output.replace_calls == 0
+    assert base.replace_calls == 0
+
+
+def test_local_sandbox_reverse_mask_routes_through_the_direct_helper(tmp_path: Path, monkeypatch) -> None:
     local = tmp_path / "skills"
     local.mkdir()
     sandbox = LocalSandbox(
@@ -113,7 +144,17 @@ def test_local_sandbox_reverse_patterns_route_through_the_helper(tmp_path: Path)
     )
 
     resolved = str(Path(local).resolve())
-    assert [p.pattern for p in sandbox._reverse_output_patterns] == [build_output_mask_pattern(resolved).pattern]
+    calls: list[tuple[str, str]] = []
+    original = path_patterns_module.replace_output_path_matches
+
+    def recording_replacer(output, base, replacement, **kwargs):
+        calls.append((output, base))
+        return original(output, base, replacement, **kwargs)
+
+    monkeypatch.setattr(local_sandbox_module, "replace_output_path_matches", recording_replacer)
+
+    assert sandbox._reverse_resolve_paths_in_output(f"read {resolved}/SKILL.md") == "read /mnt/skills/SKILL.md"
+    assert calls == [(f"read {resolved}/SKILL.md", resolved)]
 
 
 def test_tools_mask_patterns_route_through_the_helper(tmp_path: Path) -> None:
