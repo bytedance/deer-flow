@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
 from deerflow.persistence.json_compat import json_match
-from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaStore
+from deerflow.persistence.thread_meta.base import THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -114,6 +114,7 @@ class ThreadMetaRepository(ThreadMetaStore):
         *,
         metadata: dict[str, Any] | None = None,
         status: str | None = None,
+        archived: bool | None = None,
         limit: int = 100,
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
@@ -152,6 +153,12 @@ class ThreadMetaRepository(ThreadMetaStore):
                 # easy for clients to read. Sorted for determinism.
                 rejected_keys = ", ".join(sorted(str(k) for k in metadata))
                 raise InvalidMetadataFilterError(f"All metadata filter keys were rejected as unsafe: {rejected_keys}")
+
+        if archived is not None:
+            # CASE handles missing/JSON-null keys and non-boolean legacy values
+            # identically on SQLite and Postgres, including for the active view.
+            archive_flag = case((json_match(ThreadMetaRow.metadata_json, THREAD_ARCHIVED_METADATA_KEY, True), 1), else_=0)
+            stmt = stmt.where(archive_flag == int(archived))
 
         stmt = stmt.limit(limit).offset(offset)
         async with self._sf() as session:
