@@ -117,6 +117,11 @@ _KNOWN_REVISIONS: frozenset[str] | None = None
 # change must cross-pin this revision id and schema shape in tests. Amending
 # that DDL requires re-auditing old-repository reads and writes before this
 # exception remains valid.
+# Note: this tree's own chain already carries ``0019_projects`` /
+# ``0020_threads_meta_project_id`` off ``0018_oauth_identity_pg_partial``; the
+# ``0019_`` numeric prefix is intentionally reused. When the owning rollout
+# revision merges it must re-parent onto the current head (see
+# ``migrations/AGENTS.md``) so alembic never sees two heads off 0018.
 _FORWARD_COMPATIBLE_REVISION = "0019_thread_incarnations"
 
 # Baseline (stamp target for legacy DBs). Pinned here so the bootstrap layer
