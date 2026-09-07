@@ -321,14 +321,19 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         state: ToolPhaseState,
         new_state: ToolPhaseState,
         meta: ToolResultMeta,
+        hook: Literal["wrap_tool_call", "awrap_tool_call"],
     ) -> None:
         """Persist one effective transition without copying tool content."""
         context = getattr(runtime, "context", None)
         if not isinstance(context, dict):
             return
-        is_subagent = context.get("is_subagent") is True
+        # Only native task-tool subagents receive the narrow recorder.  The
+        # public runtime context may contain caller-supplied ``is_subagent`` or
+        # ``agent_id`` values, so those fields must not decide durable
+        # attribution for an ordinary lead run.
         recorder = context.get(TOOL_PROGRESS_RECORDER_CONTEXT_KEY)
-        if recorder is None:
+        is_subagent = recorder is not None
+        if not is_subagent:
             # Lead runs own a RunJournal. Ordinary task-tool subagents receive
             # only the narrow, loop-safe recorder key above.
             recorder = context.get("__run_journal")
@@ -349,7 +354,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
             recorder.record_middleware(
                 tag=MIDDLEWARE_TOOL_PROGRESS_TAG,
                 name=type(self).__name__,
-                hook="wrap_tool_call",
+                hook=hook,
                 action=action,
                 changes={
                     "is_subagent": is_subagent,
@@ -423,6 +428,8 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         tool_name: str,
         runtime: Runtime,
         tool_call_id: str,
+        *,
+        hook: Literal["wrap_tool_call", "awrap_tool_call"],
     ) -> ToolMessage | Command:
         """Update the state machine from a tool result; queue hints if warranted."""
         message = _result_tool_message(result, tool_call_id)
@@ -452,6 +459,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                     state=state,
                     new_state=new_state,
                     meta=meta,
+                    hook=hook,
                 )
         if new_state.phase != state.phase:
             if new_state.phase == "blocked":
@@ -634,7 +642,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 block_reason,
             )
             return self._make_blocked_message(request, tool_name, block_reason)
-        return self._update_state_from_result(handler(request), tool_name, runtime, str(request.tool_call.get("id") or ""))
+        return self._update_state_from_result(
+            handler(request),
+            tool_name,
+            runtime,
+            str(request.tool_call.get("id") or ""),
+            hook="wrap_tool_call",
+        )
 
     @override
     async def awrap_tool_call(
@@ -657,7 +671,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 block_reason,
             )
             return self._make_blocked_message(request, tool_name, block_reason)
-        return self._update_state_from_result(await handler(request), tool_name, runtime, str(request.tool_call.get("id") or ""))
+        return self._update_state_from_result(
+            await handler(request),
+            tool_name,
+            runtime,
+            str(request.tool_call.get("id") or ""),
+            hook="awrap_tool_call",
+        )
 
     # ------------------------------------------------------------------
     # wrap_model_call: drain pending hints and inject before model sees messages

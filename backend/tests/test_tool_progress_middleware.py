@@ -1551,7 +1551,6 @@ class TestToolProgressRunEvents:
         recorder = MagicMock()
         runtime = _make_runtime()
         runtime.context["__run_tool_progress_recorder"] = recorder
-        runtime.context["is_subagent"] = True
         runtime.context["agent_id"] = "general-purpose"
         assert "__run_journal" not in runtime.context
         middleware = _make_mw(stagnation_threshold=1)
@@ -1565,6 +1564,33 @@ class TestToolProgressRunEvents:
         assert recorded.kwargs["action"] == "warn"
         assert recorded.kwargs["changes"]["is_subagent"] is True
         assert recorded.kwargs["changes"]["agent_id"] == "general-purpose"
+
+    def test_lead_attribution_ignores_caller_supplied_subagent_fields(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        runtime.context["is_subagent"] = True
+        runtime.context["agent_id"] = "forged-agent"
+        middleware = _make_mw(stagnation_threshold=1)
+        request = _make_tool_request(runtime=runtime)
+
+        middleware.wrap_tool_call(request, lambda _request: _make_error_message())
+
+        recorded = journal.record_middleware.call_args
+        assert recorded.kwargs["changes"]["is_subagent"] is False
+        assert recorded.kwargs["changes"]["agent_id"] is None
+
+    @pytest.mark.anyio
+    async def test_async_transition_records_actual_hook(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        middleware = _make_mw(stagnation_threshold=1)
+        request = _make_tool_request(runtime=runtime)
+
+        result = _make_error_message()
+        assert await middleware.awrap_tool_call(request, AsyncMock(return_value=result)) is result
+
+        journal.record_middleware.assert_called_once()
+        assert journal.record_middleware.call_args.kwargs["hook"] == "awrap_tool_call"
 
     def test_concurrent_warn_and_block_transitions_keep_durable_order(self):
         """The state lock must also serialize transition publication.
