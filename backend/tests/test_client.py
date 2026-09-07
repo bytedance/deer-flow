@@ -496,6 +496,29 @@ class TestStream:
         assert values_events[-1].data["title"] == "Greeting"
         assert "messages" in values_events[-1].data
 
+    def test_values_events_preserve_summary_text_updates(self, client):
+        messages = [HumanMessage(content="hi", id="h-1"), AIMessage(content="ok", id="ai-1")]
+        summaries = [None, "first summary", "first summary", "revised summary", "", None]
+        agent = _make_agent_mock([{"messages": messages, "summary_text": summary} for summary in summaries])
+
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="summary-stream"))
+
+        values_events = [event for event in events if event.type == "values"]
+        assert [event.data["summary_text"] for event in values_events] == summaries
+        assert all(len(event.data["messages"]) == 2 for event in values_events)
+        assert len(_ai_events(events)) == 1
+        assert events[-1].type == "end"
+
+    def test_values_events_without_summary_expose_none(self, client):
+        agent = _make_agent_mock([{"messages": [HumanMessage(content="hi", id="h-1")]}])
+
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="no-summary"))
+
+        values_events = [event for event in events if event.type == "values"]
+        assert values_events[0].data["summary_text"] is None
+
     def test_deduplication(self, client):
         """Messages with the same id are not emitted twice."""
         ai = AIMessage(content="Hello!", id="ai-1")
@@ -902,6 +925,7 @@ class TestStream:
                 "values",
                 {
                     "title": None,
+                    "summary_text": None,
                     "messages": [
                         {"type": "human", "content": "hi", "id": "h-1"},
                         {"type": "ai", "content": "Hello", "id": "ai-1", "usage_metadata": usage},
