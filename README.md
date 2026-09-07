@@ -1483,6 +1483,13 @@ The HTTP Gateway accepts `values`, `messages-tuple`, `updates`, `debug`, `tasks`
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
 
+## Project membership
+
+A conversation joins a project at creation time (when a project is selected) or
+later through the move menu. Runs never modify membership: submitting a message
+cannot assign or reassign a conversation. Moving a conversation out of a project
+keeps it unassigned until it is explicitly moved again.
+
 ## Scheduled Tasks
 
 DeerFlow now includes a first-class scheduled-task MVP in the workspace.

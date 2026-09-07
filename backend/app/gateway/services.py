@@ -201,14 +201,24 @@ async def _ensure_thread_metadata(
     if existing is None:
         if require_existing_thread:
             raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
+        from deerflow.persistence.thread_meta import THREAD_PROJECT_METADATA_KEY
+
+        run_metadata = record.metadata or {}
+        metadata = {
+            key: value
+            for key, value in run_metadata.items()
+            # Strip the run-scoped trace id (existing) and the reserved
+            # membership key: run admission never modifies project membership —
+            # the column is written only by POST /api/threads and
+            # /threads/{id}/move — so the key must not persist either.
+            if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
+        }
         await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
-            # Seeded from the run that created the thread, minus the run-scoped
-            # trace id: a thread spans many runs and as many trace ids, so
-            # pinning the first one here would be misleading rather than useful.
-            metadata={key: value for key, value in (record.metadata or {}).items() if key != DEERFLOW_TRACE_METADATA_KEY},
+            metadata=metadata,
         )
+        return
 
 
 async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:

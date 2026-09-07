@@ -12,7 +12,7 @@ from typing import Any
 from langgraph.store.base import BaseStore
 
 from deerflow.persistence.json_compat import json_value_matches
-from deerflow.persistence.thread_meta.base import THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, ThreadMetaStore
+from deerflow.persistence.thread_meta.base import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, ThreadMetaStore, _ProjectFilterUnset
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -48,7 +48,10 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
         display_name: str | None = None,
         metadata: dict | None = None,
+        project_id: str | None = None,
     ) -> dict:
+        # Memory mode has no projects backend in Phase 1: ``project_id`` is
+        # accepted for interface parity and ignored.
         resolved_user_id = resolve_user_id(user_id, method_name="MemoryThreadMetaStore.create")
         now = now_iso()
         record: dict[str, Any] = {
@@ -65,6 +68,11 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         await self._store.aput(THREADS_NS, thread_id, record)
         return record
 
+    async def set_project(self, thread_id: str, project_id: str | None, *, user_id: str | None | _AutoSentinel = AUTO) -> bool:
+        # Memory mode has no projects backend in Phase 1: membership moves
+        # are unsupported and always report rejection.
+        return False
+
     async def get(self, thread_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> dict | None:
         return await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.get")
 
@@ -74,6 +82,7 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         metadata: dict[str, Any] | None = None,
         status: str | None = None,
         archived: bool | None = None,
+        project_id: str | None | _ProjectFilterUnset = PROJECT_FILTER_UNSET,
         limit: int = 100,
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
@@ -85,6 +94,9 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         scalable paginated I/O.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="MemoryThreadMetaStore.search")
+        if not isinstance(project_id, _ProjectFilterUnset) and project_id is not None:
+            # Memory mode has no projects backend: no thread can be a member.
+            return []
         filter_dict: dict[str, Any] = {}
         if status:
             filter_dict["status"] = status

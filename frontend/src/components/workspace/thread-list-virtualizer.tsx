@@ -44,13 +44,26 @@ export function VirtualThreadList({
     const root = rootRef.current;
     const scrollParent = getScrollElement();
     if (!root || !scrollParent) return;
-    setScrollMargin(
-      calculateScrollMargin(
-        root.getBoundingClientRect().top,
-        scrollParent.getBoundingClientRect().top,
-        scrollParent.scrollTop,
-      ),
-    );
+    const measure = () => {
+      setScrollMargin(
+        calculateScrollMargin(
+          root.getBoundingClientRect().top,
+          scrollParent.getBoundingClientRect().top,
+          scrollParent.scrollTop,
+        ),
+      );
+    };
+    measure();
+    // Sidebar sections above the list (project groups, archived section)
+    // resize without changing items.length, shifting the list's offset.
+    // Observe the scroll parent and its children so the margin is
+    // recomputed whenever any of them changes size.
+    const observer = new ResizeObserver(measure);
+    observer.observe(scrollParent);
+    for (const child of scrollParent.children) {
+      observer.observe(child);
+    }
+    return () => observer.disconnect();
   }, [getScrollElement, items.length]);
   const virtualizer = useVirtualizer({
     count: items.length,
