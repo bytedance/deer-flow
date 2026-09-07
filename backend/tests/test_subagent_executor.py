@@ -2865,11 +2865,16 @@ class TestCooperativeCancellation:
 
     @pytest.mark.anyio
     async def test_aexecute_cancelled_mid_stream_closes_stream(self, classes, base_config, msg):
-        """The graph stream is closed before a cooperative cancel returns."""
+        """The graph stream is closed before a cooperative cancel returns.
+
+        Pins the ordering the fix is actually about: stream teardown runs
+        before the sandbox lease is released (and before task-stop notifies).
+        """
+
+        calls: list[str] = []
 
         class CloseTrackingStream:
             def __init__(self, cancel_event):
-                self.closed = False
                 self._cancel_event = cancel_event
 
             def __aiter__(self):
@@ -2881,7 +2886,7 @@ class TestCooperativeCancellation:
                 yield {"messages": [msg.human("Task"), msg.ai("Should not appear", "msg-2")]}
 
             async def aclose(self):
-                self.closed = True
+                calls.append("close")
 
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentResult = classes["SubagentResult"]
@@ -2891,7 +2896,16 @@ class TestCooperativeCancellation:
         stream = CloseTrackingStream(cancel_event)
 
         mock_agent = MagicMock()
-        mock_agent.astream = MagicMock(return_value=stream)
+
+        def fake_astream(*_args, **kwargs):
+            # executor passes its execution context as the astream `context`;
+            # a sandbox id there is what makes the finally release a lease.
+            ctx = kwargs.get("context")
+            if isinstance(ctx, dict):
+                ctx["sandbox_id"] = "sb-1"
+            return stream
+
+        mock_agent.astream = MagicMock(side_effect=fake_astream)
 
         result_holder = SubagentResult(
             task_id="cancel-mid-close",
@@ -2907,11 +2921,18 @@ class TestCooperativeCancellation:
             thread_id="test-thread",
         )
 
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
+        lease_manager = MagicMock()
+        lease_manager.release_async = AsyncMock(side_effect=lambda *_a, **_k: calls.append("release"))
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+
+        with (
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+            patch.object(lease_module, "get_sandbox_lease_manager", return_value=lease_manager),
+        ):
             result = await executor._aexecute("Task", result_holder=result_holder)
 
         assert result.status == SubagentStatus.CANCELLED
-        assert stream.closed is True
+        assert calls == ["close", "release"]
 
     def test_request_cancel_sets_event(self, executor_module, classes):
         """Test that request_cancel_background_task sets the cancel_event."""
