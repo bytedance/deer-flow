@@ -122,8 +122,12 @@ class SandboxOwnershipConfig(BaseModel):
         lease_ttl_seconds = self.renewal_interval_seconds * self.ttl_multiplier
         if not math.isfinite(lease_ttl_seconds):
             raise ValueError("sandbox.ownership lease TTL must be finite")
-        if self.type == "redis" and lease_ttl_seconds * 1000 > _REDIS_MAX_SAFE_TTL_MILLISECONDS:
-            raise ValueError("sandbox.ownership Redis lease TTL must fit the signed 64-bit millisecond range with absolute-expiry headroom")
+        if self.type == "redis":
+            lease_ttl_milliseconds = lease_ttl_seconds * 1000
+            if lease_ttl_milliseconds < 1:
+                raise ValueError("sandbox.ownership Redis lease TTL must be at least 1 millisecond")
+            if lease_ttl_milliseconds > _REDIS_MAX_SAFE_TTL_MILLISECONDS:
+                raise ValueError("sandbox.ownership Redis lease TTL must fit the signed 64-bit millisecond range with absolute-expiry headroom")
         return self
 
 

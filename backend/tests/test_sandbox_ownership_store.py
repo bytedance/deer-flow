@@ -393,6 +393,25 @@ def test_redis_lease_timing_rejects_ttl_without_absolute_expiry_headroom():
         )
 
 
+def test_redis_lease_timing_rejects_ttl_below_one_millisecond():
+    with pytest.raises(ValueError, match="at least 1 millisecond"):
+        SandboxOwnershipConfig(
+            type="redis",
+            renewal_interval_seconds=0.0004,
+            ttl_multiplier=2,
+        )
+
+
+def test_redis_lease_timing_allows_one_millisecond_ttl():
+    config = SandboxOwnershipConfig(
+        type="redis",
+        renewal_interval_seconds=0.0005,
+        ttl_multiplier=2,
+    )
+
+    assert compute_lease_ttl(config) * 1000 == pytest.approx(1)
+
+
 def test_redis_lease_timing_allows_operational_ttl():
     config = SandboxOwnershipConfig(
         type="redis",
