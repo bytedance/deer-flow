@@ -410,7 +410,7 @@ async def test_second_real_stop_cancellation_finishes_all_observers_and_cleanup(
             super().__init__()
             self.cleanup_calls: list[tuple[str, float]] = []
 
-        async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
+        def schedule_cleanup(self, run_id: str, *, delay: float = 300) -> None:
             self.cleanup_calls.append((run_id, delay))
 
     completion_hook_entered = asyncio.Event()
