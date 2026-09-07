@@ -2,7 +2,7 @@ import asyncio
 import re
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -21,6 +21,7 @@ from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, Invalid
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -2930,20 +2931,23 @@ def _wire_extension_agent(monkeypatch, app, checkpointer, mode):
     return custom_factory
 
 
-async def _seed_extension_source(checkpointer, custom_factory, mode, source_thread_id):
+async def _seed_extension_source(checkpointer, custom_factory, mode, source_thread_id, *, agent_name=None):
     accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}
+    if agent_name is not None:
+        config["metadata"] = {CHECKPOINT_AGENT_NAME_METADATA_KEY: agent_name}
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {"messages": [HumanMessage(id="h1", content="question")], "ext_list": ["merged"]},
         as_node="model",
     )
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {"messages": [AIMessage(id="a1", content="answer")], "ext_list": ["payload"]},
         as_node="model",
     )
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {
             "messages": [
                 HumanMessage(
@@ -2956,7 +2960,7 @@ async def _seed_extension_source(checkpointer, custom_factory, mode, source_thre
         as_node="model",
     )
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {"messages": [AIMessage(id="a2", content="follow-up answer")]},
         as_node="model",
     )
@@ -3012,7 +3016,15 @@ def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) 
         assert created.status_code == 200, created.text
 
         # Seed after creation: create_thread writes an empty head checkpoint.
-        asyncio.run(_seed_extension_source(checkpointer, custom_factory, mode, source_thread_id))
+        asyncio.run(
+            _seed_extension_source(
+                checkpointer,
+                custom_factory,
+                mode,
+                source_thread_id,
+                agent_name="stateless-worker",
+            )
+        )
 
         read_response = client.get(f"/api/threads/{source_thread_id}/state")
         assert read_response.status_code == 200, read_response.text
@@ -3046,18 +3058,19 @@ def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) 
 
     async def materialize(thread_id):
         accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
-        snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
-        return snapshot.values
+        return await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
 
-    branch_values = asyncio.run(materialize(branch_thread_id))
+    branch_snapshot = asyncio.run(materialize(branch_thread_id))
+    branch_values = branch_snapshot.values
     assert branch_values["ext_list"] == ["replaced"]
     assert [message.id for message in branch_values["messages"]] == ["h1", "a1", "h2", "a2"]
+    assert branch_snapshot.metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] == "stateless-worker"
 
     prepared = prepare_response.json()
     assert prepared["target_run_id"] == "source-run"
     assert prepared["input"]["messages"][0]["id"] == "h2"
     base_accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
-    base_values = asyncio.run(
+    base_snapshot = asyncio.run(
         base_accessor.aget(
             {
                 "configurable": {
@@ -3067,8 +3080,10 @@ def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) 
                 }
             }
         )
-    ).values
+    )
+    base_values = base_snapshot.values
     assert [message.id for message in base_values["messages"]] == ["h1", "a1"]
+    assert base_snapshot.metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] == "stateless-worker"
 
 
 async def _seed_branch_history_source(checkpointer, custom_factory, mode, source_thread_id):
@@ -3293,6 +3308,86 @@ def test_update_thread_state_overwrite_into_never_written_channel(monkeypatch, m
         read_response = client.get(f"/api/threads/{source_thread_id}/state")
         assert read_response.status_code == 200, read_response.text
         assert read_response.json()["values"]["goal"] == {"objective": "finish"}
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_update_thread_state_preserves_agent_binding_for_manual_compaction(monkeypatch, mode) -> None:
+    """A manual state rewrite must retain the state-producing agent policy."""
+    import deerflow.config.agents_config as agents_config
+    from deerflow.runtime import context_compaction
+
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"state-binding-{mode}"
+
+    async def seed_bound_state() -> None:
+        accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+        await accessor.aupdate(
+            {
+                "configurable": {"thread_id": thread_id, "checkpoint_ns": ""},
+                "metadata": {CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+            },
+            {
+                "messages": [
+                    HumanMessage(id="h1", content="old question"),
+                    AIMessage(id="a1", content="old answer"),
+                    HumanMessage(id="h2", content="latest question"),
+                ]
+            },
+            as_node="model",
+        )
+
+    config_reads: list[str] = []
+
+    def load_agent_config(name, **_kwargs):
+        config_reads.append(name)
+        if name != "stateless-worker":
+            raise AssertionError(f"untrusted agent name reached policy lookup: {name}")
+        return SimpleNamespace(model=None, memory_enabled=False)
+
+    monkeypatch.setattr(agents_config, "load_agent_config", load_agent_config)
+    monkeypatch.setattr(context_compaction, "get_app_config", lambda: SimpleNamespace(models=[]))
+    captured: dict[str, object] = {}
+
+    class CompactionMiddleware:
+        async def acompact_state(self, state, runtime, *, force=False, raise_on_failure=False):
+            del runtime, force, raise_on_failure
+            return SimpleNamespace(
+                summary_text="summary",
+                messages_to_summarize=tuple(state["messages"][:-1]),
+                preserved_messages=tuple(state["messages"][-1:]),
+                total_tokens=42,
+            )
+
+    def create_compaction_middleware(**kwargs):
+        captured.update(kwargs)
+        return CompactionMiddleware()
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", create_compaction_middleware)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"},
+        )
+        assert created.status_code == 200, created.text
+        asyncio.run(seed_bound_state())
+
+        updated = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"values": {"title": "Renamed"}},
+        )
+        assert updated.status_code == 200, updated.text
+
+        compacted = client.post(
+            f"/api/threads/{thread_id}/compact",
+            json={"force": True, "agent_name": "memory-enabled-impostor"},
+        )
+
+    assert compacted.status_code == 200, compacted.text
+    assert compacted.json()["compacted"] is True
+    assert captured["skip_memory_flush"] is True
+    assert config_reads == ["stateless-worker"]
 
 
 def test_update_thread_state_rejects_unknown_state_fields(monkeypatch) -> None:
@@ -3606,6 +3701,9 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
         tasks=(),
         created_at="2026-07-18T00:00:00+00:00",
     )
+    source_snapshot = SimpleNamespace(
+        metadata={CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+    )
 
     async def aupdate(config, values, *, as_node=None):
         update_calls.append((config, values, as_node))
@@ -3613,7 +3711,7 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
 
     accessor = SimpleNamespace(
         aupdate=aupdate,
-        aget=AsyncMock(return_value=snapshot),
+        aget=AsyncMock(side_effect=[source_snapshot, snapshot]),
     )
 
     async def build_accessor(_request, *, thread_id, as_node, checkpoint_id=None):
@@ -3649,13 +3747,17 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
     assert len(update_calls) == 1
     read_config, updates, as_node = update_calls[0]
     assert read_config["configurable"]["thread_id"] == "state-overwrite"
+    assert read_config["metadata"] == {CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"}
     assert isinstance(updates["messages"], Overwrite)
     assert updates["messages"].value[0]["id"] == "h1"
     assert isinstance(updates["artifacts"], Overwrite)
     assert updates["artifacts"].value == ["artifact-1"]
     assert updates["title"] == "Renamed"
     assert as_node == "manual_state_update"
-    accessor.aget.assert_awaited_once_with(updated_config)
+    assert accessor.aget.await_args_list == [
+        call({"configurable": {"thread_id": "state-overwrite", "checkpoint_ns": ""}}),
+        call(updated_config),
+    ]
     assert response.json()["checkpoint_id"] == "ckpt-updated"
 
 

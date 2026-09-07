@@ -56,6 +56,7 @@ from deerflow.runtime.context_keys import (
     CHECKPOINT_AGENT_NAME_METADATA_KEY,
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
+    checkpoint_agent_binding_metadata,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.goal import (
@@ -2218,6 +2219,7 @@ async def _linearize_delta_checkpoint_resume(
     messages = values.get("messages") if isinstance(values, dict) else None
     if not isinstance(messages, list):
         raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
+    head_config["metadata"] = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
 
     # Write through the thread's effective schema so every application and
     # middleware channel can be restored. Reducer channels need Overwrite to
@@ -2307,8 +2309,13 @@ async def _rollback_to_pre_run_checkpoint(
             operation="rollback",
         )
     else:
-        restore_config = rollback_point.config
+        restore_config = {
+            **rollback_point.config,
+            "configurable": dict(rollback_point.config.get("configurable", {})),
+        }
         replacement_values = {"messages": Overwrite(list(rollback_point.messages))}
+
+    restore_config["metadata"] = checkpoint_agent_binding_metadata(rollback_point.metadata)
 
     restored_config = await mutation_accessor.aupdate(
         restore_config,
