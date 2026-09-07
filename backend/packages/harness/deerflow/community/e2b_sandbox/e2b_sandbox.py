@@ -358,18 +358,24 @@ class E2BSandbox(Sandbox):
             client = self._client
             if client is None:
                 raise RuntimeError("sandbox client has been closed")
+            if append:
+                # E2B has no append write. Read-modify-write must treat only
+                # explicit not-found as empty; any other read failure would
+                # otherwise overwrite the original file with just the tail.
+                try:
+                    existing = client.files.read(resolved) or ""
+                except (FileNotFoundException, FileNotFoundError):
+                    existing = ""
+                except Exception:
+                    logger.error(
+                        "Append pre-read failed for %s; refusing to overwrite",
+                        resolved,
+                    )
+                    raise
+                if isinstance(existing, bytes):
+                    existing = existing.decode("utf-8", errors="replace")
+                content = existing + content
             try:
-                if append:
-                    # E2B has no append write. Read-modify-write must treat only
-                    # explicit not-found as empty; any other read failure would
-                    # otherwise overwrite the original file with just the tail.
-                    try:
-                        existing = client.files.read(resolved) or ""
-                    except (FileNotFoundException, FileNotFoundError):
-                        existing = ""
-                    if isinstance(existing, bytes):
-                        existing = existing.decode("utf-8", errors="replace")
-                    content = existing + content
                 client.files.write(resolved, content)
             except Exception as e:
                 logger.error("Failed to write file %s in e2b sandbox: %s", resolved, e)
