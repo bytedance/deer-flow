@@ -656,6 +656,24 @@ class TestCustomEvents:
 
 class TestBufferFlush:
     @pytest.mark.anyio
+    async def test_flush_propagates_cancellation_requested_before_entry(self, journal_setup):
+        journal, store = journal_setup
+
+        async def cancel_before_flush():
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            journal.record_delivery()
+            current_task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await journal.flush()
+
+        await asyncio.create_task(cancel_before_flush())
+
+        events = await store.list_events("t1", "r1")
+        assert [event["event_type"] for event in events] == ["run.delivery"]
+
+    @pytest.mark.anyio
     async def test_flush_ignores_already_handled_cancellation_request(self, journal_setup):
         journal, store = journal_setup
         reached_after_flush = False

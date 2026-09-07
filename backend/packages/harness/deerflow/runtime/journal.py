@@ -863,8 +863,15 @@ class RunJournal(BaseCallbackHandler):
         deadline = asyncio.get_running_loop().time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
         current_task = asyncio.current_task()
         cancelling_on_entry = current_task.cancelling() if current_task is not None else 0
+        cancellation_observed = False
+        try:
+            # An uncontended flush lock does not suspend, so a cancellation
+            # requested before flush() may still be waiting for injection here.
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            cancellation_observed = True
         completed = await wait_for_task_until(write_task, deadline=deadline)
-        caller_cancelling = current_task is not None and current_task.cancelling() > cancelling_on_entry
+        caller_cancelling = cancellation_observed or (current_task is not None and current_task.cancelling() > cancelling_on_entry)
         if not completed:
             self._track_detached_write(write_task, batch)
             logger.warning(
