@@ -2,9 +2,14 @@
 
 Summarization input can contain only AI/Tool messages after latest-user rescue.
 If the inherited human-anchored trimmer returns nothing, format that window and
-apply `_build_summary_input_text`'s bounded text trimming instead of retaining
-only its final message. The factory must pass `trim_tokens_to_summarize=None`
-through explicitly, since omitting it restores LangChain's 4000-token default.
+apply `_build_summary_input_text`'s text trimming with `strategy="last"` instead
+of retaining only its final message. This preserves the inherited trimmer's
+preference for recent content without changing the normal human-anchored path.
+The budget applies to raw sections before HTML escaping, wrapper tags, and the
+summary prompt; it is not a hard limit on the final model request. Keep escaping
+after trimming so partial trimming cannot split escape entities. The factory
+must pass `trim_tokens_to_summarize=None` through explicitly, since omitting it
+restores LangChain's 4000-token default.
 
 Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values.
 

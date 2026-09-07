@@ -6,7 +6,7 @@ import html
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, override, runtime_checkable
+from typing import Any, Literal, Protocol, override, runtime_checkable
 
 from deerflow_extension_api import CompactionEvent, canonical_hash
 from langchain.agents import AgentState
@@ -452,9 +452,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                     return content
         except Exception:
             logger.debug("Failed to trim summary prompt section with token counter; falling back to deterministic text cap", exc_info=True)
+        if strategy == "last":
+            return text[-max_tokens:]
         return self._bound_text(text, max_tokens)
 
-    def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None) -> str | None:
+    def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None, *, new_messages_strategy: Literal["first", "last"] = "first") -> str | None:
+        """Trim raw input sections before adding escaping and prompt overhead."""
         if self.trim_tokens_to_summarize is None:
             trimmed_new_messages = formatted_messages
             trimmed_previous_summary = previous_summary.strip() if previous_summary else ""
@@ -471,14 +474,14 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 trimmed_new_messages = self._trim_summary_section_text(
                     formatted_messages,
                     new_message_tokens,
-                    strategy="first",
+                    strategy=new_messages_strategy,
                 )
             else:
                 trimmed_previous_summary = ""
                 trimmed_new_messages = self._trim_summary_section_text(
                     formatted_messages,
                     max_tokens,
-                    strategy="first",
+                    strategy=new_messages_strategy,
                 )
 
         # Escape < > & before embedding into the <existing_summary>/<new_messages>
@@ -516,17 +519,21 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     def _build_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
         trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
+        new_messages_strategy: Literal["first", "last"] = "first"
         if not trimmed_messages:
             # The inherited trimmer requires a HumanMessage. Rescuing the current
             # request can leave an AI/Tool-only window, even below the budget.
-            # Keep that window here; _build_summary_input_text still bounds it.
+            # Bound the raw text instead, keeping the newest content to match
+            # the inherited trimmer's strategy="last" policy.
             trimmed_messages = messages_to_summarize
+            if not any(isinstance(message, HumanMessage) for message in messages_to_summarize):
+                new_messages_strategy = "last"
         if not trimmed_messages:
             return None
         # Format messages to avoid token inflation from metadata when str() is called on
         # message objects.
         formatted_messages = get_buffer_string(trimmed_messages)
-        formatted_messages = self._build_summary_input_text(formatted_messages, previous_summary=previous_summary)
+        formatted_messages = self._build_summary_input_text(formatted_messages, previous_summary=previous_summary, new_messages_strategy=new_messages_strategy)
         if not formatted_messages:
             return None
         return self.summary_prompt.format(messages=formatted_messages).rstrip()
