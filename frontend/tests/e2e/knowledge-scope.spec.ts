@@ -52,7 +52,19 @@ test.describe("custom-agent knowledge scope", () => {
     });
 
     await page.goto("/workspace/agents/researcher/chats/new");
-    await page.getByTestId("knowledge-scope-trigger").click();
+    const trigger = page.getByTestId("knowledge-scope-trigger");
+    await expect(trigger).toHaveText("");
+    await expect(trigger).toHaveAttribute("aria-pressed", "true");
+    await expect(trigger).toHaveClass(/bg-primary\/10/);
+
+    await trigger.click();
+    await page.getByLabel("Off").check();
+    await page.getByRole("button", { name: "Apply" }).click();
+    await expect(trigger).toHaveAttribute("aria-pressed", "false");
+    await expect(trigger).toHaveAttribute("aria-label", "Knowledge · Off");
+    await expect(trigger).not.toHaveClass(/bg-primary\/10/);
+
+    await trigger.click();
     await page.getByLabel("Selected knowledge bases").check();
     await page.getByLabel("Policies").check();
     await page.getByRole("button", { name: "Files" }).click();
@@ -60,6 +72,8 @@ test.describe("custom-agent knowledge scope", () => {
     await page.getByLabel("Leave.pdf").check();
     await expect(page.getByLabel("Parsing.pdf")).toBeDisabled();
     await page.getByRole("button", { name: "Apply" }).click();
+    await expect(trigger).toHaveAttribute("aria-pressed", "true");
+    await expect(trigger).toHaveClass(/bg-primary\/10/);
 
     await page
       .getByPlaceholder(/how can i assist you/i)

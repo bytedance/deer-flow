@@ -640,7 +640,7 @@ Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索�
 
 DeerFlow 可连接租户级 RAGFlow，并通过 `knowledge_search` 按 embedding 模型分组并行召回运维允许的知识库；dataset ID 与 API key 不会暴露给模型。启用 `knowledge_base.enabled` 后，还可使用受鉴权保护的 `/api/knowledge` 管理代理和 `/workspace/knowledge` 页面。
 
-使用内置 RAGFlow `knowledge_search` provider 时，可在 `config.yaml` 中设置 `knowledge_base.scope_selection_enabled: true`，为自定义智能体对话开放模式选择器右侧的“知识库”按钮。用户可选择全部允许知识库、指定知识库/文件或关闭本轮检索。选择仅保存在当前页面内，刷新或切换对话后恢复“全部”；每条已发送的人类消息保留不可变的范围快照，用于历史回显、重试和恢复。普通对话不显示、不提交该范围。Gateway 会校验快照、与运维 allowlist 取交集，把仅含执行字段的范围传递给 native/durable 子智能体，并在模型输入和外部 trace 中清除完整范围。
+使用内置 RAGFlow `knowledge_search` provider 时，可在 `config.yaml` 中设置 `knowledge_base.scope_selection_enabled: true`，为自定义智能体对话开放模式选择器右侧的纯图标“知识库”按钮。图标持续高亮表示知识检索已启用，普通状态表示本轮检索已关闭。用户可选择全部允许知识库、指定知识库/文件或关闭本轮检索。选择仅保存在当前页面内，刷新或切换对话后恢复“全部”；每条已发送的人类消息保留不可变的范围快照，用于历史回显、重试和恢复。普通对话不显示、不提交该范围。Gateway 会校验快照、与运维 allowlist 取交集，把仅含执行字段的范围传递给 native/durable 子智能体，并在模型输入和外部 trace 中清除完整范围。
 
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 
