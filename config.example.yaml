@@ -718,10 +718,10 @@ models:
 # ============================================================================
 # Knowledge Base (RAGFlow)
 # ============================================================================
-# Optional tenant-shared RAGFlow retrieval and human management proxy. The
-# feature is disabled by default; set the API key through an environment
-# variable before enabling it. RAGFlow remains the source of truth and DeerFlow
-# does not persist dataset or document contents.
+# Optional tenant-shared RAGFlow retrieval. The feature is disabled by default;
+# set the API key through an environment variable before enabling it. RAGFlow
+# remains the source of truth and DeerFlow does not persist or manage dataset or
+# document contents.
 knowledge_base:
   enabled: false
   # Custom-agent chat only. Keeps the selector hidden unless the effective

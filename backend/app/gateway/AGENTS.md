@@ -79,7 +79,9 @@ the thread/assistant binding, exact built-in RAGFlow provider, and the agent's
 `knowledge` tool group, and strips client attempts to inject the execution key
 through free-form runtime config. Ordinary regenerate/resume paths recover the
 already accepted source/checkpoint scope; edit-regenerate may replace it with a
-new canonical snapshot. The safe retrieval-catalog routes under
+new canonical snapshot. A clarification reply carrying the current selector
+snapshot validates and admits that new scope; when the reply omits a scope it
+inherits the prior turn's checkpoint scope. The safe retrieval-catalog routes under
 `/api/knowledge/retrieval-catalog` are read-only, custom-agent-scoped, and must
 apply the same operator dataset allowlist without exposing provider credentials.
 

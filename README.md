@@ -1046,6 +1046,9 @@ snapshot for replay and history. Ordinary chats never show or submit this
 selector. The Gateway validates every snapshot, intersects it with the
 operator's dataset allowlist, propagates the execution-only scope to native and
 durable subagents, and removes it from model inputs and external traces.
+When answering a pending clarification, an explicitly submitted current
+selector snapshot wins; clients that omit it inherit the prior turn's accepted
+scope.
 This release does not add an independent Knowledge item to the workspace
 sidebar or a DeerFlow knowledge-management page; create, upload, parse, and
 delete datasets and documents directly in RAGFlow.

@@ -1435,6 +1435,19 @@ def _graph_input_is_human_input_response(graph_input: object) -> bool:
     return current is not None and "human_input_response" in current.additional_kwargs
 
 
+def _current_human_message_has_knowledge_scope(graph_input: object) -> bool:
+    if not isinstance(graph_input, Mapping):
+        return False
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list):
+        return False
+    current = next(
+        (message for message in reversed(messages) if isinstance(message, HumanMessage)),
+        None,
+    )
+    return current is not None and KNOWLEDGE_SCOPE_KEY in current.additional_kwargs
+
+
 async def _load_scope_agent_config(
     *,
     assistant_id: str | None,
@@ -1609,7 +1622,15 @@ async def start_run(
 
         replay_kind = run_metadata.get("replay_kind")
         target_message_id = run_metadata.get("regenerate_from_message_id")
-        is_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and replay_kind != "edit") or _graph_input_is_human_input_response(graph_input)
+        scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
+        candidate_has_scope = any(isinstance(message, BaseMessage) and KNOWLEDGE_SCOPE_KEY in message.additional_kwargs for message in scope_graph_input.get("messages", []))
+        replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and replay_kind != "edit")
+        is_human_input_response = _graph_input_is_human_input_response(graph_input)
+        # A clarification reply is a new HumanMessage. If the UI sends its
+        # current selector snapshot, validate and admit that snapshot normally;
+        # only omission inherits the source turn's authoritative scope. Replay
+        # and regenerate paths remain server-authoritative regardless of input.
+        is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not _current_human_message_has_knowledge_scope(graph_input))
         recovery_scope = (
             await _recover_run_knowledge_scope(
                 request,
@@ -1619,8 +1640,6 @@ async def start_run(
             if is_scope_recovery
             else None
         )
-        scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
-        candidate_has_scope = any(isinstance(message, BaseMessage) and KNOWLEDGE_SCOPE_KEY in message.additional_kwargs for message in scope_graph_input.get("messages", []))
         agent_config = (
             await _load_scope_agent_config(
                 assistant_id=body.assistant_id,
