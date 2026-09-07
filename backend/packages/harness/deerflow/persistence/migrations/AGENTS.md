@@ -12,6 +12,7 @@ DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run
 | legacy (DeerFlow tables, no `alembic_version`) | `create_all` (baseline tables only, backfill) + `alembic stamp 0001_baseline` + `upgrade head` |
 | versioned (one locally known `alembic_version` row) | `alembic upgrade head`          |
 | forward-compatible (`0019_thread_incarnations`) | warn and skip migration             |
+| unknown revision, empty version table, or multiple version rows | fail closed and refuse to start |
 
 The legacy branch handles pre-alembic databases that already have at least one DeerFlow-owned table. `create_all` runs first because stamping at `0001_baseline` makes alembic skip the baseline's own `create_table` DDL on the subsequent upgrade — so any baseline table introduced into `Base.metadata` after the user's DB was first provisioned (e.g. the `channel_*` tables from PR #1930 for users upgrading across multiple releases) would otherwise never be created, and the first request hitting that table would 500 with `no such table`. The backfill is **restricted to `_BASELINE_TABLE_NAMES`** so it does not also create tables that future revisions introduce — those revisions' own `op.create_table` would otherwise fail with `relation already exists`. A guard test pins `_BASELINE_TABLE_NAMES` against `0001_baseline.upgrade()`'s actual output, so editing 0001 to add or remove a table forces a matching update to the constant. Column-level shape (pre-#3658 vs post-#3658 vs manual-ALTER for `token_usage_by_model`) is answered by each `versions/*.py` revision via the idempotent helpers in `migrations/_helpers.py` (`safe_add_column` / `safe_drop_column`) which no-op when the change is already present and `logger.warning` on shape drift. **Adding a new ORM column / table only requires a new revision file — no edit to `bootstrap.py` is needed** *unless* the new revision adds a new baseline table (rare; only happens when a new model is part of the baseline rather than introduced by its own revision).
 
@@ -27,7 +28,12 @@ warning and leaves the newer schema untouched. Any other unknown revision, an
 empty version table, or multiple version rows fails closed. Do not broaden the
 allowlist without proving that old repositories can read, insert, and update
 through the newer schema; nullable additive columns are covered by
-`tests/test_persistence_forward_revision_compat.py`. Because SQLite has no
+`tests/test_persistence_forward_revision_compat.py`. This exception is reviewed
+only for the expand-only 0019 shape: nullable VARCHAR(32)
+`threads_meta.incarnation` and `mcp_tasks.thread_incarnation` columns with no
+server default, table, index, constraint, or data backfill. The 0019 migration
+must cross-pin its revision id and schema shape against the bootstrap contract;
+amending that DDL requires a fresh old-repository compatibility audit. Because SQLite has no
 cross-process bootstrap mutex, an old process may read 0018 immediately before
 another process commits 0019. If its now-stale Alembic upgrade fails, bootstrap
 re-reads the version and recovers only for the exact allowlisted 0019 while that

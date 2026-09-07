@@ -13,11 +13,13 @@ Combines two ideas:
 Three-branch decision (see ``_decide_state``)
 ---------------------------------------------
 
-| DB state                              | Action                                  |
-|---------------------------------------|-----------------------------------------|
-| empty (no DeerFlow tables)            | ``create_all`` + ``alembic stamp head`` |
-| legacy (DeerFlow tables, no alembic)  | ``create_all`` (baseline tables only, as backfill) + ``stamp 0001_baseline`` + ``upgrade head`` |
-| versioned (``alembic_version`` row)   | ``alembic upgrade head``                |
+| DB state                                      | Action                                  |
+|-----------------------------------------------|-----------------------------------------|
+| empty (no DeerFlow tables)                    | ``create_all`` + ``alembic stamp head`` |
+| legacy (DeerFlow tables, no alembic)          | ``create_all`` (baseline tables only, as backfill) + ``stamp 0001_baseline`` + ``upgrade head`` |
+| versioned (one locally known revision)        | ``alembic upgrade head``                |
+| reviewed forward-compatible revision 0019     | warn and skip migration                 |
+| unknown, empty, or multiple revision rows     | refuse to start                         |
 
 The legacy branch handles pre-alembic databases that already have at least one
 DeerFlow-owned table. ``create_all`` runs first because stamping at
@@ -108,8 +110,13 @@ _HEAD_REVISION: str | None = None
 _KNOWN_REVISIONS: frozenset[str] | None = None
 
 # One additive revision may be present when an older Gateway starts during the
-# thread-incarnation rollout.  This exception is intentionally exact: changing
-# it requires auditing the newer schema for backward-compatible reads/writes.
+# thread-incarnation rollout. This allowlist was reviewed only for revision
+# ``0019_thread_incarnations`` adding nullable VARCHAR(32) columns
+# ``threads_meta.incarnation`` and ``mcp_tasks.thread_incarnation`` without a
+# server default, table, index, constraint, or data backfill. The owning 0019
+# change must cross-pin this revision id and schema shape in tests. Amending
+# that DDL requires re-auditing old-repository reads and writes before this
+# exception remains valid.
 _FORWARD_COMPATIBLE_REVISION = "0019_thread_incarnations"
 
 # Baseline (stamp target for legacy DBs). Pinned here so the bootstrap layer
