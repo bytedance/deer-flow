@@ -1318,3 +1318,14 @@ def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
     assert found == ["/mnt/user-data/workspace/notes.txt "]
     assert truncated is False
+
+
+def test_list_dir_raises_when_find_returns_no_entries() -> None:
+    class _EmptyBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout="", stderr="", exit_code=0)
+
+    box = BoxliteBox("box-id", box=_EmptyBox(), run=_fake_run)
+
+    with pytest.raises(FileNotFoundError):
+        box.list_dir("/mnt/user-data/workspace")

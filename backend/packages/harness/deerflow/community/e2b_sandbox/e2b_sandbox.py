@@ -339,17 +339,22 @@ class E2BSandbox(Sandbox):
         with self._lock:
             client = self._client
             if client is None:
-                return []
+                raise RuntimeError("sandbox client has been closed")
             try:
                 result = client.commands.run(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-                output = getattr(result, "stdout", "") or ""
-                # splitlines() already removed the terminators; do NOT strip
-                # entries — a filename that legitimately ends in whitespace
-                # would be corrupted and never resolve again.
-                return [line for line in output.splitlines() if line]
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
-                return []
+                raise OSError(f"Failed to list_dir {resolved} in e2b sandbox: {e}") from e
+            output = getattr(result, "stdout", "") or ""
+            # splitlines() already removed the terminators; do NOT strip
+            # entries — a filename that legitimately ends in whitespace
+            # would be corrupted and never resolve again.
+            # An existing directory still prints itself via `find -type d`, so
+            # empty stdout is the 2>/dev/null missing-path case, not a real empty dir.
+            entries = [line for line in output.splitlines() if line]
+            if not entries:
+                raise FileNotFoundError(resolved)
+            return entries
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         resolved = self._resolve_path(path)

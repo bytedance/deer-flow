@@ -614,6 +614,18 @@ class TestListDirSerialization:
         assert result == ["/a", "/b"]
         assert lock_was_held == [True], "list_dir must hold the lock during exec_command"
 
+    def test_list_dir_raises_when_exec_fails(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(side_effect=RuntimeError("sandbox down"))
+
+        with pytest.raises(OSError, match="Failed to list directory"):
+            sandbox.list_dir("/test")
+
+    def test_list_dir_raises_when_find_returns_no_entries(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="")))
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/missing")
+
 
 class TestNoChangeTimeout:
     """Verify that no_change_timeout is forwarded to every exec_command call."""

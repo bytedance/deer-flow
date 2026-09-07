@@ -5204,6 +5204,33 @@ def test_list_dir_preserves_trailing_space_in_filename():
     assert sb.list_dir("/home/user") == ["/home/user/notes.txt ", "/home/user/sub"]
 
 
+def test_list_dir_raises_when_command_fails():
+    client = FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(OSError, match="Failed to list_dir"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_raises_when_client_closed():
+    sb = _make_sandbox(FakeClient())
+    sb.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_raises_when_find_returns_no_entries():
+    # `find ... 2>/dev/null` on a missing path yields empty stdout; that is not
+    # a real empty directory (`find -type d` still prints the directory itself).
+    listing = SimpleNamespace(stdout="", stderr="", exit_code=0)
+    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(FileNotFoundError):
+        sb.list_dir("/home/user/missing")
+
+
 def test_glob_preserves_trailing_space_in_filename():
     listing = SimpleNamespace(stdout="/home/user/notes.txt \n", stderr="", exit_code=0)
     client = FakeClient(commands=FakeCommandsAPI([listing]))

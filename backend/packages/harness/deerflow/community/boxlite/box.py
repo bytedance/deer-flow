@@ -293,7 +293,12 @@ class BoxliteBox(Sandbox):
         r = self._sh(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
         # splitlines() already removed the terminators; do NOT strip entries —
         # a filename that legitimately ends in whitespace would be corrupted.
-        return [line for line in (r.stdout or "").splitlines() if line]
+        # An existing directory still prints itself via `find -type d`, so
+        # empty stdout is the 2>/dev/null missing-path case, not a real empty dir.
+        entries = [line for line in (r.stdout or "").splitlines() if line]
+        if not entries:
+            raise FileNotFoundError(resolved)
+        return entries
 
     def glob(
         self,

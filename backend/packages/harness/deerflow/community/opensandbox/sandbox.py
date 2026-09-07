@@ -327,7 +327,12 @@ class OpenSandboxSandbox(Sandbox):
         execution = self._run(f"find {shlex.quote(resolved)} -maxdepth {depth} \\( -type f -o -type d \\) 2>/dev/null | head -500")
         # splitlines() already removed the terminators; do NOT strip entries —
         # a filename that legitimately ends in whitespace would be corrupted.
-        return [line for line in execution_stdout(execution).splitlines() if line]
+        # An existing directory still prints itself via `find -type d`, so
+        # empty stdout is the 2>/dev/null missing-path case, not a real empty dir.
+        entries = [line for line in execution_stdout(execution).splitlines() if line]
+        if not entries:
+            raise FileNotFoundError(resolved)
+        return entries
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
         if max_results <= 0:
