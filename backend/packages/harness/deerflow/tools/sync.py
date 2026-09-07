@@ -58,6 +58,20 @@ def make_sync_tool_wrapper(coro: Callable[..., Any], tool_name: str) -> Callable
         else, such as ``run_config``, may collide with LangChain's injected
         ``config`` argument. Rename that user-facing field or extend this
         helper before using that signature.
+
+        The returned wrapper is built with ``functools.wraps(coro)``, so it
+        copies ``__name__``, ``__qualname__``, ``__doc__``, ``__annotations__``
+        and ``__dict__`` and sets ``__wrapped__``. This matters for LangGraph:
+        ``ToolNode._get_all_injected_args`` reads ``get_type_hints(tool.func)``,
+        and ``get_type_hints`` follows ``__wrapped__`` back to the coroutine's
+        own ``__globals__``. That is why injected parameters such as
+        ``runtime: Runtime`` are still detected here even when the caller was
+        compiled with ``from __future__ import annotations`` (mcp/tools.py,
+        skill_manage_tool.py) and the annotation is a string. Do not replace
+        ``wraps`` with a bare wrapper or a hand-copied signature: the string
+        annotation would then be evaluated against the wrapper's module globals,
+        or the ``runtime`` parameter would disappear entirely and the tool would
+        run with ``runtime=None``.
     """
     config_param = _get_runnable_config_param(coro)
 
@@ -79,6 +93,7 @@ def make_sync_tool_wrapper(coro: Callable[..., Any], tool_name: str) -> Callable
 
     if config_param:
 
+        @functools.wraps(coro)
         def sync_wrapper(*args: Any, config: RunnableConfig = None, **kwargs: Any) -> Any:
             if config is not None or config_param not in kwargs:
                 kwargs[config_param] = config
@@ -86,6 +101,7 @@ def make_sync_tool_wrapper(coro: Callable[..., Any], tool_name: str) -> Callable
 
         return sync_wrapper
 
+    @functools.wraps(coro)
     def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
         return run_coroutine(*args, **kwargs)
 

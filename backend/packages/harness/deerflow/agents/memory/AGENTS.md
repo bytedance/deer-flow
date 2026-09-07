@@ -202,6 +202,18 @@ Use the earliest source review deadline for its next review.
 
 #### Remote backends
 
+Strict reads use the backend-neutral `MemoryReadError`.
+Backends declare their policy through `read_failures_are_fatal_for_config()`.
+`DynamicContextMiddleware` preserves that policy at its injection timeout.
+Policy methods must use only in-memory config. The non-loading lookup returns
+unknown for a cold backend; discovery/config reload runs inside the existing
+timed injection worker. Per-call policy state cannot leak across runs, and
+timeout handling never submits more executor work. Unknown policy fails closed.
+The prompt loader retains `MemoryManagerError` + `fail_closed` compatibility
+for third-party backends that have not adopted the typed error.
+The base policy resolver also honors legacy `fail_closed` at the timeout boundary;
+other settings remain permissive unless the backend overrides the resolver.
+
 OpenViking uses the maintained `langchain-openviking` package.
 Keep it in middleware mode.
 One API key is bound to one configured DeerFlow owner.

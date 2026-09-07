@@ -397,7 +397,7 @@
       "pattern": "middleware:{tag}",
       "category": "middleware",
       "producer": "RunJournal.record_middleware(tag, ...)",
-      "known_tags": ["guardrail", "loop_detection", "safety_termination", "skill_activation", "skill_secrets"],
+      "known_tags": ["guardrail", "loop_detection", "safety_termination", "skill_activation", "skill_secrets", "tool_promotion"],
       "event_type_schema": {
         "type": "string",
         "pattern": "^middleware:",
@@ -444,7 +444,7 @@
     {
       "id": "middleware-coverage",
       "status": "partial",
-      "notes": "Loop-detection events cover lead-agent and ordinary task-tool subagent runs; durable batch subagent loop detection and deferred-tool promotion do not currently emit middleware events."
+      "notes": "Loop-detection and deferred-tool promotion events cover lead-agent and ordinary task-tool subagent runs. Durable batch subagents have no parent run journal and do not currently emit either event."
     },
     {
       "id": "run-scoped-observation-context",

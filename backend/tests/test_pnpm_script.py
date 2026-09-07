@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PNPM_SCRIPT = REPO_ROOT / "scripts" / "pnpm.py"
@@ -126,6 +129,7 @@ def test_official_entrypoints_route_pnpm_through_shared_runner():
     assert 'project_root / "scripts" / "pnpm.py"' in support_bundle_script
 
 
+@pytest.mark.skipif(shutil.which("make") is None, reason="GNU make is not on PATH (not bundled with Git Bash on Windows)")
 def test_make_install_dry_run_does_not_invoke_bare_pnpm():
     result = subprocess.run(
         ["make", "-n", "install"],

@@ -10,11 +10,36 @@ DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run
 |-------------------------------------------|-----------------------------------------|
 | empty (no DeerFlow tables)                | `create_all` + `alembic stamp head`     |
 | legacy (DeerFlow tables, no `alembic_version`) | `create_all` (baseline tables only, backfill) + `alembic stamp 0001_baseline` + `upgrade head` |
-| versioned (`alembic_version` row exists)  | `alembic upgrade head`                  |
+| versioned (one locally known `alembic_version` row) | `alembic upgrade head`          |
+| forward-compatible (`0019_thread_incarnations`) | warn and skip migration             |
+| unknown revision, empty version table, or multiple version rows | fail closed and refuse to start |
 
 The legacy branch handles pre-alembic databases that already have at least one DeerFlow-owned table. `create_all` runs first because stamping at `0001_baseline` makes alembic skip the baseline's own `create_table` DDL on the subsequent upgrade — so any baseline table introduced into `Base.metadata` after the user's DB was first provisioned (e.g. the `channel_*` tables from PR #1930 for users upgrading across multiple releases) would otherwise never be created, and the first request hitting that table would 500 with `no such table`. The backfill is **restricted to `_BASELINE_TABLE_NAMES`** so it does not also create tables that future revisions introduce — those revisions' own `op.create_table` would otherwise fail with `relation already exists`. A guard test pins `_BASELINE_TABLE_NAMES` against `0001_baseline.upgrade()`'s actual output, so editing 0001 to add or remove a table forces a matching update to the constant. Column-level shape (pre-#3658 vs post-#3658 vs manual-ALTER for `token_usage_by_model`) is answered by each `versions/*.py` revision via the idempotent helpers in `migrations/_helpers.py` (`safe_add_column` / `safe_drop_column`) which no-op when the change is already present and `logger.warning` on shape drift. **Adding a new ORM column / table only requires a new revision file — no edit to `bootstrap.py` is needed** *unless* the new revision adds a new baseline table (rare; only happens when a new model is part of the baseline rather than introduced by its own revision).
 
 The empty-DB path keeps using `create_all` because `Base.metadata` is the only authoritative schema source — `create_all` renders both SQLite (JSON, type affinity) and Postgres (JSONB, partial indexes) correctly without anyone having to keep a hand-written baseline in lockstep. `0001_baseline.upgrade()` is therefore almost never executed in practice; it exists as a stamp target + chain root.
+
+**Rolling forward compatibility**: this migration tree deliberately remains at
+`0018_oauth_identity_pg_partial`, but an older Gateway may briefly share a
+database with the expand-only `0019_thread_incarnations` deployment. Bootstrap
+reads `alembic_version` while holding its backend lock and accepts exactly one
+row. A locally known revision follows the normal upgrade path. The one unknown
+revision `0019_thread_incarnations` is explicitly allowlisted: bootstrap logs a
+warning and leaves the newer schema untouched. Any other unknown revision, an
+empty version table, or multiple version rows fails closed. Do not broaden the
+allowlist without proving that old repositories can read, insert, and update
+through the newer schema; nullable additive columns are covered by
+`tests/test_persistence_forward_revision_compat.py`. This exception is reviewed
+only for the expand-only 0019 shape: nullable VARCHAR(32)
+`threads_meta.incarnation` and `mcp_tasks.thread_incarnation` columns with no
+server default, table, index, constraint, or data backfill. The 0019 migration
+must cross-pin its revision id and schema shape against the bootstrap contract;
+amending that DDL requires a fresh old-repository compatibility audit. Because SQLite has no
+cross-process bootstrap mutex, an old process may read 0018 immediately before
+another process commits 0019. If its now-stale Alembic upgrade fails, bootstrap
+re-reads the version and recovers only for the exact allowlisted 0019 while that
+revision remains absent from the local migration tree. Do not generalize this
+recovery or apply it to a binary that owns 0019; its migration failures must
+remain fatal.
 
 **Concurrency safety**: Postgres uses `pg_advisory_lock` to serialise concurrent Gateway instances. SQLite uses a per-engine `asyncio.Lock` for same-process startup and is best-effort across processes via SQLite's file-level write lock + `PRAGMA busy_timeout`; multi-instance deployments should use Postgres. Column revisions in `versions/` additionally use idempotent helpers (`_helpers.py::safe_add_column`, `safe_drop_column`) so repeated post-baseline changes and retries are no-ops when the change is already present.
 
@@ -88,6 +113,6 @@ on installs that never enabled it. The convention is:
 - `migrations/versions/0016_subagent_batches.py` — creates durable native-subagent batch and item tables, including owner/submission idempotency, item identity, lease/recovery state, and result fields
 - `migrations/versions/0017_personal_access_tokens.py` — creates the personal access token table for programmatic API access
 - `migrations/versions/0018_oauth_identity_pg_partial.py` — converts `idx_users_oauth_identity` to a partial index on Postgres (`postgresql_where`), matching what `UserRow.__table_args__` already builds via `create_all`; `0001_baseline` never applied the predicate on Postgres, so every `alembic upgrade head`-provisioned deployment carried a full index until this revision. Postgres-only, idempotent (checks `pg_index.indpred` directly), no-op on SQLite (already partial via `sqlite_where`) and on a DB where the index doesn't exist yet. Originally generated as 0017 and renumbered to 0018 after 0017_personal_access_tokens merged first and kept that slot
-- `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch decision + locking
+- `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch provisioning decision, locked revision validation, and the narrow 0019 forward-compatibility exception
 - `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps)

@@ -49,6 +49,29 @@ def test_local_sandbox_client_bypasses_environment_proxy():
     )
 
 
+def test_local_sandbox_client_forwards_trusted_relay_headers():
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+    sentinel_httpx = MagicMock()
+    headers = {"X-DeerFlow-Relay-Token": "secret-token"}
+    with (
+        patch("deerflow.community.aio_sandbox.aio_sandbox.httpx.Client", return_value=sentinel_httpx),
+        patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient") as sdk_cls,
+    ):
+        AioSandbox(
+            id="test-sandbox",
+            base_url="http://host.docker.internal:8080",
+            request_headers=headers,
+        )
+
+    sdk_cls.assert_called_once_with(
+        base_url="http://host.docker.internal:8080",
+        timeout=600,
+        headers=headers,
+        httpx_client=sentinel_httpx,
+    )
+
+
 @pytest.mark.parametrize(
     "base_url",
     [
