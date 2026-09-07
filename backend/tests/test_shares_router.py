@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI, Request, Response
 from fastapi.testclient import TestClient
@@ -340,6 +341,25 @@ def test_public_get_is_exempt_from_auth_middleware(tmp_path):
     assert response.headers["Referrer-Policy"] == "no-referrer"
     assert response.headers["Cache-Control"] == "no-store"
     assert response.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
+
+
+@pytest.mark.parametrize("method", ["post", "put", "patch", "delete"])
+def test_shares_prefix_exempt_is_get_scoped(method: str, tmp_path):
+    """Non-GET verbs under /api/shares/ stay behind the auth gate (#5078
+    review P3): the exemption is keyed on the method in the middleware, so
+    the anonymous surface cannot widen silently when a route is later added
+    under the prefix — the request dies with 401 before routing (405)."""
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+    app.include_router(shares_router.router)
+    set_app_config(_config(enabled=True))
+    app.state.share_repo = None
+    try:
+        with TestClient(app) as client:
+            response = getattr(client, method)("/api/shares/dfs_unknown-token")
+    finally:
+        reset_app_config()
+    assert response.status_code == 401  # middleware verdict, not 405
 
 
 # ── The sharpest edges: auth-disabled mode and null-owner threads ─────────

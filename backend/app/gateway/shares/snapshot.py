@@ -252,8 +252,16 @@ _ENTITY_NAMES = {
     "grave": "`",
     "verbar": "|",
 }
+# Numeric references decode without the trailing ``;`` too: CommonMark
+# escapes a malformed reference's ``&`` (so the pure-markdown renderer shows
+# the literal bytes), but a raw-HTML passthrough consumer hands the bytes to
+# the HTML5 tokenizer, which consumes semicolon-less numeric references in
+# both text and attribute content (``missing-semicolon-after-character-
+# reference`` is a parse error, not a refusal). Named references stay
+# semicolon-required: HTML5 decodes the semicolon-less named forms only for
+# a small legacy list that excludes ``sol``/``bsol``/``percnt``.
 _HTML_ENTITY_RE = re.compile(
-    r"&(?:#0*\d+|#x0*[0-9a-f]+|" + "|".join(_ENTITY_NAMES) + r");",
+    r"&(?:#0*\d+;?|#x0*[0-9a-f]+;?|(?:" + "|".join(_ENTITY_NAMES) + r");)",
     re.IGNORECASE,
 )
 # ``uXXXX`` / ``u{X...}`` escapes decode the same way (JSON consumers decode
@@ -269,7 +277,10 @@ def _decode_entity(text: str, index: int) -> tuple[str, int] | None:
     match = _HTML_ENTITY_RE.match(text, index)
     if match is None:
         return None
-    body = match.group(0)[1:-1].lower()
+    body = match.group(0)[1:]
+    if body.endswith(";"):
+        body = body[:-1]
+    body = body.lower()
     if body.startswith("#"):
         digits = body[1:]
         base = 10
@@ -1356,6 +1367,66 @@ def _workspace_route_end(value: str, core_end: int) -> int:
     return end
 
 
+def _workspace_separator_unit_count(value: str) -> int:
+    """Count single-layer separator units in ``value``.
+
+    A unit is one source byte group the normalizer decodes to exactly one
+    ``/`` in a single decode layer: a literal ``/``, a ``\\/`` pair, one
+    backslash of a lone run (Windows-style separator), a ``\\uXXXX`` escape
+    decoding to ``/``, an entity reference decoding to ``/``, or a ``%2F``
+    triple. Multi-layer compositions (``%252F``) are one separator rendered
+    across layers and count as zero single-layer units here. Two or more
+    adjacent units are a separator *run* — the rendered ``//`` of a
+    protocol-relative URL — and may never anchor a rooted route.
+    """
+    count = 0
+    i = 0
+    n = len(value)
+    while i < n:
+        char = value[i]
+        if char == "/":
+            count += 1
+            i += 1
+            continue
+        if char == "\\":
+            run_end = i
+            while run_end < n and value[run_end] == "\\":
+                run_end += 1
+            unicode_escape = _UNICODE_ESCAPE_RE.match(value, run_end)
+            decoded_escape = _decode_unicode_escape(unicode_escape.group(0)) if unicode_escape is not None else None
+            if decoded_escape is not None:
+                if decoded_escape == "/":
+                    count += 1
+                i = unicode_escape.end()
+                continue
+            if run_end < n and value[run_end] == "/":
+                count += 1
+                i = run_end + 1
+                continue
+            count += run_end - i
+            i = run_end
+            continue
+        if char == "&":
+            entity = _decode_entity(value, i)
+            if entity is not None:
+                decoded, end = entity
+                if decoded == "/":
+                    count += 1
+                i = end
+                continue
+        if char == "%" and i + 2 < n:
+            try:
+                byte = int(value[i + 1 : i + 3], 16)
+            except ValueError:
+                byte = 0x100
+            if byte < 0x80 and chr(byte) == "/":
+                count += 1
+                i += 3
+                continue
+        i += 1
+    return count
+
+
 def _workspace_private_source_extent(path: str) -> tuple[int, bool] | None:
     """Return ``(source_end, opaque_tail_reached_end)`` for ``path``.
 
@@ -1413,14 +1484,32 @@ def _workspace_url_path_source_start(value: str) -> int | None:
 
 
 def _has_private_workspace_reference(value: str) -> bool:
-    """Classify one reference whose literal root or HTTP scheme is first."""
-    if _WORKSPACE_HTTP_RE.match(value) is not None:
+    """Classify one reference whose rendered root or HTTP scheme is first.
+
+    The root may be encoded in any family the path normalizer decodes
+    (``\\/``, ``&#47;``, ``\\u002F``, ``%2F``, a lone backslash), matching the
+    generic sanitizer's contract for ``api/threads`` references: the decoded
+    form — not the literal bytes — is what a percent-decoding or
+    entity-decoding consumer renders. The scheme is matched literally or in
+    the escape-collapsed view only, never percent-decoded: an encoded scheme
+    manufactures no URL in any consumer, while CommonMark decodes character
+    references in both text and link destinations, so ``&#104;ttps://…``
+    renders as a live URL and must classify like its literal form. A leading
+    separator *run* (the rendered ``//`` of a protocol-relative reference)
+    never classifies.
+    """
+    escape_collapsed: str | None = None
+    if "&" in value or "\\" in value:
+        escape_collapsed, _ = _collapse_separators_with_offsets(value, resolve_dots=False)
+    if _WORKSPACE_HTTP_RE.match(value) is not None or (escape_collapsed is not None and _WORKSPACE_HTTP_RE.match(escape_collapsed) is not None):
         path_start = _workspace_url_path_source_start(value)
         if path_start is None:
             return False
         value = value[path_start:]
     elif not value.startswith("/") or value.startswith("//"):
-        return False
+        view, view_spans = _normalize_workspace_path_with_offsets(value, resolve_dots=False)
+        if not view.startswith("/") or _workspace_separator_unit_count(value[: view_spans[0][1] + 1]) > 1:
+            return False
     return _workspace_private_source_end(value) is not None
 
 
@@ -1650,12 +1739,15 @@ def _iter_workspace_source_tokens(text: str) -> Iterator[tuple[str, int]]:
 
 
 def _collect_workspace_edits(text: str, edits: list[tuple[int, int, str]]) -> None:
-    """Collect workspace cuts only from literal anchors in original text.
+    """Collect workspace cuts from rendered anchors mapped to source bytes.
 
     The generic sanitizer's resolved whole-message shadow is intentionally
     not a truth source here: resolving a relative path can manufacture a
-    root, and resolving a complete URL can pop its authority. Literal routes
-    are split into independent anchored candidates, normalized path-locally,
+    root, and resolving a complete URL can pop its authority. Anchors are
+    the *rendered* separator origins — literal ``/`` positions plus every
+    root the path normalizer decodes from ``\\/``, ``&#47;``, ``\\u002F``,
+    ``%2F``, or a lone backslash — so an encoded route root classifies like
+    its literal form. Each anchored candidate is normalized path-locally
     and mapped back to exact source spans.  A later route in the same prose
     token therefore cannot hide behind an earlier public path, and public
     punctuation or text after a route is never swallowed by a fail-closed
@@ -1704,32 +1796,53 @@ def _collect_workspace_edits(text: str, edits: list[tuple[int, int, str]]) -> No
         opaque_tail = False
         scanned_through = 0
         marker_index = 0
-        boundary_index = 0
-        slash = value.find("/", 0, stop)
-        while slash >= 0:
-            while marker_index < len(opaque_markers) and opaque_markers[marker_index] < slash:
-                if anchors and opaque_markers[marker_index] >= scanned_through:
-                    opaque_tail = True
-                marker_index += 1
-            rendered_value = value
-            rendered_slash = slash
-            if boundary_shadow is not None and boundary_spans is not None:
-                while boundary_index < len(boundary_spans) and boundary_spans[boundary_index][1] < slash:
-                    boundary_index += 1
-                if boundary_index < len(boundary_spans) and boundary_spans[boundary_index][0] <= slash <= boundary_spans[boundary_index][1] and boundary_shadow[boundary_index] == "/":
-                    rendered_value = boundary_shadow
-                    rendered_slash = boundary_index
-            if not value.startswith("//", slash) and _workspace_root_boundary_ok(value, slash) and _workspace_root_boundary_ok(rendered_value, rendered_slash):
+        if anchor_view is None or anchor_spans is None:
+            # Pure-literal token: anchors are literal ``/`` positions.
+            slash = value.find("/", 0, stop)
+            while slash >= 0:
+                while marker_index < len(opaque_markers) and opaque_markers[marker_index] < slash:
+                    if anchors and opaque_markers[marker_index] >= scanned_through:
+                        opaque_tail = True
+                    marker_index += 1
+                if not value.startswith("//", slash) and _workspace_root_boundary_ok(value, slash):
+                    # Once a rooted candidate is active, only a prose/Markdown
+                    # terminator can begin another one inside one token.
+                    if not anchors or (not opaque_tail and standalone_separator(value, slash)):
+                        anchors.append(slash)
+                        opaque_tail = False
+                scanned_through = slash + 1
+                slash = value.find("/", slash + 1, stop)
+        else:
+            # Every rendered separator is an anchor origin: a route root may
+            # be encoded in any family the path normalizer decodes (``\/``,
+            # ``&#47;``, ``\\u002F``, ``%2F``, a lone backslash), so the
+            # anchor walk runs on the decoded view and maps each separator
+            # back to its first source byte. A separator *run* — two or
+            # more adjacent units, the rendered ``//`` of a protocol-relative
+            # reference — never anchors (single-layer unit counting;
+            # mixed-layer compositions classify fail-closed).
+            for view_index, view_char in enumerate(anchor_view):
+                if view_char != "/":
+                    continue
+                source_begin, source_end = anchor_spans[view_index]
+                if source_begin >= stop:
+                    break
+                if _workspace_separator_unit_count(value[source_begin : source_end + 1]) > 1:
+                    continue
+                while marker_index < len(opaque_markers) and opaque_markers[marker_index] < source_begin:
+                    if anchors and opaque_markers[marker_index] >= scanned_through:
+                        opaque_tail = True
+                    marker_index += 1
                 # Once a rooted candidate is active, only a prose/Markdown
                 # terminator in both the source and rendered views can begin
                 # another one.  Entity/unicode syntax ending in punctuation
                 # must not split route data (``chat&#115;/id``), while an
                 # encoded comma remains a real prose boundary.
-                if not anchors or (not opaque_tail and standalone_separator(value, slash) and standalone_separator(rendered_value, rendered_slash)):
-                    anchors.append(slash)
-                    opaque_tail = False
-            scanned_through = slash + 1
-            slash = value.find("/", slash + 1, stop)
+                if _workspace_root_boundary_ok(value, source_begin) and _workspace_root_boundary_ok(anchor_view, view_index):
+                    if not anchors or (not opaque_tail and standalone_separator(value, source_begin) and standalone_separator(anchor_view, view_index)):
+                        anchors.append(source_begin)
+                        opaque_tail = False
+                scanned_through = max(scanned_through, source_end + 1)
 
         claimed_until = 0
         index = 0
@@ -1772,19 +1885,27 @@ def _collect_workspace_edits(text: str, edits: list[tuple[int, int, str]]) -> No
         boundary_spans: list[tuple[int, int]] | None = None
         if "&" in value or "\\" in value:
             boundary_shadow, boundary_spans = _collapse_separators_with_offsets(value, resolve_dots=False)
-        if boundary_shadow is None or boundary_spans is None:
+        # The anchor view adds percent decoding to the escape families so a
+        # route root encoded in *any* supported family can anchor. Dot
+        # segments stay unresolved here: resolution can manufacture a root
+        # (``docs/../workspace/…``) and must never create an anchor.
+        anchor_view: str | None = None
+        anchor_spans: list[tuple[int, int]] | None = None
+        if "&" in value or "\\" in value or "%" in value:
+            anchor_view, anchor_spans = _normalize_workspace_path_with_offsets(value, resolve_dots=False)
+        if anchor_view is None or anchor_spans is None:
             opaque_markers = [match.start() for match in re.finditer(r"[?#]", value)]
         else:
             opaque_markers = []
             shadow_cursor = 0
-            while shadow_cursor < len(boundary_shadow):
-                if boundary_shadow[shadow_cursor] == "&":
-                    residual_entity = _HTML_ENTITY_RE.match(boundary_shadow, shadow_cursor)
+            while shadow_cursor < len(anchor_view):
+                if anchor_view[shadow_cursor] == "&":
+                    residual_entity = _HTML_ENTITY_RE.match(anchor_view, shadow_cursor)
                     if residual_entity is not None:
                         shadow_cursor = residual_entity.end()
                         continue
-                if boundary_shadow[shadow_cursor] in "?#":
-                    opaque_markers.append(boundary_spans[shadow_cursor][0])
+                if anchor_view[shadow_cursor] in "?#":
+                    opaque_markers.append(anchor_spans[shadow_cursor][0])
                 shadow_cursor += 1
         url_anchors: list[int] = []
         boundary_cursor = 0
@@ -1798,6 +1919,20 @@ def _collect_workspace_edits(text: str, edits: list[tuple[int, int, str]]) -> No
                     shadow_index = boundary_cursor
             if http_boundary_ok(value, start, boundary_shadow, shadow_index):
                 url_anchors.append(start)
+        # An escape-decoded scheme (``&#104;ttps://``) renders as a live URL
+        # (CommonMark decodes character references in text and destinations)
+        # and classifies like its literal form; a percent-encoded scheme
+        # manufactures no URL in any consumer and stays out. The escape view
+        # is the same ``boundary_shadow`` computed above.
+        if boundary_shadow is not None and boundary_spans is not None:
+            for url_match in _WORKSPACE_HTTP_RE.finditer(boundary_shadow):
+                view_index = url_match.start()
+                start = boundary_spans[view_index][0]
+                if start in url_anchors:
+                    continue
+                if http_boundary_ok(value, start, boundary_shadow, view_index):
+                    url_anchors.append(start)
+            url_anchors.sort()
 
         # A valid literal URL owns everything after its scheme until the
         # next independently anchored scheme in this whitespace token.  Bare

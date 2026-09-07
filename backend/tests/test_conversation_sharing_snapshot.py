@@ -673,11 +673,13 @@ def test_neutralize_workspace_routes_respect_source_boundaries():
     escaped_tail = rf"_x /workspace/chats/{'a' * 64}\_"
     assert neutralize(escaped_tail) == "_x [private artifact omitted]"
 
-    # Encoded data cannot manufacture a source root or scheme. Those forms
-    # are not emitted by pathOfThread; keeping the source anchor literal also
-    # prevents public protocol-relative, UNC, and mid-word lookalikes.
+    # Encoded data cannot manufacture a *scheme* or a dot-resolved root.
+    # An encoded *separator root* is deliberately absent from this list: it
+    # classifies like its literal form (see the dedicated regression below),
+    # matching the generic sanitizer's pinned contract for encoded
+    # ``api/threads`` references. Keeping the scheme literal preserves
+    # public protocol-relative, UNC, and mid-word lookalikes.
     for public_value in (
-        "%2Fworkspace%2Fchats%2Fthread-secret",
         "https%3A%2F%2Fdeer.example%2Fworkspace%2Fchats%2Fthread-secret",
         "//workspace/chats/thread-secret",
         "[x](//workspace/chats/thread-secret)",
@@ -702,6 +704,105 @@ def test_neutralize_workspace_routes_respect_source_boundaries():
         "foo&#115;/workspace/chats/id",
     ):
         assert neutralize(public_value) == public_value
+
+
+def test_neutralize_encoded_workspace_roots_classify_like_literal():
+    """Every escape family the sanitizer decodes anchors a workspace route.
+
+    Review P1 (round 12): the workspace classifier anchored only on a
+    literal ``/`` in the source bytes, so the escape families the generic
+    path already pins for ``/api/threads`` references — ``\\/``,
+    ``&#47;``/``&sol;``, ``\\u002F``, percent — published the workspace route
+    and its thread id verbatim, including as a live Markdown destination.
+    The encoded root now classifies exactly like the literal one; interior
+    encoded separators keep their existing behavior.
+    """
+    neutralize = _neutralize_private_references
+    marker = "[private artifact omitted]"
+    encoded_roots = (
+        r"\\/workspace\\/chats\\/SECRET7q",
+        "&#47;workspace&#47;chats&#47;SECRET7q",
+        "&sol;workspace&sol;chats&sol;SECRET7q",
+        "&#x2f;workspace&#x2f;chats&#x2f;SECRET7q",
+        r"\\u002Fworkspace\\u002Fchats\\u002FSECRET7q",
+        r"\u{2f}workspace\u{2f}chats\u{2f}SECRET7q",
+        "%2Fworkspace%2Fchats%2FSECRET7q",
+        "%2fworkspace%2fchats%2fSECRET7q",
+        r"%252Fworkspace%252Fchats%252FSECRET7q",
+        r"\workspace\chats\SECRET7q",
+    )
+    for value in encoded_roots:
+        assert neutralize(value) == marker, value
+        assert neutralize(f"see {value} now") == f"see {marker} now", value
+    # The agent-prefixed route family classifies through the same anchors.
+    assert neutralize("%2Fworkspace%2Fagents%2Fresearch-bot%2Fchats%2FSECRET7q") == marker
+    # A live Markdown destination (the worst shape in the finding) collapses
+    # the link like the literal destination already does.
+    for destination in (
+        r"[notes](\\/workspace\\/chats\\/SECRET7q)",
+        "[notes](&#47;workspace&#47;chats&#47;SECRET7q)",
+        "[notes](&sol;workspace&sol;chats&sol;SECRET7q)",
+        "[notes](%2Fworkspace%2Fchats%2FSECRET7q)",
+        r"[notes](\\u002Fworkspace\\u002Fchats\\u002FSECRET7q)",
+    ):
+        assert neutralize(destination) == f"notes {marker}", destination
+    # Windows-style separators mirror the generic path's pinned contract
+    # (``\\api\\threads\\…`` cuts); a leading backslash *run* is UNC /
+    # protocol-relative and stays public.
+    assert neutralize(r"\workspace\agents\bot\chats\SECRET7q") == marker
+    assert neutralize(r"open \workspace\chats\id,file") == f"open {marker},file"
+    # An escape-decoded scheme renders as a live URL (CommonMark decodes
+    # character references in text and destinations) and classifies like
+    # its literal form; the percent-encoded scheme stays public above.
+    assert neutralize("&#104;ttps://deer.example/workspace/chats/SECRET7q") == f"&#104;ttps://deer.example{marker}"
+    assert neutralize("[x](&#104;ttps://deer.example/workspace/chats/SECRET7q)") == f"x {marker}"
+    # Encoded separator *runs* keep the protocol-relative contract: two
+    # adjacent units render as ``//`` and never anchor a rooted route.
+    for public_value in (
+        "%2F%2Fworkspace%2Fchats%2FSECRET7q",
+        "&#47;&#47;workspace&#47;chats&#47;SECRET7q",
+        r"\\/\\u002Fworkspace\\/chats\\/SECRET7q",
+    ):
+        assert neutralize(public_value) == public_value, public_value
+
+
+def test_neutralize_semicolon_less_numeric_references():
+    """HTML5 consumes semicolon-less numeric references; classification too.
+
+    Thread 3905131958 (re-filed by review round 12): CommonMark escapes the
+    malformed reference's ``&`` so the pure-markdown renderer shows literal
+    bytes, but a raw-HTML passthrough hands the bytes to the HTML5 tokenizer,
+    which consumes numeric character references without the ``;`` in both
+    text and attribute content — the same "decode beyond CommonMark" family
+    the sanitizer already applies to percent and ``\\uXXXX`` encodings. The
+    numeric alternatives now make the semicolon optional; named references
+    keep requiring it (HTML5 decodes semicolon-less *named* references only
+    for a small legacy list that excludes ``sol``/``bsol``/``percnt``).
+    """
+    neutralize = _neutralize_private_references
+    marker = "[private artifact omitted]"
+    # Raw prose, Markdown destination, and HTML-attribute shapes.
+    assert neutralize("&#47api&#47threads&#47SECRET7q&#47uploads&#47x") == marker
+    assert neutralize("&#047api&#47threads&#47SECRET7q") == marker
+    # Hex maximal munch is HTML5's rule and bounds the hex family: a hex
+    # letter directly after the digits is consumed by the reference
+    # (``&#x2fchats`` decodes to U+02FC + ``hats``, never to ``/chats``), so
+    # the cut shape mixes decimal refs where the follower is a hex letter.
+    assert neutralize("&#x2fworkspace&#47chats&#47SECRET7q") == marker
+    assert neutralize("&#x02fworkspace&#47chats&#47SECRET7q") == marker
+    assert neutralize("[x](&#47api&#47threads&#47SECRET7q&#47uploads&#47y)") == f"x {marker}"
+    assert neutralize("<a href=&#47api&#47threads&#47SECRET7q>open</a>") == f"<a href={marker}>open</a>"
+    # Hex maximal munch is HTML5's rule: ``&#x2fapi`` decodes to U+02FA plus
+    # literal ``pi`` (the ``a`` is a hex digit) and ``&#x2fchats`` to U+02FC
+    # plus ``hats``, so neither spells a private route and both stay literal
+    # — only a non-hex follower (``&#x2fworkspace``) decodes to ``/``.
+    assert neutralize("&#x2fapi&#x2fthreads&#47SECRET7q") == "&#x2fapi&#x2fthreads&#47SECRET7q"
+    assert neutralize("&#x2fworkspace&#x2fchats&#x2fSECRET7q") == "&#x2fworkspace&#x2fchats&#x2fSECRET7q"
+    # Semicolon-less *named* references never decode to separators.
+    for public_value in ("&solapi&solthreads&SECRET7q", "&bsolapi&bsolthreads&SECRET7q"):
+        assert neutralize(public_value) == public_value
+    # Compositions keep decoding within the collapse budget.
+    assert neutralize("&amp;#47api&amp;#47threads&amp;#47SECRET7q") == marker
 
 
 def test_neutralize_joined_workspace_routes_scale_linearly():
