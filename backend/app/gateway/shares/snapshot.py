@@ -166,6 +166,17 @@ _HTML_CLOSE_TAG_RE = re.compile(rf"</{_HTML_TAG_NAME}[ \t]*>")
 
 
 def _is_complete_tag_line(content: str) -> bool:
+    # CommonMark allows up to three columns of indentation before an HTML
+    # block opener of any type; four or more columns is an indented code
+    # block instead. A tab always advances to the next four-column stop, so
+    # any leading tab disqualifies the line — and the ``strip`` below must
+    # never manufacture a tag the source does not carry at a legal indent:
+    # stripping a tab (or a fourth space) in front of ``<span>`` opened a
+    # phantom type-7 block whose extent then swallowed the real fence
+    # opener, leaving its closer to protect everything after it as an
+    # unclosed fence (a published ``<think>`` block).
+    if _indent_columns(content) >= 4:
+        return False
     indent = 0
     while indent < len(content) and content[indent] == " " and indent < 3:
         indent += 1
@@ -1287,6 +1298,15 @@ _REFERENCE_CUT_TERMINATORS = ",;:!?)\\]}\"'`*_~(|[<"
 # prefix-free and already cover the alias.
 _BOUNDARY_BLOCK_RE = re.compile(r"[\w.\-]\Z")
 _CORE_API_THREAD_REFERENCE_RE = re.compile(r"api/(?:langgraph/)?threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
+# Round 13: the *global* run routes are owner-scoped surfaces of their own
+# (``GET /api/runs/{run_id}/messages|feedback``, ``routers/runs.py`` —
+# ``_resolve_run`` filters by the contextvar user), and the public DTO
+# regenerates message ids (``m1..mN``) precisely so a source run identifier
+# never reaches anonymous readers. A raw run URL in message text leaks the
+# same identifier class the DTO scrubs, so it classifies like the thread
+# routes — including the ``api/langgraph/`` nginx alias, for every
+# ``/api/runs/{id}`` subpath, not just the two mounted today.
+_CORE_API_RUN_REFERENCE_RE = re.compile(r"api/(?:langgraph/)?runs/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
 _CORE_MNT_USER_DATA_RE = re.compile(r"mnt/user-data(?![\w.\-])", re.IGNORECASE)
 _AGENT_NAME_ROUTE_SEGMENT = AGENT_NAME_PATTERN.pattern.removeprefix("^").removesuffix("$")
 _THREAD_ID_ROUTE_SEGMENT = THREAD_ID_PATTERN.removeprefix("^").removesuffix("$")
@@ -1302,6 +1322,7 @@ _WORKSPACE_HTTP_RE = re.compile(r"https?://", re.IGNORECASE)
 _WORKSPACE_LITERAL_HTTP_AUTHORITY_RE = re.compile(r"https?://[^/?#\s<>\"]+", re.IGNORECASE)
 _WORKSPACE_REFERENCE_TRAILING_PUNCTUATION = _REFERENCE_TRAILING_PUNCTUATION.replace("_", "")
 _API_THREAD_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/(?:langgraph/)?threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
+_API_RUN_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/(?:langgraph/)?runs/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
 _MNT_USER_DATA_RE = re.compile(r"(?<![\w.\-])mnt/user-data(?![\w.\-])", re.IGNORECASE)
 
 
@@ -1532,7 +1553,7 @@ def _is_private_reference(value: str, *, include_workspace: bool = True) -> bool
                 break
             fed = candidate
         shadow, fed_spans = _collapse_separators_with_offsets(fed, resolve_dots=resolve_dots)
-        for core in (_CORE_API_THREAD_REFERENCE_RE, _CORE_MNT_USER_DATA_RE):
+        for core in (_CORE_API_THREAD_REFERENCE_RE, _CORE_API_RUN_REFERENCE_RE, _CORE_MNT_USER_DATA_RE):
             for match in core.finditer(shadow):
                 if _boundary_ok(fed, fed_spans, match.start()):
                     return True
@@ -1579,7 +1600,7 @@ def _starts_with_private_reference(window: str) -> bool:
     # (a protocol-relative ``//mnt/…`` strips to the phrase and classifies
     # like the absolute form).
     decoded = _trim_reference_punctuation(decoded).lstrip("/").lower()
-    return _MNT_USER_DATA_RE.match(decoded) is not None or _API_THREAD_REFERENCE_RE.match(decoded) is not None
+    return _MNT_USER_DATA_RE.match(decoded) is not None or _API_THREAD_REFERENCE_RE.match(decoded) is not None or _API_RUN_REFERENCE_RE.match(decoded) is not None
 
 
 # Probe windows may contain a URL scheme (``https://…`` tail); its ``//``
@@ -1621,24 +1642,30 @@ def _private_reference_segments(
     so its cuts cannot swallow public heads the resolved view already cut
     precisely."""
     segments: list[tuple[int, int]] = []
-    # Both match streams are computed once: re-searching per iteration
+    # All match streams are computed once: re-searching per iteration
     # rescans the token tail every time and is quadratic on joined lists.
     api_matches = [m for m in _CORE_API_THREAD_REFERENCE_RE.finditer(value) if _boundary_ok(fed_text, fed_spans, offset + m.start())]
+    run_matches = [m for m in _CORE_API_RUN_REFERENCE_RE.finditer(value) if _boundary_ok(fed_text, fed_spans, offset + m.start())]
     mnt_matches = [m for m in _CORE_MNT_USER_DATA_RE.finditer(value) if _boundary_ok(fed_text, fed_spans, offset + m.start())]
     api_index = 0
+    run_index = 0
     mnt_index = 0
     pos = 0
     n = len(value)
 
     def next_match(start: int) -> tuple[int, int] | None:
-        nonlocal api_index, mnt_index
+        nonlocal api_index, run_index, mnt_index
         while api_index < len(api_matches) and api_matches[api_index].start() < start:
             api_index += 1
+        while run_index < len(run_matches) and run_matches[run_index].start() < start:
+            run_index += 1
         while mnt_index < len(mnt_matches) and mnt_matches[mnt_index].start() < start:
             mnt_index += 1
         options: list[tuple[int, int]] = []
         if api_index < len(api_matches):
             options.append((api_matches[api_index].start(), api_matches[api_index].end()))
+        if run_index < len(run_matches):
+            options.append((run_matches[run_index].start(), run_matches[run_index].end()))
         if mnt_index < len(mnt_matches):
             options.append((mnt_matches[mnt_index].start(), mnt_matches[mnt_index].end()))
         return min(options) if options else None

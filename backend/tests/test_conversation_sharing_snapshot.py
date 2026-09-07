@@ -1462,6 +1462,31 @@ def test_owner_scoped_thread_routes_are_redacted():
     assert neutralize("thread /api/threads/8f3a mentioned") == "thread [private artifact omitted] mentioned"
 
 
+def test_owner_scoped_global_run_routes_are_redacted():
+    """Round 13: the *global* run routes (``GET /api/runs/{run_id}/messages``
+    and ``/feedback``, ``routers/runs.py`` — ``_resolve_run`` filters by the
+    contextvar user) carry the internal source run id, the identifier class
+    the public DTO regenerates (``m1..mN``) specifically to keep from
+    anonymous readers. A raw run URL in message text redacts like the thread
+    routes, including the nginx ``/api/langgraph/`` alias, every
+    ``/api/runs/{id}`` subpath, and the joined-list/destination shapes the
+    thread family already pins. Mid-word lookalikes stay public via the
+    same ``foo.api`` boundary rule."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    assert neutralize("/api/runs/2f0c9a34-9d1e-4f30-b1c2-7c21e6b0a55d/messages") == "[private artifact omitted]"
+    assert neutralize("/api/runs/8f3a/feedback?after=1") == "[private artifact omitted]"
+    assert neutralize("/api/langgraph/runs/8f3a/messages exported") == "[private artifact omitted] exported"
+    assert neutralize("runs /api/runs/8f3a/nonexistent-subresource,thanks") == "runs [private artifact omitted],thanks"
+    assert neutralize("[log](/api/runs/8f3a/messages)") == "log [private artifact omitted]"
+    # Escape-family parity with the thread routes (round 8/12 contract).
+    assert neutralize("&#47;api&#47;runs&#47;8f3a&#47;messages") == "[private artifact omitted]"
+    assert neutralize("%2Fapi%2Fruns%2F8f3a%2Ffeedback") == "[private artifact omitted]"
+    # Boundary guards behave exactly like the thread family.
+    assert neutralize("x-api/runs/8f3a/messages") == "x-api/runs/8f3a/messages"
+    assert neutralize("/api/runtime/threads/x") == "/api/runtime/threads/x"
+
+
 async def test_snapshot_neutralizes_entity_and_unicode_escaped_private_references():
     """Message-level regression for both round-8 separator-encoding forms."""
     private_text = " ".join(
@@ -2077,6 +2102,48 @@ def test_strip_invalid_type7_tags_do_not_open_html_blocks():
     valid = '<span data-x="a>b">\n```\ncode\n\n```\n<think>secret-real-html</think> after'
     kept = strip(valid)
     assert "secret-real-html" in kept, kept
+
+
+def test_strip_tab_or_four_space_indent_beats_type7_html_block():
+    """Round 13: an HTML block opener of any type allows up to three columns
+    of indentation; four or more columns — a tab always advances to the next
+    four-column stop — is an indented code block instead. ``strip``-ing the
+    indent away manufactured a phantom type-7 block that swallowed the real
+    fence opener, whose closer then protected everything after it as an
+    unclosed fence: the trailing reasoning block was published verbatim. The
+    tab-indented line is code (protected byte-for-byte, leading tab intact),
+    the fence opens at column zero, and the reasoning after its closer is
+    stripped."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    for indent in ("\t", "    ", "   \t"):
+        leaked = f"{indent}<span>\n~~~\ncode\n\n~~~\n<think>secret-indent</think>"
+        out = strip(leaked)
+        assert "secret-indent" not in out, (indent, out)
+        # The public indented-code line keeps its exact leading bytes.
+        assert out.startswith(indent), (indent, out)
+
+    # Three columns of indentation is still a legal type-7 opener: the HTML
+    # block consumes the first fence, the second fence is the real one, and
+    # reasoning inside *that* fence stays protected (markdown-it parity).
+    legal = '   <span data-x="1">\n```\ninner\n\n```\n```\n`<think>kept</think>`\n```'
+    kept = strip(legal)
+    assert "<think>kept</think>" in kept, kept
+
+    # A tab-indented line mid-document (after a leaf block) is also code,
+    # and reasoning after the fenced region that follows is stripped.
+    trailing = "# h\n\n\t<div>\nplain\n\n<think>secret-tail</think>"
+    out = strip(trailing)
+    assert "secret-tail" not in out, out
+    assert "\t<div>\nplain" in out, out
+
+    # A message that is *entirely* indented code (no think block anywhere)
+    # passes through verbatim — including its leading indentation bytes.
+    pure = "\tdef f():\n    return 1"
+    assert strip(pure) == pure, strip(pure)
+    assert strip("    code line") == "    code line"
 
 
 def test_unmatched_backtick_scan_stays_linear_on_growing_runs():
