@@ -23,6 +23,7 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel
 # ``frontend/src/core/threads/utils.ts`` and
 # ``frontend/tests/e2e/utils/mock-api.ts``.
 THREAD_PINNED_METADATA_KEY = "deerflow_pinned"
+THREAD_ARCHIVED_METADATA_KEY = "deerflow_archived"
 
 
 class InvalidMetadataFilterError(ValueError):
@@ -52,11 +53,15 @@ class ThreadMetaStore(abc.ABC):
         *,
         metadata: dict[str, Any] | None = None,
         status: str | None = None,
+        archived: bool | None = None,
         limit: int = 100,
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict[str, Any]]:
         """Search threads.
+
+        ``archived=None`` includes all threads; False includes legacy rows
+        without a true archive flag. Filtering precedes pagination.
 
         Results are ordered with pinned threads first
         (``metadata.deerflow_pinned is True``), then by ``updated_at`` and

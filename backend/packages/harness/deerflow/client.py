@@ -280,6 +280,13 @@ class DeerFlowClient:
         if context is not None:
             cfg.update(context)
 
+        # Prompt and middleware assembly bind user-scoped SOUL, skills, and
+        # storage even when authorization enforcement is disabled. Keep that
+        # storage identity in the graph cache key independently of the
+        # authorization principal so one trusted embedded client can safely
+        # serve more than one caller.
+        effective_user_id = cfg.get("user_id") or get_effective_user_id()
+
         authorization_identity = None
         if self._app_config.authorization.enabled:
             principal = build_principal_from_context(
@@ -306,6 +313,7 @@ class DeerFlowClient:
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
             self._checkpoint_snapshot_frequency,
+            effective_user_id,
             authorization_identity,
         )
 
@@ -378,8 +386,6 @@ class DeerFlowClient:
             top_k=self._app_config.tool_search.auto_promote_top_k,
         )
         mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=deferred_setup.deferred_names)
-
-        effective_user_id = cfg.get("user_id") or get_effective_user_id()
 
         kwargs: dict[str, Any] = {
             # attach_tracing=False because ``stream()`` injects tracing
@@ -899,12 +905,11 @@ class DeerFlowClient:
         configurable = config.get("configurable") or {}
         deerflow_trace_id = ensure_trace_id()
         effective_user_id = context.get("user_id") or get_effective_user_id()
-        if self._app_config.authorization.enabled:
-            # Match the existing user-scoped storage/tracing identity when an
-            # embedded caller relies on CurrentUser instead of an explicit
-            # user_id override. Layer 1, Layer 2, and the agent cache must see
-            # the same actor.
-            context["user_id"] = effective_user_id
+        # Materialize the storage owner in runtime context in every auth mode.
+        # ContextVars normally propagate, but this explicit channel also
+        # survives worker/isolated-loop boundaries and matches the identity
+        # used by prompt assembly and the agent cache.
+        context["user_id"] = effective_user_id
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
