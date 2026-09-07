@@ -72,6 +72,8 @@ Both survive the background timer boundary.
 The fence peek reads JSON counters only, not fact files, and runs before the queue lock.
 `DeerMem.aadd()` offloads the complete synchronous admission path with `asyncio.to_thread`.
 Async middleware must not call `DeerMem.add()` directly on the event loop.
+`add_nowait()` is synchronous; async callers must offload it with `asyncio.to_thread`.
+The built-in pre-summarization hook already runs inside that offloaded boundary.
 Provider exceptions and invalid generation values fail closed before queue admission.
 Normal capture failures log a replayable warning; emergency pre-summarization failures log an unrecoverable error with thread, user, and agent context.
 Same-key merges keep the earlier token unless a newer clear is already visible.
