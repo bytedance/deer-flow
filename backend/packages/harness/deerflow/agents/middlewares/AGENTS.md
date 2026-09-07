@@ -100,9 +100,12 @@ Before changing a later authorization phase, read the [authorization RFC](../../
    in an admitted batch. A hard limit can stop scanning immediately because it
    rejects the entire batch. Only the selected warning is marked and logged;
    hash warnings still precede frequency warnings when neither layer stops the
-   run. A frequency warning whose burst decays within the batch must not leave
-   a stale suppression mark. `tests/test_loop_detection_middleware.py` covers
-   mixed-tool batches, window decay, and sync/async compiled-graph execution.
+   run. Among simultaneous frequency-warning candidates, the first crossing in
+   model tool-call order remains selected for compatibility; later calls are
+   still counted and can warn in a later batch. A frequency warning whose burst
+   decays within the batch must not leave a stale suppression mark.
+   `tests/test_loop_detection_middleware.py` covers mixed-tool batches, window
+   decay, overrides, and sync/async compiled-graph execution.
 30. **TokenBudgetMiddleware** - *(optional, if `token_budget.enabled`)* Enforces per-run token limits
 31. **Custom middlewares** - *(optional)* Any `custom_middlewares` passed to `build_middlewares` are injected here, before config-declared extensions and the terminal-response/safety/clarification tail
 32. **Configured extension middlewares** - *(optional, if `extensions.middlewares` is set in `config.yaml` or `extensions_config.json`)* Zero-argument `AgentMiddleware` classes loaded from `module.path:ClassName` entries via `deerflow.reflection.resolve_class`. Missing packages, invalid classes, and broken modules fail loudly at agent creation. These run after built-ins/programmatic custom middleware and after the lead/subagent loop/token guards, but before the terminal-response/safety/clarification tail; subagents receive the same configured extension middleware class list before their safety tail. Treat these files as trusted operator config because middleware paths instantiate arbitrary code. Gateway skill/MCP toggle endpoints preserve this field through `to_file_dict()` but must not add a write path for `extensions.middlewares` without an explicit trust-boundary review. Lead-only vs subagent-only middleware lists and per-context constructor parameters are not expressible in this MVP.

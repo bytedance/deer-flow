@@ -253,6 +253,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self.max_tracked_threads = max_tracked_threads
         self.tool_freq_warn = tool_freq_warn
         self.tool_freq_hard_limit = tool_freq_hard_limit
+        self._default_tool_freq_thresholds = (tool_freq_warn, tool_freq_hard_limit)
         self._tool_freq_overrides: dict[str, tuple[int, int]] = tool_freq_overrides or {}
         # Layer 2's windowed frequency count can never exceed the deque length,
         # so the deque MUST be at least as long as the largest hard limit it is
@@ -545,10 +546,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                         del name_counter[old]
                     else:
                         name_counter[old] = c
-                    old_warn = self._tool_freq_overrides.get(
-                        old,
-                        (self.tool_freq_warn, self.tool_freq_hard_limit),
-                    )[0]
+                    old_warn = self._tool_freq_overrides.get(old, self._default_tool_freq_thresholds)[0]
                     if c < old_warn:
                         # Any tool can evict an older name from the shared
                         # window. Rearm that name as soon as its burst decays,
@@ -556,10 +554,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                         self._tool_freq_warned[thread_id].discard(old)
                 freq_count = name_counter.get(name, 0)
 
-                if name in self._tool_freq_overrides:
-                    eff_warn, eff_hard = self._tool_freq_overrides[name]
-                else:
-                    eff_warn, eff_hard = self.tool_freq_warn, self.tool_freq_hard_limit
+                eff_warn, eff_hard = self._tool_freq_overrides.get(name, self._default_tool_freq_thresholds)
 
                 if freq_count >= eff_hard:
                     logger.error(

@@ -1547,6 +1547,37 @@ class TestToolCallBatchDecisions:
         third = mw._track_and_check(_make_state(tool_calls=[self._call("a", 4)]), runtime)
         assert third is not None and third.tool_names == ("a",)
 
+    def test_cross_tool_eviction_rearms_at_evicted_tools_override_threshold(self):
+        mw = LoopDetectionMiddleware(
+            window_size=3,
+            tool_freq_warn=2,
+            tool_freq_hard_limit=5,
+            tool_freq_overrides={"bash": (3, 4)},
+        )
+        runtime = _make_runtime()
+
+        first = mw._track_and_check(
+            _make_state(tool_calls=[self._call("bash", i) for i in range(3)]),
+            runtime,
+        )
+        assert first is not None and first.tool_names == ("bash",)
+        assert mw._tool_freq_warned["test-thread"] == {"bash"}
+
+        second = mw._track_and_check(
+            _make_state(tool_calls=[self._call("read_file", i) for i in range(3)]),
+            runtime,
+        )
+        assert second is not None and second.tool_names == ("read_file",)
+        assert mw._tool_name_counter["test-thread"]["bash"] == 2
+        assert "bash" not in mw._tool_freq_warned["test-thread"]
+
+        third = mw._track_and_check(
+            _make_state(tool_calls=[self._call("bash", i) for i in range(3, 6)]),
+            runtime,
+        )
+        assert third is not None and third.tool_names == ("bash",)
+        assert third.count == 3
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_async", [False, True])
     async def test_batch_hard_stop_prevents_tool_execution_in_real_agent_graph(self, use_async):
