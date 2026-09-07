@@ -1031,6 +1031,8 @@ async def test_run_agent_schedules_terminal_cleanup_when_completion_hook_is_canc
     assert journal not in config["callbacks"]
     assert journal._closed is True
     assert journal._store is None
+    assert record.finalizing is False
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
     bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
     assert run_manager.cleanup_calls == [(record.run_id, 300)]
     schedule_collection.assert_called_once_with()

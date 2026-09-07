@@ -12,6 +12,7 @@ from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -25,7 +26,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
-from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY, TOOL_PROMOTION_RECORDER_CONTEXT_KEY
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
@@ -772,6 +773,7 @@ class SubagentExecutor:
         parent_model: str | None = None,
         sandbox_state: SandboxState | None = None,
         thread_data: ThreadDataState | None = None,
+        uploaded_files: list[dict[str, Any]] | None = None,
         thread_id: str | None = None,
         trace_id: str | None = None,
         user_id: str | None = None,
@@ -787,6 +789,7 @@ class SubagentExecutor:
         execution_capacity: SubagentExecutionCapacity | None = None,
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
+        tool_promotion_recorder: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -799,6 +802,9 @@ class SubagentExecutor:
             parent_model: The parent agent's model name for inheritance.
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
+            uploaded_files: Snapshot of files uploaded in the parent's current
+                run. Seeded into the child graph state so ``list_uploaded_files``
+                can exclude them from historical-upload results.
             thread_id: Thread ID for sandbox operations.
             trace_id: Trace ID from parent for distributed tracing.
             user_id: User ID captured from the parent tool's runtime context.
@@ -831,6 +837,8 @@ class SubagentExecutor:
                 parent task tool. Native subagents execute on a separate event
                 loop, so this must be a proxy rather than the parent
                 ``RunJournal`` itself.
+            tool_promotion_recorder: Optional loop-safe recorder for deferred-tool
+                promotion events. It follows the same isolated-loop boundary.
         """
         self.config = config
         self.app_config = app_config
@@ -845,6 +853,7 @@ class SubagentExecutor:
             self.model_name = None
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
+        self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.thread_id = thread_id
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
@@ -878,6 +887,7 @@ class SubagentExecutor:
         # in report_contract.render_acceptance_criteria_block.
         self.acceptance_criteria = acceptance_criteria
         self.loop_detection_recorder = loop_detection_recorder
+        self.tool_promotion_recorder = tool_promotion_recorder
 
         self._base_tools = _filter_tools(
             tools,
@@ -1256,11 +1266,15 @@ class SubagentExecutor:
             "messages": messages,
         }
 
-        # Pass through sandbox and thread data from parent
+        # Pass through the parent runtime state that tools need. Each child
+        # receives fresh containers so graph writes never mutate the snapshot
+        # held by another execution.
         if self.sandbox_state is not None:
             state["sandbox"] = self.sandbox_state
         if self.thread_data is not None:
             state["thread_data"] = self.thread_data
+        if self.uploaded_files is not None:
+            state["uploaded_files"] = deepcopy(self.uploaded_files)
 
         return state, final_tools, deferred_setup
 
@@ -1484,6 +1498,8 @@ class SubagentExecutor:
             context["agent_id"] = self.config.name
             if self.loop_detection_recorder is not None:
                 context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder
+            if self.tool_promotion_recorder is not None:
+                context[TOOL_PROMOTION_RECORDER_CONTEXT_KEY] = self.tool_promotion_recorder
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 

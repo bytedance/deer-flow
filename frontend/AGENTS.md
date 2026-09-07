@@ -113,3 +113,15 @@ routes, writes the detailed result to `.next/performance-results.json`, and comp
 totals with `performance-budgets.json`. Fix route ownership or split points when a
 budget fails; do not raise a ceiling without documenting and reviewing the measured
 regression.
+
+Chat archive is a thread metadata flag (`deerflow_archived === true`), independent
+of run status. Sidebar and Chats explicitly request the Gateway's optional
+`archived` filter through `searchThreadsByArchive`; the SDK drops this extension,
+so use the authenticated REST fetcher. Static demos retain SDK fixture queries.
+`core/threads/archive.ts` waits for the write, cancels stale reads, merges only the
+owned flag into metadata snapshots, then restarts metadata reads and resets list
+pagination. Keep both default and Custom Agent header restore controls in sync.
+Pin/archive responses must not merge unrelated metadata flags: out-of-order
+organization requests can otherwise roll back each other's confirmed state.
+Run-created optimistic snapshots have no archive flag: refresh archive-filtered
+lists from the server instead of inserting those snapshots into either view.

@@ -333,6 +333,8 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > After a run publishes its terminal stream marker, its process-local `RunRecord` remains available for the existing five-minute grace period before cleanup; durable run history remains available through `RunStore`, while the stream bridge retains its delivery tail on its separate cleanup schedule.
 >
 > Run cancellation may land on any Gateway worker. A non-owning worker now persists the interrupt or rollback request for the live owner, which observes it during lease renewal and performs the normal cancellation flow; load-balancer routing alone no longer produces a 409. The first accepted action wins even if a retry lands on the owner, and accepted cancellation competes atomically with owner completion. Dead owners still follow lease takeover and orphan recovery. Cancellation latency is therefore bounded by the lease heartbeat interval.
+
+> Cancelling a model recovery probe, including while it is queued or waiting to retry, lets the next call check whether the provider has recovered. Cancellation does not count as a provider failure or release another call's active recovery probe.
 >
 > With lease heartbeat enabled, a transient RunStore renewal error is retried only until the last confirmed lease expires; the stale worker then cancels local execution and suppresses checkpoint, completion-hook, delivery-receipt, and thread-status finalization. A remote tool side effect already in flight may still be outside local cancellation.
 >
@@ -713,9 +715,14 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 | `/status` | Show current thread info |
 | `/models` | List available models |
 | `/memory` | View memory |
+| `/agent list` | List your Custom Agents |
+| `/agent use <name>` | Start a new conversation with a Custom Agent |
 | `/help` | Show help |
 
 > Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
+
+Agent selection is conversation-scoped: `/agent use <name>` starts a fresh conversation and pins that Custom Agent in the thread metadata. Existing conversations never switch agents midway, the selection survives a Gateway restart, and opening the IM-created thread in the Web UI continues through the same Custom Agent.
+Use `/agent use lead_agent` to return to the default agent in a new conversation.
 
 #### Request Trace Correlation
 
@@ -762,6 +769,12 @@ fail checkpoint preflight (or are cancelled while waiting for prior
 finalization) keep the existing completion-data behavior: they receive the
 zero-delivery receipt but do not overwrite RunStore completion fields with an
 empty snapshot.
+
+The same run event history records loop-detection decisions and deferred MCP
+tool promotions for both the lead agent and ordinary task subagents. Promotion
+events identify newly promoted deferred-tool names and whether routing metadata or
+`tool_search` selected them, without copying the search query, routing keywords,
+schemas, arguments, results, or catalog hash into the promotion event itself.
 
 #### LangSmith Tracing
 
@@ -1174,6 +1187,12 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
 
+### Chat Archive
+
+Use **Archive chat** in a recent chat's sidebar menu to hide completed work while keeping its messages, files, and original link. The success message offers **Undo**. Open **Chats → Archived** to find archived conversations and restore them individually; an open archived conversation also shows a restore button in its header. Search filters the titles of loaded conversations, with **Load more** for older entries.
+
+Archive and restore preserve the chat's activity time and pinned state. Archiving does not stop a running task or pause its schedules, and new activity does not automatically restore it. Use the existing Delete action when you intend to remove a conversation and its files.
+
 ### Session Goals
 
 Use `/goal <completion condition>` to attach one active completion condition to the current thread. The goal is thread-scoped state, not a skill activation, so it stays active across turns until DeerFlow determines it has been satisfied or you clear it.
@@ -1201,6 +1220,8 @@ The chat header also shows a context-window gauge when the selected model has a 
 Sub-agents are an optimization, not the default response to a complex request.
 
 The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions — when delegation has clear net benefit from real parallel latency, specialist capability, or context isolation. It keeps interdependent scopes and overlapping side effects out of parallel dispatch; a bounded sequential chain can still run in one sub-agent when specialist or context-isolation benefit clearly wins. The lead uses the fewest useful sub-agents and re-evaluates later batches instead of fanning out solely because a task is large or multi-step. Sub-agents report back structured results, and the lead agent verifies and synthesizes them into a coherent output. Deterministic tool receipts cover both direct tool messages and state-updating `Command` results such as delegated `task` responses; when the receipt ledger reaches its context budget, it retains the newest actions and their original receipt IDs. Operators can disable this provenance layer with `verification.receipts_enabled: false`. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Concurrent parent runs also receive independent server-side sub-agent execution IDs, so a provider that reuses a tool-call ID cannot make one run poll, cancel, or clean up another run's background task. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step from that run's terminal tool-message metadata rather than a process-global provider-ID cache.
+
+An ordinary `task` also receives a defensive snapshot of the dispatching run's current uploads. This lets eligible sub-agents use `list_uploaded_files` to find earlier-turn files without returning same-turn attachments as historical. Delayed or recovered `batch_task` workers leave this tool disabled because they have no valid turn-local upload boundary.
 
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand; full stored result text is available only through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
 
@@ -1289,6 +1310,19 @@ the full code editor. Active HTML, XHTML, and SVG artifacts remain forced
 downloads at the Gateway boundary.
 
 With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes, so host-native CLI launchers retain their normal MSYS compatibility.
+
+Docker AIO sandboxes default to their existing open egress behavior for
+compatibility. Operators can set `sandbox.network.mode` to `isolated` or
+`allowlist`; allowlist mode supports operator-defined domains and an interactive
+Human Input card for temporary or sandbox-lifetime HTTP(S) approval. Private,
+loopback, link-local, multicast, and cloud metadata addresses remain
+unapprovable. Denied hostnames are rejected before DNS resolution, and
+scheduled or otherwise non-interactive runs auto-deny without opening a card.
+The trusted sidecar uses a dedicated per-sandbox egress bridge rather than
+Docker's shared default bridge, and rejects ambiguous HTTP field names before
+forwarding. See
+[Sandbox configuration](backend/docs/CONFIGURATION.md#sandbox-network-policy)
+for runtime requirements and the complete policy model.
 
 `AioSandboxProvider` normally detects thread-data mounts from its backend: local
 containers use the mounted gateway directories, while remote/provisioner
