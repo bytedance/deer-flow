@@ -392,7 +392,7 @@ describe("PatSettingsPage", () => {
 
   it("arms the login-redirect deferral synchronously with the submission click", () => {
     // The deferral's render-driven channel lags one commit; a /me refresh
-    // already in flight can answer 401 inside that window and navigate the
+    // already in flight can answer 401 inside this window and navigate the
     // page away while the POST still mints. The imperative arm must fire in
     // the same synchronous breath as the submission latch.
     const mutate = rs.fn(() => new Promise<never>(() => undefined));
@@ -413,6 +413,39 @@ describe("PatSettingsPage", () => {
     // No await: still inside the pre-render latch window.
     expect(deferLoginRedirectMock).toHaveBeenCalledTimes(1);
     expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases the imperative deferral when the page unmounts mid-mint", () => {
+    // Review finding: the handover release only fires while mounted and
+    // once `created` renders, and the catch path only covers failures. An
+    // in-app navigation or logout that tears this page down mid-mint makes
+    // the resolution's setCreated a no-op — nothing would ever release the
+    // armed +1, and the provider's automatic 401 login redirect stays
+    // disabled for the rest of the session. The unmount cleanup must
+    // release it.
+    const release = rs.fn();
+    const mutate = rs.fn(() => new Promise<never>(() => undefined));
+    patsMockState.createMutate = mutate;
+    deferLoginRedirectMock.mockReset();
+    deferLoginRedirectMock.mockReturnValue(release);
+
+    const { unmount } = renderWithQueryClient(<PatSettingsPage />);
+    fireEvent.click(screen.getByText("Create token"));
+    fireEvent.change(screen.getByPlaceholderText("e.g. ci-runner"), {
+      target: { value: "ci" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: "Read threads" }));
+    const submit = screen
+      .getAllByText("Create token")
+      .find((element) => element.closest("[role=dialog]") !== null)!;
+    fireEvent.click(submit);
+
+    // Mid-mint: armed, not yet handed over to the passive channel.
+    expect(deferLoginRedirectMock).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+
+    unmount();
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   it("clears the show-once token when the account changes after creation", async () => {

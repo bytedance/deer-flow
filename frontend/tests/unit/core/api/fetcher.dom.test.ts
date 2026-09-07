@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 
 import { fetch as apiFetch } from "@/core/api/fetcher";
+import { adjustLoginRedirectDeferral } from "@/core/auth/login-redirect-deferral";
 
 describe("api fetcher unauthorized redirect", () => {
   let originalFetch: typeof globalThis.fetch;
@@ -37,5 +38,34 @@ describe("api fetcher unauthorized redirect", () => {
     expect(next).toBe(
       "/artifacts/view?path=%2Fmnt%2Fuser-data%2Foutputs%2Freport.md&thread_id=t-1",
     );
+  });
+
+  it("suppresses the hard 401 navigation while a login-redirect deferral holds", async () => {
+    // The deferral exists so the PAT show-once window cannot be navigated
+    // away from — but this fetcher's 401 branch is a hard
+    // window.location.href write that bypasses the provider's held
+    // redirect entirely (a reconnect-triggered list refetch while the
+    // session already expired would discard the credential's only copy).
+    // The count gates the hard navigation too; the error still throws.
+    window.history.replaceState({}, "", "/workspace/settings");
+    adjustLoginRedirectDeferral(true);
+    try {
+      const hrefBefore = window.location.href;
+      await expect(apiFetch("/api/v1/auth/pats")).rejects.toThrow();
+      expect(window.location.href).toBe(hrefBefore);
+
+      // After the deferral clears, the automatic navigation is back.
+      adjustLoginRedirectDeferral(false);
+      await expect(apiFetch("/api/v1/auth/pats")).rejects.toThrow();
+      expect(window.location.href).toContain("/login?next=");
+    } finally {
+      // Never leak an armed deferral into other tests.
+      if (window.location.href.includes("/login")) {
+        window.history.replaceState({}, "", "/workspace");
+      }
+      while (adjustLoginRedirectDeferral(false) > 0) {
+        // drain
+      }
+    }
   });
 });

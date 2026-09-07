@@ -202,6 +202,20 @@ function InteractivePatSettingsPage() {
       pendingDeferralReleaseRef.current = null;
     }
   }, [created]);
+  // A mid-mint unmount (logout, or any in-app navigation that tears this
+  // page down — beforeunload does not fire on SPA navigation) must release
+  // the imperative deferral: the resolution handler's setCreated is a no-op
+  // on an unmounted component, so the handover effect above never runs and
+  // the armed +1 would hold the provider's login redirect forever. The
+  // ref is null on every other exit path (handover, dialog close, catch),
+  // making this cleanup a no-op there.
+  useEffect(
+    () => () => {
+      pendingDeferralReleaseRef.current?.();
+      pendingDeferralReleaseRef.current = null;
+    },
+    [],
+  );
   // A displayed result belongs to the account that minted it. A *confirmed*
   // different signed-in user (another tab replaced the shared cookie and /me
   // converged onto the successor) must stop rendering it — and the mutation

@@ -159,4 +159,66 @@ describe("login redirect deferral", () => {
       expect(routerMock.push).toHaveBeenCalledWith("/login?next=%2Fworkspace");
     });
   });
+
+  it("holds a 401 answering a refresh that was already in flight when the arm landed", async () => {
+    // Review finding: the refresh closure captured the deferral count at
+    // start time. A visibility-triggered /me refresh (or the reconciler's
+    // cadence) already in flight when Create is clicked answers 401 against
+    // the pre-arm snapshot — the stale closure still sees 0 and navigates
+    // away mid-mint. The 401 branch must read the live count at resolution
+    // time, not the one the fetch started with. Start the refresh, THEN arm,
+    // THEN resolve the 401 — the ordering the pre-fix closure gets wrong.
+    let resolveFetch!: (response: Response) => void;
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+          }),
+      ),
+    );
+    let arm!: () => () => void;
+    function ArmProbe({ expose }: { expose: (arm: () => () => void) => void }) {
+      const { refreshUser } = useAuth();
+      const armFn = useDeferLoginRedirect(false);
+      return (
+        <>
+          <button onClick={() => expose(armFn)}>expose</button>
+          <button onClick={() => void refreshUser()}>refresh</button>
+        </>
+      );
+    }
+    render(
+      <AuthProvider initialUser={user}>
+        <ArmProbe expose={(fn) => (arm = fn)} />
+      </AuthProvider>,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button")[0]!);
+    });
+    // The refresh is in flight with the pre-arm closure before any arm.
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole("button")[1]!);
+    });
+    let release!: () => void;
+    await act(async () => {
+      release = arm();
+    });
+    await act(async () => {
+      resolveFetch(new Response(null, { status: 401 }));
+    });
+
+    // Held behind the deferral armed after the refresh started — not an
+    // immediate navigation with the only token copy on screen.
+    expect(routerMock.push).not.toHaveBeenCalled();
+
+    await act(async () => {
+      release();
+    });
+    await waitFor(() => {
+      expect(routerMock.push).toHaveBeenCalledWith("/login?next=%2Fworkspace");
+    });
+  });
 });

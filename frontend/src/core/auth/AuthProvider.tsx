@@ -12,6 +12,7 @@ import React, {
 
 import { isStaticWebsiteOnly } from "../static-mode";
 
+import { adjustLoginRedirectDeferral, isLoginRedirectDeferred } from "./login-redirect-deferral";
 import { type User, buildLoginUrl } from "./types";
 
 // Re-export for consumers
@@ -56,6 +57,10 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(initialUser);
   const [isLoading, setIsLoading] = useState(false);
   const [loginRedirectDeferrals, setLoginRedirectDeferrals] = useState(0);
+  // The live count lives in a module shared with the API fetcher (see
+  // login-redirect-deferral.ts): a /me refresh that was already in flight
+  // when a deferral armed keeps the closure it started with, so the 401
+  // branch below must read the live value, never a captured snapshot.
   const [pendingLoginRedirect, setPendingLoginRedirect] = useState<string | null>(null);
   const router = useRouter();
   const pathname = usePathname();
@@ -64,7 +69,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const isAuthenticated = user !== null;
 
   const setLoginRedirectDeferral = useCallback((active: boolean) => {
-    setLoginRedirectDeferrals((count) => (active ? count + 1 : Math.max(0, count - 1)));
+    setLoginRedirectDeferrals(adjustLoginRedirectDeferral(active));
   }, []);
 
   /**
@@ -99,10 +104,12 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
         // redirect: the soft navigation would unmount the deferring flow
         // (the PAT show-once dialog) without firing beforeunload and
         // discard the only copy of an active credential — session expiry
-        // does not revoke a minted token.
+        // does not revoke a minted token. The count is read live at
+        // resolution time: this closure may predate the arm() call, so a
+        // captured snapshot could still say 0 while a deferral holds.
         if (pathname?.startsWith("/workspace")) {
           const target = buildLoginUrl(pathname);
-          if (loginRedirectDeferrals > 0) {
+          if (isLoginRedirectDeferred()) {
             setPendingLoginRedirect(target);
           } else {
             router.push(target);
@@ -115,7 +122,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     } finally {
       setIsLoading(false);
     }
-  }, [staticMode, pathname, router, loginRedirectDeferrals]);
+  }, [staticMode, pathname, router]);
 
   // The held redirect fires the moment the last deferral clears.
   useEffect(() => {
