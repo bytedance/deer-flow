@@ -909,7 +909,7 @@ async def wait_run(thread_id: ThreadId, body: RunCreateRequest, request: Request
 
     if completed:
         try:
-            accessor, config = build_checkpoint_state_accessor(
+            accessor, config = await build_checkpoint_state_accessor(
                 request,
                 thread_id=thread_id,
                 assistant_id=body.assistant_id,

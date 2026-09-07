@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -873,6 +874,7 @@ def build_checkpoint_state_mutation_accessor(
 # a restart.
 _STATE_ACCESSOR_GRAPH_CACHE_MAX = 64
 _state_accessor_graph_cache: dict[tuple[str | None, str, int | None], tuple[Any, Any, Any]] = {}
+_state_accessor_graph_cache_lock = threading.Lock()
 
 
 def _accessor_graph_cache_max(app_config: Any) -> int:
@@ -886,22 +888,26 @@ def _accessor_graph_cache_max(app_config: Any) -> int:
 def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
     app_config = (config.get("context") or {}).get("app_config")
     key = (assistant_id, mode, snapshot_frequency)
-    cached = _state_accessor_graph_cache.get(key)
-    if cached is not None and cached[0] is agent_factory and cached[1] is app_config:
-        return cached[2]
-    if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
-        _state_accessor_graph_cache.clear()
-    agent_result = agent_factory(config=config)
-    try:
-        from deerflow.agents.lead_agent.agent import unwrap_agent_graph
+    # This function is called through asyncio.to_thread(). Serialize cache
+    # misses so concurrent state/history requests keep the original single-
+    # flight construction behavior without waiting on the Gateway event loop.
+    with _state_accessor_graph_cache_lock:
+        cached = _state_accessor_graph_cache.get(key)
+        if cached is not None and cached[0] is agent_factory and cached[1] is app_config:
+            return cached[2]
+        if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
+            _state_accessor_graph_cache.clear()
+        agent_result = agent_factory(config=config)
+        try:
+            from deerflow.agents.lead_agent.agent import unwrap_agent_graph
 
-        graph = unwrap_agent_graph(agent_result)
-    except Exception:
-        # A custom factory must keep working even if importing the lead
-        # assembly type fails.
-        graph = agent_result
-    _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
-    return graph
+            graph = unwrap_agent_graph(agent_result)
+        except Exception:
+            # A custom factory must keep working even if importing the lead
+            # assembly type fails.
+            graph = agent_result
+        _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
+        return graph
 
 
 class _RawCheckpointSnapshot:
@@ -981,7 +987,7 @@ class _RawCheckpointReadAccessor:
         return result
 
 
-def build_checkpoint_state_accessor(
+async def build_checkpoint_state_accessor(
     request: Request,
     *,
     thread_id: str,
@@ -1002,7 +1008,14 @@ def build_checkpoint_state_accessor(
 
     agent_factory = resolve_agent_factory(assistant_id)
     try:
-        graph = _state_accessor_graph(agent_factory, assistant_id, ctx.checkpoint_channel_mode, getattr(ctx, "checkpoint_snapshot_frequency", None), config)
+        graph = await asyncio.to_thread(
+            _state_accessor_graph,
+            agent_factory,
+            assistant_id,
+            ctx.checkpoint_channel_mode,
+            getattr(ctx, "checkpoint_snapshot_frequency", None),
+            config,
+        )
     except Exception:
         if ctx.checkpoint_channel_mode != "full":
             # Delta materialization needs the graph's channel table; there is
@@ -1065,7 +1078,7 @@ async def build_thread_checkpoint_state_accessor(
     ``AgentMiddleware.state_schema`` from the response.
     """
     assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=fail_closed)
-    return build_checkpoint_state_accessor(
+    return await build_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=assistant_id,
@@ -1196,7 +1209,7 @@ async def ensure_checkpoint_history_seeded(
     if await get_checkpointer(request).aget_tuple(checkpoint_config) is None:
         return
 
-    accessor, config = build_checkpoint_state_accessor(
+    accessor, config = await build_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=assistant_id,

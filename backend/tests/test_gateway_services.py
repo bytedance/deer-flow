@@ -825,7 +825,8 @@ def test_resolve_agent_factory_returns_the_explicit_lead_assembly_factory():
     ("checkpoint_id", "includes_checkpoint_id"),
     [(None, False), ("checkpoint-1", True)],
 )
-def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_persistence(
+@pytest.mark.asyncio
+async def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_persistence(
     _stub_app_config,
     checkpoint_id,
     includes_checkpoint_id,
@@ -864,7 +865,7 @@ def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_pers
         patch("app.gateway.services.get_run_context", return_value=ctx),
         patch("app.gateway.services.resolve_agent_factory", return_value=fake_factory) as resolve,
     ):
-        accessor, config = build_checkpoint_state_accessor(
+        accessor, config = await build_checkpoint_state_accessor(
             request,
             thread_id="thread-1",
             assistant_id="Research_Agent",
@@ -891,7 +892,8 @@ def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_pers
         assert config["configurable"]["checkpoint_id"] == checkpoint_id
 
 
-def test_build_checkpoint_state_accessor_accepts_lead_agent_assembly_factory(_stub_app_config):
+@pytest.mark.asyncio
+async def test_build_checkpoint_state_accessor_accepts_lead_agent_assembly_factory(_stub_app_config):
     """Checkpoint reads accept the descriptor-carrying Gateway factory result."""
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -924,7 +926,7 @@ def test_build_checkpoint_state_accessor_accepts_lead_agent_assembly_factory(_st
         patch("app.gateway.services.get_run_context", return_value=ctx),
         patch("app.gateway.services.resolve_agent_factory", return_value=fake_factory),
     ):
-        accessor, _config = build_checkpoint_state_accessor(
+        accessor, _config = await build_checkpoint_state_accessor(
             request,
             thread_id="thread-with-assembly-factory",
         )
@@ -1171,7 +1173,7 @@ async def test_seeded_checkpoint_messages_precede_the_first_new_run_messages():
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
+        new=AsyncMock(return_value=(accessor, {"configurable": {"thread_id": "thread-1"}})),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1231,7 +1233,7 @@ async def test_checkpoint_history_seed_skips_new_thread_without_checkpoint():
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("new threads should not build an accessor"),
+        new=AsyncMock(side_effect=AssertionError("new threads should not build an accessor")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1256,7 +1258,7 @@ async def test_checkpoint_history_seed_is_skipped_when_journal_already_has_messa
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("checkpoint state should not be loaded"),
+        new=AsyncMock(side_effect=AssertionError("checkpoint state should not be loaded")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1331,7 +1333,7 @@ async def test_checkpoint_history_seed_guard_is_thread_scoped_under_user_context
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("checkpoint state should not be loaded"),
+        new=AsyncMock(side_effect=AssertionError("checkpoint state should not be loaded")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1386,7 +1388,7 @@ async def test_checkpoint_history_seed_runs_exactly_once_across_principals(tmp_p
 
         with patch(
             "app.gateway.services.build_checkpoint_state_accessor",
-            return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
+            new=AsyncMock(return_value=(accessor, {"configurable": {"thread_id": "thread-1"}})),
         ):
             # First seed: ownerless (no user contextvar) — rows stamped NULL.
             await ensure_checkpoint_history_seeded(

@@ -229,7 +229,7 @@ class _RawStateAccessor:
 
 @pytest.fixture(autouse=True)
 def _patch_checkpoint_state_builder(monkeypatch):
-    def _builder(request, *, thread_id, assistant_id=None, checkpoint_id=None):
+    async def _builder(request, *, thread_id, assistant_id=None, checkpoint_id=None):
         config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
         if checkpoint_id is not None:
             config["configurable"]["checkpoint_id"] = checkpoint_id
@@ -242,7 +242,7 @@ def _patch_checkpoint_state_builder(monkeypatch):
         return _RawStateAccessor(request.app.state.checkpointer), config
 
     async def _read_boundary(request, *, thread_id, checkpoint_id=None):
-        return _builder(request, thread_id=thread_id, checkpoint_id=checkpoint_id)
+        return await _builder(request, thread_id=thread_id, checkpoint_id=checkpoint_id)
 
     async def _mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None):
         return _mutation_builder(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id)
@@ -1030,7 +1030,7 @@ def test_latest_thread_readers_use_materialized_snapshot_values() -> None:
         patch(
             "app.gateway.routers.threads.build_checkpoint_state_accessor",
             create=True,
-            return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}),
+            new=AsyncMock(return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
         ),
         patch(
             "app.gateway.routers.threads.build_thread_checkpoint_state_accessor",
@@ -1086,7 +1086,7 @@ def test_get_thread_status_uses_raw_pending_writes_for_materialized_checkpoint()
     with (
         patch(
             "app.gateway.routers.threads.build_checkpoint_state_accessor",
-            return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}),
+            new=AsyncMock(return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
         ),
         TestClient(app) as client,
     ):
@@ -1130,7 +1130,7 @@ def test_get_thread_preserves_metadata_status_without_checkpoint(stored_status: 
     with (
         patch(
             "app.gateway.routers.threads.build_checkpoint_state_accessor",
-            return_value=(accessor, snapshot.config),
+            new=AsyncMock(return_value=(accessor, snapshot.config)),
         ),
         TestClient(app) as client,
     ):
@@ -2584,7 +2584,7 @@ def test_branch_thread_uses_materialized_history_and_overwrites_fresh_seed(monke
     source_accessor.aget = source_aget
     branch_accessor = SimpleNamespace(aupdate=branch_aupdate)
 
-    def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
+    async def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
         assert thread_id == source_thread_id
         return source_accessor, {
             "configurable": {
@@ -2703,7 +2703,7 @@ def test_branch_thread_preserves_unlinked_legacy_histories(
     source_accessor = SimpleNamespace(ahistory=source_ahistory, aget=unexpected_lineage_read)
     branch_accessor = SimpleNamespace(aupdate=branch_aupdate)
 
-    def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
+    async def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
         assert thread_id == source_thread_id
         return source_accessor, {
             "configurable": {
@@ -2838,7 +2838,7 @@ def test_branch_thread_real_mutation_graph_finishes_without_scheduling(monkeypat
         aget=AsyncMock(side_effect=lambda config: next(item for item in source_history if item.config["configurable"]["checkpoint_id"] == config["configurable"]["checkpoint_id"])),
     )
 
-    def source_builder(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
+    async def source_builder(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
         if thread_id != source_thread_id:
             raise AssertionError("fresh branches must use the dedicated mutation graph")
         return source_accessor, {
