@@ -268,3 +268,15 @@ Keep these cross-component constraints in sync:
 - Eviction weights must total `1.0`.
 - `watermark_max_keys: 0` makes the conversation watermark cache unbounded.
 - A dropped watermark can re-extract one batch on the next turn.
+
+#### Write-side near-duplicate fact gate (opt-in)
+
+`fact_dedup_enabled` / `fact_dedup_similarity_threshold` implement the
+write-side counterpart to relevance-aware retrieval (issue #5252): a proposed
+NEW fact that paraphrases an existing same-category fact merges into it
+(existing id/content/createdAt kept, confidence raised to the maximum, source
+refreshed) instead of being appended, and one `facts_merged_dedup` metric
+increment records the merge. The similarity is deterministic and network-free
+(bounded token-Jaccard via the updater-local tokenizer). Exact-content
+duplicates keep going through the existing content-key check; targeted updates
+by fact id are untouched.

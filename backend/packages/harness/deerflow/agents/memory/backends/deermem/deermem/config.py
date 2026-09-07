@@ -73,6 +73,29 @@ class DeerMemConfig(BaseModel):
         default="fts5",
         description="Retrieval adapter factory: 'fts5' (default), an empty string to disable, or a dotted factory receiving DeerMemConfig and implementing RetrievalPort.",
     )
+    fact_dedup_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in deterministic near-duplicate gate for NEW facts (issue "
+            "#5252). When true, a proposed new fact whose bounded "
+            "token-Jaccard similarity to an existing fact in the same "
+            "user/agent scope AND category reaches "
+            "fact_dedup_similarity_threshold merges into that fact instead "
+            "of being appended: the existing id/content/createdAt are kept, "
+            "confidence is raised to max(old, new), and source is refreshed. "
+            "False preserves the legacy behavior exactly."
+        ),
+    )
+    fact_dedup_similarity_threshold: float = Field(
+        default=0.7,
+        ge=0.5,
+        le=1.0,
+        description=(
+            "Minimum bounded token-Jaccard similarity for the write-side "
+            "near-duplicate merge gate. Used only when fact_dedup_enabled "
+            "is true."
+        ),
+    )
     # ── Queue ────────────────────────────────────────────────────────────
     debounce_seconds: int = Field(
         default=30,

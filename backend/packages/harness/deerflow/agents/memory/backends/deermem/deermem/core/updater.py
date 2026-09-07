@@ -472,6 +472,68 @@ def _fact_content_key(content: Any) -> str | None:
     return stripped.casefold()
 
 
+_FACT_TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
+_FACT_SIMILARITY_TOKEN_BUDGET = 128
+
+
+def _fact_content_tokens(content: str) -> list[str]:
+    """Deterministic, network-free tokenization for fact similarity.
+
+    Words via regex; space-free CJK text falls back to character bigrams so
+    Chinese facts still produce deterministic overlap without jieba.
+    """
+    lowered = content.strip().lower()
+    if not lowered:
+        return []
+    tokens = _FACT_TOKEN_RE.findall(lowered)
+    if tokens:
+        return tokens
+    parts = lowered.split()
+    if len(parts) == 1 and any("一" <= char <= "鿿" for char in lowered):
+        return [lowered[index : index + 2] for index in range(len(lowered) - 1)]
+    return [part for part in parts if part]
+
+
+def _fact_content_similarity(left: str, right: str) -> float:
+    """Bounded token-Jaccard similarity over case-folded token sets."""
+    left_set = set(_fact_content_tokens(left)[:_FACT_SIMILARITY_TOKEN_BUDGET])
+    right_set = set(_fact_content_tokens(right)[:_FACT_SIMILARITY_TOKEN_BUDGET])
+    if not left_set or not right_set:
+        return 0.0
+    return len(left_set & right_set) / len(left_set | right_set)
+
+
+def _find_dedup_merge_target(
+    content: str,
+    category: str,
+    facts: list[dict[str, Any]],
+    *,
+    threshold: float,
+) -> dict[str, Any] | None:
+    """Return the most similar same-category fact at/above the similarity
+    threshold, or ``None`` (write-side near-duplicate gate, issue #5252).
+
+    Deterministic and offline: bounded token-Jaccard similarity. Only
+    candidate facts whose content is a non-empty string participate;
+    category mismatch never merges.
+    """
+    best_target: dict[str, Any] | None = None
+    best_similarity = 0.0
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        candidate_content = fact.get("content")
+        if not isinstance(candidate_content, str) or not candidate_content.strip():
+            continue
+        if fact.get("category", "context") != category:
+            continue
+        similarity = _fact_content_similarity(content, candidate_content)
+        if similarity >= threshold and similarity > best_similarity:
+            best_target = fact
+            best_similarity = similarity
+    return best_target
+
+
 def _raise_if_duplicate_fact_content(memory_data: dict[str, Any], content_key: str | None) -> None:
     """Reject a candidate fact whose normalized content already exists.
 
@@ -2075,6 +2137,33 @@ class MemoryUpdater:
             replacement_fact_keys[fact_index] = fact_key
             if fact_key in existing_fact_keys:
                 continue
+
+            # Write-side near-duplicate gate (issue #5252): a proposed new fact
+            # that paraphrases an existing same-category fact merges into it
+            # instead of being appended. The existing id/content/createdAt stay
+            # authoritative; confidence rises to the maximum and the source is
+            # refreshed. Deterministic and offline; opt-in via config.
+            if config.fact_dedup_enabled:
+                merge_target = _find_dedup_merge_target(
+                    normalized_content,
+                    fact.get("category", "context"),
+                    current_memory.get("facts", []),
+                    threshold=config.fact_dedup_similarity_threshold,
+                )
+                if merge_target is not None:
+                    try:
+                        existing_confidence = float(merge_target.get("confidence"))
+                        if not math.isfinite(existing_confidence):
+                            raise ValueError
+                    except (TypeError, ValueError):
+                        existing_confidence = 0.0
+                    if confidence > existing_confidence:
+                        merge_target["confidence"] = confidence
+                    merge_target["source"] = thread_id or "unknown"
+                    if metrics is not None:
+                        metrics["facts_merged_dedup"] = metrics.get("facts_merged_dedup", 0) + 1
+                    logger.debug("Merged near-duplicate fact into existing fact %s", merge_target.get("id"))
+                    continue
 
             fact_entry = {
                 "id": f"fact_{uuid.uuid4().hex[:8]}",
