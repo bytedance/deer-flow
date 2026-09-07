@@ -232,6 +232,23 @@ class TestRewriteLocalPathsInText:
 
         assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/shot.png"
 
+    @pytest.mark.skipif(os.name != "nt", reason="exercises backslash relative paths in free text")
+    def test_windows_backslash_relative_path_in_text_is_rewritten(self, paths: Paths):
+        _workspace_file(paths, "temp/page.yml")
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text("Saved as temp\\page.yml", thread_id="t1", user_id="u1", source_base_dir=workspace)
+
+        assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/temp/page.yml"
+
+    def test_single_slash_file_uri_is_matched_as_posix_absolute(self):
+        # file:/… (single slash, as RFC 8089 and Java's File.toURI() produce)
+        # must not be stolen mid-token by the drive-qualified alternative: the
+        # engine has to fall through to the /… absolute alternative.
+        match = mcp_tools._LOCAL_PATH_IN_TEXT_RE.search("Saved as file:/tmp/workspace/shot.png")
+        assert match.group(0) == "/tmp/workspace/shot.png"
+
     @pytest.mark.skipif(os.name != "nt", reason="exercises the file://C:/… two-slash URI form in free text")
     def test_windows_two_slash_file_uri_in_text_is_rewritten(self, paths: Paths):
         src = _workspace_file(paths, "shot.png")

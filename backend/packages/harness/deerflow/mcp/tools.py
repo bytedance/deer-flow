@@ -58,7 +58,9 @@ _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _LOCAL_PATH_IN_TEXT_RE = re.compile(
     r"(?:file://)?/[^\s'\"<>|*?]+"  # POSIX absolute path or file:// URI
     r"|file://[A-Za-z]:[^\s'\"<>|*?]+"  # file://C:/… — some Windows tools skip the third slash
-    r"|[A-Za-z]:[\\/][^\s'\"<>|*?]+"  # Windows drive-qualified absolute path
+    # Windows drive-qualified absolute path; the lookbehind keeps a word
+    # character before the colon (file:/…, id:/…) on the earlier alternatives
+    r"|(?<![\w.-])[A-Za-z]:[\\/][^\s'\"<>|*?]+"
     # path relative to the server cwd (Windows servers print "\" separators)
     r"|(?:\.{0,2}[\\/]|[\w.-]+[\\/])[^\s'\"<>|*?]+"
 )
