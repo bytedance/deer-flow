@@ -1,5 +1,5 @@
-"""Regression: ``bootstrap_schema`` offloads ``alembic.command.stamp`` /
-``alembic.command.upgrade`` via ``asyncio.to_thread``.
+"""Regression: ``bootstrap_schema`` offloads migration-tree parsing and
+``alembic.command.stamp`` / ``alembic.command.upgrade`` via ``asyncio.to_thread``.
 
 The alembic commands are synchronous: they open their own engine and execute
 DDL. Calling them directly on the FastAPI lifespan event loop would block --
@@ -59,17 +59,20 @@ async def test_bootstrap_offloads_alembic_stamp_and_upgrade(monkeypatch: pytest.
 
     monkeypatch.setattr(bootstrap_mod.asyncio, "to_thread", spy_to_thread)
 
-    # Use a real SQLite DB so alembic actually runs stamp + upgrade.
+    # Use a real SQLite DB so alembic actually runs metadata parsing, stamp,
+    # and upgrade.
     db_path = tmp_path / "spy.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path.as_posix()}")
     try:
         # Empty branch -> create_all + stamp head. ``_stamp`` must be offloaded.
         await bootstrap_mod.bootstrap_schema(engine, backend="sqlite")
+        assert "_get_revision_metadata" in seen, f"migration metadata parsing not offloaded; saw: {seen}"
         assert "_stamp" in seen, f"_stamp not offloaded; saw: {seen}"
 
         # Re-run -> versioned branch -> upgrade head (no-op at head). ``_upgrade`` must be offloaded.
         seen.clear()
         await bootstrap_mod.bootstrap_schema(engine, backend="sqlite")
+        assert "_get_revision_metadata" in seen, f"migration metadata parsing not offloaded; saw: {seen}"
         assert "_upgrade" in seen, f"_upgrade not offloaded; saw: {seen}"
     finally:
         await engine.dispose()
