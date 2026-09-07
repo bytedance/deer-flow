@@ -965,9 +965,13 @@ async def wait_run(
         idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
     )
 
-    completed = True
-    if record.task is not None:
-        completed = await wait_for_run_completion(bridge, record, request, run_mgr)
+    # Reused/hydrated records have no local task. Wait on the bridge when this
+    # worker can observe it; otherwise return durable status rather than
+    # serializing whatever checkpoint happens to exist.
+    if record.store_only and not bridge.supports_cross_process:
+        return {"status": record.status.value, "error": record.error}
+
+    completed = await wait_for_run_completion(bridge, record, request, run_mgr)
 
     if completed:
         try:

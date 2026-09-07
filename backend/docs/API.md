@@ -193,13 +193,16 @@ Idempotency-Key: <unique key for this logical request>  # optional
 ```
 
 The thread-scoped create, stream, and wait endpoints accept an optional
-`Idempotency-Key` header. Retrying the same endpoint with the same authenticated
-user, `thread_id`, and key reuses the existing run instead of executing the
-input again. Generate a new key for every intentional user action; reuse a key
-only when retrying that same action after an uncertain HTTP result. Keys may be
-at most 255 characters. Stateless `/api/langgraph/runs/*` endpoints do not
-support this header because requests without an explicit thread create a new
-temporary conversation.
+`Idempotency-Key` header. Retrying with the same authenticated user, `thread_id`,
+and key reuses the existing run instead of executing the input again. The key is
+shared across `/runs`, `/runs/stream`, and `/runs/wait` for a given user and
+thread, so the same key string cannot back two different calls even across those
+endpoints. Reuse is bound to the original `input` and `assistant_id`; a retry
+that changes either returns 409. Generate a new key for every intentional user
+action; reuse a key only when retrying that same action after an uncertain HTTP
+result. Keys may be at most 255 characters. Stateless `/api/langgraph/runs/*`
+endpoints do not support this header because requests without an explicit thread
+create a new temporary conversation.
 
 **Request Body:**
 ```json
