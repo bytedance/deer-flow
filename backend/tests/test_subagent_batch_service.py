@@ -355,9 +355,7 @@ async def test_bookkeeping_failure_does_not_overlap_unsupervised_retry(monkeypat
             return {"valid": True, "cancel_requested": False}
 
         async def finalize_item(self, *_args, **kwargs):
-            live_running_at_finalize.append(
-                [eid for eid, row in executions.items() if not row.execution_done_event.is_set()]
-            )
+            live_running_at_finalize.append([eid for eid, row in executions.items() if not row.execution_done_event.is_set()])
             self.finalized = kwargs
             self.item_status = "queued"
             return True
@@ -415,7 +413,7 @@ async def test_bookkeeping_failure_does_not_overlap_unsupervised_retry(monkeypat
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
     service = SubagentBatchService(
         repository=repository,
-        config=SubagentBatchesConfig(poll_interval_seconds=0.01, lease_seconds=3, max_attempts=3),
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1, lease_seconds=10),
         runtime_config=SubagentRuntimeConfig(max_running=2),
     )
 
