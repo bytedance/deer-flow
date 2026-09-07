@@ -21,7 +21,6 @@ def _app_with_config(
     knowledge_base_enabled: bool = False,
     scope_selection_enabled: bool = False,
     knowledge_search_provider: str | None = None,
-    knowledge_base_url: str = "http://ragflow.example",
 ) -> FastAPI:
     app = FastAPI()
     app.state.mcp_tasks_available = mcp_tasks_available
@@ -42,7 +41,6 @@ def _app_with_config(
         knowledge_base=SimpleNamespace(
             enabled=knowledge_base_enabled,
             scope_selection_enabled=scope_selection_enabled,
-            base_url=knowledge_base_url,
         ),
     )
     search_tool = SimpleNamespace(use=knowledge_search_provider) if knowledge_search_provider is not None else None
@@ -67,9 +65,7 @@ def test_features_reports_agents_api_enabled() -> None:
         },
         "conversation_references": {"enabled": False, "max_references": 3},
         "knowledge_base": {
-            "enabled": False,
             "scope_selection_enabled": False,
-            "management_url": None,
         },
     }
 
@@ -90,9 +86,7 @@ def test_features_reports_agents_api_disabled() -> None:
         },
         "conversation_references": {"enabled": False, "max_references": 3},
         "knowledge_base": {
-            "enabled": False,
             "scope_selection_enabled": False,
-            "management_url": None,
         },
     }
 
@@ -102,17 +96,6 @@ def test_features_reports_conversation_references_when_the_tool_is_configured() 
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json()["conversation_references"] == {"enabled": True, "max_references": 3}
-
-
-def test_features_reports_knowledge_base_enabled() -> None:
-    with TestClient(_app_with_config(agents_api_enabled=True, knowledge_base_enabled=True)) as client:
-        response = client.get("/api/features")
-    assert response.status_code == 200
-    assert response.json()["knowledge_base"] == {
-        "enabled": True,
-        "scope_selection_enabled": False,
-        "management_url": "http://ragflow.example",
-    }
 
 
 def test_features_enables_scope_selection_only_for_exact_ragflow_provider() -> None:
@@ -155,42 +138,6 @@ def test_features_scope_selection_fails_closed(
 
     assert response.status_code == 200
     assert response.json()["knowledge_base"]["scope_selection_enabled"] is False
-
-
-def test_features_does_not_expose_credentials_embedded_in_ragflow_url() -> None:
-    with TestClient(
-        _app_with_config(
-            agents_api_enabled=True,
-            knowledge_base_enabled=True,
-            knowledge_base_url="http://user:password@ragflow.example",
-        )
-    ) as client:
-        response = client.get("/api/features")
-    assert response.status_code == 200
-    assert response.json()["knowledge_base"] == {
-        "enabled": True,
-        "scope_selection_enabled": False,
-        "management_url": None,
-    }
-    assert "password" not in response.text
-
-
-def test_features_strips_ragflow_url_query_and_fragment() -> None:
-    with TestClient(
-        _app_with_config(
-            agents_api_enabled=True,
-            knowledge_base_enabled=True,
-            knowledge_base_url="http://ragflow.example/prefix?api_key=secret#fragment",
-        )
-    ) as client:
-        response = client.get("/api/features")
-    assert response.status_code == 200
-    assert response.json()["knowledge_base"] == {
-        "enabled": True,
-        "scope_selection_enabled": False,
-        "management_url": "http://ragflow.example/prefix",
-    }
-    assert "secret" not in response.text
 
 
 def test_features_reports_mcp_tasks_startup_capability() -> None:

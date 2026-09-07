@@ -16,8 +16,6 @@ export interface FeaturesResponse {
     max_references?: number;
   };
   knowledge_base?: {
-    enabled: boolean;
-    management_url?: string | null;
     scope_selection_enabled?: boolean;
   };
 }
@@ -78,19 +76,11 @@ export async function fetchConversationReferencesCapability(): Promise<Conversat
   };
 }
 
-export async function fetchKnowledgeBaseEnabled(): Promise<boolean> {
-  return (await fetchFeatures()).knowledge_base?.enabled ?? false;
-}
-
 export async function fetchKnowledgeBaseFeature(): Promise<{
-  enabled: boolean;
-  managementUrl: string | null;
   scopeSelectionEnabled: boolean;
 }> {
   const feature = (await fetchFeatures()).knowledge_base;
   return {
-    enabled: feature?.enabled ?? false,
-    managementUrl: feature?.management_url ?? null,
     scopeSelectionEnabled: feature?.scope_selection_enabled ?? false,
   };
 }
