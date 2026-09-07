@@ -450,8 +450,12 @@ export function RecentChatList() {
   // data) yields `null` → exclude nothing (fail-visible), and a thread whose
   // project id is unknown to both lists stays here too. TanStack dedupes
   // these shared queries with `GroupedProjectList`.
-  const activeProjectsQuery = useProjects("active");
-  const archivedProjectsQuery = useProjects("archived");
+  // The discovery queries only feed that grouped-mode filter; in the default
+  // flat mode the results are read by nobody, so keep the two project round
+  // trips off the page load (`GroupedProjectList` fetches these same keys
+  // when grouped mode is on, and TanStack dedupes the observers).
+  const activeProjectsQuery = useProjects("active", { enabled: grouped });
+  const archivedProjectsQuery = useProjects("archived", { enabled: grouped });
   const knownProjectIds = useMemo(() => {
     const activeProjects = activeProjectsQuery.data;
     const archivedProjects = archivedProjectsQuery.data;

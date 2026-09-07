@@ -47,12 +47,15 @@ function invalidateProjectCaches(
   }
 }
 
-export function useProjects(status?: ProjectStatus) {
+export function useProjects(
+  status?: ProjectStatus,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   return useQuery<Project[]>({
     queryKey: [...PROJECTS_QUERY_KEY, { status }],
     queryFn: () => listProjects(status),
     // Static-demo mode has no Gateway; never fire project requests there.
-    enabled: !isStaticWebsiteOnly(),
+    enabled: enabled && !isStaticWebsiteOnly(),
   });
 }
 
@@ -60,6 +63,11 @@ export function useProject(id: string) {
   return useQuery<Project>({
     queryKey: [...PROJECTS_QUERY_KEY, "detail", id],
     queryFn: () => getProject(id),
+    // A deleted or foreign project 404s deterministically and the page has a
+    // dedicated not-found state for it; do not spend the default retry
+    // backoff (~7s) in "loading" first. Matches useThreadMetadata /
+    // useThreadTokenUsage.
+    retry: false,
     enabled: !isStaticWebsiteOnly(),
   });
 }
