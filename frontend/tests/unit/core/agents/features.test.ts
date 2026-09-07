@@ -12,7 +12,6 @@ import { fetchAgentsApiEnabled } from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
 import {
   fetchBrowserControlEnabled,
-  fetchKnowledgeBaseEnabled,
   fetchKnowledgeBaseFeature,
   fetchMcpTasksEnabled,
 } from "@/core/features/api";
@@ -119,28 +118,17 @@ describe("fetchMcpTasksEnabled", () => {
 });
 
 describe("fetchKnowledgeBaseFeature", () => {
-  test("reads the knowledge_base feature flag and management URL", async () => {
+  test("reads the knowledge-base retrieval-scope flags", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {
         agents_api: { enabled: true },
         knowledge_base: {
-          enabled: true,
-          management_url: "http://ragflow.example",
           scope_selection_enabled: true,
         },
       }),
     );
-    await expect(fetchKnowledgeBaseEnabled()).resolves.toBe(true);
-
-    mockedFetch.mockResolvedValueOnce(
-      jsonResponse(200, {
-        knowledge_base: { enabled: true, management_url: null },
-      }),
-    );
     await expect(fetchKnowledgeBaseFeature()).resolves.toEqual({
-      enabled: true,
-      managementUrl: null,
-      scopeSelectionEnabled: false,
+      scopeSelectionEnabled: true,
     });
   });
 
@@ -148,11 +136,7 @@ describe("fetchKnowledgeBaseFeature", () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, { agents_api: { enabled: true } }),
     );
-    await expect(fetchKnowledgeBaseEnabled()).resolves.toBe(false);
-    mockedFetch.mockResolvedValueOnce(jsonResponse(200, {}));
     await expect(fetchKnowledgeBaseFeature()).resolves.toEqual({
-      enabled: false,
-      managementUrl: null,
       scopeSelectionEnabled: false,
     });
   });

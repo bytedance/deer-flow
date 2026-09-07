@@ -1,8 +1,8 @@
 # RFC：自定义智能体对话的知识检索范围选择（最小版本）
 
 **状态：** 草案，按最小实现推进迭代
-**日期：** 2026-09-06
-**前置能力：** RAGFlow 只读检索、混合 embedding 分组召回、Gateway 知识库管理代理与 `/workspace/knowledge`。实施时先核对现有能力，复用已有实现。
+**日期：** 2026-09-07
+**前置能力：** RAGFlow 只读检索、混合 embedding 分组召回，以及供聊天选择器使用的 Gateway 只读目录接口。实施时先核对现有能力，复用已有实现。
 **RAGFlow 兼容性基线：** v0.27.0。
 
 ## 1. 本版决定
@@ -34,6 +34,8 @@ knowledge_search(query: str)
 
 本版不做：
 
+- 工作区侧边栏中的独立“知识库”入口与 `/workspace/knowledge` 管理页面。
+- DeerFlow 内创建、上传、解析或删除知识库和文件；这些操作继续在 RAGFlow 中完成。
 - thread metadata 中的 `knowledge_scope`、`knowledge_scope_revision`。
 - 对话范围 GET/PUT、revision CAS、`knowledge_scope_write` 锁及默认值同步。
 - 首次发送原子保存默认值、分支继承默认值、跨设备恢复。
@@ -47,7 +49,7 @@ knowledge_search(query: str)
 
 ## 3. 最小交互
 
-按钮放在自定义智能体对话的模式选择器右侧，显示“知识库 · 全部 / N库 / N库·M文件 / 关闭”。其中 M 只统计显式指定文件，不代表全部文件库的实际文件总数。
+按钮放在自定义智能体对话的模式选择器右侧，仅显示知识库图标。`all` 或 `selected` 状态持续高亮，`disabled` 状态恢复普通样式；当前范围的“全部 / N库 / N库·M文件 / 关闭”摘要仅保留在无障碍名称和悬浮提示中。其中 M 只统计显式指定文件，不代表全部文件库的实际文件总数。
 
 ### 3.1 全局 UI 开关
 

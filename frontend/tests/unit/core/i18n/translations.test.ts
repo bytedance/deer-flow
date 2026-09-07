@@ -20,8 +20,6 @@ describe("core copy loading", () => {
     expect(chinese.channels.descriptions.buzz).toBe(
       "通过 DeerFlow 智能体接收 Buzz 频道消息和私聊。",
     );
-    expect(chinese.knowledge.sharedBannerTitle).toBe(
-      "本部署上的知识库由所有 DeerFlow 用户共享",
-    );
+    expect(chinese.knowledge.scope.title).toBe("知识库范围");
   });
 });

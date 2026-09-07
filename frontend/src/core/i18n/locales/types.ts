@@ -256,9 +256,7 @@ export interface Translations {
     demoChats: string;
     agents: string;
     scheduledTasks: string;
-    knowledge: string;
     agentsDisabledTooltip: string;
-    knowledgeDisabledTooltip: string;
     channels: string;
   };
   // Sidebar projects section
@@ -294,100 +292,8 @@ export interface Translations {
     projectUnavailable: string;
   };
 
-  // Knowledge bases
+  // Knowledge scope for custom-agent chat
   knowledge: {
-    title: string;
-    description: string;
-    sharedBannerTitle: string;
-    sharedBannerDescription: string;
-    featureDisabledTitle: string;
-    featureDisabledDescription: string;
-    loadFailed: string;
-    retry: string;
-    emptyTitle: string;
-    emptyDescription: string;
-    create: {
-      action: string;
-      title: string;
-      description: string;
-      name: string;
-      namePlaceholder: string;
-      datasetDescription: string;
-      descriptionPlaceholder: string;
-      submit: string;
-      submitting: string;
-      success: string;
-    };
-    dataset: {
-      documents: string;
-      chunks: string;
-      open: string;
-      delete: string;
-      adminOnly: string;
-      deleteTitle: string;
-      deleteDescription: string;
-      deleteConfirm: string;
-      deleting: string;
-      deleteSuccess: string;
-    };
-    status: {
-      empty: string;
-      parsing: string;
-      ready: string;
-      failed: string;
-      unparsed: string;
-      cancelled: string;
-    };
-    detail: {
-      back: string;
-      notFound: string;
-      documents: string;
-      noDocuments: string;
-      noDocumentsDescription: string;
-      selectAll: string;
-      selected: string;
-      name: string;
-      size: string;
-      chunks: string;
-      status: string;
-      updated: string;
-      parse: string;
-      parsing: string;
-      delete: string;
-      deleteTitle: string;
-      deleteDescription: string;
-      deleteConfirm: string;
-      deleting: string;
-      parseSuccess: string;
-      deleteSuccess: string;
-    };
-    upload: {
-      title: string;
-      description: string;
-      dropHere: string;
-      browse: string;
-      uploading: string;
-      success: string;
-      noFiles: string;
-      tooManyFiles: string;
-      fileTooLarge: string;
-      requestTooLarge: string;
-    };
-    ragflow: {
-      title: string;
-      description: string;
-      items: string[];
-      open: string;
-      unavailable: string;
-    };
-    errors: {
-      create: string;
-      deleteDataset: string;
-      upload: string;
-      parse: string;
-      deleteDocuments: string;
-    };
-    cancel: string;
     scope: {
       title: string;
       description: string;
