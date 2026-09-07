@@ -398,6 +398,7 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+    from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
     from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
@@ -414,6 +415,7 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
     expected_order: list[tuple[str, type]] = [
         ("InputSanitizationMiddleware", InputSanitizationMiddleware),
         ("ToolOutputBudgetMiddleware", ToolOutputBudgetMiddleware),
+        ("ToolResultSanitizationMiddleware", ToolResultSanitizationMiddleware),
         ("ThreadDataMiddleware", ThreadDataMiddleware),
         ("UploadsMiddleware", UploadsMiddleware),
         ("SandboxMiddleware", SandboxMiddleware),

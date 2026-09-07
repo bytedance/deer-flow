@@ -75,6 +75,39 @@ async def _reclaim_prepare_and_cleanup(prepare: asyncio.Future[tuple[list[Worksp
         await _remove_text_cache_dir(orphaned)
 
 
+async def _drain_scan_and_cleanup(
+    scan: asyncio.Future[WorkspaceSnapshot],
+    text_cache_dir: Path | None,
+) -> None:
+    """Let a cancelled scan finish before removing the cache it may still use."""
+    while not scan.done():
+        try:
+            await asyncio.shield(scan)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            break
+
+    # Cancellation remains the caller-visible outcome, but consume any late scan
+    # failure so the drained task cannot emit an un-retrieved exception warning.
+    try:
+        scan.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
+    if text_cache_dir is None:
+        return
+
+    cleanup = asyncio.create_task(_remove_text_cache_dir(text_cache_dir))
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            pass
+
+
 async def capture_workspace_snapshot(
     thread_id: str,
     *,
@@ -104,8 +137,9 @@ async def capture_workspace_snapshot(
             except asyncio.CancelledError:
                 pass
         raise
-    try:
-        return await asyncio.to_thread(
+
+    scan = asyncio.ensure_future(
+        asyncio.to_thread(
             scan_workspace_roots,
             roots,
             limits=limits,
@@ -113,6 +147,16 @@ async def capture_workspace_snapshot(
             text_cache_dir=text_cache_dir,
             extra_excluded_dir_names=extra_excluded_dir_names,
         )
+    )
+    try:
+        return await asyncio.shield(scan)
+    except asyncio.CancelledError:
+        # The scan runs in a worker thread and cannot be stopped by cancelling
+        # this coroutine. Keep the cache alive until that worker has finished,
+        # then remove it before propagating cancellation. Repeated cancellation
+        # must not abandon either phase.
+        await _drain_scan_and_cleanup(scan, text_cache_dir)
+        raise
     except Exception:
         if text_cache_dir is not None:
             await _remove_text_cache_dir(text_cache_dir)

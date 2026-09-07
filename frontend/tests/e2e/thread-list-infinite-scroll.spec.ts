@@ -86,7 +86,14 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
     // observer and never interferes with routing.
     let searchRequestCount = 0;
     page.on("request", (request) => {
-      if (request.url().includes("/api/langgraph/threads/search")) {
+      // Archive-filtered lists use the Gateway directly; SDK callers keep
+      // the LangGraph proxy path. Observe both search transports.
+      if (
+        request.method() === "POST" &&
+        /^\/api\/(?:langgraph\/)?threads\/search$/.test(
+          new URL(request.url()).pathname,
+        )
+      ) {
         searchRequestCount += 1;
       }
     });
@@ -100,6 +107,7 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
       timeout: 15_000,
     });
     const baselineRequests = searchRequestCount;
+    expect(baselineRequests).toBeGreaterThan(0);
 
     // Type a query that matches nothing in the first page (and nothing at
     // all, since titles are deterministic).
