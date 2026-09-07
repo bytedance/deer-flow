@@ -38,6 +38,17 @@ jobs:
           --after "${{ github.sha }}"
           --github-annotations
 
+  lint-scripts:
+    runs-on: ubuntu-latest
+    # The liveness check is wall-clock dependent (~15s); leave headroom for a
+    # cold runner.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run wait-for-port liveness check
+        run: bash scripts/check_wait_for_port_liveness.sh
+
   lint-backend:
     runs-on: ubuntu-latest
     steps:
