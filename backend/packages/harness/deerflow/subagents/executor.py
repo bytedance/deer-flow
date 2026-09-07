@@ -78,6 +78,22 @@ def _defer_subagent_cancellation(
     return deferred or interrupt
 
 
+def _prefer_cleanup_error(
+    current: BaseException | None,
+    candidate: BaseException | None,
+) -> BaseException | None:
+    """Keep first-observed ordering unless a later fatal outranks a normal error."""
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    current_is_fatal = not isinstance(current, (asyncio.CancelledError, Exception))
+    candidate_is_fatal = not isinstance(candidate, (asyncio.CancelledError, Exception))
+    if candidate_is_fatal and not current_is_fatal:
+        return candidate
+    return current
+
+
 async def _await_stream_cleanup(
     task: asyncio.Future[Any],
     deferred: asyncio.CancelledError | None,
@@ -95,7 +111,7 @@ async def _await_stream_cleanup(
                 return deferred, exc
             observed_cancellations = current_cancellations
             deferred = _defer_subagent_cancellation(deferred, exc)
-        except Exception as exc:
+        except BaseException as exc:
             return deferred, exc
 
 
@@ -169,15 +185,15 @@ async def _close_agent_stream(
             continue
         seen_tasks.add(id(value))
         deferred, task_error = await _await_stream_cleanup(value, deferred)
-        close_error = close_error or task_error
+        close_error = _prefer_cleanup_error(close_error, task_error)
 
     close = getattr(stream, "aclose", None)
     if close is None:
         return deferred, close_error
     try:
         close_result = close()
-    except (asyncio.CancelledError, Exception) as exc:
-        return deferred, close_error or exc
+    except BaseException as exc:
+        return deferred, _prefer_cleanup_error(close_error, exc)
     if not inspect.isawaitable(close_result):
         return deferred, close_error
 
@@ -188,7 +204,8 @@ async def _close_agent_stream(
     if id(close_task) not in seen_tasks:
         deferred, task_error = await _await_stream_cleanup(close_task, deferred)
         captured_error = close_task.result() if task_error is None else None
-        close_error = close_error or task_error or captured_error
+        close_error = _prefer_cleanup_error(close_error, task_error)
+        close_error = _prefer_cleanup_error(close_error, captured_error)
     return deferred, close_error
 
 
@@ -1741,7 +1758,19 @@ class SubagentExecutor:
                 cancelled_during_stream = cancelled_during_stream or result.cancel_event.is_set()
                 if close_error is not None:
                     if not isinstance(close_error, (asyncio.CancelledError, Exception)):
-                        raise close_error
+                        preferred_error = _prefer_cleanup_error(stream_error, close_error)
+                        if preferred_error is close_error:
+                            raise close_error
+                        logger.critical(
+                            "[trace=%s] Subagent %s stream close also failed while propagating an earlier fatal error",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=(
+                                type(close_error),
+                                close_error,
+                                close_error.__traceback__,
+                            ),
+                        )
                     interrupted = stream_error is not None or deferred_cancellation is not None or cancelled_during_stream
                     if not interrupted:
                         raise close_error
@@ -1866,6 +1895,8 @@ class SubagentExecutor:
             )
 
         finally:
+            active_error = sys.exception()
+            cleanup_error: BaseException | None = None
             if execution_context is not None and execution_context.get("sandbox_id") is not None:
                 try:
                     from deerflow.sandbox import get_sandbox_provider
@@ -1873,13 +1904,16 @@ class SubagentExecutor:
 
                     provider = get_sandbox_provider()
                     await get_sandbox_lease_manager(provider).release_async(sandbox_lease_owner_id)
-                except Exception:
-                    logger.warning(
-                        "[trace=%s] Failed to release sandbox execution lease for subagent %s",
-                        self.trace_id,
-                        self.config.name,
-                        exc_info=True,
-                    )
+                except BaseException as exc:
+                    if isinstance(exc, Exception):
+                        logger.warning(
+                            "[trace=%s] Failed to release sandbox execution lease for subagent %s",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
+                    else:
+                        cleanup_error = _prefer_cleanup_error(cleanup_error, exc)
             if task_info is not None and task_store is not None:
                 try:
                     await notify_task_stop(
@@ -1892,13 +1926,33 @@ class SubagentExecutor:
                         ),
                         timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
                     )
-                except Exception:
-                    logger.warning(
-                        "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
-                        self.trace_id,
-                        self.config.name,
-                        exc_info=True,
-                    )
+                except BaseException as exc:
+                    if isinstance(exc, Exception):
+                        logger.warning(
+                            "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
+                    else:
+                        cleanup_error = _prefer_cleanup_error(cleanup_error, exc)
+            if cleanup_error is not None:
+                preferred_error = _prefer_cleanup_error(
+                    active_error,
+                    cleanup_error,
+                )
+                if preferred_error is cleanup_error:
+                    raise cleanup_error
+                logger.critical(
+                    "[trace=%s] Subagent %s cleanup also failed while propagating an earlier fatal error",
+                    self.trace_id,
+                    self.config.name,
+                    exc_info=(
+                        type(cleanup_error),
+                        cleanup_error,
+                        cleanup_error.__traceback__,
+                    ),
+                )
 
         return result
 

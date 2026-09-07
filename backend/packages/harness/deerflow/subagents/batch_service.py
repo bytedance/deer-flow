@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 _SHUTDOWN_DEADLINE_SECONDS = 4.75
 _FATAL_SHUTDOWN_CLEANUP_GRACE_SECONDS = 0.1
 _CANCELLED_SHUTDOWN_DRAIN_SECONDS = 0.1
+_LEASE_OWNER_MAX_CHARS = 128
+_CLAIM_TOKEN_CHARS = 16
 
 
 def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
@@ -55,10 +57,12 @@ class SubagentBatchService:
         self._runtime_config = runtime_config
         self._app_config = app_config
         self._execution_capacity = execution_capacity
-        self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
+        host_budget = _LEASE_OWNER_MAX_CHARS - 2 - 32 - _CLAIM_TOKEN_CHARS
+        self._lease_owner = f"{socket.gethostname()[:host_budget]}:{uuid.uuid4().hex}"
         self._stop = asyncio.Event()
         self._poller: asyncio.Task[None] | None = None
         self._executions: dict[str, asyncio.Task[None]] = {}
+        self._claim_recoveries: set[asyncio.Task[None]] = set()
         self._execution_ids: dict[str, str] = {}
         self._item_batches: dict[str, str] = {}
         self._shutdown_execution_ids: set[str] = set()
@@ -88,6 +92,13 @@ class SubagentBatchService:
             return
         exc = task.exception()
         self._record_fatal(exc)
+
+    def _claim_recovery_done(self, task: asyncio.Task[None]) -> None:
+        """Observe and forget a reclaimed-item fencing task."""
+        self._claim_recoveries.discard(task)
+        if task.cancelled():
+            return
+        self._record_fatal(task.exception())
 
     def _abandoned_cleanup_done(
         self,
@@ -207,7 +218,13 @@ class SubagentBatchService:
         # Freeze ownership before waking item pollers.  Their cancellation
         # cleanup removes entries from both maps, but shutdown must still wait
         # for every admitted background execution to finish teardown.
-        tasks = {id(task): task for task in self._executions.values()}
+        tasks = {
+            id(task): task
+            for task in (
+                *self._executions.values(),
+                *self._claim_recoveries,
+            )
+        }
         self._shutdown_execution_ids.update(self._execution_ids.values())
         self._stop.set()
         poller = self._poller
@@ -220,7 +237,15 @@ class SubagentBatchService:
                     self._record_fatal(poller_result)
         # A repository may finish a claim transaction while cancellation is
         # being delivered.  Reconcile once the sole task producer has stopped.
-        tasks.update({id(task): task for task in self._executions.values()})
+        tasks.update(
+            {
+                id(task): task
+                for task in (
+                    *self._executions.values(),
+                    *self._claim_recoveries,
+                )
+            }
+        )
         self._shutdown_execution_ids.update(self._execution_ids.values())
         for execution_id in tuple(self._shutdown_execution_ids):
             request_cancel_background_task(execution_id)
@@ -249,6 +274,7 @@ class SubagentBatchService:
             if pending_execution_ids:
                 await asyncio.sleep(0.05)
         self._executions.clear()
+        self._claim_recoveries.clear()
         self._execution_ids.clear()
         self._item_batches.clear()
         pending_fatal = self._first_fatal
@@ -271,54 +297,146 @@ class SubagentBatchService:
             except TimeoutError:
                 pass
 
+    async def _compensate_claims(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        lease_owner: str,
+        error: str,
+    ) -> None:
+        """Release claims that never reached local execution admission."""
+        compensation_results = await asyncio.gather(
+            *(
+                self._repository.requeue_item_after_admission_failure(
+                    item["id"],
+                    lease_owner=lease_owner,
+                    error=error,
+                    now=datetime.now(UTC),
+                )
+                for item in items
+            ),
+            return_exceptions=True,
+        )
+        for item, compensation_result in zip(
+            items,
+            compensation_results,
+            strict=True,
+        ):
+            if isinstance(compensation_result, BaseException):
+                logger.error(
+                    "Could not compensate durable subagent claim (item_id=%s)",
+                    item["id"],
+                    exc_info=(
+                        type(compensation_result),
+                        compensation_result,
+                        compensation_result.__traceback__,
+                    ),
+                )
+        for compensation_result in compensation_results:
+            if isinstance(compensation_result, BaseException) and not isinstance(
+                compensation_result,
+                Exception,
+            ):
+                raise compensation_result
+
+    async def _drain_reclaimed_local_execution(
+        self,
+        *,
+        item_id: str,
+        task: asyncio.Task[None],
+        lease_owner: str,
+    ) -> bool:
+        """Fence a reclaimed item until its stale local execution has drained."""
+        execution_id = self._execution_ids.get(item_id)
+        if execution_id is not None:
+            request_cancel_background_task(execution_id)
+        task.cancel()
+        renew_every = max(1.0, self._config.lease_seconds / 3)
+        while not task.done():
+            done, _pending = await asyncio.wait(
+                {task},
+                timeout=renew_every,
+            )
+            if done:
+                break
+            try:
+                lease = await self._repository.renew_item_lease(
+                    item_id,
+                    lease_owner=lease_owner,
+                    lease_seconds=self._config.lease_seconds,
+                    now=datetime.now(UTC),
+                )
+            except Exception:
+                logger.warning(
+                    "Could not renew reclaimed durable subagent lease while draining its stale local execution (item_id=%s)",
+                    item_id,
+                    exc_info=True,
+                )
+                return False
+            if not lease["valid"]:
+                return False
+        await asyncio.gather(task, return_exceptions=True)
+        return True
+
+    async def _recover_reclaimed_item(
+        self,
+        *,
+        item: dict[str, Any],
+        task: asyncio.Task[None],
+        lease_owner: str,
+    ) -> None:
+        """Drain a stale local execution before releasing its replacement claim."""
+        item_id = item["id"]
+        drained = await self._drain_reclaimed_local_execution(
+            item_id=item_id,
+            task=task,
+            lease_owner=lease_owner,
+        )
+        if drained:
+            await self._compensate_claims(
+                [item],
+                lease_owner=lease_owner,
+                error="Worker drained a stale local execution before readmission",
+            )
+
     async def run_once(self, *, now: datetime) -> None:
-        available = max(0, self._runtime_config.max_running - len(self._executions))
+        available = max(
+            0,
+            self._runtime_config.max_running - len(self._executions) - len(self._claim_recoveries),
+        )
         if available <= 0:
             return
+        # A service identity is stable for observability, but ownership must be
+        # unique per claim transaction. Otherwise an expired claim reacquired by
+        # this process is indistinguishable from its stale local predecessor.
+        claim_owner = f"{self._lease_owner}:{uuid.uuid4().hex[:_CLAIM_TOKEN_CHARS]}"
         items = await self._repository.claim_items(
             now=now,
-            lease_owner=self._lease_owner,
+            lease_owner=claim_owner,
             lease_seconds=self._config.lease_seconds,
             limit=available,
         )
         if self._stop.is_set():
-            compensation_results = await asyncio.gather(
-                *(
-                    self._repository.requeue_item_after_admission_failure(
-                        item["id"],
-                        lease_owner=self._lease_owner,
-                        error="Worker stopped before execution admission",
-                        now=datetime.now(UTC),
-                    )
-                    for item in items
-                ),
-                return_exceptions=True,
-            )
-            for item, compensation_result in zip(
+            await self._compensate_claims(
                 items,
-                compensation_results,
-                strict=True,
-            ):
-                if isinstance(compensation_result, BaseException):
-                    logger.error(
-                        "Could not compensate late durable subagent claim (item_id=%s)",
-                        item["id"],
-                        exc_info=(
-                            type(compensation_result),
-                            compensation_result,
-                            compensation_result.__traceback__,
-                        ),
-                    )
-            for compensation_result in compensation_results:
-                if isinstance(compensation_result, BaseException) and not isinstance(
-                    compensation_result,
-                    Exception,
-                ):
-                    raise compensation_result
+                lease_owner=claim_owner,
+                error="Worker stopped before execution admission",
+            )
             return
         for item in items:
             item_id = item["id"]
-            if item_id in self._executions:
+            existing_execution = self._executions.get(item_id)
+            if existing_execution is not None:
+                recovery = asyncio.create_task(
+                    self._recover_reclaimed_item(
+                        item=item,
+                        task=existing_execution,
+                        lease_owner=claim_owner,
+                    ),
+                    name=f"subagent-batch-reclaim-{item_id}",
+                )
+                self._claim_recoveries.add(recovery)
+                recovery.add_done_callback(self._claim_recovery_done)
                 continue
             task = asyncio.create_task(
                 self._execute_item(item),
@@ -337,6 +455,7 @@ class SubagentBatchService:
         *,
         item_id: str,
         execution_id: str,
+        lease_owner: str,
     ) -> None:
         """Keep the durable lease while waiting for local execution teardown."""
         renew_every = max(1.0, self._config.lease_seconds / 3)
@@ -356,7 +475,7 @@ class SubagentBatchService:
                 try:
                     lease = await self._repository.renew_item_lease(
                         item_id,
-                        lease_owner=self._lease_owner,
+                        lease_owner=lease_owner,
                         lease_seconds=self._config.lease_seconds,
                         now=datetime.now(UTC),
                     )
@@ -380,6 +499,8 @@ class SubagentBatchService:
     async def _finalize_item_with_retry(
         self,
         item_id: str,
+        *,
+        lease_owner: str,
         **kwargs: Any,
     ) -> bool:
         """Retry an uncertain terminal write without changing its meaning."""
@@ -387,7 +508,7 @@ class SubagentBatchService:
             try:
                 return await self._repository.finalize_item(
                     item_id,
-                    lease_owner=self._lease_owner,
+                    lease_owner=lease_owner,
                     **kwargs,
                 )
             except Exception:
@@ -453,6 +574,7 @@ class SubagentBatchService:
 
     async def _execute_item(self, item: dict[str, Any]) -> None:
         item_id = item["id"]
+        lease_owner = item.get("_lease_owner", self._lease_owner)
         execution_id: str | None = None
         try:
             batch = item["batch"]
@@ -492,9 +614,15 @@ class SubagentBatchService:
                 acceptance_criteria=item.get("acceptance_criteria"),
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
+            marked_running = await self._repository.mark_item_running(
+                item_id,
+                lease_owner=lease_owner,
+                now=datetime.now(UTC),
+            )
+            if not marked_running:
+                return
             execution_id = executor.execute_async(prompt, task_id=item_id)
             self._execution_ids[item_id] = execution_id
-            marked_running = False
             renew_every = max(1.0, self._config.lease_seconds / 3)
             status_poll_every = min(
                 self._config.poll_interval_seconds,
@@ -506,18 +634,11 @@ class SubagentBatchService:
                 result = get_background_task_result(execution_id)
                 if result is None:
                     raise RuntimeError("Native subagent execution disappeared")
-                if result.status is SubagentStatus.RUNNING and not marked_running:
-                    marked_running = await self._repository.mark_item_running(
-                        item_id,
-                        lease_owner=self._lease_owner,
-                        now=datetime.now(UTC),
-                    )
-                    if not marked_running:
-                        request_cancel_background_task(execution_id)
                 if result.status.is_terminal:
                     await self._wait_for_execution_teardown(
                         item_id=item_id,
                         execution_id=execution_id,
+                        lease_owner=lease_owner,
                     )
                     result = get_background_task_result(execution_id)
                     if result is None:
@@ -533,7 +654,7 @@ class SubagentBatchService:
                 if now_monotonic >= next_renew_at:
                     lease = await self._repository.renew_item_lease(
                         item_id,
-                        lease_owner=self._lease_owner,
+                        lease_owner=lease_owner,
                         lease_seconds=self._config.lease_seconds,
                         now=datetime.now(UTC),
                     )
@@ -555,7 +676,7 @@ class SubagentBatchService:
             if getattr(result, "admission_failure", False):
                 await self._repository.requeue_item_after_admission_failure(
                     item_id,
-                    lease_owner=self._lease_owner,
+                    lease_owner=lease_owner,
                     error=result.error,
                     now=datetime.now(UTC),
                 )
@@ -575,6 +696,7 @@ class SubagentBatchService:
                     logger.warning("Batch acceptance check failed; result remains unchecked (item_id=%s)", item_id, exc_info=True)
             await self._finalize_item_with_retry(
                 item_id,
+                lease_owner=lease_owner,
                 succeeded=result.status is SubagentStatus.COMPLETED,
                 result=stored_result,
                 result_preview=preview,
@@ -596,9 +718,11 @@ class SubagentBatchService:
                 await self._wait_for_execution_teardown(
                     item_id=item_id,
                     execution_id=execution_id,
+                    lease_owner=lease_owner,
                 )
             await self._finalize_item_with_retry(
                 item_id,
+                lease_owner=lease_owner,
                 succeeded=False,
                 result=None,
                 result_preview=None,
@@ -617,6 +741,7 @@ class SubagentBatchService:
                     await self._wait_for_execution_teardown(
                         item_id=item_id,
                         execution_id=execution_id,
+                        lease_owner=lease_owner,
                     )
             # Fatal exits, including cancellation during process shutdown, must
             # not release the durable lease or registry entry until the native

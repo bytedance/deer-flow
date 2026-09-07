@@ -331,6 +331,10 @@ class SubagentBatchRepository:
                     item.updated_at = now
                     item.error = None
                     value = self._item_dict(item)
+                    # Worker-only fencing token. It is intentionally excluded
+                    # from public item projections but must follow the claim
+                    # through every lease mutation and terminal write.
+                    value["_lease_owner"] = lease_owner
                     value["prompt"] = item.prompt
                     value["batch"] = self._execution_batch_dict(batch)
                     claimed.append(value)

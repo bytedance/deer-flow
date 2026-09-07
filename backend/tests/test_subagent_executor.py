@@ -1236,6 +1236,73 @@ class TestAsyncExecutionPath:
                 await executor._aexecute("Do something")
 
     @pytest.mark.anyio
+    async def test_stream_close_fatal_outranks_prior_cleanup_error(
+        self,
+        classes,
+    ):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+
+        class FatalClose(BaseException):
+            pass
+
+        prior_cleanup = asyncio.get_running_loop().create_future()
+        prior_cleanup.set_exception(RuntimeError("exit task failed"))
+        cancellation = asyncio.CancelledError(prior_cleanup)
+        fatal = FatalClose("fatal close")
+
+        class Stream:
+            async def aclose(self):
+                raise fatal
+
+        deferred, close_error = await executor_module._close_agent_stream(
+            Stream(),
+            cancellation=cancellation,
+        )
+
+        assert deferred is cancellation
+        assert close_error is fatal
+
+    @pytest.mark.anyio
+    async def test_aexecute_preserves_original_fatal_when_stream_close_is_also_fatal(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+    ):
+        class OriginalFatal(BaseException):
+            pass
+
+        class CloseFatal(BaseException):
+            pass
+
+        original = OriginalFatal("original stream fatal")
+        close_fatal = CloseFatal("close fatal")
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise original
+
+            async def aclose(self):
+                raise close_fatal
+
+        mock_agent.astream.return_value = Stream()
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            with pytest.raises(OriginalFatal) as raised:
+                await executor._aexecute("Do something")
+
+        assert raised.value is original
+
+    @pytest.mark.anyio
     async def test_aexecute_preserves_base_exception_at_parent_boundary(self, classes, base_config):
         SubagentExecutor = classes["SubagentExecutor"]
         executor = SubagentExecutor(
@@ -1796,6 +1863,123 @@ class TestAsyncExecutionPath:
 
         manager.release("lead")
         provider.release.assert_called_once_with("shared")
+
+    @pytest.mark.anyio
+    async def test_aexecute_lease_fatal_still_notifies_task_stop(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        msg,
+        monkeypatch,
+    ):
+        class FatalLeaseRelease(BaseException):
+            pass
+
+        fatal = FatalLeaseRelease("lease release failed")
+        extensions = SimpleNamespace(
+            needs_task_store=True,
+            has_task_lifecycle=True,
+        )
+        final_state = {
+            "messages": [
+                msg.human("Do something"),
+                msg.ai("Done", "msg-1"),
+            ]
+        }
+
+        async def stream(*_args, context, **_kwargs):
+            context["sandbox_id"] = "sandbox-1"
+            yield final_state
+
+        manager = SimpleNamespace(
+            release_async=AsyncMock(side_effect=fatal),
+        )
+        notify_module = importlib.import_module("deerflow.extensions.notify")
+        notify_start = AsyncMock()
+        notify_stop = AsyncMock()
+        monkeypatch.setattr(notify_module, "notify_task_start", notify_start)
+        monkeypatch.setattr(notify_module, "notify_task_stop", notify_stop)
+        sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = object()
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(
+            lease_module,
+            "get_sandbox_lease_manager",
+            lambda _provider: manager,
+        )
+        mock_agent.astream = stream
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            run_id="run-1",
+            extensions=extensions,
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            with pytest.raises(FatalLeaseRelease) as raised:
+                await executor._aexecute("Do something")
+
+        assert raised.value is fatal
+        notify_start.assert_awaited_once()
+        notify_stop.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_aexecute_cleanup_fatal_outranks_host_cancellation(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        monkeypatch,
+    ):
+        class FatalLeaseRelease(BaseException):
+            pass
+
+        fatal = FatalLeaseRelease("lease release failed")
+        stream_started = asyncio.Event()
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                stream_started.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                return None
+
+        def stream(*_args, context, **_kwargs):
+            context["sandbox_id"] = "sandbox-1"
+            return Stream()
+
+        manager = SimpleNamespace(
+            release_async=AsyncMock(side_effect=fatal),
+        )
+        sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = object()
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(
+            lease_module,
+            "get_sandbox_lease_manager",
+            lambda _provider: manager,
+        )
+        mock_agent.astream = stream
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            execution = asyncio.create_task(executor._aexecute("Do something"))
+            await asyncio.wait_for(stream_started.wait(), timeout=1)
+            execution.cancel()
+            with pytest.raises(FatalLeaseRelease) as raised:
+                await execution
+
+        assert raised.value is fatal
 
     @pytest.mark.anyio
     async def test_aexecute_fork_restored_state_cleans_scope_without_parking_parent(

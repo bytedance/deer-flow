@@ -63,6 +63,7 @@ async def test_claim_separates_total_live_leased_and_running(tmp_path) -> None:
     claimed = await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
     assert len(claimed) == 1
     assert claimed[0]["status"] == "leased"
+    assert claimed[0]["_lease_owner"] == "worker-1"
 
     batch = await repo.get_batch("batch-1", user_id="user-1")
     assert batch is not None
@@ -91,11 +92,16 @@ async def test_expired_lease_is_recovered_with_stable_item_identity(tmp_path) ->
     repo = await _repo(tmp_path)
     await _create(repo, count=1, max_live=1, max_running=1)
     now = datetime.now(UTC)
-    first = await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=30, limit=1)
+    first = await repo.claim_items(
+        now=now,
+        lease_owner="worker-1:generation-1",
+        lease_seconds=30,
+        limit=1,
+    )
 
     reclaimed = await repo.claim_items(
         now=now + timedelta(seconds=31),
-        lease_owner="worker-2",
+        lease_owner="worker-1:generation-2",
         lease_seconds=30,
         limit=1,
     )
@@ -103,6 +109,20 @@ async def test_expired_lease_is_recovered_with_stable_item_identity(tmp_path) ->
     assert reclaimed[0]["id"] == first[0]["id"]
     assert reclaimed[0]["item_key"] == "item-0"
     assert reclaimed[0]["attempt"] == 2
+    assert reclaimed[0]["_lease_owner"] == "worker-1:generation-2"
+    assert not await repo.finalize_item(
+        first[0]["id"],
+        lease_owner="worker-1:generation-1",
+        succeeded=True,
+        result="stale",
+        result_preview="stale",
+        result_truncated=False,
+        error=None,
+        stop_reason=None,
+        token_usage=None,
+        model_name="model-a",
+        completed_at=now + timedelta(seconds=32),
+    )
 
 
 @pytest.mark.asyncio
