@@ -57,6 +57,7 @@ _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 # user-data tree, so an over-eager match is harmless (left untouched).
 _LOCAL_PATH_IN_TEXT_RE = re.compile(
     r"(?:file://)?/[^\s'\"<>|*?]+"  # POSIX absolute path or file:// URI
+    r"|file://[A-Za-z]:[^\s'\"<>|*?]+"  # file://C:/… — some Windows tools skip the third slash
     r"|[A-Za-z]:[\\/][^\s'\"<>|*?]+"  # Windows drive-qualified absolute path
     # path relative to the server cwd (Windows servers print "\" separators)
     r"|(?:\.{0,2}[\\/]|[\w.-]+[\\/])[^\s'\"<>|*?]+"
@@ -87,8 +88,17 @@ def _local_path_from_uri(uri: str, *, base_dir: Path | None = None) -> Path | No
         # Windows into a drive-qualified "C:\..." path; on POSIX it is identity.
         # It already percent-decodes, so no extra unquote here, and it can
         # reject odd Windows spellings with OSError — leave those untouched.
+        netloc = parsed.netloc
+        if netloc and netloc.lower() != "localhost":
+            # Some Windows tools emit file://C:/… (two slashes): the drive
+            # lands in the URI authority. Any other host is not a local file.
+            if len(netloc) != 2 or not netloc[0].isalpha() or netloc[1] != ":":
+                return None
+            url_path = f"/{netloc}{parsed.path}"
+        else:
+            url_path = parsed.path
         try:
-            raw = url2pathname(parsed.path)
+            raw = url2pathname(url_path)
         except OSError:
             return None
     elif len(parsed.scheme) == 1 and parsed.scheme.isalpha():

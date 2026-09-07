@@ -86,6 +86,13 @@ class TestLocalPathFromUri:
     def test_windows_url2pathname_oserror_is_left_untouched(self):
         assert mcp_tools._local_path_from_uri("file:///C:/tmp/a|b.png") is None
 
+    @pytest.mark.skipif(os.name != "nt", reason="exercises the file://C:/… two-slash Windows drive URI form")
+    def test_windows_two_slash_file_uri_resolves_drive(self):
+        assert mcp_tools._local_path_from_uri("file://C:/Users/shot.png") == Path("C:/Users/shot.png")
+
+    def test_remote_host_file_uri_is_ignored(self):
+        assert mcp_tools._local_path_from_uri("file://example.com/a.png") is None
+
     def test_empty_is_ignored(self):
         assert mcp_tools._local_path_from_uri("") is None
 
@@ -222,6 +229,17 @@ class TestRewriteLocalPathsInText:
 
         with _patch_paths(paths):
             result = mcp_tools._rewrite_local_paths_in_text(text, thread_id="t1", user_id="u1")
+
+        assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/shot.png"
+
+    @pytest.mark.skipif(os.name != "nt", reason="exercises the file://C:/… two-slash URI form in free text")
+    def test_windows_two_slash_file_uri_in_text_is_rewritten(self, paths: Paths):
+        src = _workspace_file(paths, "shot.png")
+        two_slash_uri = src.as_uri().replace("file:///", "file://", 1)
+        assert two_slash_uri.startswith("file://C:")
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(f"Saved as {two_slash_uri}", thread_id="t1", user_id="u1")
 
         assert result == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/shot.png"
 
