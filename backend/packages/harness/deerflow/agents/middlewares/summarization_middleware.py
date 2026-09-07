@@ -453,6 +453,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         except Exception:
             logger.debug("Failed to trim summary prompt section with token counter; falling back to deterministic text cap", exc_info=True)
         if strategy == "last":
+            omitted_marker = "\n...\n"
+            if len(text) > max_tokens and max_tokens > len(omitted_marker):
+                return omitted_marker + text[-(max_tokens - len(omitted_marker)) :]
             return text[-max_tokens:]
         return self._bound_text(text, max_tokens)
 
@@ -521,12 +524,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
         new_messages_strategy: Literal["first", "last"] = "first"
         if not trimmed_messages:
-            # The inherited trimmer requires a HumanMessage. Rescuing the current
-            # request can leave an AI/Tool-only window, even below the budget.
-            # Bound the raw text instead, keeping the newest content to match
-            # the inherited trimmer's strategy="last" policy.
-            trimmed_messages = messages_to_summarize
-            if not any(isinstance(message, HumanMessage) for message in messages_to_summarize):
+            if any(isinstance(message, HumanMessage) for message in messages_to_summarize):
+                # The human anchor can fall outside the token-limited tail.
+                # Preserve the existing final-message fallback for this case.
+                trimmed_messages = messages_to_summarize[-1:]
+            else:
+                # Rescuing the current request can leave an AI/Tool-only window,
+                # which the inherited human-anchored trimmer rejects even below
+                # budget. Bound its raw text while favoring recent content.
+                trimmed_messages = messages_to_summarize
                 new_messages_strategy = "last"
         if not trimmed_messages:
             return None

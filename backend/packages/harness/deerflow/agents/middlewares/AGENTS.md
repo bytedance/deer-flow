@@ -5,6 +5,11 @@ If the inherited human-anchored trimmer returns nothing, format that window and
 apply `_build_summary_input_text`'s text trimming with `strategy="last"` instead
 of retaining only its final message. This preserves the inherited trimmer's
 preference for recent content without changing the normal human-anchored path.
+If the window still contains a human message but that anchor is outside the
+token-limited tail, retain the existing final-message fallback. Do not restore
+the whole mixed window with head-first text trimming: that can discard recent
+tool results. Deterministic tail truncation marks omitted text with a leading
+`\n...\n` when the cap leaves room for both the marker and retained content.
 The budget applies to raw sections before HTML escaping, wrapper tags, and the
 summary prompt; it is not a hard limit on the final model request. Keep escaping
 after trimming so partial trimming cannot split escape entities. The factory
