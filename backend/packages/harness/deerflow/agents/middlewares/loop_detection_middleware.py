@@ -545,6 +545,15 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                         del name_counter[old]
                     else:
                         name_counter[old] = c
+                    old_warn = self._tool_freq_overrides.get(
+                        old,
+                        (self.tool_freq_warn, self.tool_freq_hard_limit),
+                    )[0]
+                    if c < old_warn:
+                        # Any tool can evict an older name from the shared
+                        # window. Rearm that name as soon as its burst decays,
+                        # even when the current call belongs to another tool.
+                        self._tool_freq_warned[thread_id].discard(old)
                 freq_count = name_counter.get(name, 0)
 
                 if name in self._tool_freq_overrides:

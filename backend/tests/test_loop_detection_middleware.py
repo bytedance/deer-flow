@@ -1529,6 +1529,24 @@ class TestToolCallBatchDecisions:
         assert second is not None and second.action == "warn"
         assert second.tool_names == ("a",)
 
+    def test_other_tool_eviction_rearms_frequency_warning(self):
+        mw = LoopDetectionMiddleware(window_size=3, tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+
+        first = mw._track_and_check(
+            _make_state(tool_calls=[self._call(name, i) for i, name in enumerate(["a", "b", "a"])]),
+            runtime,
+        )
+        assert first is not None and first.tool_names == ("a",)
+
+        second = mw._track_and_check(_make_state(tool_calls=[self._call("b", 3)]), runtime)
+        assert second is not None and second.tool_names == ("b",)
+        assert mw._tool_name_counter["test-thread"]["a"] == 1
+        assert "a" not in mw._tool_freq_warned["test-thread"]
+
+        third = mw._track_and_check(_make_state(tool_calls=[self._call("a", 4)]), runtime)
+        assert third is not None and third.tool_names == ("a",)
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_async", [False, True])
     async def test_batch_hard_stop_prevents_tool_execution_in_real_agent_graph(self, use_async):
