@@ -4058,10 +4058,27 @@ def test_create_thread_with_missing_or_foreign_project_404(tmp_path):
 
         foreign_resp = client.post("/api/threads", json={"thread_id": "thread-foreign-proj", "project_id": foreign["id"]})
         assert foreign_resp.status_code == 404, foreign_resp.text
-        assert foreign_resp.json()["detail"] == "Project not found"
 
-        # Fail closed: neither rejected create left a thread row behind.
-        assert client.post("/api/threads/search", json={}).json() == []
+
+def test_create_thread_with_project_in_memory_mode_404():
+    """Memory mode has no projects backend: a project-scoped create must fail
+    closed with the same 404 the SQL store produces for a missing project —
+    not silently persist an unassigned thread whose run would then proceed
+    outside the selected project (``ensureProjectThread`` keeps the composer
+    text for a retry on this failure)."""
+    app, _, _ = _build_thread_app()
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "thread-mem-proj", "project_id": "p1"})
+        assert created.status_code == 404, created.text
+        assert created.json()["detail"] == "Project not found"
+
+        # The store's project filter fails closed too; no row was persisted.
+        hits = client.post("/api/threads/search", json={"project_id": "p1"}).json()
+        assert hits == []
+
+        # Unscoped creates still work in memory mode.
+        plain = client.post("/api/threads", json={"thread_id": "thread-mem-plain"})
+        assert plain.status_code == 200, plain.text
 
 
 def test_create_and_patch_strip_deerflow_project_id_metadata_key(tmp_path):

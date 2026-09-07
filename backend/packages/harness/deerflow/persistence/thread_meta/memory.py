@@ -50,8 +50,16 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         metadata: dict | None = None,
         project_id: str | None = None,
     ) -> dict:
-        # Memory mode has no projects backend in Phase 1: ``project_id`` is
-        # accepted for interface parity and ignored.
+        # Memory mode has no projects backend in Phase 1. Fail closed exactly
+        # like the SQL store does for a missing/foreign/archived project: a
+        # create carrying ``project_id`` raises ``ProjectNotAssignableError``
+        # (the router maps it to 404) instead of silently persisting an
+        # unassigned thread that a run would then proceed under. Mirrors
+        # ``set_project`` below, which already reports rejection.
+        if project_id is not None:
+            from deerflow.persistence.projects import ProjectNotAssignableError
+
+            raise ProjectNotAssignableError(project_id)
         resolved_user_id = resolve_user_id(user_id, method_name="MemoryThreadMetaStore.create")
         now = now_iso()
         record: dict[str, Any] = {
