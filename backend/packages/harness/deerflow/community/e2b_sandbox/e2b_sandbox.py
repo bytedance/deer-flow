@@ -7,6 +7,7 @@ import shlex
 import threading
 from typing import TYPE_CHECKING
 
+from e2b import FileNotFoundException
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
@@ -357,16 +358,24 @@ class E2BSandbox(Sandbox):
             client = self._client
             if client is None:
                 raise RuntimeError("sandbox client has been closed")
-            try:
-                if append:
+            if append:
+                # E2B has no append write. Read-modify-write must treat only
+                # explicit not-found as empty; any other read failure would
+                # otherwise overwrite the original file with just the tail.
+                try:
+                    existing = client.files.read(resolved) or ""
+                except (FileNotFoundException, FileNotFoundError):
                     existing = ""
-                    try:
-                        existing = client.files.read(resolved) or ""
-                        if isinstance(existing, bytes):
-                            existing = existing.decode("utf-8", errors="replace")
-                    except Exception:
-                        existing = ""
-                    content = (existing or "") + content
+                except Exception:
+                    logger.error(
+                        "Append pre-read failed for %s; refusing to overwrite",
+                        resolved,
+                    )
+                    raise
+                if isinstance(existing, bytes):
+                    existing = existing.decode("utf-8", errors="replace")
+                content = existing + content
+            try:
                 client.files.write(resolved, content)
             except Exception as e:
                 logger.error("Failed to write file %s in e2b sandbox: %s", resolved, e)

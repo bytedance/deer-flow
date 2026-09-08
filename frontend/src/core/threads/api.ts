@@ -162,3 +162,33 @@ export async function compactThreadContext(
 
   return (await response.json()) as ThreadCompactResponse;
 }
+
+/** Gateway extension not forwarded by the LangGraph SDK's search method. */
+export async function searchThreadsByArchive({
+  archived,
+  metadata,
+  status,
+  limit,
+  offset,
+}: {
+  archived: boolean;
+  metadata?: Record<string, unknown>;
+  status?: string;
+  limit: number;
+  offset: number;
+}): Promise<AgentThread[]> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/search`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archived, metadata, status, limit, offset }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to load conversations."),
+    );
+  }
+  return (await response.json()) as AgentThread[];
+}
