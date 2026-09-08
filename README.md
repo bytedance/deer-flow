@@ -968,7 +968,7 @@ official Linux amd64 and arm64 CLI release archives, verifies their published
 SHA-256 checksums, safely extracts one executable per architecture, and mounts
 the resulting runtime read-only at `/mnt/integrations/lark-cli/runtime`. An
 architecture-selecting launcher in that mount makes `lark-cli` available in the
-sandbox `PATH`. Air-gapped AIO deployments can pre-stage a symlink-free runtime
+sandbox `PATH`. Air-gapped AIO deployments can pre-stage a symlink- and reparse-free runtime
 tree containing `bin/lark-cli` plus both `linux-{amd64,arm64}/lark-cli` files and
 set `DEER_FLOW_LARK_CLI_SANDBOX_RUNTIME_DIR` to that directory.
 

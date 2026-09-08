@@ -37,6 +37,13 @@ leave `config.json` with a dangling keychain reference. The transaction snapshot
 still supplies the previous OAuth data for logout and restores the complete old
 tree if any switch step fails.
 
+The managed sandbox runtime walker uses the same single-`lstat` test as the
+credential tree (`FILE_ATTRIBUTE_REPARSE_POINT`, not only symlink/junction) so
+OneDrive/cloud placeholders cannot be copytree'd into the bind-mounted tree.
+On a Windows host the POSIX exec-bit check is skipped and logged at debug:
+Docker Desktop virtiofs/gRPC-FUSE typically synthesizes `~0755`; a mount that
+preserves host modes (SMB/9p) will fail at exec.
+
 ### Browser Progress Screenshots (`community/browser_automation/`)
 
 Hidden per-action browser progress frames use JPEG at quality 80 to keep their

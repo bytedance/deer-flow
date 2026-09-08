@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import io
 import json
+import logging
 import multiprocessing
 import os
 import re
@@ -407,21 +408,33 @@ def test_managed_sandbox_runtime_rejects_any_symlink_in_prestaged_tree(monkeypat
     assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
 
 
-def _patch_path_is_junction(monkeypatch, target: Path) -> None:
-    """Pretend *target* is an NTFS junction without requiring a Windows host."""
-    real_is_junction = Path.is_junction
+def _patch_path_reparse_point(monkeypatch, target: Path) -> None:
+    """Pretend *target* is any Windows reparse point (not a symlink/junction).
 
-    def _is_junction(self: Path) -> bool:
+    OneDrive/cloud placeholders, ProjFS, and AppExecLink report
+    ``FILE_ATTRIBUTE_REPARSE_POINT`` while ``Path.is_symlink()`` and
+    ``Path.is_junction()`` stay False — the hole the runtime walker must close.
+    """
+    real_lstat = Path.lstat
+
+    def _lstat(self: Path):
+        info = real_lstat(self)
         try:
-            return self.resolve() == target.resolve() or real_is_junction(self)
+            is_target = self.resolve() == target.resolve()
         except OSError:
-            return real_is_junction(self)
+            is_target = False
+        if not is_target:
+            return info
+        return SimpleNamespace(
+            st_mode=info.st_mode,
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+        )
 
-    monkeypatch.setattr(Path, "is_junction", _is_junction)
+    monkeypatch.setattr(Path, "lstat", _lstat)
 
 
-def test_managed_sandbox_runtime_rejects_any_junction_in_prestaged_tree(monkeypatch, tmp_path) -> None:
-    """copytree(symlinks=False) would descend a junction; reject it before copy."""
+def test_managed_sandbox_runtime_rejects_any_reparse_in_prestaged_tree(monkeypatch, tmp_path) -> None:
+    """copytree(symlinks=False) would descend a cloud/reparse dir; reject it before copy."""
     _patch_paths(monkeypatch, tmp_path / "home")
     source = tmp_path / "pre-staged"
     for arch in ("amd64", "arm64"):
@@ -433,12 +446,12 @@ def test_managed_sandbox_runtime_rejects_any_junction_in_prestaged_tree(monkeypa
     launcher.parent.mkdir(parents=True)
     launcher.write_text("#!/bin/sh\n", encoding="utf-8")
     launcher.chmod(0o755)
-    junction = source / "extra-mount"
-    junction.mkdir()
-    _patch_path_is_junction(monkeypatch, junction)
+    placeholder = source / "onedrive-placeholder"
+    placeholder.mkdir()
+    _patch_path_reparse_point(monkeypatch, placeholder)
     monkeypatch.setenv(lark_cli.LARK_CLI_SANDBOX_RUNTIME_SOURCE_ENV, str(source))
 
-    with pytest.raises(ValueError, match="junction"):
+    with pytest.raises(ValueError, match="reparse point"):
         lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
 
     assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
@@ -478,12 +491,16 @@ def _stage_non_executable_sandbox_runtime(root: Path) -> None:
         binary.chmod(0o644)
 
 
-def test_validate_lark_cli_sandbox_runtime_accepts_non_executable_files_on_windows_hosts(tmp_path, monkeypatch) -> None:
+def test_validate_lark_cli_sandbox_runtime_accepts_non_executable_files_on_windows_hosts(tmp_path, monkeypatch, caplog) -> None:
     monkeypatch.setattr(lark_cli, "os", SimpleNamespace(name="nt"))
     root = tmp_path / "runtime"
     _stage_non_executable_sandbox_runtime(root)
 
-    lark_cli._validate_lark_cli_sandbox_runtime(root)
+    with caplog.at_level(logging.DEBUG, logger=lark_cli.logger.name):
+        lark_cli._validate_lark_cli_sandbox_runtime(root)
+    assert "Skipping POSIX exec-bit check" in caplog.text
+    assert "bin/lark-cli" in caplog.text
+    assert "virtiofs/gRPC-FUSE" in caplog.text
     lark_cli._write_lark_cli_sandbox_launcher(root)
     assert b"\r" not in (root / "bin" / "lark-cli").read_bytes()
 
@@ -497,21 +514,60 @@ def test_validate_lark_cli_sandbox_runtime_rejects_non_executable_files_on_posix
         lark_cli._validate_lark_cli_sandbox_runtime(root)
 
 
-def test_validate_lark_cli_sandbox_runtime_rejects_ntfs_junction_root(tmp_path, monkeypatch) -> None:
+def test_is_symlink_or_junction_matches_credential_any_reparse_policy() -> None:
+    """Runtime guard uses the same single-lstat reparse test as the credential tree."""
+
+    class _FakePath:
+        def __init__(self, st_mode: int, st_attrs: int = 0) -> None:
+            self._st_mode = st_mode
+            self._st_attrs = st_attrs
+
+        def lstat(self):
+            return SimpleNamespace(st_mode=self._st_mode, st_file_attributes=self._st_attrs)
+
+    assert not lark_cli._is_symlink_or_junction(_FakePath(stat.S_IFDIR))
+    assert not lark_cli._is_symlink_or_junction(_FakePath(stat.S_IFREG))
+    assert lark_cli._is_symlink_or_junction(_FakePath(stat.S_IFLNK))
+    # Cloud / ProjFS / AppExecLink: reparse bit set, but not a symlink or junction.
+    assert lark_cli._is_symlink_or_junction(_FakePath(stat.S_IFDIR, stat.FILE_ATTRIBUTE_REPARSE_POINT))
+    assert lark_cli._is_symlink_or_junction(_FakePath(stat.S_IFREG, stat.FILE_ATTRIBUTE_REPARSE_POINT))
+    assert lark_cli._stat_is_symlink_or_reparse(SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT))
+
+
+def test_validate_lark_cli_sandbox_runtime_rejects_any_reparse_root(tmp_path, monkeypatch) -> None:
     root = tmp_path / "runtime"
     _stage_non_executable_sandbox_runtime(root)
-    _patch_path_is_junction(monkeypatch, root)
+    _patch_path_reparse_point(monkeypatch, root)
+    assert not root.is_symlink()
+    assert not root.is_junction()
 
-    with pytest.raises(ValueError, match="junction"):
+    with pytest.raises(ValueError, match="reparse point"):
         lark_cli._validate_lark_cli_sandbox_runtime(root)
 
 
-def test_validate_lark_cli_sandbox_runtime_rejects_ntfs_junction_member(tmp_path, monkeypatch) -> None:
+def test_validate_lark_cli_sandbox_runtime_rejects_any_reparse_member_dir(tmp_path, monkeypatch) -> None:
     root = tmp_path / "runtime"
     _stage_non_executable_sandbox_runtime(root)
-    _patch_path_is_junction(monkeypatch, root / "linux-amd64")
+    member = root / "linux-amd64"
+    _patch_path_reparse_point(monkeypatch, member)
+    assert not member.is_symlink()
+    assert not member.is_junction()
 
-    with pytest.raises(ValueError, match="junction"):
+    with pytest.raises(ValueError, match=r"reparse point: .*/linux-amd64"):
+        lark_cli._validate_lark_cli_sandbox_runtime(root)
+
+
+def test_validate_lark_cli_sandbox_runtime_rejects_cloud_placeholder_file(tmp_path, monkeypatch) -> None:
+    """A file-like reparse (OneDrive placeholder) must not enter the bind-mounted runtime."""
+    root = tmp_path / "runtime"
+    _stage_non_executable_sandbox_runtime(root)
+    placeholder = root / "linux-amd64" / "lark-cli"
+    _patch_path_reparse_point(monkeypatch, placeholder)
+    assert placeholder.is_file()
+    assert not placeholder.is_symlink()
+    assert not placeholder.is_junction()
+
+    with pytest.raises(ValueError, match=r"reparse point: .*/linux-amd64/lark-cli"):
         lark_cli._validate_lark_cli_sandbox_runtime(root)
 
 
