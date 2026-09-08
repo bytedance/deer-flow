@@ -238,10 +238,13 @@ async function submitVisibleTurn(
   const displayed = result.current.thread.messages.at(-1);
   const submittedId = displayed?.id;
   expect(typeof submittedId).toBe("string");
-  const submittedInput = streamMockState.submit.mock.calls.at(-1)?.[0] as {
-    messages: Message[];
-  };
-  expect(submittedInput.messages.at(-1)?.id).toBe(submittedId);
+  // The submit mock is an untyped rs.fn(); cast the call list once so the
+  // tuple indexing below typechecks.
+  const submitCalls = streamMockState.submit.mock.calls as unknown as Array<
+    [{ messages: Message[] }]
+  >;
+  const submittedInput = submitCalls.at(-1)?.[0];
+  expect(submittedInput?.messages.at(-1)?.id).toBe(submittedId);
   return submittedId!;
 }
 
