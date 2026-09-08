@@ -12,6 +12,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -324,22 +325,16 @@ class OpenSandboxSandbox(Sandbox):
         if depth < 0:
             raise ValueError("max_depth must be non-negative")
         resolved = self._resolve_path(path)
-        execution = self._run(f"find -H {shlex.quote(resolved)} -maxdepth {depth} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        # splitlines() already removed the terminators; do NOT strip entries —
-        # a filename that legitimately ends in whitespace would be corrupted.
-        # find -H dereferences only the start point (symlink-to-dir).
-        # An existing directory still prints itself via `find -type d`.
-        # Empty stdout with find exit 0 or 1 is the missing-path case; other
-        # statuses (e.g. 127, no find binary) are command failure, not FileNotFoundError.
+        execution = self._run(remote_list_dir_command(resolved, depth))
         error = getattr(execution, "error", None)
-        exit_code = getattr(execution, "exit_code", None)
-        if error is not None or exit_code not in (0, 1):
-            detail = f"{getattr(error, 'name', type(error).__name__)}: {getattr(error, 'value', error)}" if error is not None else f"command exited with code {exit_code}"
+        if error is not None:
+            detail = f"{getattr(error, 'name', type(error).__name__)}: {getattr(error, 'value', error)}"
             raise OSError(f"Failed to list_dir {resolved}: {detail}")
-        entries = [line for line in execution_stdout(execution).splitlines() if line]
-        if not entries:
-            raise FileNotFoundError(resolved)
-        return entries
+        return parse_remote_list_dir_output(
+            execution_stdout(execution),
+            resolved,
+            pipeline_exit_code=getattr(execution, "exit_code", None),
+        )
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
         if max_results <= 0:

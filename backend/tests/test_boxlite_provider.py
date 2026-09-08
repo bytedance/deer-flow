@@ -1354,4 +1354,4 @@ def test_list_dir_uses_find_H_to_dereference_start_point() -> None:
     box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
 
     assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace"]
-    assert any(len(argv) >= 3 and str(argv[2]).startswith("find -H ") for argv in captured)
+    assert any(len(argv) >= 3 and "find -H " in str(argv[2]) for argv in captured)

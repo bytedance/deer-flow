@@ -11,6 +11,7 @@ from e2b import FileNotFoundException
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -342,25 +343,15 @@ class E2BSandbox(Sandbox):
             if client is None:
                 raise RuntimeError("sandbox client has been closed")
             try:
-                result = client.commands.run(f"find -H {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
+                result = client.commands.run(remote_list_dir_command(resolved, max_depth))
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
                 raise OSError(f"Failed to list_dir {resolved} in e2b sandbox: {e}") from e
-            output = getattr(result, "stdout", "") or ""
-            # splitlines() already removed the terminators; do NOT strip
-            # entries — a filename that legitimately ends in whitespace
-            # would be corrupted and never resolve again.
-            # find -H dereferences only the start point (symlink-to-dir).
-            # An existing directory still prints itself via `find -type d`.
-            # Empty stdout with find exit 0 or 1 is the missing-path case; other
-            # statuses (e.g. 127, no find binary) are command failure, not FileNotFoundError.
-            exit_code = getattr(result, "exit_code", None)
-            if exit_code not in (0, 1):
-                raise OSError(f"Failed to list_dir {resolved} in e2b sandbox: command exited with code {exit_code}")
-            entries = [line for line in output.splitlines() if line]
-            if not entries:
-                raise FileNotFoundError(resolved)
-            return entries
+            return parse_remote_list_dir_output(
+                getattr(result, "stdout", "") or "",
+                resolved,
+                pipeline_exit_code=getattr(result, "exit_code", None),
+            )
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         resolved = self._resolve_path(path)

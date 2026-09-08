@@ -12,6 +12,7 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import re
 import shlex
 import sys
 import threading
@@ -154,12 +155,9 @@ class _FakeSandbox:
             return _FakeResult(exit_code=1, stdout=b"5 passed, 1 error\n")
         if "BOOTSTRAP_OK" in script:  # provider create-time bootstrap script
             return _FakeResult(stdout=b"BOOTSTRAP_OK\n")
-        if script.startswith("find "):
-            tokens = shlex.split(script)
-            i = 1
-            while i < len(tokens) and tokens[i] in ("-H", "-L", "-P"):
-                i += 1
-            root = tokens[i]
+        if script.startswith("find ") or "find -H " in script:
+            match = re.search(r"(?:^|[\s;{])find(?:\s+-[HLP])*\s+(\S+)", script)
+            root = match.group(1).strip("'\"") if match else ""
             hits = [p for p in self.files if p == root or p.startswith(f"{root.rstrip('/')}/")]
             return _FakeResult(stdout=("\n".join(hits) + "\n").encode() if hits else b"")
         if script.startswith("grep "):
@@ -634,7 +632,7 @@ def test_list_dir_forwards_max_depth() -> None:
     box = TenkiSandbox("sb", fake)
     box.write_file("/mnt/user-data/workspace/a.txt", "x")
     box.list_dir("/mnt/user-data/workspace", max_depth=4)
-    find_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("find ")]
+    find_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and "find " in c["argv"][2]]
     assert find_scripts and "-maxdepth 4" in find_scripts[-1]
 
 

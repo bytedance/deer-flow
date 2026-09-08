@@ -5249,7 +5249,7 @@ def test_list_dir_uses_find_H_to_dereference_start_point():
     sb = _make_sandbox(FakeClient(commands=commands))
 
     assert sb.list_dir("/mnt/acp-workspace") == ["/mnt/acp-workspace"]
-    assert commands.calls and commands.calls[0].startswith("find -H ")
+    assert commands.calls and "find -H " in commands.calls[0]
 
 
 def test_glob_preserves_trailing_space_in_filename():

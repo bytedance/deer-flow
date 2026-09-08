@@ -136,19 +136,16 @@ class _FakeCommands:
             return _execution(exit_code=9)
         if command == "missing-complete":
             return _execution(stderr=("stream ended",), exit_code=None)
-        if command.startswith("find "):
+        if command.startswith("find ") or "find -H " in command:
             return self._find(command)
         if command.startswith(("grep ", "{ grep ")):
             return self._grep(command)
         return _execution()
 
     def _find(self, command: str) -> _Execution:
-        tokens = shlex.split(command)
-        i = 1
-        while i < len(tokens) and tokens[i] in ("-H", "-L", "-P"):
-            i += 1
-        root = tokens[i].rstrip("/") or "/"
-        include_dirs = "d" in tokens
+        match = re.search(r"(?:^|[\s;{])find(?:\s+-[HLP])*\s+(\S+)", command)
+        root = (match.group(1).strip("'\"") if match else "").rstrip("/") or "/"
+        include_dirs = "-type d" in command
         paths = list(self._owner.file_data)
         if include_dirs:
             paths.extend(self._owner.directories)

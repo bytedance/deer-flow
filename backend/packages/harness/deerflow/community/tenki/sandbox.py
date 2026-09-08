@@ -29,6 +29,7 @@ import threading
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -368,20 +369,13 @@ class TenkiSandbox(Sandbox):
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
-        r = self._sh(f"find -H {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        # splitlines() already removed the terminators; do NOT strip entries —
-        # a filename that legitimately ends in whitespace would be corrupted.
-        # BusyBox find supports -H (find [-HL]); dereference only the start point.
-        # An existing directory still prints itself via `find -type d`.
-        # Empty stdout with find exit 0 or 1 is the missing-path case; other
-        # statuses (e.g. 127, no find binary) are command failure, not FileNotFoundError.
-        exit_code = getattr(r, "exit_code", None)
-        if exit_code not in (0, 1):
-            raise OSError(f"Failed to list_dir {resolved}: command exited with code {exit_code}")
-        entries = [self._virtual_path(line) for line in (r.stdout_text or "").splitlines() if line]
-        if not entries:
-            raise FileNotFoundError(resolved)
-        return entries
+        r = self._sh(remote_list_dir_command(resolved, max_depth))
+        entries = parse_remote_list_dir_output(
+            r.stdout_text or "",
+            resolved,
+            pipeline_exit_code=getattr(r, "exit_code", None),
+        )
+        return [self._virtual_path(line) for line in entries]
 
     def glob(
         self,
