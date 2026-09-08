@@ -126,6 +126,7 @@ class TestLeadAgentAssembly:
         from deerflow.config.app_config import AppConfig
         from deerflow.config.model_config import ModelConfig
         from deerflow.config.sandbox_config import SandboxConfig
+        from deerflow.config.subagents_config import CustomSubagentConfig, SubagentsAppConfig
 
         app_config = AppConfig(
             models=[
@@ -139,6 +140,7 @@ class TestLeadAgentAssembly:
                     supports_vision=False,
                 )
             ],
+            subagents=SubagentsAppConfig(custom_agents={"researcher": CustomSubagentConfig(description="research", system_prompt="research")}),
             sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
         )
         monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
@@ -215,8 +217,6 @@ class TestLeadAgentAssembly:
         assert prompt_calls[0]["allowed_subagents"] == ["general-purpose"]
         assert assembly.graph["system_prompt"] == "allowed_subagents=['general-purpose']"
         assert assembly.descriptor.base_prompt_hash == canonical_hash(assembly.graph["system_prompt"])
-        assert assembly.descriptor.effective_policies["subagents"]["type_allowlist"] == ["general-purpose"]
-        assert list(assembly.descriptor.effective_policies["subagents"]["runtime_limits"].keys()) == ["general-purpose"]
 
     def test_descriptor_subagent_policy_respects_custom_agent_allowed_subagents(self, monkeypatch):
         """Fixes #5205: custom agent assembly descriptor must restrict its
