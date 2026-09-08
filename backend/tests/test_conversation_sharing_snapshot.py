@@ -2343,3 +2343,72 @@ def test_underscore_id_bytes_do_not_terminate_the_reference_cut():
     assert neutralize("[my_label_](https://example.com/a_b)") == "[my_label_](https://example.com/a_b)"
     # The mount-name boundary keeps rejecting underscore-extended siblings.
     assert neutralize("files live under mnt/user-data_extra/x") == "files live under mnt/user-data_extra/x"
+
+
+def test_plain_path_floods_skip_the_workspace_machinery(monkeypatch: pytest.MonkeyPatch):
+    """A 2 MiB plain-path token cannot hold a route and must not pay for one.
+
+    Every workspace route needs the literal ``workspace``/``agents`` word in
+    its normalized view, and normalization only decodes escapes — it cannot
+    invent letters. A ``/a``-repeated flood (or entity spam decoding to
+    letters) shows neither word, so the anchor walk, the URL scan, and the
+    per-slice extent calls are all skipped instead of re-parsing every
+    slash of a route that cannot exist.
+    """
+    import app.gateway.shares.snapshot as snapshot
+
+    calls: list[int] = []
+    original = snapshot._workspace_private_source_extent
+
+    def counting(path: str):
+        calls.append(len(path))
+        return original(path)
+
+    monkeypatch.setattr(snapshot, "_workspace_private_source_extent", counting)
+
+    flood = "/a" * (1024 * 512)
+    assert _neutralize_private_references(flood) == flood
+    assert calls == []
+
+    entity_spam = "&#97;" * 200_000
+    assert _neutralize_private_references(entity_spam) == entity_spam
+    assert calls == []
+
+    # A real route behind a real boundary in the same flood shape still cuts.
+    mixed = ",".join(["/a/a/a"] * 1000) + ",/workspace/chats/SECRET7q"
+    assert "SECRET7q" not in _neutralize_private_references(mixed)
+
+
+def test_plain_workspace_word_token_memory_stays_bounded():
+    """A near-capacity workspace-word token must not build per-char maps.
+
+    The extent normalizer materialized a per-character ``(start, end)``
+    tuple list per view (two views per slice), peaking near 1 GiB for one
+    2 MiB plain token. Plain paths — no ``%``/``&``/``\\``/foldable ``//``,
+    no dot segments — are their own normalized view with an identity map.
+    """
+    import tracemalloc
+
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    attack = "/workspace/" + "a/" * (1024 * 1024 - 6)
+    tracemalloc.start()
+    try:
+        neutralize(attack)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 64 * 1024 * 1024, f"peak {peak / 1024 / 1024:.0f} MiB"
+
+
+def test_plain_path_flood_time_stays_small():
+    """The /a-repeated flood dropped from ~12s to well under a second."""
+    from time import perf_counter
+
+    attack = "/a" * (1024 * 1024)
+    started = perf_counter()
+    result = _neutralize_private_references(attack)
+    elapsed = perf_counter() - started
+
+    assert result == attack
+    assert elapsed < 2.0, f"plain flood took {elapsed:.2f}s"

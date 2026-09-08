@@ -1177,6 +1177,32 @@ def _remove_dot_segments_once(
     return "".join(out), out_spans
 
 
+# A separator run not directly after ``:`` folds to one ``/``; the run in
+# ``https://`` is a scheme separator and never folds.
+_FOLDABLE_SLASH_RUN_RE = re.compile(r"(?<!:)//")
+
+
+class _IdentitySpans:
+    """Lazy identity offset map: ``spans[i] == (i, i)`` without materializing.
+
+    Every consumer of the collapse offset maps indexes them positionally;
+    a text that cannot change under a pass (no ``&``, ``\\``, ``//``) needs
+    no per-character tuple list — a 2 MiB plain token would otherwise pay
+    hundreds of MiB per shadow view.
+    """
+
+    __slots__ = ("_length",)
+
+    def __init__(self, length: int) -> None:
+        self._length = length
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __getitem__(self, index: int) -> tuple[int, int]:
+        return (index, index)
+
+
 def _collapse_separators_with_offsets(text: str, *, resolve_dots: bool = True) -> tuple[str, list[tuple[int, int]]]:
     """Normalize escape and backslash separators for classification.
 
@@ -1200,6 +1226,14 @@ def _collapse_separators_with_offsets(text: str, *, resolve_dots: bool = True) -
     normalized like their resolved forms; ``resolve_dots=False`` yields the
     as-written view for the dual-shadow classification.
     """
+    if "&" not in text and "\\" not in text and _FOLDABLE_SLASH_RUN_RE.search(text) is None:
+        # Without entity/backslash introducers or foldable separator runs
+        # (a ``//`` after ``:`` is a scheme separator and stays) no pass can
+        # change the text; dot removal needs a real dot segment.
+        if not resolve_dots or "/." not in text:
+            return text, _IdentitySpans(len(text))
+        normalized, spans = _remove_dot_segments_once(text, _IdentitySpans(len(text)))
+        return normalized, spans
     if resolve_dots:
         normalized, spans = _remove_dot_segments_once(text, [(index, index) for index in range(len(text))])
     else:
@@ -1226,6 +1260,18 @@ def _normalize_workspace_path_with_offsets(text: str, *, resolve_dots: bool) -> 
     unicode escapes share the same bounded fixpoint, allowing their supported
     compositions while keeping work linear in the path length.
     """
+    # Identity fast path: without escape introducers (``%``, ``&``,
+    # ``\\``) no pass can change the text except separator-run folding and
+    # dot-segment removal, so a path with none of those is its own
+    # normalized view. ``None`` spans mean exactly that identity mapping —
+    # a near-capacity plain path no longer materializes a per-character
+    # tuple list per view (the measured 2 MiB case peaked near 1 GiB).
+    if "%" not in text and "&" not in text and "\\" not in text and "//" not in text:
+        if not resolve_dots or "/." not in text:
+            return text, None
+        spans = [(index, index) for index in range(len(text))]
+        normalized, spans = _remove_dot_segments_once(text, spans, encoded_dots=False)
+        return normalized, spans
     normalized = text
     spans = [(index, index) for index in range(len(text))]
     for _ in range(_COLLAPSE_MAX_PASSES):
@@ -1507,7 +1553,7 @@ def _workspace_private_source_extent(path: str) -> tuple[int, bool] | None:
         while end > match.end() and shadow[end - 1] in _WORKSPACE_REFERENCE_TRAILING_PUNCTUATION:
             end -= 1
         if end:
-            extents.append((spans[end - 1][1] + 1, opaque_tail_reached_end))
+            extents.append(((end if spans is None else spans[end - 1][1] + 1), opaque_tail_reached_end))
     if not extents:
         return None
     return max(end for end, _ in extents), any(reached for _, reached in extents)
@@ -1550,6 +1596,10 @@ def _has_private_workspace_reference(value: str) -> bool:
     separator *run* (the rendered ``//`` of a protocol-relative reference)
     never classifies.
     """
+    if not _can_hold_workspace_route(value):
+        # Neither word is reachable through any decoder this classifier
+        # runs, so no view of *value* can start a workspace route.
+        return False
     escape_collapsed: str | None = None
     if "&" in value or "\\" in value:
         escape_collapsed, _ = _collapse_separators_with_offsets(value, resolve_dots=False)
@@ -1560,7 +1610,8 @@ def _has_private_workspace_reference(value: str) -> bool:
         value = value[path_start:]
     elif not value.startswith("/") or value.startswith("//"):
         view, view_spans = _normalize_workspace_path_with_offsets(value, resolve_dots=False)
-        if not view.startswith("/") or _workspace_separator_unit_count(value[: view_spans[0][1] + 1]) > 1:
+        first_unit_end = 1 if view_spans is None else view_spans[0][1] + 1
+        if not view.startswith("/") or _workspace_separator_unit_count(value[:first_unit_end]) > 1:
             return False
     return _workspace_private_source_end(value) is not None
 
@@ -1790,10 +1841,60 @@ def _neutralize_private_references(text: str) -> str:
     return text
 
 
+_PROBE_UNICODE_ESCAPE_RE = re.compile(
+    r"\\u(?:\{0*[0-9a-f]{1,6}\}|[0-9a-f]{4}|[0-9a-f]{2})", re.IGNORECASE
+)
+
+
+def _probe_entity(match: "re.Match[str]") -> str:
+    entity = _decode_entity(match.group(0), 0)
+    return entity[0] if entity is not None else match.group(0)
+
+
+def _probe_unicode_escape(match: "re.Match[str]") -> str:
+    decoded = _decode_unicode_escape(match.group(0)[1:])
+    return decoded if decoded is not None else match.group(0)
+
+
+def _can_hold_workspace_route(value: str) -> bool:
+    """Cheap necessary condition for any workspace/agents route in *value*.
+
+    Every route the classifier can match contains the literal word
+    ``workspace`` or ``agents`` in its normalized view, and normalization
+    only decodes escapes — it cannot invent letters. So a value that shows
+    neither word literally nor after bounded percent/entity/unicode
+    decoding cannot hold a route: the anchor walk, the URL scan, and both
+    offset maps are skipped for it. This keeps a 2 MiB plain-path token
+    (``/a`` repeated) out of the workspace machinery entirely instead of
+    paying the per-token normalization cost for a route that cannot exist.
+    """
+    lowered = value.lower()
+    if "workspace" in lowered or "agents" in lowered:
+        return True
+    probe = value
+    for _ in range(_COLLAPSE_MAX_PASSES):
+        decoded = unquote(probe)
+        if "&" in decoded:
+            decoded = _HTML_ENTITY_RE.sub(_probe_entity, decoded)
+        if "\\" in decoded:
+            decoded = _PROBE_UNICODE_ESCAPE_RE.sub(_probe_unicode_escape, decoded)
+        if decoded == probe:
+            break
+        probe = decoded
+        probe_lower = probe.lower()
+        if "workspace" in probe_lower or "agents" in probe_lower:
+            return True
+    # Leftover introducers may still compose just past the probe budget;
+    # fall through conservatively rather than risk a false skip.
+    return "%" in probe or "&" in probe or "\\" in probe
+
+
 def _iter_workspace_source_tokens(text: str) -> Iterator[tuple[str, int]]:
     """Split source tokens where renderer normalization creates whitespace."""
     for match in _WORKSPACE_TEXT_TOKEN_RE.finditer(text):
         value = match.group(0)
+        if not _can_hold_workspace_route(value):
+            continue
         if "&" not in value and "\\" not in value:
             yield value, match.start()
             continue
