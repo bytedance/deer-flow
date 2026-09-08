@@ -130,6 +130,9 @@ export function ScheduledTaskScheduleInput({
   );
   const initialInterval = parseInitialInterval(initial.schedule_spec);
   const [intervalAmount, setIntervalAmount] = useState(initialInterval.amount);
+  const [intervalAmountText, setIntervalAmountText] = useState(
+    String(initialInterval.amount),
+  );
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
     initialInterval.unit,
   );
@@ -352,15 +355,25 @@ export function ScheduledTaskScheduleInput({
             type="number"
             min={minIntervalAmount(intervalUnit)}
             max={maxIntervalAmount(intervalUnit)}
-            value={intervalAmount}
+            value={intervalAmountText}
             onChange={(e) => {
-              const next = Number(e.target.value);
-              if (!Number.isFinite(next)) {
+              // Do not clamp on every keystroke: typing 90 would otherwise
+              // become 9 -> 60, then 600. Emit/blur still apply the floor.
+              const raw = e.target.value;
+              setIntervalAmountText(raw);
+              const next = Number(raw);
+              if (!Number.isInteger(next) || next <= 0) {
                 return;
               }
-              setIntervalAmount(
-                clampIntervalAmount(next, intervalUnit),
+              setIntervalAmount(next);
+            }}
+            onBlur={() => {
+              const next = clampIntervalAmount(
+                Number(intervalAmountText),
+                intervalUnit,
               );
+              setIntervalAmount(next);
+              setIntervalAmountText(String(next));
             }}
             aria-label={labels.fields.intervalAmount}
           />
@@ -369,9 +382,9 @@ export function ScheduledTaskScheduleInput({
             onValueChange={(value) => {
               const unit = value as IntervalUnit;
               setIntervalUnit(unit);
-              setIntervalAmount((amount) =>
-                clampIntervalAmount(amount, unit),
-              );
+              const next = clampIntervalAmount(intervalAmount, unit);
+              setIntervalAmount(next);
+              setIntervalAmountText(String(next));
             }}
           >
             <SelectTrigger
