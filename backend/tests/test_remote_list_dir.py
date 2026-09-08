@@ -49,9 +49,23 @@ def test_parse_sigpipe_truncated_listing_is_success() -> None:
 def test_parse_falls_back_to_pipeline_exit_without_marker() -> None:
     with pytest.raises(OSError, match="exited with code 127"):
         parse_remote_list_dir_output("", "/dir", pipeline_exit_code=127)
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(OSError, match="marker missing"):
         parse_remote_list_dir_output("", "/dir", pipeline_exit_code=0)
-    assert parse_remote_list_dir_output("/dir\n", "/dir", pipeline_exit_code=0) == ["/dir"]
+    with pytest.raises(OSError, match="marker missing"):
+        parse_remote_list_dir_output("/dir\n", "/dir", pipeline_exit_code=0)
+
+
+@_POSIX_SH
+def test_parse_without_marker_real_subprocess_status_is_not_always_ok() -> None:
+    """``rm -f`` exits 0/1, both in _FIND_OK. A real process status with no marker must not become FileNotFoundError."""
+    for script in ("exit 0", "exit 1"):
+        proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
+        with pytest.raises(OSError, match="marker missing"):
+            parse_remote_list_dir_output(
+                proc.stdout,
+                "/dir",
+                pipeline_exit_code=proc.returncode,
+            )
 
 
 def test_command_records_find_status_after_head() -> None:
@@ -63,6 +77,7 @@ def test_command_records_find_status_after_head() -> None:
     assert "__DF_FIND_STATUS__:" in command
     assert command.index("find -H ") < command.index("head -n")
     assert command.index("head -n") < command.index("__DF_FIND_STATUS__:")
+    assert 'exit "${st:-126}"' in command
 
 
 def _run_list_dir_script(command: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -114,6 +129,7 @@ def test_list_dir_command_surfaces_find_127_not_head_0(tmp_path) -> None:
         remote_list_dir_command("/dir", 2),
         env=_env_with_bin(str(fake_bin)),
     )
+    assert proc.returncode == 127
     with pytest.raises(OSError, match="exited with code 127"):
         parse_remote_list_dir_output(proc.stdout, "/dir", pipeline_exit_code=proc.returncode)
 
@@ -125,6 +141,7 @@ def test_list_dir_command_records_find_127_under_set_e(tmp_path) -> None:
         "set -e; " + remote_list_dir_command("/dir", 2),
         env=_env_with_bin(str(fake_bin)),
     )
+    assert proc.returncode == 127
     with pytest.raises(OSError, match="exited with code 127"):
         parse_remote_list_dir_output(proc.stdout, "/dir", pipeline_exit_code=proc.returncode)
 

@@ -29,13 +29,16 @@ def remote_list_dir_command(path: str, max_depth: int, *, limit: int = _LIST_LIM
     n = int(limit)
     # Status file is written by the find side of the pipe, then printed AFTER
     # head so a 500-line listing cannot truncate the marker. ``set +e`` undoes
-    # a login-profile ``set -e`` so a failing find still records $?.
+    # a login-profile ``set -e`` so a failing find still records $?. End with
+    # ``exit`` of that status (126 if the file is missing): the last command
+    # would otherwise be ``rm``, whose 0/1 is not find's status.
     return (
         f"set +e; _st=/tmp/df_find_$$; "
         f"{{ find -H {quoted} -maxdepth {depth} \\( -type f -o -type d \\) 2>/dev/null; "
         f'echo $? > "$_st"; }} | head -n {n}; '
-        f'printf \'\\n%s\\n\' {_STATUS_PREFIX}$(cat "$_st"); '
-        f'rm -f "$_st"'
+        f'st=$(cat "$_st" 2>/dev/null); '
+        f'printf \'\\n%s\\n\' {_STATUS_PREFIX}$st; '
+        f'rm -f "$_st"; exit "${{st:-126}}"'
     )
 
 
@@ -69,7 +72,14 @@ def parse_remote_list_dir_output(
             lines.pop()
 
     if find_status is None:
-        find_status = pipeline_exit_code
+        # Do not treat a missing marker as success. The process status used to
+        # be ``rm``'s (0/1, both in _FIND_OK), which reclassified a lost 127
+        # as FileNotFoundError.
+        if pipeline_exit_code is not None and pipeline_exit_code not in _FIND_OK:
+            raise OSError(
+                f"Failed to list_dir {resolved}: command exited with code {pipeline_exit_code}"
+            )
+        raise OSError(f"Failed to list_dir {resolved}: find status marker missing")
     if find_status not in _FIND_OK:
         raise OSError(f"Failed to list_dir {resolved}: command exited with code {find_status}")
 
