@@ -4,6 +4,7 @@ import { getPageMap } from "nextra/page-map";
 import { Layout } from "nextra-theme-docs";
 
 import { buildLocalizedDocsPageMap } from "@/components/docs/docs-page-map";
+import { DocsLanguageProvider } from "@/components/docs/docs-language-context";
 import { Footer } from "@/components/landing/footer";
 import { Header } from "@/components/landing/header";
 import { getLocaleByLang } from "@/core/i18n/locale";
@@ -21,21 +22,23 @@ export default async function DocLayout({ children, params }) {
   const pageMap = buildLocalizedDocsPageMap(`/${lang}/docs`, pages);
 
   return (
-    <Layout
-      navbar={
-        <Header
-          className="sticky max-w-full px-10"
-          homeURL="/"
-          locale={locale}
-        />
-      }
-      pageMap={pageMap}
-      docsRepositoryBase="https://github.com/bytedance/deer-flow/tree/main/frontend"
-      footer={<Footer className="mt-0" />}
-      i18n={i18n}
-      // ... Your additional layout options
-    >
-      {children}
-    </Layout>
+    <DocsLanguageProvider lang={lang}>
+      <Layout
+        navbar={
+          <Header
+            className="sticky max-w-full px-10"
+            homeURL="/"
+            locale={locale}
+          />
+        }
+        pageMap={pageMap}
+        docsRepositoryBase="https://github.com/bytedance/deer-flow/tree/main/frontend"
+        footer={<Footer className="mt-0" />}
+        i18n={i18n}
+        // ... Your additional layout options
+      >
+        {children}
+      </Layout>
+    </DocsLanguageProvider>
   );
 }
