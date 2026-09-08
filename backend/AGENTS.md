@@ -320,7 +320,7 @@ engines are removed, and an empty set falls back to it. Re-check on DDGS upgrade
 
 ### File Upload
 
-Multi-file upload with automatic document conversion:
+Multi-file uploads convert documents; outlines skip fenced code:
 - Endpoint: `POST /api/threads/{thread_id}/uploads`
 - Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
 - Rejects directory inputs before copying so uploads stay all-or-nothing

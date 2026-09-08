@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 import sqlalchemy as sa
+from alembic import command as alembic_command
 from alembic.util.exc import CommandError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -28,7 +29,7 @@ from deerflow.persistence.engine import close_engine, get_engine, init_engine_fr
 from deerflow.persistence.mcp_tasks import McpTaskRepository
 from deerflow.persistence.thread_meta import ThreadMetaRepository
 
-HEAD = "0019_batch_acceptance"
+HEAD = "0021_batch_acceptance"
 POSTGRES_URL = os.environ.get("TEST_POSTGRES_URI")
 
 
@@ -56,6 +57,94 @@ async def _set_database_revision(engine, revision: str) -> None:
 async def _seed_head(engine) -> None:
     await bootstrap_schema(engine, backend="sqlite")
     assert await _database_revision(engine) == HEAD
+
+
+async def _seed_original_forward_schema(engine) -> None:
+    # The rollout predates projects: seeding today's head masks missing columns.
+    await asyncio.to_thread(_upgrade, _get_alembic_config(engine), "0018_oauth_identity_pg_partial")
+    await _add_forward_columns(engine)
+    await _set_database_revision(engine, _FORWARD_COMPATIBLE_REVISION)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("concurrent", [False, True])
+async def test_original_forward_schema_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, concurrent: bool) -> None:
+    engine = create_async_engine(_url(tmp_path, "original-forward.db"))
+    try:
+        await _seed_original_forward_schema(engine)
+        if concurrent:
+            await _set_database_revision(engine, "0018_oauth_identity_pg_partial")
+
+            def concurrent_upgrade(_cfg, _revision):
+                asyncio.run(_set_database_revision(engine, _FORWARD_COMPATIBLE_REVISION))
+                raise CommandError("revision advanced concurrently")
+
+            monkeypatch.setattr(bootstrap_mod, "_upgrade", concurrent_upgrade)
+
+        with pytest.raises(RuntimeError, match="missing.*projects.*threads_meta.project_id"):
+            await bootstrap_schema(engine, backend="sqlite")
+
+        assert await _database_revision(engine) == _FORWARD_COMPATIBLE_REVISION
+        async with engine.connect() as conn:
+            tables = await conn.run_sync(lambda sync: sa.inspect(sync).get_table_names())
+        assert "projects" not in tables
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ddl", "missing"),
+    [
+        ("DROP TABLE projects", "projects"),
+        ("ALTER TABLE projects DROP COLUMN instructions", "projects.instructions"),
+        ("ALTER TABLE threads_meta DROP COLUMN project_id", "threads_meta.project_id"),
+    ],
+)
+async def test_forward_revision_rejects_partial_project_schema(tmp_path: Path, ddl: str, missing: str) -> None:
+    engine = create_async_engine(_url(tmp_path, "partial-projects.db"))
+    try:
+        await _seed_head(engine)
+        await _add_forward_columns(engine)
+        async with engine.begin() as conn:
+            if "DROP COLUMN project_id" in ddl:
+                await conn.execute(sa.text("DROP INDEX ix_threads_meta_project_id"))
+            await conn.execute(sa.text(ddl))
+        await _set_database_revision(engine, _FORWARD_COMPATIBLE_REVISION)
+
+        with pytest.raises(RuntimeError, match=f"missing required local schema: {missing};"):
+            await bootstrap_schema(engine, backend="sqlite")
+        assert await _database_revision(engine) == _FORWARD_COMPATIBLE_REVISION
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_audited_original_forward_schema_can_upgrade_preserving_incarnations(tmp_path: Path) -> None:
+    engine = create_async_engine(_url(tmp_path, "forward-recovery.db"))
+    try:
+        await _seed_original_forward_schema(engine)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text("INSERT INTO threads_meta (thread_id, status, metadata_json, created_at, updated_at, incarnation) VALUES ('existing', 'idle', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, :incarnation)"),
+                {"incarnation": "a" * 32},
+            )
+
+        # Documented offline operator recovery, only after verifying the exact
+        # 0018 + two nullable columns shape. Bootstrap never re-stamps an unknown DB.
+        await asyncio.to_thread(alembic_command.stamp, _get_alembic_config(engine), "0018_oauth_identity_pg_partial", purge=True)
+        await bootstrap_schema(engine, backend="sqlite")
+
+        assert await _database_revision(engine) == HEAD
+        repository = ThreadMetaRepository(async_sessionmaker(engine, expire_on_commit=False))
+        assert [row["thread_id"] for row in await repository.search(user_id=None)] == ["existing"]
+        assert (await repository.create("new", user_id=None))["thread_id"] == "new"
+        async with engine.connect() as conn:
+            assert (await conn.execute(sa.text("SELECT incarnation FROM threads_meta WHERE thread_id = 'existing'"))).scalar_one() == "a" * 32
+            columns = await conn.run_sync(lambda sync: sa.inspect(sync).get_columns("mcp_tasks"))
+        assert "thread_incarnation" in {column["name"] for column in columns}
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

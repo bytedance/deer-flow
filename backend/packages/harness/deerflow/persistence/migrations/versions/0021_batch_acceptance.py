@@ -1,15 +1,15 @@
 """Persist optional durable batch acceptance criteria and verdicts.
 
-Revision ID: 0019_batch_acceptance
-Revises: 0018_oauth_identity_pg_partial
+Revision ID: 0021_batch_acceptance
+Revises: 0020_threads_meta_project_id
 """
 
 from __future__ import annotations
 
 import sqlalchemy as sa
 
-revision = "0019_batch_acceptance"
-down_revision = "0018_oauth_identity_pg_partial"
+revision = "0021_batch_acceptance"
+down_revision = "0020_threads_meta_project_id"
 branch_labels = None
 depends_on = None
 
