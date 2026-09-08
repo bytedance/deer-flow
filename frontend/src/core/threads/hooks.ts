@@ -772,6 +772,12 @@ export function resolveTransientHistoryBridge(
       unpositioned.push(message);
     }
   }
+  // Place rescued seq rows first so weaving can anchor unsequenced
+  // neighbors to them without a later insertion reversing their order.
+  const positionedHistory = insertByTrustedSeq(visibleHistory, seqPositioned);
+  const anchorIdentities = new Set(
+    positionedHistory.map(messageIdentity).filter(isNonEmptyString),
+  );
   const missingByIdentity = new Map(
     unpositioned.flatMap((message) => {
       const identity = messageIdentity(message);
@@ -791,7 +797,7 @@ export function resolveTransientHistoryBridge(
   let hasCanonicalAnchor = false;
 
   for (const identity of bridgeOrder) {
-    if (presentIdentities.has(identity)) {
+    if (anchorIdentities.has(identity)) {
       if (pending.length > 0) {
         if (hasCanonicalAnchor) {
           beforeAnchor.set(identity, [
@@ -846,10 +852,7 @@ export function resolveTransientHistoryBridge(
   // persistence-gap case: loaded history is older and the rescued live turns
   // belong after it.
   if (!lastAnchorIdentity) {
-    return insertByTrustedSeq(
-      [...visibleHistory, ...unpositioned],
-      seqPositioned,
-    );
+    return [...positionedHistory, ...unpositioned];
   }
 
   // A candidate added before its ordering snapshot (or carrying an identity
@@ -864,7 +867,7 @@ export function resolveTransientHistoryBridge(
   }
 
   const resolved: Message[] = [];
-  for (const message of visibleHistory) {
+  for (const message of positionedHistory) {
     const identity = messageIdentity(message);
     if (identity) {
       resolved.push(...(beforeAnchor.get(identity) ?? []));
@@ -874,7 +877,7 @@ export function resolveTransientHistoryBridge(
       resolved.push(...pending);
     }
   }
-  return insertByTrustedSeq(resolved, seqPositioned);
+  return resolved;
 }
 
 export function mergeTransientHistoryBridge(

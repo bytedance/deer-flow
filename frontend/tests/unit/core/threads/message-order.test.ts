@@ -437,3 +437,34 @@ test("a seq carried only by a hidden control copy still positions its visible tw
   expect(seqsOf(merged)).toEqual([1, 2, 3]);
   expect(merged[1]!.content).toBe("visible twin");
 });
+
+test("live-only sequenced results anchor preceding unsequenced steps", () => {
+  const start = msg("start", "human", "start", 1);
+  const end = msg("end", "ai", "end", 9);
+  const step = msg("step", "ai", "step");
+  const result = msg("result", "ai", "result", 3);
+  expect(
+    idsOf(mergeMessages([start, end], [start, step, result, end], [])),
+  ).toEqual(["start", "step", "result", "end"]);
+});
+
+test.each(["before", "after"] as const)(
+  "bridge keeps an unsequenced step %s its rescued sequenced neighbor",
+  (side) => {
+    const start = msg("start", "human", "start", 1);
+    const end = msg("end", "ai", "end", 9);
+    const step = msg("step", "ai", "step");
+    const result = msg("result", "ai", "result", 3);
+    const rescued = side === "before" ? [step, result] : [result, step];
+    const previous = [start, ...rescued, end];
+    const order = previous.map((message) => messageIdentity(message)!);
+    const resolved = resolveTransientHistoryBridge(
+      [start, end],
+      rescued,
+      order,
+      order,
+    );
+    expect(idsOf(resolved)).toEqual(idsOf(previous));
+    expect(idsOf(mergeMessages(resolved, [], []))).toEqual(idsOf(previous));
+  },
+);

@@ -301,6 +301,9 @@ export function mergeMessages(
       continue;
     }
     if (identity && trustedSeqOf(identity) !== undefined) {
+      // A positioned live-only result also anchors its preceding steps.
+      beforeAnchor.set(identity, pending);
+      pending = [];
       skeletonLive.push(message);
       continue;
     }
@@ -353,6 +356,11 @@ export function mergeMessages(
   for (const message of skeletonLive) {
     const seq = trustedSeqOf(messageIdentity(message));
     if (seq !== undefined) {
+      for (const segmentMessage of beforeAnchor.get(
+        messageIdentity(message)!,
+      ) ?? []) {
+        entries.push({ message: segmentMessage, major: seq, minor: -0.5 });
+      }
       entries.push({ message, major: seq, minor: 0 });
     }
   }
