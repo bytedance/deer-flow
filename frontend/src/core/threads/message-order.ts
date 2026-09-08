@@ -15,7 +15,9 @@
  * Ordering uses a skeleton of every identity with a trusted seq, sorted by
  * position, and weaves segments without seq around shared-identity anchors
  * exactly as before: internal segment order is preserved, a segment goes
- * before its next anchor, and conflicting speculative constraints lose to
+ * before its next anchor. Live-only positioned entries within the loaded
+ * window also anchor trailing segments; rescued prefixes before that window
+ * leave new steps at the tail. Conflicting speculative constraints lose to
  * the skeleton. `deerflow_seq` is server-owned display metadata — it is
  * never written back into a checkpoint by the client.
  *
@@ -191,8 +193,10 @@ type PositionedMessage = {
  *    no-shared-identity case alike (this replaces the old canonicalMinSeq
  *    local rule, which could not place a window-internal gap: R4).
  * 3. Live-only messages without a seq keep the existing anchor weaving: a
- *    pending segment goes before its next shared anchor (or trails after the
- *    last one), its internal order untouched.
+ *    pending segment goes before its next shared or positioned anchor. A
+ *    trailing segment follows its last live-only positioned anchor unless
+ *    that anchor predates the loaded window; otherwise it keeps the tail.
+ *    Its internal order is untouched.
  * 4. When a speculative anchor and the skeleton disagree, the skeleton wins;
  *    established seq order is never reversed to fit a no-seq segment.
  *
@@ -275,6 +279,7 @@ export function mergeMessages(
   const beforeAnchor = new Map<string, Message[]>();
   const skeletonLive: Message[] = [];
   let pending: Message[] = [];
+  let trailingAnchorSeq: number | undefined;
   for (const message of live) {
     const identity = messageIdentity(message);
     const canonicalMessage = identity
@@ -288,6 +293,7 @@ export function mergeMessages(
         ]);
       }
       pending = [];
+      trailingAnchorSeq = undefined;
       // A hidden checkpoint control message must not replace a visible
       // canonical user turn that happens to reuse its identity. In every
       // other case the live checkpoint copy is fresher and replaces history
@@ -305,14 +311,13 @@ export function mergeMessages(
       beforeAnchor.set(identity, pending);
       pending = [];
       skeletonLive.push(message);
+      trailingAnchorSeq = trustedSeqOf(identity);
       continue;
     }
     pending.push(message);
   }
-  // A trailing live-only segment is known to come after the last shared
-  // anchor, but that anchor may not be the end of canonical history (for
-  // example, another client may have persisted newer rows). Preserve the
-  // canonical source order before appending the live tail.
+  // Only a live-only positioned anchor can pull trailing steps into a gap.
+  // After a shared anchor, preserve canonical source order before the tail.
   const trailingPending = pending;
 
   // Pass 3: position canonical entries. A canonical entry without a trusted
@@ -321,6 +326,7 @@ export function mergeMessages(
   const entries: PositionedMessage[] = [];
   let minorCounter = 0;
   let previousCanonicalSeq = 0;
+  let firstCanonicalSeq = Number.POSITIVE_INFINITY;
   for (const message of canonical) {
     const identity = messageIdentity(message);
     const seq = trustedSeqOf(identity);
@@ -330,6 +336,7 @@ export function mergeMessages(
       major = seq;
       minor = 0;
       previousCanonicalSeq = seq;
+      firstCanonicalSeq = Math.min(firstCanonicalSeq, seq);
     } else {
       major = previousCanonicalSeq;
       minor = ++minorCounter;
@@ -364,7 +371,17 @@ export function mergeMessages(
       entries.push({ message, major: seq, minor: 0 });
     }
   }
-  for (const message of [...trailingPending, ...optimisticMessages]) {
+  // A rescued early input may precede an unloaded history gap while its
+  // followers belong to the new run (#4666). Keep those followers at the
+  // tail; within the loaded window, keep trailing steps beside their result.
+  const trailingMajor =
+    trailingAnchorSeq !== undefined && trailingAnchorSeq >= firstCanonicalSeq
+      ? trailingAnchorSeq
+      : Number.POSITIVE_INFINITY;
+  for (const message of trailingPending) {
+    entries.push({ message, major: trailingMajor, minor: 0.5 });
+  }
+  for (const message of optimisticMessages) {
     entries.push({
       message,
       major: Number.POSITIVE_INFINITY,

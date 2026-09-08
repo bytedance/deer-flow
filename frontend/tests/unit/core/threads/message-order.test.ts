@@ -448,6 +448,44 @@ test("live-only sequenced results anchor preceding unsequenced steps", () => {
   ).toEqual(["start", "step", "result", "end"]);
 });
 
+test.each([true, false])(
+  "live-only sequenced results anchor trailing steps (shared identity: %s)",
+  (shared) => {
+    const start = msg("start", "human", "start", 1);
+    const end = msg("end", "ai", "end", 9);
+    const before = msg("before", "ai", "preceding step");
+    const result = msg("result", "ai", "result", 3);
+    const after = msg("after", "ai", "following step");
+    const last = msg("last", "ai", "last step");
+    const optimistic = msg("optimistic", "human", "next question");
+    const live = [...(shared ? [start] : []), before, result, after, last];
+
+    expect(idsOf(mergeMessages([start, end], live, [optimistic]))).toEqual([
+      "start",
+      "before",
+      "result",
+      "after",
+      "last",
+      "end",
+      "optimistic",
+    ]);
+  },
+);
+
+test("a later shared anchor ends the live-only result's trailing segment", () => {
+  const start = msg("start", "human", "start", 1);
+  const result = msg("result", "ai", "result", 3);
+  const shared = msg("shared", "ai", "shared", 5);
+  const end = msg("end", "ai", "end", 9);
+  const after = msg("after", "ai", "new step");
+
+  expect(
+    idsOf(
+      mergeMessages([start, shared, end], [start, result, shared, after], []),
+    ),
+  ).toEqual(["start", "result", "shared", "end", "after"]);
+});
+
 test.each(["before", "after"] as const)(
   "bridge keeps an unsequenced step %s its rescued sequenced neighbor",
   (side) => {
