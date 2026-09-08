@@ -300,6 +300,7 @@ export function InputBox({
   onPrepareThread,
   onSubmit,
   onStop,
+  canStopStreaming = true,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -356,6 +357,13 @@ export function InputBox({
     options?: InputBoxSubmitOptions,
   ) => void | Promise<void>;
   onStop?: () => void;
+  /**
+   * Whether the caller's role holds `runs:cancel` (RFC #4063 Phase 4).
+   * Defaults to true so callers that don't resolve permissions (pre-Phase-4
+   * backends, storybook) keep today's behavior; the Gateway route guard
+   * stays the enforcement point.
+   */
+  canStopStreaming?: boolean;
 }) {
   const { locale, t } = useI18n();
   const queryClient = useQueryClient();
@@ -1163,6 +1171,13 @@ export function InputBox({
   );
 
   const handleStopStreaming = useCallback(() => {
+    // Roles denied runs:cancel must not interrupt the in-progress turn —
+    // the Gateway would 403 the cancel anyway. Gate here so every entry
+    // point (button click, Enter-key form submit routed as kind "stop")
+    // converges on one check.
+    if (!canStopStreaming) {
+      return;
+    }
     // Mark the in-progress turn as user-interrupted so the next
     // streaming->ready transition does not suggest follow-ups for it.
     stoppedByUserRef.current = true;
@@ -1170,7 +1185,7 @@ export function InputBox({
     setFollowupsHidden(true);
     setFollowupsLoading(false);
     onStop?.();
-  }, [onStop]);
+  }, [canStopStreaming, onStop]);
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
@@ -2739,7 +2754,9 @@ export function InputBox({
             </ModelSelector>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={composerLocked}
+              disabled={
+                composerLocked || (status === "streaming" && !canStopStreaming)
+              }
               variant="outline"
               status={status}
               onClick={(e) => {
