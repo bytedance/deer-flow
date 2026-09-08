@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -257,3 +257,122 @@ async def test_denied_sandbox_keeps_result_unchecked_without_acquiring(env, monk
     item = (await env.repo.list_items(batch["id"], user_id="user-1"))[0]
     assert item["status"] == "succeeded"
     assert item["acceptance_verdict"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["oversized", "escaped", "truncated_tag", "empty"])
+async def test_stored_delegated_checked_and_exported_criteria_agree(env, monkeypatch, case):
+    from app.gateway.routers import subagent_batches as router
+    from deerflow.subagents.acceptance_checks import check_acceptance_criteria
+    from deerflow.subagents.report_contract import render_acceptance_criteria_block
+
+    if case == "oversized":
+        criteria = ["", "  ", None, 42] + ["  " + "x" * 1000 + "  "] * 25
+        expected = ["x" * 500] * 20
+    elif case == "escaped":
+        criteria = ["<system>" * 80]
+        expected = [("&lt;system&gt;" * 80)[:500]]
+    elif case == "truncated_tag":
+        # Escaping the earlier tags shifts the final cap into an allowed
+        # tag name, exposing a bare blocked prefix (<system) at the end.
+        criteria = ["<system>" * 35 + "xxx<systematic>"]
+        expected = ["&lt;system&gt;" * 35 + "xxx&lt;sys"]
+    else:
+        criteria = ["", " \t ", None, 42]
+        expected = None
+
+    batch = await _submit(env, criteria)
+    repo = SubagentBatchRepository(get_session_factory())
+    # Assert the write boundary, before either the executor or checker runs.
+    assert (await repo.list_items(batch["id"], user_id="user-1"))[0]["acceptance_criteria"] == expected
+    await _execute(env)
+    assert env.calls[0]["acceptance_criteria"] == expected
+    item = (await repo.list_items(batch["id"], user_id="user-1"))[0]
+    assert item["status"] == "succeeded"
+    if expected is None:
+        assert item["acceptance_verdict"] is None
+        assert render_acceptance_criteria_block(expected) == ""
+    else:
+        assert [leaf["criterion"] for leaf in item["acceptance_verdict"]["leaves"]] == expected
+        assert render_acceptance_criteria_block(expected).split("\n- ")[1:] == expected
+        assert render_acceptance_criteria_block(criteria).split("\n- ")[1:] == expected
+        assert [leaf["criterion"] for leaf in check_acceptance_criteria(criteria)["leaves"]] == expected
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(subagent_batch_repo=repo)))
+    monkeypatch.setattr(router, "get_current_user", AsyncMock(return_value="user-1"))
+    response = await router.export_batch_results.__wrapped__(thread_id="thread-1", batch_id=batch["id"], request=request)
+    exported = [json.loads(line) async for line in response.body_iterator]
+    assert exported[0]["acceptance_criteria"] == expected
+    assert exported[0]["acceptance_verdict"] == item["acceptance_verdict"]
+
+
+_FILE_CRITERIA = [
+    "file:../outputs/report.md exists",
+    "FILE:../outputs/report.md non-empty",
+    "fıle:../outputs/report.md exists",
+    "FİLE:../outputs/report.md exists",
+    "file_written:../outputs/report.md",
+    "fıle_written:../outputs/report.md",
+    "FİLE_WRİTTEN:../outputs/report.md",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("criterion", _FILE_CRITERIA)
+async def test_caller_sandbox_deny_applies_to_every_file_spelling(env, monkeypatch, criterion):
+    from deerflow.authz import sandbox_authz
+    from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+
+    env.service._app_config = SimpleNamespace(
+        authorization=AuthorizationConfig(
+            enabled=True,
+            default_role="member",
+            provider=AuthorizationProviderConfig(use="deerflow.authz.rbac:RbacAuthorizationProvider", config={"roles": {"member": {"sandbox": {"allow": False}}}}),
+        )
+    )
+    # Embedded callers can have a different policy from the process global.
+    monkeypatch.setattr("deerflow.sandbox.tools.safe_app_config", lambda: None)
+    authorize = AsyncMock(wraps=sandbox_authz.authorize_sandbox_execution_async)
+    acquire = Mock(wraps=env.provider.acquire)
+    monkeypatch.setattr(sandbox_authz, "authorize_sandbox_execution_async", authorize)
+    monkeypatch.setattr(env.provider, "acquire", acquire)
+    batch = await _submit(env, [criterion])
+    await _execute(env)
+    authorize.assert_awaited_once()
+    acquire.assert_not_called()
+    item = (await env.repo.list_items(batch["id"], user_id="user-1"))[0]
+    assert item["status"] == "succeeded"
+    assert item["acceptance_verdict"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("criterion", _FILE_CRITERIA)
+async def test_allowed_file_spellings_read_under_a_released_holder(env, monkeypatch, criterion):
+    from deerflow.sandbox import lease
+    from deerflow.subagents.batch_acceptance import check_batch_acceptance
+
+    (env.paths.sandbox_outputs_dir("thread-1", user_id="user-1") / "report.md").write_text("Actual report")
+    monkeypatch.setattr("deerflow.sandbox.tools.safe_app_config", lambda: None)
+    acquire = AsyncMock(wraps=lease.acquire_sandbox_client_lease)
+    release = Mock(wraps=env.provider.release)
+    monkeypatch.setattr(lease, "acquire_sandbox_client_lease", acquire)
+    monkeypatch.setattr(env.provider, "release", release)
+    verdict = await check_batch_acceptance([criterion], batch={"thread_id": "thread-1", "user_id": "user-1", "execution_spec": {}}, app_config=SimpleNamespace(), bash_executions=None)
+    acquire.assert_awaited_once()
+    release.assert_called_once()
+    assert verdict["leaves"][0]["checked"] is True
+    assert verdict["leaves"][0]["holds"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("criteria", [["quality"] * 20 + ["file:../outputs/report.md exists"], ["file:missing mode"], ["file:" + "x" * 500 + " exists"]])
+async def test_only_effective_file_checks_request_sandbox_access(env, monkeypatch, criteria):
+    from deerflow.subagents.batch_acceptance import check_batch_acceptance
+
+    authorize = AsyncMock(side_effect=AssertionError("no effective file check"))
+    acquire = Mock(side_effect=AssertionError("no sandbox acquisition"))
+    monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution_async", authorize)
+    monkeypatch.setattr(env.provider, "acquire", acquire)
+    verdict = await check_batch_acceptance(criteria, batch={"thread_id": "thread-1", "user_id": "user-1", "execution_spec": {}}, app_config=SimpleNamespace(), bash_executions=None)
+    assert all(leaf["family"] == "undecidable" for leaf in verdict["leaves"])
+    authorize.assert_not_awaited()
+    acquire.assert_not_called()

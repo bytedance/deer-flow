@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.subagents.acceptance_checks import AcceptanceVerdict, validate_acceptance_verdict
 from deerflow.subagents.batch_runtime import BatchItemInput
+from deerflow.subagents.report_contract import normalize_acceptance_criteria
 from deerflow.utils.time import coerce_iso
 
 BATCH_ACTIVE_STATUSES = ("queued", "running", "paused")
@@ -135,7 +136,7 @@ class SubagentBatchRepository:
                 item_key=item["key"],
                 position=position,
                 prompt=item["prompt"],
-                acceptance_criteria=item.get("acceptance_criteria"),
+                acceptance_criteria=normalize_acceptance_criteria(item.get("acceptance_criteria")) or None,
                 status="pending",
                 attempt=0,
                 result_truncated=False,

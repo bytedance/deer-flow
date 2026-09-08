@@ -6,7 +6,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from deerflow.config.app_config import AppConfig
-from deerflow.subagents.acceptance_checks import AcceptanceVerdict, check_acceptance_criteria
+from deerflow.subagents.acceptance_checks import AcceptanceVerdict, check_acceptance_criteria, parse_file_criterion
+from deerflow.subagents.report_contract import normalize_acceptance_criteria
 
 
 def _thread_data(thread_id: str, user_id: str) -> dict[str, str]:
@@ -31,6 +32,9 @@ async def check_batch_acceptance(
     from deerflow.sandbox.lease import SANDBOX_LEASE_OWNER_CONTEXT_KEY, acquire_sandbox_client_lease, run_sync_lifecycle_operation
     from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
+    criteria = await run_sync_lifecycle_operation(normalize_acceptance_criteria, criteria)
+    if not criteria:
+        return None
     thread_id, user_id = batch["thread_id"], batch["user_id"]
     spec = batch["execution_spec"]
     context = {key: spec.get(key) for key in ("user_role", "oauth_provider", "oauth_id", "channel_user_id", "is_internal", "authz_attributes")}
@@ -41,7 +45,7 @@ async def check_batch_acceptance(
     try:
         # Evidence-only / unsupported conditions need no sandbox. File checks
         # use an authorized, owner-scoped holder of the shared thread sandbox.
-        if any(isinstance(criterion, str) and criterion.strip().lower().startswith(("file:", "file_written:")) for criterion in criteria):
+        if any(parse_file_criterion(criterion) is not None for criterion in criteria):
             await authorize_sandbox_execution_async(context=context, app_config=app_config)
             provider = await run_sync_lifecycle_operation(get_sandbox_provider)
             lease = await acquire_sandbox_client_lease(provider, thread_id, user_id=user_id, owner_prefix="batch-acceptance")

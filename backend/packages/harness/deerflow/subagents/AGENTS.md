@@ -1,9 +1,11 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-**Durable batch acceptance**: `batch_task` persists optional per-item criteria and
-passes them to the native executor's existing untrusted report-contract input.
+**Durable batch acceptance**: `batch_task` normalizes optional per-item criteria
+before persistence (empty becomes null; 20 items × 500 neutralized characters),
+sharing `normalize_acceptance_criteria` with the executor and checker.
 Completed items reuse `acceptance_checks` through `batch_acceptance.py`, with
-owner-scoped thread paths, sandbox authorization and a client lease. Blocking
+owner-scoped thread paths, sandbox authorization and a client lease. Admission
+and checks share `parse_file_criterion` on the effective normalized list. Blocking
 reads drain before release on cancellation, and the batch item lease is renewed
 while checking. The nullable validated verdict survives repository queries and
 JSONL exports independently of execution status. No criteria, checker errors,
