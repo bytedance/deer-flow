@@ -187,6 +187,14 @@ class TestCheckModelsConfigured:
         result = doctor.check_models_configured(tmp_path / "config.yaml")
         assert result.status == "skip"
 
+    def test_commented_out_models_block(self, tmp_path):
+        # config.example.yaml ships a `models:` key whose entries are all
+        # commented out, so it parses as None rather than an empty list.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        result = doctor.check_models_configured(cfg)
+        assert result.status == "fail"
+
 
 # ---------------------------------------------------------------------------
 # check_llm_api_key
@@ -216,6 +224,14 @@ class TestCheckLLMApiKey:
         results = doctor.check_llm_api_key(tmp_path / "config.yaml")
         assert results == []
 
+    def test_commented_out_models_block_returns_empty(self, tmp_path):
+        # Regression: iterating a null `models:` raised TypeError, which the
+        # broad handler rendered as "('NoneType' object is not iterable)".
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        results = doctor.check_llm_api_key(cfg)
+        assert results == []
+
 
 # ---------------------------------------------------------------------------
 # check_llm_auth
@@ -236,6 +252,12 @@ class TestCheckLLMAuth:
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "token")
         results = doctor.check_llm_auth(cfg)
         assert any(result.status == "ok" and "Claude auth available" in result.label for result in results)
+
+    def test_commented_out_models_block_returns_empty(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        assert doctor.check_llm_auth(cfg) == []
+        assert doctor.check_llm_package(cfg) == []
 
 
 # ---------------------------------------------------------------------------
