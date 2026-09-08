@@ -204,10 +204,11 @@ async def test_stop_waits_for_real_item_background_teardown(monkeypatch) -> None
             return True
 
     class Executor:
-        def __init__(self, **_kwargs) -> None:
-            pass
+        def __init__(self, **kwargs) -> None:
+            self._admission_hook = kwargs["admission_hook"]
 
         def execute_async(self, _prompt, task_id=None):
+            asyncio.create_task(self._admission_hook())
             assert task_id == "item-1"
             execution_started.set()
             return "execution-1"
@@ -283,10 +284,11 @@ async def test_stop_does_not_start_items_from_a_late_cancelled_claim(monkeypatch
             return True
 
     class Executor:
-        def __init__(self, **_kwargs) -> None:
-            pass
+        def __init__(self, **kwargs) -> None:
+            self._admission_hook = kwargs["admission_hook"]
 
         def execute_async(self, _prompt, task_id=None):
+            asyncio.create_task(self._admission_hook())
             nonlocal execution_started
             execution_started = True
             return f"execution-{task_id}"
@@ -432,6 +434,7 @@ async def test_submit_keeps_batch_running_limit_separate_from_one_process_capaci
 
 @pytest.mark.asyncio
 async def test_execute_item_marks_real_running_then_persists_terminal_result(monkeypatch) -> None:
+    service_loop = asyncio.get_running_loop()
     result = SimpleNamespace(
         status=FakeStatus.RUNNING,
         result=None,
@@ -482,8 +485,10 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
     class Executor:
         def __init__(self, **kwargs) -> None:
             executor_kwargs.update(kwargs)
+            self._admission_hook = kwargs["admission_hook"]
 
         def execute_async(self, _prompt, task_id=None):
+            asyncio.create_task(self._admission_hook())
             assert task_id == "item-1"
             return "execution-1"
 
@@ -517,6 +522,7 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
     assert repository.finalized["succeeded"] is True
     assert repository.finalized["result"] == "done"
     assert executor_kwargs["execution_capacity"] is execution_capacity
+    assert executor_kwargs["admission_hook_loop"] is service_loop
 
 
 @pytest.mark.asyncio
@@ -561,10 +567,11 @@ async def test_execute_item_polls_completion_without_waiting_for_lease_renewal(m
             return True
 
     class Executor:
-        def __init__(self, **_kwargs) -> None:
-            pass
+        def __init__(self, **kwargs) -> None:
+            self._admission_hook = kwargs["admission_hook"]
 
         def execute_async(self, _prompt, task_id=None):
+            asyncio.create_task(self._admission_hook())
             assert task_id == "item-1"
             return "execution-1"
 
@@ -619,10 +626,11 @@ async def test_executor_admission_failure_requeues_instead_of_finalizing(monkeyp
         async def mark_item_running(self, *_args, **_kwargs):
             return True
 
-        async def claim_items(self, **_kwargs):
+        async def claim_items(self, **kwargs):
             return [
                 {
                     "id": "item-1",
+                    "_lease_owner": kwargs["lease_owner"],
                     "item_key": "record-1",
                     "prompt": "Process record 1",
                     "batch": {
@@ -644,10 +652,11 @@ async def test_executor_admission_failure_requeues_instead_of_finalizing(monkeyp
             return True
 
     class Executor:
-        def __init__(self, **_kwargs) -> None:
-            pass
+        def __init__(self, **kwargs) -> None:
+            self._admission_hook = kwargs["admission_hook"]
 
         def execute_async(self, _prompt, task_id=None):
+            asyncio.create_task(self._admission_hook())
             assert task_id == "item-1"
             return "execution-1"
 
@@ -670,6 +679,8 @@ async def test_executor_admission_failure_requeues_instead_of_finalizing(monkeyp
 
     assert repository.requeued is not None
     assert repository.requeued[0] == "item-1"
+    assert repository.requeued[1]["lease_owner"].startswith(f"{service._lease_owner}:")
+    assert repository.requeued[1]["lease_owner"] != service._lease_owner
     assert repository.finalized is False
 
 
@@ -680,6 +691,15 @@ async def test_mark_running_failure_does_not_start_native_execution(
     supervisor_failed = asyncio.Event()
     finalized = asyncio.Event()
     execution_started = False
+    result = SimpleNamespace(
+        status=FakeStatus.PENDING,
+        result=None,
+        error=None,
+        stop_reason=None,
+        token_usage_records=None,
+        execution_done_event=asyncio.Event(),
+        get_fatal_error=lambda: None,
+    )
 
     class Repository:
         async def mark_item_running(self, *_args, **_kwargs):
@@ -691,24 +711,37 @@ async def test_mark_running_failure_does_not_start_native_execution(
             return True
 
     class Executor:
-        def __init__(self, **_kwargs) -> None:
-            pass
+        def __init__(self, **kwargs) -> None:
+            self._admission_hook = kwargs["admission_hook"]
 
         def execute_async(self, _prompt, task_id=None):
-            nonlocal execution_started
-            execution_started = True
             assert task_id == "item-1"
+
+            async def run() -> None:
+                nonlocal execution_started
+                try:
+                    admitted = await self._admission_hook()
+                except Exception as exc:
+                    result.status = FakeStatus.FAILED
+                    result.error = str(exc)
+                else:
+                    execution_started = admitted is not False
+                finally:
+                    result.execution_done_event.set()
+
+            asyncio.create_task(run())
             return "execution-1"
 
     monkeypatch.setattr(service_module, "get_app_config", lambda: SimpleNamespace())
     monkeypatch.setattr(service_module, "resolve_subagent_model_name", lambda *_args, **_kwargs: "model-a")
     monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
     monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(service_module, "get_background_task_result", lambda _execution_id: result)
     monkeypatch.setattr(service_module, "cleanup_background_task", lambda _execution_id: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
     service = SubagentBatchService(
         repository=Repository(),
-        config=SubagentBatchesConfig(),
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1),
         runtime_config=SubagentRuntimeConfig(max_running=1),
     )
     item = {
@@ -746,24 +779,29 @@ async def test_terminal_result_keeps_lease_until_execution_teardown_finishes(
     )
     finalized = asyncio.Event()
     lease_renewed = asyncio.Event()
+    lease_owners: list[str] = []
 
     class Repository:
-        async def mark_item_running(self, *_args, **_kwargs):
+        async def mark_item_running(self, *_args, **kwargs):
+            lease_owners.append(kwargs["lease_owner"])
             return True
 
-        async def renew_item_lease(self, *_args, **_kwargs):
+        async def renew_item_lease(self, *_args, **kwargs):
+            lease_owners.append(kwargs["lease_owner"])
             lease_renewed.set()
             return {"valid": True, "cancel_requested": False}
 
-        async def finalize_item(self, *_args, **_kwargs):
+        async def finalize_item(self, *_args, **kwargs):
+            lease_owners.append(kwargs["lease_owner"])
             finalized.set()
             return True
 
     class Executor:
-        def __init__(self, **_kwargs) -> None:
-            pass
+        def __init__(self, **kwargs) -> None:
+            self._admission_hook = kwargs["admission_hook"]
 
         def execute_async(self, _prompt, task_id=None):
+            asyncio.create_task(self._admission_hook())
             assert task_id == "item-1"
             return "execution-1"
 
@@ -784,6 +822,7 @@ async def test_terminal_result_keeps_lease_until_execution_teardown_finishes(
     )
     item = {
         "id": "item-1",
+        "_lease_owner": "worker:generation",
         "item_key": "record-1",
         "prompt": "Process record 1",
         "batch": {
@@ -805,6 +844,8 @@ async def test_terminal_result_keeps_lease_until_execution_teardown_finishes(
     await asyncio.wait_for(execution, timeout=1)
 
     assert finalized.is_set()
+    assert lease_owners
+    assert set(lease_owners) == {"worker:generation"}
 
 
 @pytest.mark.asyncio
@@ -815,6 +856,16 @@ async def test_detached_mark_running_fatal_is_raised_without_starting_execution(
         pass
 
     execution_started = False
+    fatal_error: list[BaseException] = []
+    result = SimpleNamespace(
+        status=FakeStatus.PENDING,
+        result=None,
+        error=None,
+        stop_reason=None,
+        token_usage_records=None,
+        execution_done_event=asyncio.Event(),
+        get_fatal_error=lambda: fatal_error[0] if fatal_error else None,
+    )
 
     class Repository:
         async def claim_items(self, **_kwargs):
@@ -837,13 +888,26 @@ async def test_detached_mark_running_fatal_is_raised_without_starting_execution(
             raise ItemFatal("item aborted")
 
     class Executor:
-        def __init__(self, **_kwargs) -> None:
-            pass
+        def __init__(self, **kwargs) -> None:
+            self._admission_hook = kwargs["admission_hook"]
 
         def execute_async(self, _prompt, task_id=None):
-            nonlocal execution_started
-            execution_started = True
             assert task_id == "item-1"
+
+            async def run() -> None:
+                nonlocal execution_started
+                try:
+                    admitted = await self._admission_hook()
+                except BaseException as exc:
+                    fatal_error.append(exc)
+                    result.status = FakeStatus.FAILED
+                    result.error = str(exc)
+                else:
+                    execution_started = admitted is not False
+                finally:
+                    result.execution_done_event.set()
+
+            asyncio.create_task(run())
             return "execution-1"
 
     monkeypatch.setattr(service_module, "get_app_config", lambda: SimpleNamespace())
@@ -854,10 +918,12 @@ async def test_detached_mark_running_fatal_is_raised_without_starting_execution(
     )
     monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
     monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(service_module, "get_background_task_result", lambda _execution_id: result)
+    monkeypatch.setattr(service_module, "cleanup_background_task", lambda _execution_id: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
     service = SubagentBatchService(
         repository=Repository(),
-        config=SubagentBatchesConfig(lease_seconds=10),
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1, lease_seconds=10),
         runtime_config=SubagentRuntimeConfig(max_running=1),
     )
 
@@ -927,10 +993,11 @@ async def test_batch_stop_propagates_original_execution_fatal_without_future_rea
             return True
 
     class Executor:
-        def __init__(self, **_kwargs) -> None:
-            pass
+        def __init__(self, **kwargs) -> None:
+            self._admission_hook = kwargs["admission_hook"]
 
         def execute_async(self, _prompt, task_id=None):
+            asyncio.create_task(self._admission_hook())
             assert task_id == "item-1"
             return "execution-1"
 
@@ -1002,10 +1069,11 @@ async def test_terminal_persistence_retry_preserves_success_semantics(
             return True
 
     class Executor:
-        def __init__(self, **_kwargs) -> None:
-            pass
+        def __init__(self, **kwargs) -> None:
+            self._admission_hook = kwargs["admission_hook"]
 
         def execute_async(self, _prompt, task_id=None):
+            asyncio.create_task(self._admission_hook())
             assert task_id == "item-1"
             return "execution-1"
 

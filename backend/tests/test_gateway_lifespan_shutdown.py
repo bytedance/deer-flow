@@ -85,10 +85,11 @@ def test_shutdown_is_bounded_when_channel_stop_hangs():
 def test_shutdown_is_bounded_when_subagent_batch_stop_hangs():
     import app.gateway.app as gateway_app
 
-    async def run() -> tuple[float, AsyncMock]:
-        async def hang_forever() -> None:
-            await asyncio.Event().wait()
+    class HangingBatchStop:
+        def __await__(self):
+            return asyncio.Event().wait().__await__()
 
+    async def run() -> tuple[float, MagicMock, list[float]]:
         app = FastAPI()
         startup_config = MagicMock()
         startup_config.log_level = "INFO"
@@ -96,13 +97,21 @@ def test_shutdown_is_bounded_when_subagent_batch_stop_hangs():
         startup_config.memory.shutdown_flush_timeout_seconds = 5.0
         fake_channel_service = MagicMock()
         fake_channel_service.get_status = MagicMock(return_value={})
-        stop_batch = AsyncMock(side_effect=hang_forever)
+        stop_batch = MagicMock(return_value=HangingBatchStop())
+        batch_wait_for_timeouts: list[float] = []
+        original_wait_for = asyncio.wait_for
+
+        async def recording_wait_for(awaitable, timeout):
+            if isinstance(awaitable, HangingBatchStop):
+                batch_wait_for_timeouts.append(timeout)
+            return await original_wait_for(awaitable, timeout)
 
         async def fake_start(_startup_config, **_kwargs):
             return fake_channel_service
 
         with (
             patch.object(gateway_app, "_SHUTDOWN_HOOK_TIMEOUT_SECONDS", 0.05),
+            patch.object(gateway_app.asyncio, "wait_for", side_effect=recording_wait_for),
             patch("app.gateway.app.get_app_config", return_value=startup_config),
             patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
             patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
@@ -115,12 +124,106 @@ def test_shutdown_is_bounded_when_subagent_batch_stop_hangs():
             async with gateway_app.lifespan(app):
                 app.state.subagent_batch_service = SimpleNamespace(stop=stop_batch)
             elapsed = asyncio.get_running_loop().time() - start
-        return elapsed, stop_batch
+        return elapsed, stop_batch, batch_wait_for_timeouts
 
-    elapsed, stop_batch = asyncio.run(run())
+    elapsed, stop_batch, batch_wait_for_timeouts = asyncio.run(asyncio.wait_for(run(), timeout=2.0))
 
-    stop_batch.assert_awaited_once()
+    stop_batch.assert_called_once_with()
     assert elapsed >= 0.04
+    assert batch_wait_for_timeouts == [0.05]
+
+
+def test_real_task_cancellation_does_not_leave_hanging_scheduled_stop_unbounded():
+    import app.gateway.app as gateway_app
+
+    async def run() -> tuple[float, AsyncMock]:
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        fake_channel_service = MagicMock()
+        fake_channel_service.get_status.return_value = {}
+        oidc_close_started = asyncio.Event()
+
+        async def fake_start(_startup_config, **_kwargs):
+            return fake_channel_service
+
+        async def cancellable_oidc_close() -> None:
+            oidc_close_started.set()
+            await asyncio.Event().wait()
+
+        async def hang_forever() -> None:
+            await asyncio.Event().wait()
+
+        stop_scheduled = AsyncMock(side_effect=hang_forever)
+        with (
+            patch.object(gateway_app, "_SHUTDOWN_HOOK_TIMEOUT_SECONDS", 0.05),
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+            patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("app.gateway.app.auth.close_oidc_service", side_effect=cancellable_oidc_close),
+            patch("app.channels.service.start_channel_service", side_effect=fake_start),
+            patch("app.channels.service.stop_channel_service", AsyncMock()),
+        ):
+            context = gateway_app.lifespan(app)
+            await context.__aenter__()
+            app.state.scheduled_task_service = SimpleNamespace(stop=stop_scheduled)
+            started = asyncio.get_running_loop().time()
+            shutdown = asyncio.create_task(context.__aexit__(None, None, None))
+            await asyncio.wait_for(oidc_close_started.wait(), timeout=1.0)
+            shutdown.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(shutdown, timeout=1.0)
+            elapsed = asyncio.get_running_loop().time() - started
+        return elapsed, stop_scheduled
+
+    elapsed, stop_scheduled = asyncio.run(run())
+
+    stop_scheduled.assert_awaited_once_with()
+    assert 0.04 <= elapsed < 1.0
+
+
+def test_shutdown_is_bounded_when_mcp_task_stop_hangs():
+    import app.gateway.app as gateway_app
+
+    async def run() -> tuple[float, AsyncMock]:
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        fake_channel_service = MagicMock()
+        fake_channel_service.get_status.return_value = {}
+
+        async def fake_start(_startup_config, **_kwargs):
+            return fake_channel_service
+
+        async def hang_forever() -> None:
+            await asyncio.Event().wait()
+
+        stop_mcp = AsyncMock(side_effect=hang_forever)
+        with (
+            patch.object(gateway_app, "_SHUTDOWN_HOOK_TIMEOUT_SECONDS", 0.05),
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+            patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+            patch("app.channels.service.start_channel_service", side_effect=fake_start),
+            patch("app.channels.service.stop_channel_service", AsyncMock()),
+        ):
+            started = asyncio.get_running_loop().time()
+            async with gateway_app.lifespan(app):
+                app.state.mcp_task_service = SimpleNamespace(stop=stop_mcp)
+            elapsed = asyncio.get_running_loop().time() - started
+        return elapsed, stop_mcp
+
+    elapsed, stop_mcp = asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+
+    stop_mcp.assert_awaited_once_with()
+    assert 0.04 <= elapsed < 1.0
 
 
 def test_subagent_batch_fatal_does_not_skip_remaining_gateway_cleanup():
@@ -129,8 +232,12 @@ def test_subagent_batch_fatal_does_not_skip_remaining_gateway_cleanup():
     class BatchStopFatal(BaseException):
         pass
 
+    class BrowserCloseFatal(BaseException):
+        pass
+
     async def run() -> tuple[BatchStopFatal, AsyncMock, MagicMock]:
         fatal = BatchStopFatal("batch worker fatal")
+        later_fatal = BrowserCloseFatal("browser close fatal")
         app = FastAPI()
         startup_config = MagicMock()
         startup_config.log_level = "INFO"
@@ -139,7 +246,7 @@ def test_subagent_batch_fatal_does_not_skip_remaining_gateway_cleanup():
         fake_channel_service = MagicMock()
         fake_channel_service.get_status.return_value = {}
         browser_manager = SimpleNamespace(
-            close_all_sessions=AsyncMock(return_value=1),
+            close_all_sessions=AsyncMock(side_effect=later_fatal),
         )
         memory_manager = MagicMock()
         memory_manager.warm.return_value = None
@@ -183,6 +290,287 @@ def test_subagent_batch_fatal_does_not_skip_remaining_gateway_cleanup():
     _fatal, close_browser_sessions, memory_manager = asyncio.run(run())
 
     close_browser_sessions.assert_awaited_once()
+    memory_manager.shutdown_flush.assert_called_once_with(5.0)
+    memory_manager.close.assert_called_once_with()
+
+
+def test_shutdown_fatal_beats_cancellation_and_runtime_exit_error():
+    import app.gateway.app as gateway_app
+
+    class BatchStopFatal(BaseException):
+        pass
+
+    class RuntimeExitFatal(BaseException):
+        pass
+
+    async def run() -> None:
+        cancellation = asyncio.CancelledError("early cancellation")
+        batch_fatal = BatchStopFatal("batch fatal")
+        runtime_fatal = RuntimeExitFatal("runtime exit fatal")
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        fake_channel_service = MagicMock()
+        fake_channel_service.get_status.return_value = {}
+
+        async def fake_start(_startup_config, **_kwargs):
+            return fake_channel_service
+
+        @asynccontextmanager
+        async def failing_runtime(_app, _startup_config):
+            try:
+                yield
+            finally:
+                raise runtime_fatal
+
+        with (
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+            patch("app.gateway.app.langgraph_runtime", failing_runtime),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("app.gateway.app.auth.close_oidc_service", AsyncMock(side_effect=cancellation)),
+            patch("app.channels.service.start_channel_service", side_effect=fake_start),
+            patch("app.channels.service.stop_channel_service", AsyncMock()),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+        ):
+            with pytest.raises(BatchStopFatal) as raised:
+                async with gateway_app.lifespan(app):
+                    app.state.subagent_batch_service = SimpleNamespace(
+                        stop=AsyncMock(side_effect=batch_fatal),
+                    )
+
+        assert raised.value is batch_fatal
+
+    asyncio.run(run())
+
+
+def test_langgraph_runtime_startup_error_is_not_masked():
+    import app.gateway.app as gateway_app
+
+    startup_error = RuntimeError("runtime startup failed")
+
+    @asynccontextmanager
+    async def failing_runtime(_app, _startup_config):
+        raise startup_error
+        yield
+
+    async def run() -> None:
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        with (
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+            patch("app.gateway.app.langgraph_runtime", failing_runtime),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+        ):
+            with pytest.raises(RuntimeError) as raised:
+                async with gateway_app.lifespan(FastAPI()):
+                    pass
+
+        assert raised.value is startup_error
+
+    asyncio.run(run())
+
+
+def test_host_cancellation_during_oidc_close_runs_remaining_gateway_cleanup():
+    import app.gateway.app as gateway_app
+
+    async def run() -> tuple[asyncio.CancelledError, AsyncMock, MagicMock]:
+        cancellation = asyncio.CancelledError("host shutdown cancelled")
+        later_cancellation = asyncio.CancelledError("later shutdown cancellation")
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = True
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        fake_channel_service = MagicMock()
+        fake_channel_service.get_status.return_value = {}
+        stop_channel_service = AsyncMock()
+        browser_manager = SimpleNamespace(
+            close_all_sessions=AsyncMock(return_value=1),
+        )
+        memory_manager = MagicMock()
+        memory_manager.warm.return_value = None
+        memory_manager.shutdown_flush.return_value = True
+
+        async def fake_start(_startup_config, **_kwargs):
+            return fake_channel_service
+
+        @asynccontextmanager
+        async def failing_runtime(_app, _startup_config):
+            try:
+                yield
+            finally:
+                raise RuntimeError("ordinary runtime exit error")
+
+        with (
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch(
+                "app.gateway.app.get_gateway_config",
+                return_value=MagicMock(host="x", port=0),
+            ),
+            patch("app.gateway.app.langgraph_runtime", failing_runtime),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch(
+                "app.gateway.app.auth.close_oidc_service",
+                AsyncMock(side_effect=cancellation),
+            ),
+            patch(
+                "app.channels.service.start_channel_service",
+                side_effect=fake_start,
+            ),
+            patch(
+                "app.channels.service.stop_channel_service",
+                stop_channel_service,
+            ),
+            patch(
+                "deerflow.community.browser_automation.get_browser_session_manager",
+                return_value=browser_manager,
+            ),
+            patch(
+                "deerflow.agents.memory.get_memory_manager",
+                return_value=memory_manager,
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError) as raised:
+                async with gateway_app.lifespan(app):
+                    app.state.subagent_batch_service = SimpleNamespace(
+                        stop=AsyncMock(side_effect=later_cancellation),
+                    )
+
+        assert raised.value is cancellation
+        return cancellation, browser_manager.close_all_sessions, memory_manager
+
+    _cancellation, close_browser_sessions, memory_manager = asyncio.run(run())
+
+    close_browser_sessions.assert_awaited_once()
+    memory_manager.shutdown_flush.assert_called_once_with(5.0)
+    memory_manager.close.assert_called_once_with()
+
+
+def test_host_cancellation_during_batch_stop_runs_remaining_gateway_cleanup():
+    import app.gateway.app as gateway_app
+
+    async def run() -> tuple[asyncio.CancelledError, AsyncMock, MagicMock]:
+        cancellation = asyncio.CancelledError("host shutdown cancelled")
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = True
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        fake_channel_service = MagicMock()
+        fake_channel_service.get_status.return_value = {}
+        browser_manager = SimpleNamespace(
+            close_all_sessions=AsyncMock(return_value=1),
+        )
+        memory_manager = MagicMock()
+        memory_manager.warm.return_value = None
+        memory_manager.shutdown_flush.return_value = True
+
+        async def fake_start(_startup_config, **_kwargs):
+            return fake_channel_service
+
+        with (
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch(
+                "app.gateway.app.get_gateway_config",
+                return_value=MagicMock(host="x", port=0),
+            ),
+            patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+            patch(
+                "app.channels.service.start_channel_service",
+                side_effect=fake_start,
+            ),
+            patch("app.channels.service.stop_channel_service", AsyncMock()),
+            patch(
+                "deerflow.community.browser_automation.get_browser_session_manager",
+                return_value=browser_manager,
+            ),
+            patch(
+                "deerflow.agents.memory.get_memory_manager",
+                return_value=memory_manager,
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError) as raised:
+                async with gateway_app.lifespan(app):
+                    app.state.subagent_batch_service = SimpleNamespace(
+                        stop=AsyncMock(side_effect=cancellation),
+                    )
+
+        assert raised.value is cancellation
+        return cancellation, browser_manager.close_all_sessions, memory_manager
+
+    _cancellation, close_browser_sessions, memory_manager = asyncio.run(run())
+
+    close_browser_sessions.assert_awaited_once()
+    memory_manager.shutdown_flush.assert_called_once_with(5.0)
+    memory_manager.close.assert_called_once_with()
+
+
+def test_retrieval_warm_fatal_still_closes_memory_backend():
+    import app.gateway.app as gateway_app
+
+    class RetrievalWarmFatal(BaseException):
+        pass
+
+    async def run() -> tuple[RetrievalWarmFatal, MagicMock]:
+        fatal = RetrievalWarmFatal("retrieval warm fatal")
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = True
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        fake_channel_service = MagicMock()
+        fake_channel_service.get_status.return_value = {}
+        memory_manager = MagicMock()
+        memory_manager.warm.return_value = None
+        memory_manager.warm_retrieval.side_effect = fatal
+        memory_manager.shutdown_flush.return_value = True
+
+        async def fake_start(_startup_config, **_kwargs):
+            return fake_channel_service
+
+        with (
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch(
+                "app.gateway.app.get_gateway_config",
+                return_value=MagicMock(host="x", port=0),
+            ),
+            patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+            patch(
+                "app.channels.service.start_channel_service",
+                side_effect=fake_start,
+            ),
+            patch("app.channels.service.stop_channel_service", AsyncMock()),
+            patch(
+                "deerflow.community.browser_automation.get_browser_session_manager",
+                return_value=SimpleNamespace(
+                    close_all_sessions=AsyncMock(return_value=0),
+                ),
+            ),
+            patch(
+                "deerflow.agents.memory.get_memory_manager",
+                return_value=memory_manager,
+            ),
+        ):
+            with pytest.raises(RetrievalWarmFatal) as raised:
+                async with gateway_app.lifespan(app):
+                    await asyncio.sleep(0)
+
+        assert raised.value is fatal
+        return fatal, memory_manager
+
+    _fatal, memory_manager = asyncio.run(run())
+
     memory_manager.shutdown_flush.assert_called_once_with(5.0)
     memory_manager.close.assert_called_once_with()
 

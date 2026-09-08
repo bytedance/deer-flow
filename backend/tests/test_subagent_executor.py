@@ -174,6 +174,8 @@ def _setup_executor_classes():
     else:
         sys.modules.pop("deerflow.sandbox.overwrite", None)
 
+    executor_module._shutdown_isolated_subagent_loop()
+
 
 # Helper classes that wrap real classes for testing
 class MockHumanMessage:
@@ -1408,7 +1410,7 @@ class TestAsyncExecutionPath:
                 return False
 
         class RejectingCapacity:
-            def slot(self):
+            def slot(self, **_kwargs):
                 return RejectingSlot()
 
         executor = SubagentExecutor(
@@ -1423,6 +1425,51 @@ class TestAsyncExecutionPath:
         assert result.status == SubagentStatus.FAILED
         assert result.admission_failure is True
         assert "capacity is full" in result.error
+
+    @pytest.mark.anyio
+    async def test_aexecute_runs_admission_hook_on_its_owner_loop_after_capacity_acquire(
+        self,
+        classes,
+        base_config,
+    ):
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        owner_loop = asyncio.get_running_loop()
+        hook_loops = []
+        events: list[str] = []
+
+        async def admission_hook() -> bool:
+            hook_loops.append(asyncio.get_running_loop())
+            events.append("admission")
+            return True
+
+        async def admitted(_task, result):
+            events.append("execution")
+            result.try_set_terminal(SubagentStatus.COMPLETED, result="done")
+            return result
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=SubagentExecutionCapacity(
+                SubagentRuntimeConfig(max_running=1),
+            ),
+            admission_hook=admission_hook,
+            admission_hook_loop=owner_loop,
+        )
+
+        with patch.object(executor, "_aexecute_admitted", side_effect=admitted):
+            result = await asyncio.to_thread(
+                lambda: asyncio.run(executor._aexecute("Do something")),
+            )
+
+        assert result.status is SubagentStatus.COMPLETED
+        assert hook_loops == [owner_loop]
+        assert events == ["admission", "execution"]
 
     @pytest.mark.anyio
     async def test_aexecute_marks_structured_llm_error_fallback_as_failed(self, classes, base_config, mock_agent, msg):
@@ -3253,7 +3300,7 @@ class TestCleanupBackgroundTask:
                 await release_allowed.wait()
 
         class TrackingCapacity:
-            def slot(self):
+            def slot(self, **_kwargs):
                 return TrackingSlot()
 
         mock_agent.astream = lambda *args, **kwargs: async_iterator([{"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}])
@@ -3568,7 +3615,7 @@ class TestCooperativeCancellation:
                 capacity_released.set()
 
         class TrackingCapacity:
-            def slot(self):
+            def slot(self, **_kwargs):
                 return TrackingSlot()
 
         async def blocking_node(_state):
@@ -3695,7 +3742,7 @@ class TestCooperativeCancellation:
                 capacity_released.set()
 
         class TrackingCapacity:
-            def slot(self):
+            def slot(self, **_kwargs):
                 return TrackingSlot()
 
         class SlowCloseStream:
@@ -5112,7 +5159,7 @@ class TestToolReceiptHarvest:
             return False
 
     class _ImmediateCapacity:
-        def slot(self):
+        def slot(self, **_kwargs):
             return TestToolReceiptHarvest._ImmediateSlot()
 
     class _ThreadSubmitter:
@@ -5946,6 +5993,351 @@ def test_utcnow_helper_returns_utc_aware_datetime(classes):
     assert now.utcoffset().total_seconds() == 0.0
 
 
+@pytest.mark.anyio
+async def test_await_admitted_execution_defers_repeated_cancellation_until_attempt_gate(
+    _setup_executor_classes,
+):
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    gate = asyncio.get_running_loop().create_future()
+    child_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    child_cancellations = 0
+
+    async def admitted():
+        nonlocal child_cancellations
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancellations += 1
+            child_cancelled.set()
+            raise
+
+    child = asyncio.create_task(
+        executor_module._capture_admitted_execution(admitted),
+    )
+    host = asyncio.create_task(
+        executor_module._await_admitted_execution(
+            child,
+            cancellation_gate=gate,
+        ),
+    )
+    await asyncio.wait_for(child_started.wait(), timeout=1)
+
+    host.cancel("original cancellation")
+    await asyncio.sleep(0)
+    host.cancel("duplicate cancellation")
+    await asyncio.sleep(0)
+    assert not child.done()
+    assert child_cancellations == 0
+
+    gate.set_result(True)
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await host
+
+    assert raised.value.args == ("original cancellation",)
+    assert child_cancelled.is_set()
+    assert child_cancellations == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("gate_outcome", "fatal_wins"),
+    [
+        pytest.param("rejected", False, id="gate-false-rejection"),
+        pytest.param("hook-error", False, id="gate-false-hook-error"),
+        pytest.param("fatal", True, id="gate-false-fatal"),
+    ],
+)
+async def test_await_admitted_execution_gate_false_error_priority_and_cleanup(
+    _setup_executor_classes,
+    monkeypatch,
+    gate_outcome,
+    fatal_wins,
+):
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+    gate = asyncio.get_running_loop().create_future()
+    hook_started = asyncio.Event()
+    finish_hook = asyncio.Event()
+    cancel_payload = ("original cancellation", 17)
+    original_cancellations = []
+    unobserved = []
+    child = None
+
+    class FatalAdmission(BaseException):
+        pass
+
+    fatal = FatalAdmission("fatal admission")
+    original_defer = executor_module._defer_subagent_cancellation
+
+    def capture_original_cancellation(deferred, interrupt):
+        if deferred is None:
+            original_cancellations.append(interrupt)
+        return original_defer(deferred, interrupt)
+
+    monkeypatch.setattr(
+        executor_module,
+        "_defer_subagent_cancellation",
+        capture_original_cancellation,
+    )
+
+    async def admission_hook():
+        hook_started.set()
+        await finish_hook.wait()
+        if gate_outcome == "rejected":
+            return False
+        if gate_outcome == "hook-error":
+            try:
+                raise ValueError("hook failed")
+            except Exception as exc:
+                raise executor_module.SubagentCapacityRejected(
+                    "Subagent execution admission hook failed: hook failed",
+                ) from exc
+        raise fatal
+
+    async def admitted():
+        try:
+            async with capacity.slot(after_acquire=admission_hook):
+                raise AssertionError("admission body must not start")
+        finally:
+            gate.set_result(False)
+
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unobserved.append(context))
+    try:
+        child = asyncio.create_task(
+            executor_module._capture_admitted_execution(admitted),
+        )
+        host = asyncio.create_task(
+            executor_module._await_admitted_execution(
+                child,
+                cancellation_gate=gate,
+            ),
+        )
+        await asyncio.wait_for(hook_started.wait(), timeout=1)
+
+        host.cancel(cancel_payload)
+        await asyncio.sleep(0)
+        finish_hook.set()
+
+        if fatal_wins:
+            with pytest.raises(FatalAdmission) as raised:
+                await host
+            assert raised.value is fatal
+        else:
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await host
+            assert original_cancellations
+            assert raised.value is original_cancellations[0]
+            assert raised.value.args == (cancel_payload,)
+            assert raised.value.args[0] is cancel_payload
+
+        assert child.done()
+        assert gate.done()
+        assert gate.result() is False
+        assert capacity.snapshot().running == 0
+        await asyncio.sleep(0)
+        assert unobserved == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("child_outcome", "fatal_wins"),
+    [
+        pytest.param("normal", False, id="task-done-normal"),
+        pytest.param("cancelled", False, id="task-done-child-cancelled"),
+        pytest.param("fatal", True, id="task-done-fatal"),
+    ],
+)
+async def test_await_admitted_execution_task_done_race_priority_and_cleanup(
+    _setup_executor_classes,
+    monkeypatch,
+    child_outcome,
+    fatal_wins,
+):
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+    gate = asyncio.get_running_loop().create_future()
+    gate.set_result(False)
+    child_release = asyncio.Event()
+    shield_entered = asyncio.Event()
+    shield_release = asyncio.Event()
+    cancel_payload = ("host cancellation", 29)
+    original_cancellations = []
+    unobserved = []
+
+    class FatalExecution(BaseException):
+        pass
+
+    child_cancellation = asyncio.CancelledError("child cancellation", 23)
+    fatal = FatalExecution("fatal execution")
+    original_defer = executor_module._defer_subagent_cancellation
+    original_shield = asyncio.shield
+
+    def capture_original_cancellation(deferred, interrupt):
+        if deferred is None:
+            original_cancellations.append(interrupt)
+        return original_defer(deferred, interrupt)
+
+    async def controlled_shield(awaitable):
+        if awaitable is not child:
+            return await original_shield(awaitable)
+        shield_entered.set()
+        await shield_release.wait()
+        return await original_shield(awaitable)
+
+    monkeypatch.setattr(
+        executor_module,
+        "_defer_subagent_cancellation",
+        capture_original_cancellation,
+    )
+    monkeypatch.setattr(executor_module.asyncio, "shield", controlled_shield)
+
+    async def admitted():
+        async with capacity.slot():
+            await child_release.wait()
+            if child_outcome == "cancelled":
+                raise child_cancellation
+            if child_outcome == "fatal":
+                raise fatal
+            return "done"
+
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unobserved.append(context))
+    try:
+        child = asyncio.create_task(
+            executor_module._capture_admitted_execution(admitted),
+        )
+        host = asyncio.create_task(
+            executor_module._await_admitted_execution(
+                child,
+                cancellation_gate=gate,
+            ),
+        )
+        await asyncio.wait_for(shield_entered.wait(), timeout=1)
+        child_release.set()
+        while not child.done():
+            await asyncio.sleep(0)
+        assert capacity.snapshot().running == 0
+
+        host.cancel(cancel_payload)
+        await asyncio.sleep(0)
+        shield_release.set()
+
+        if fatal_wins:
+            with pytest.raises(FatalExecution) as raised:
+                await host
+            assert raised.value is fatal
+        else:
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await host
+            assert original_cancellations
+            assert raised.value is original_cancellations[0]
+            assert raised.value.args == (cancel_payload,)
+            assert raised.value.args[0] is cancel_payload
+            if child_outcome == "cancelled":
+                assert raised.value is not child_cancellation
+
+        assert child.done()
+        assert gate.done()
+        assert gate.result() is False
+        assert capacity.snapshot().running == 0
+        await asyncio.sleep(0)
+        assert unobserved == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.anyio
+async def test_aexecute_cancellation_after_hook_commit_before_completion_callback_starts_one_attempt(
+    classes,
+    base_config,
+):
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+    SubagentExecutor = classes["SubagentExecutor"]
+    capacity = SubagentExecutionCapacity(
+        SubagentRuntimeConfig(max_running=1),
+    )
+    hook_loop = asyncio.get_running_loop()
+    worker_ready = threading.Event()
+    worker_done = threading.Event()
+    execution_loop = None
+    execution_task = None
+    hook_attempts = 0
+    execution_attempts = 0
+    worker_error: BaseException | None = None
+
+    async def admission_hook() -> bool:
+        nonlocal hook_attempts
+        hook_attempts += 1
+        assert execution_loop is not None
+        assert execution_task is not None
+        execution_loop.call_soon_threadsafe(
+            execution_task.cancel,
+            "hook committed",
+        )
+        return True
+
+    async def admitted(_task, _result):
+        nonlocal execution_attempts
+        execution_attempts += 1
+        assert _result.status is classes["SubagentStatus"].RUNNING
+        await asyncio.Event().wait()
+
+    executor = SubagentExecutor(
+        config=base_config,
+        tools=[],
+        thread_id="test-thread",
+        execution_capacity=capacity,
+        admission_hook=admission_hook,
+        admission_hook_loop=hook_loop,
+    )
+
+    def run() -> None:
+        nonlocal execution_loop, execution_task, worker_error
+
+        async def execute() -> None:
+            nonlocal execution_loop, execution_task
+            execution_loop = asyncio.get_running_loop()
+            execution_task = asyncio.current_task()
+            worker_ready.set()
+            await executor._aexecute("Do something")
+
+        try:
+            asyncio.run(execute())
+        except BaseException as exc:
+            worker_error = exc
+        finally:
+            worker_done.set()
+
+    with patch.object(executor, "_aexecute_admitted", side_effect=admitted):
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        assert await asyncio.to_thread(worker_ready.wait, 1)
+        assert await asyncio.to_thread(worker_done.wait, 3)
+        worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert isinstance(worker_error, asyncio.CancelledError)
+    assert worker_error.args == ("hook committed",)
+    assert hook_attempts == 1
+    assert execution_attempts == 1
+    assert capacity.snapshot().running == 0
+
+
 @pytest.mark.parametrize(
     "initial_status_name",
     ["PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"],
@@ -6000,7 +6392,7 @@ def test_execute_async_publishes_timeout_before_teardown_and_capacity_release(
             capacity_released.set()
 
     class TrackingCapacity:
-        def slot(self):
+        def slot(self, **_kwargs):
             return TrackingSlot()
 
     async def slow_admitted(_task, _result):

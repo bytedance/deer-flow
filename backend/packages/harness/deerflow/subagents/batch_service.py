@@ -596,6 +596,15 @@ class SubagentBatchService:
                 include_upload_tool=False,
                 app_config=app_config,
             )
+            admission_loop = asyncio.get_running_loop()
+
+            async def mark_running_after_admission() -> bool:
+                return await self._repository.mark_item_running(
+                    item_id,
+                    lease_owner=lease_owner,
+                    now=datetime.now(UTC),
+                )
+
             executor = SubagentExecutor(
                 config=config,
                 tools=tools,
@@ -612,15 +621,10 @@ class SubagentBatchService:
                 authz_attributes=spec.get("authz_attributes"),
                 execution_capacity=self._execution_capacity,
                 acceptance_criteria=item.get("acceptance_criteria"),
+                admission_hook=mark_running_after_admission,
+                admission_hook_loop=admission_loop,
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
-            marked_running = await self._repository.mark_item_running(
-                item_id,
-                lease_owner=lease_owner,
-                now=datetime.now(UTC),
-            )
-            if not marked_running:
-                return
             execution_id = executor.execute_async(prompt, task_id=item_id)
             self._execution_ids[item_id] = execution_id
             renew_every = max(1.0, self._config.lease_seconds / 3)
@@ -687,7 +691,12 @@ class SubagentBatchService:
             acceptance_verdict = None
             if result.status is SubagentStatus.COMPLETED and item.get("acceptance_criteria"):
                 try:
-                    valid, acceptance_verdict = await self._check_acceptance_with_lease(item, result, app_config)
+                    valid, acceptance_verdict = await self._check_acceptance_with_lease(
+                            item,
+                            result,
+                            app_config,
+                            lease_owner=lease_owner,
+                        )
                     if not valid:
                         return
                 except Exception:
@@ -753,13 +762,20 @@ class SubagentBatchService:
             if execution_id is not None:
                 cleanup_background_task(execution_id)
 
-    async def _check_acceptance_with_lease(self, item, result, app_config):
+    async def _check_acceptance_with_lease(
+        self,
+        item,
+        result,
+        app_config,
+        *,
+        lease_owner: str,
+    ):
         """Keep a completed execution leased until its advisory check drains."""
 
         async def renew():
             lease = await self._repository.renew_item_lease(
                 item["id"],
-                lease_owner=self._lease_owner,
+                lease_owner=lease_owner,
                 lease_seconds=self._config.lease_seconds,
                 now=datetime.now(UTC),
             )

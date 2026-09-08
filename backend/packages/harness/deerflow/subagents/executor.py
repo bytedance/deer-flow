@@ -38,6 +38,7 @@ from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import (
     SubagentCapacityError,
+    SubagentCapacityRejected,
     SubagentExecutionCapacity,
     get_subagent_execution_capacity,
 )
@@ -127,6 +128,8 @@ async def _capture_admitted_execution(
 
 async def _await_admitted_execution(
     task: asyncio.Task[tuple[Any, BaseException | None]],
+    *,
+    cancellation_gate: asyncio.Future[bool] | None = None,
 ) -> Any:
     """Cancel an admitted execution once, then drain all of its teardown."""
     deferred: asyncio.CancelledError | None = None
@@ -137,7 +140,7 @@ async def _await_admitted_execution(
             result, execution_error = await asyncio.shield(task)
             if execution_error is not None and not isinstance(
                 execution_error,
-                asyncio.CancelledError,
+                (asyncio.CancelledError, Exception),
             ):
                 raise execution_error
             if deferred is not None:
@@ -153,7 +156,25 @@ async def _await_admitted_execution(
                 raise
             observed_cancellations = current_cancellations
             if deferred is None and not task.done():
-                task.cancel()
+                deferred = _defer_subagent_cancellation(deferred, exc)
+                should_cancel = True
+                if cancellation_gate is not None:
+                    while True:
+                        try:
+                            should_cancel = await asyncio.shield(cancellation_gate)
+                            break
+                        except asyncio.CancelledError as gate_exc:
+                            current_cancellations = host.cancelling() if host is not None else 0
+                            if current_cancellations <= observed_cancellations:
+                                raise deferred
+                            observed_cancellations = current_cancellations
+                            deferred = _defer_subagent_cancellation(
+                                deferred,
+                                gate_exc,
+                            )
+                if should_cancel and not task.done():
+                    task.cancel()
+                continue
             deferred = _defer_subagent_cancellation(deferred, exc)
 
 
@@ -981,6 +1002,8 @@ class SubagentExecutor:
         deerflow_trace_id: str | None = None,
         extensions: Any | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
+        admission_hook: Callable[[], Awaitable[bool | None]] | None = None,
+        admission_hook_loop: asyncio.AbstractEventLoop | None = None,
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
         tool_promotion_recorder: Any | None = None,
@@ -1021,6 +1044,11 @@ class SubagentExecutor:
                 Direct ``create_deerflow_agent`` callers pass one through their
                 ``SubagentRuntime``; application factories fall back to the
                 startup-configured process singleton.
+            admission_hook: Optional async callback run after process capacity
+                is acquired but before execution starts.
+            admission_hook_loop: Event loop that owns ``admission_hook``. Batch
+                persistence hooks use this to return to the service/database
+                loop from the isolated executor loop.
             acceptance_criteria: Optional lead-supplied completion requirements
                 (RFC #4651 PR3). Criterion values are model-supplied untrusted
                 data, so ``_build_initial_state`` appends them to the task
@@ -1077,6 +1105,8 @@ class SubagentExecutor:
         # generation underneath the delegated work.
         self.extensions = extensions
         self.execution_capacity = execution_capacity
+        self.admission_hook = admission_hook
+        self.admission_hook_loop = admission_hook_loop
         # Raw lead-supplied criteria; stripping/capping happens at render time
         # in report_contract.render_acceptance_criteria_block.
         self.acceptance_criteria = acceptance_criteria
@@ -1491,21 +1521,58 @@ class SubagentExecutor:
         with ensure_trace_context(self.deerflow_trace_id):
             try:
                 try:
+                    attempt_gate = asyncio.get_running_loop().create_future() if self.admission_hook is not None else None
+
+                    async def run_admission_hook() -> bool | None:
+                        if self.admission_hook is None:
+                            return None
+                        try:
+                            hook_loop = self.admission_hook_loop
+                            if hook_loop is None or hook_loop is asyncio.get_running_loop():
+                                return await self.admission_hook()
+
+                            async def invoke() -> bool | None:
+                                assert self.admission_hook is not None
+                                return await self.admission_hook()
+
+                            invocation = invoke()
+                            try:
+                                hook_future = asyncio.run_coroutine_threadsafe(
+                                    invocation,
+                                    hook_loop,
+                                )
+                            except BaseException:
+                                invocation.close()
+                                raise
+                            return await asyncio.wrap_future(hook_future)
+                        except Exception as exc:
+                            raise SubagentCapacityRejected(
+                                f"Subagent execution admission hook failed: {exc}",
+                            ) from exc
 
                     async def execute_admitted() -> SubagentResult:
-                        capacity = self.execution_capacity or get_subagent_execution_capacity()
-                        async with capacity.slot():
-                            with result._state_lock:
-                                if not result.status.is_terminal:
-                                    result.status = SubagentStatus.RUNNING
-                                    result.started_at = _utcnow()
-                            return await self._aexecute_admitted(task, result)
+                        try:
+                            capacity = self.execution_capacity or get_subagent_execution_capacity()
+                            async with capacity.slot(after_acquire=run_admission_hook):
+                                with result._state_lock:
+                                    if not result.status.is_terminal:
+                                        result.status = SubagentStatus.RUNNING
+                                        result.started_at = _utcnow()
+                                if attempt_gate is not None:
+                                    attempt_gate.set_result(True)
+                                return await self._aexecute_admitted(task, result)
+                        finally:
+                            if attempt_gate is not None and not attempt_gate.done():
+                                attempt_gate.set_result(False)
 
                     execution = asyncio.create_task(
                         _capture_admitted_execution(execute_admitted),
                         name=f"subagent-{self.config.name}-admitted",
                     )
-                    return await _await_admitted_execution(execution)
+                    return await _await_admitted_execution(
+                        execution,
+                        cancellation_gate=attempt_gate,
+                    )
                 except SubagentCapacityError as exc:
                     result.try_set_terminal(
                         SubagentStatus.FAILED,

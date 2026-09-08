@@ -6,6 +6,7 @@ from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.subagents.capacity import (
     SubagentCapacityRejected,
     SubagentCapacityTimeout,
+    SubagentExecutionCapacity,
     configure_subagent_execution_capacity,
     configured_subagent_max_running,
     get_subagent_execution_capacity,
@@ -136,11 +137,31 @@ async def test_capacity_cancellation_during_release_does_not_leak_slot(monkeypat
     await asyncio.wait_for(release_started.wait(), timeout=1)
     execution.cancel()
     await asyncio.sleep(0)
+    execution.cancel()
+    await asyncio.sleep(0)
     assert not execution.done()
     release_allowed.set()
     with pytest.raises(asyncio.CancelledError):
         await execution
 
+    assert capacity.snapshot().running == 0
+
+
+@pytest.mark.asyncio
+async def test_capacity_runs_after_acquire_before_body_and_releases_on_rejection() -> None:
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+    events: list[str] = []
+
+    async def reject_after_acquire() -> bool:
+        assert capacity.snapshot().running == 1
+        events.append("hook")
+        return False
+
+    with pytest.raises(SubagentCapacityRejected, match="admission hook"):
+        async with capacity.slot(after_acquire=reject_after_acquire):
+            events.append("body")
+
+    assert events == ["hook"]
     assert capacity.snapshot().running == 0
 
 

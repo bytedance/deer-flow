@@ -19,6 +19,9 @@ BATCH_ACTIVE_STATUSES = ("queued", "running", "paused")
 BATCH_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 ITEM_ACTIVE_STATUSES = ("queued", "leased", "running")
 ITEM_TERMINAL_STATUSES = ("succeeded", "failed", "cancelled")
+_LEASE_OWNER_SERVICE_TOKEN_CHARS = 32
+_LEASE_OWNER_GENERATION_TOKEN_CHARS = 16
+_LOWER_HEX_CHARS = frozenset("0123456789abcdef")
 _BATCH_PUBLIC_FIELDS = (
     "id",
     "thread_id",
@@ -54,6 +57,23 @@ _ITEM_PUBLIC_FIELDS = (
     "updated_at",
 )
 _ITEM_TIMESTAMP_FIELDS = ("started_at", "completed_at", "created_at", "updated_at")
+
+
+def _lease_owner_has_generation_token(lease_owner: str | None) -> bool:
+    """Recognize only the current ``host:service:claim`` ownership format."""
+    if not lease_owner:
+        return False
+    host, separator, claim_token = lease_owner.rpartition(":")
+    if not separator:
+        return False
+    service_owner, separator, service_token = host.rpartition(":")
+    return (
+        bool(separator and service_owner)
+        and len(claim_token) == _LEASE_OWNER_GENERATION_TOKEN_CHARS
+        and len(service_token) == _LEASE_OWNER_SERVICE_TOKEN_CHARS
+        and all(char in _LOWER_HEX_CHARS for char in claim_token)
+        and all(char in _LOWER_HEX_CHARS for char in service_token)
+    )
 
 
 class SubagentBatchRepository:
@@ -181,6 +201,31 @@ class SubagentBatchRepository:
         data["counts"] = {status: counts.get(status, 0) for status in ("pending", "queued", "leased", "running", "succeeded", "failed", "cancelled")}
         return data
 
+    async def _lock_batch_and_owned_item(
+        self,
+        session: AsyncSession,
+        item_id: str,
+        *,
+        lease_owner: str,
+        statuses: tuple[str, ...],
+        lease_valid_at: datetime | None = None,
+    ) -> tuple[SubagentBatchRow | None, SubagentBatchItemRow | None]:
+        """Lock an item's batch before locking the leased item itself."""
+        batch_id = select(SubagentBatchItemRow.batch_id).where(SubagentBatchItemRow.id == item_id).scalar_subquery()
+        batch = (await session.execute(select(SubagentBatchRow).where(SubagentBatchRow.id == batch_id).with_for_update())).scalar_one_or_none()
+        if batch is None:
+            return None, None
+        item_stmt = select(SubagentBatchItemRow).where(
+            SubagentBatchItemRow.id == item_id,
+            SubagentBatchItemRow.batch_id == batch.id,
+            SubagentBatchItemRow.status.in_(statuses),
+            SubagentBatchItemRow.lease_owner == lease_owner,
+        )
+        if lease_valid_at is not None:
+            item_stmt = item_stmt.where(SubagentBatchItemRow.lease_expires_at >= lease_valid_at)
+        item = (await session.execute(item_stmt.with_for_update())).scalar_one_or_none()
+        return batch, item
+
     async def get_batch(self, batch_id: str, *, user_id: str) -> dict[str, Any] | None:
         async with self._sf() as session:
             batch = await session.get(SubagentBatchRow, batch_id)
@@ -265,6 +310,13 @@ class SubagentBatchRepository:
                     ).scalars()
                 )
                 for item in expired:
+                    if item.status == "leased" and _lease_owner_has_generation_token(item.lease_owner):
+                        # The claim reserved capacity but execution never began,
+                        # so recovery must not consume an execution attempt. A
+                        # rolling-upgrade lease without the per-claim generation
+                        # token is ambiguous and conservatively keeps its attempt.
+                        item.attempt = max(0, item.attempt - 1)
+                        item.started_at = None
                     item.lease_owner = None
                     item.lease_expires_at = None
                     item.updated_at = now
@@ -327,7 +379,6 @@ class SubagentBatchRepository:
                     item.attempt += 1
                     item.lease_owner = lease_owner
                     item.lease_expires_at = expires_at
-                    item.started_at = now
                     item.updated_at = now
                     item.error = None
                     value = self._item_dict(item)
@@ -353,20 +404,14 @@ class SubagentBatchRepository:
         now: datetime,
     ) -> dict[str, bool]:
         async with self._sf() as session:
-            item = (
-                await session.execute(
-                    select(SubagentBatchItemRow)
-                    .where(
-                        SubagentBatchItemRow.id == item_id,
-                        SubagentBatchItemRow.status.in_(("leased", "running")),
-                        SubagentBatchItemRow.lease_owner == lease_owner,
-                    )
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
+            batch, item = await self._lock_batch_and_owned_item(
+                session,
+                item_id,
+                lease_owner=lease_owner,
+                statuses=("leased", "running"),
+            )
             if item is None:
                 return {"valid": False, "cancel_requested": True}
-            batch = await session.get(SubagentBatchRow, item.batch_id)
             cancel_requested = item.cancel_requested_at is not None or batch is None or batch.status == "cancelled"
             if not cancel_requested:
                 item.lease_expires_at = now + timedelta(seconds=lease_seconds)
@@ -376,18 +421,14 @@ class SubagentBatchRepository:
 
     async def mark_item_running(self, item_id: str, *, lease_owner: str, now: datetime) -> bool:
         async with self._sf() as session:
-            item = (
-                await session.execute(
-                    select(SubagentBatchItemRow)
-                    .where(
-                        SubagentBatchItemRow.id == item_id,
-                        SubagentBatchItemRow.status == "leased",
-                        SubagentBatchItemRow.lease_owner == lease_owner,
-                    )
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
-            if item is None or item.cancel_requested_at is not None:
+            batch, item = await self._lock_batch_and_owned_item(
+                session,
+                item_id,
+                lease_owner=lease_owner,
+                statuses=("leased",),
+                lease_valid_at=now,
+            )
+            if item is None or item.cancel_requested_at is not None or batch is None or batch.status == "cancelled":
                 return False
             item.status = "running"
             item.started_at = now
@@ -412,20 +453,14 @@ class SubagentBatchRepository:
         acceptance_verdict: AcceptanceVerdict | None = None,
     ) -> bool:
         async with self._sf() as session:
-            item = (
-                await session.execute(
-                    select(SubagentBatchItemRow)
-                    .where(
-                        SubagentBatchItemRow.id == item_id,
-                        SubagentBatchItemRow.status.in_(("leased", "running")),
-                        SubagentBatchItemRow.lease_owner == lease_owner,
-                    )
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
+            batch, item = await self._lock_batch_and_owned_item(
+                session,
+                item_id,
+                lease_owner=lease_owner,
+                statuses=("leased", "running"),
+            )
             if item is None:
                 return False
-            batch = await session.get(SubagentBatchRow, item.batch_id, with_for_update=True)
             cancelled = item.cancel_requested_at is not None or batch is None or batch.status == "cancelled"
             item.lease_owner = None
             item.lease_expires_at = None
@@ -475,20 +510,14 @@ class SubagentBatchRepository:
         attempt instead of consuming the batch's retry budget.
         """
         async with self._sf() as session:
-            item = (
-                await session.execute(
-                    select(SubagentBatchItemRow)
-                    .where(
-                        SubagentBatchItemRow.id == item_id,
-                        SubagentBatchItemRow.status.in_(("leased", "running")),
-                        SubagentBatchItemRow.lease_owner == lease_owner,
-                    )
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
+            batch, item = await self._lock_batch_and_owned_item(
+                session,
+                item_id,
+                lease_owner=lease_owner,
+                statuses=("leased", "running"),
+            )
             if item is None:
                 return False
-            batch = await session.get(SubagentBatchRow, item.batch_id, with_for_update=True)
             cancelled = item.cancel_requested_at is not None or batch is None or batch.status == "cancelled"
             item.lease_owner = None
             item.lease_expires_at = None

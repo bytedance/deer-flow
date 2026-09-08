@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -126,9 +126,19 @@ class SubagentExecutionCapacity:
             self._release_locked()
 
     @asynccontextmanager
-    async def slot(self) -> AsyncIterator[None]:
+    async def slot(
+        self,
+        *,
+        after_acquire: Callable[[], Awaitable[bool | None]] | None = None,
+    ) -> AsyncIterator[None]:
         await self._acquire()
         try:
+            if after_acquire is not None:
+                admitted = await after_acquire()
+                if admitted is False:
+                    raise SubagentCapacityRejected(
+                        "Subagent execution admission hook rejected the execution",
+                    )
             yield
         finally:
             await _release_after_cancellation(self._release)
