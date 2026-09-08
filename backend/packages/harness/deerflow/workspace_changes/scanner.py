@@ -271,13 +271,18 @@ def _normalize_symlink_target(target: str) -> str:
     hosts. ``readlink(2)`` returns the literal string the link was created
     with, and backslash is a valid filename byte on Linux — a target string
     that merely starts with ``\\\\?\\`` there must be recorded verbatim.
+
+    On Windows, only extended *drive-letter* paths are stripped. Other
+    ``\\\\?\\`` namespace forms (volume-GUID paths, device paths) are kept
+    verbatim: stripping them would leave a relative-looking remainder that
+    no longer names the target's namespace.
     """
     if os.name != "nt":
         return target
     if target.startswith("\\\\?\\UNC\\"):
         return "\\\\" + target[len("\\\\?\\UNC\\") :]
-    if target.startswith("\\\\?\\"):
-        return target[len("\\\\?\\") :]
+    if target.startswith("\\\\?\\") and len(target) >= 7 and target[4].isascii() and target[4].isalpha() and target[5] == ":" and target[6] in "\\/":
+        return target[4:]
     return target
 
 

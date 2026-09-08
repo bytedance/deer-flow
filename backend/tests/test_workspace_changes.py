@@ -760,6 +760,17 @@ def test_normalize_symlink_target_strips_extended_length_unc_prefix(monkeypatch)
     assert _normalize_symlink_target(r"\\?\UNC\server\share\a.txt") == r"\\server\share\a.txt"
 
 
+def test_normalize_symlink_target_preserves_volume_guid_and_degenerate_prefixes(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    # Volume-GUID paths are absolute Windows targets in their own namespace;
+    # stripping the prefix would leave a relative-looking path.
+    target = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\folder\target.txt"
+    assert _normalize_symlink_target(target) == target
+    # Only a drive letter followed by a colon and a separator is a drive path.
+    for degenerate in (r"\\?\C:", r"\\?\1:\x", r"\\?\:"):
+        assert _normalize_symlink_target(degenerate) == degenerate
+
+
 def test_normalize_symlink_target_leaves_relative_and_plain_posix_targets_verbatim():
     assert _normalize_symlink_target("relative/target.txt") == "relative/target.txt"
     assert _normalize_symlink_target("/tmp/target.txt") == "/tmp/target.txt"
