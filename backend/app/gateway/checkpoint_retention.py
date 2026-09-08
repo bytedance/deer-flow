@@ -79,6 +79,7 @@ class _Node:
     step: int
     duration_only: bool
     mid_run: bool
+    versions: frozenset = frozenset()
 
 
 def _node_step(tuple_: Any) -> int:
@@ -101,11 +102,16 @@ def _thread_config(thread_id: str) -> dict[str, Any]:
 async def _thread_storage_stats(saver: Any, thread_id: str) -> dict[str, int]:
     """Per-thread rows/bytes, same normalized shape as ``bench_channels``."""
     if isinstance(saver, InMemorySaver):
-        checkpoint_rows = checkpoint_bytes = write_rows = write_bytes = 0
+        checkpoint_rows = checkpoint_bytes = blob_rows = blob_bytes = write_rows = write_bytes = 0
         for namespace in saver.storage.get(thread_id, {}).values():
             for checkpoint, metadata, _parent in namespace.values():
                 checkpoint_rows += 1
                 checkpoint_bytes += len(checkpoint[1]) + len(metadata[1])
+        for (stored_thread, _ns, _channel, _version), (_type_tag, blob) in saver.blobs.items():
+            if stored_thread != thread_id:
+                continue
+            blob_rows += 1
+            blob_bytes += len(blob)
         for (stored_thread, _ns, _cp_id), writes in saver.writes.items():
             if stored_thread != thread_id:
                 continue
@@ -113,10 +119,12 @@ async def _thread_storage_stats(saver: Any, thread_id: str) -> dict[str, int]:
                 write_rows += 1
                 write_bytes += len(blob)
         return {
+            "logical_checkpoint_bytes": checkpoint_bytes + blob_bytes,
+            "logical_write_bytes": write_bytes,
             "checkpoint_rows": checkpoint_rows,
             "checkpoint_bytes": checkpoint_bytes,
-            "blob_rows": 0,
-            "blob_bytes": 0,
+            "blob_rows": blob_rows,
+            "blob_bytes": blob_bytes,
             "write_rows": write_rows,
             "write_bytes": write_bytes,
         }
@@ -133,6 +141,8 @@ async def _thread_storage_stats(saver: Any, thread_id: str) -> dict[str, int]:
             stats[bytes_key] = int(row[1] or 0)
         stats["blob_rows"] = 0
         stats["blob_bytes"] = 0
+        stats["logical_checkpoint_bytes"] = stats["checkpoint_bytes"]
+        stats["logical_write_bytes"] = stats["write_bytes"]
         return stats
     sqls = (
         ("checkpoint_rows", "checkpoint_bytes", "SELECT COUNT(*) AS rows, COALESCE(SUM(pg_column_size(checkpoint) + pg_column_size(metadata)), 0) AS bytes FROM checkpoints WHERE thread_id = %s"),
@@ -146,6 +156,8 @@ async def _thread_storage_stats(saver: Any, thread_id: str) -> dict[str, int]:
             row = await cursor.fetchone()
         stats[row_key] = int(row["rows"])
         stats[bytes_key] = int(row["bytes"] or 0)
+    stats["logical_checkpoint_bytes"] = stats["checkpoint_bytes"] + stats["blob_bytes"]
+    stats["logical_write_bytes"] = stats["write_bytes"]
     return stats
 
 
@@ -178,7 +190,12 @@ async def _checkpoint_ids_with_writes(saver: Any, thread_id: str) -> set[tuple[s
 
 
 async def _delete_checkpoint_rows(saver: Any, thread_id: str, key: tuple[str, str]) -> None:
-    """Remove one checkpoint and the rows only it reachable, jointly (contract mechanics)."""
+    """Remove one checkpoint row and the writes rows it owns, jointly.
+
+    Blob rows are handled by the survivor-reachability pass
+    (:func:`_delete_unreachable_blobs`), never per-checkpoint: versions are
+    shared between a checkpoint and its clones (see the contract doc).
+    """
     ns, cp_id = key
     if isinstance(saver, InMemorySaver):
         saver.storage.get(thread_id, {}).get(ns, {}).pop(cp_id, None)
@@ -201,13 +218,30 @@ async def _delete_checkpoint_rows(saver: Any, thread_id: str, key: tuple[str, st
             (thread_id, ns, cp_id),
         )
         await cursor.execute(
-            "DELETE FROM checkpoint_blobs WHERE thread_id = %s AND checkpoint_ns = %s AND version = %s",
-            (thread_id, ns, cp_id),
-        )
-        await cursor.execute(
             "DELETE FROM checkpoint_writes WHERE thread_id = %s AND checkpoint_ns = %s AND checkpoint_id = %s",
             (thread_id, ns, cp_id),
         )
+
+
+async def _delete_unreachable_blobs(saver: Any, thread_id: str, survivor_versions: set) -> None:
+    """Whole-thread blob GC: drop exactly the versions no surviving checkpoint
+    references (memory ``saver.blobs`` / Postgres ``checkpoint_blobs``)."""
+    if isinstance(saver, InMemorySaver):
+        for key in [key for key in saver.blobs if key[0] == thread_id and key[3] not in survivor_versions]:
+            del saver.blobs[key]
+        return
+    if isinstance(saver, AsyncSqliteSaver):
+        return
+    async with saver._cursor() as cursor:
+        await cursor.execute("SELECT DISTINCT version FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,))
+        rows = await cursor.fetchall()
+    orphans = [row["version"] for row in rows if row["version"] not in survivor_versions]
+    if orphans:
+        async with saver._cursor() as cursor:
+            await cursor.execute(
+                "DELETE FROM checkpoint_blobs WHERE thread_id = %s AND version = ANY(%s)",
+                (thread_id, orphans),
+            )
 
 
 async def enforce_thread_retention(
@@ -247,6 +281,8 @@ async def enforce_thread_retention(
             parent = parent_config.get("configurable") or {}
             parent_ns = parent.get("checkpoint_ns") or ""
             parent_id = parent.get("checkpoint_id")
+        checkpoint = getattr(tuple_, "checkpoint", None) or {}
+        channel_versions = checkpoint.get("channel_versions")
         nodes[(ns, cp_id)] = _Node(
             ns=ns,
             cp_id=cp_id,
@@ -255,6 +291,7 @@ async def enforce_thread_retention(
             step=_node_step(tuple_),
             duration_only=is_duration_only_checkpoint(tuple_),
             mid_run=bool(getattr(tuple_, "next", None)),
+            versions=frozenset(channel_versions.values()) if isinstance(channel_versions, dict) else frozenset(),
         )
     if not nodes:
         return report
@@ -307,9 +344,23 @@ async def enforce_thread_retention(
     if effective.max_delete_per_run is not None:
         deletable = deletable[: effective.max_delete_per_run]
 
+    # Blob GC, contract deletion mechanics: a blob row is an orphan only if no
+    # SURVIVING checkpoint references its version. A real duration-only leaf
+    # copies its parent's channel_versions verbatim, so its blobs are the
+    # parent's rows — deleting "blobs keyed by the removed checkpoint's own
+    # versions" would corrupt the surviving state.
+    deleted_keys = set(deletable)
+    survivor_versions: set[Any] = set()
+    for key, node in nodes.items():
+        if key not in deleted_keys:
+            survivor_versions.update(node.versions)
+
     for key in deletable:
         await _delete_checkpoint_rows(saver, thread_id, key)
         report.deleted_checkpoint_ids.append(key[1])
+
+    if deletable:
+        await _delete_unreachable_blobs(saver, thread_id, survivor_versions)
 
     if collect_stats:
         report.stats_after = await _thread_storage_stats(saver, thread_id)
