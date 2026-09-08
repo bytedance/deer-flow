@@ -2,10 +2,12 @@
 
 ``get_available_tools()`` may block on MCP cache initialization while it runs
 on async agent-assembly paths. The offload dispatches the (unchanged,
-synchronous) assembly to a worker thread via ``asyncio.to_thread`` at the
-async entry points: ``task_tool``, ``SubagentBatchService._execute_item``,
-and the Gateway run worker's agent construction (``run_agent`` ->
-``agent_factory`` -> lead-agent assembly).
+synchronous) assembly to the dedicated assembly pool (``asyncio.to_thread``'
+s default-executor alternative) at the async entry points: ``task_tool``,
+``SubagentBatchService._execute_item``, the Gateway run worker's agent
+construction (``run_agent`` -> ``agent_factory`` -> lead-agent assembly), and
+the checkpoint state-accessor build (``abuild_checkpoint_state_accessor`` ->
+``build_thread_checkpoint_state_accessor``).
 
 Under the strict Blockbuster context (this directory's conftest), any
 blocking IO reached from ``deerflow.*`` while on the event loop raises
@@ -41,6 +43,10 @@ from deerflow.subagents.config import SubagentConfig
 # ``deerflow.tools.builtins.task_tool`` is shadowed by the StructuredTool.
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 batch_service_module = importlib.import_module("deerflow.subagents.batch_service")
+# Imported at module scope: the first import of app.gateway.services pulls in
+# fastapi/pydantic, whose one-time metadata reads must not run inside a gated
+# test item.
+gateway_services = importlib.import_module("app.gateway.services")
 
 pytestmark = pytest.mark.asyncio
 
@@ -264,6 +270,48 @@ async def test_run_agent_assembles_off_loop(monkeypatch, tmp_path):
         graph_input={},
         config={},
     )
+
+    assert observed_threads, "agent assembly must be invoked"
+    assert all(thread is not threading.main_thread() for thread in observed_threads)
+
+
+async def test_state_accessor_build_assembles_off_loop(monkeypatch, tmp_path):
+    """abuild_checkpoint_state_accessor dispatches assembly to the assembly pool."""
+    cfg = tmp_path / "extensions_config.json"
+    cfg.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    observed_threads: list = []
+
+    ctx = SimpleNamespace(
+        checkpointer=None,
+        store=None,
+        checkpoint_channel_mode="full",
+        checkpoint_snapshot_frequency=None,
+        app_config=None,
+    )
+    monkeypatch.setattr(gateway_services, "get_run_context", lambda _request: ctx)
+
+    async def _no_assistant(_request, _thread_id, **_kwargs):
+        return None
+
+    monkeypatch.setattr(gateway_services, "resolve_thread_assistant_id", _no_assistant)
+
+    def _resolve_factory(_assistant_id):
+        # A fresh factory per resolution: the accessor graph cache validates
+        # the factory identity, so this always misses and always reaches the
+        # probe regardless of what earlier tests left cached.
+        def _factory(*, config):
+            observed_threads.append(threading.current_thread())
+            # Real production blocking read (executed inside a deerflow.* frame):
+            # trips the strict gate when the factory runs on the loop.
+            ExtensionsConfig.from_file()
+            return SimpleNamespace()
+
+        return _factory
+
+    monkeypatch.setattr(gateway_services, "resolve_agent_factory", _resolve_factory)
+
+    await gateway_services.build_thread_checkpoint_state_accessor(SimpleNamespace(), thread_id="thread-1")
 
     assert observed_threads, "agent assembly must be invoked"
     assert all(thread is not threading.main_thread() for thread in observed_threads)

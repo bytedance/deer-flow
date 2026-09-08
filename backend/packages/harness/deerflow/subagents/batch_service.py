@@ -20,6 +20,7 @@ from deerflow.subagents.executor import (
     get_background_task_result,
     request_cancel_background_task,
 )
+from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +197,7 @@ class SubagentBatchService:
             )
             # Assemble off-loop: tool assembly may block on MCP cache
             # initialization, which must not stall the calling event loop (issue #5172).
-            tools = await asyncio.to_thread(
+            tools = await run_assembly(
                 get_available_tools,
                 groups=spec.get("tool_groups"),
                 model_name=effective_model,

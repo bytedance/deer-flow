@@ -80,6 +80,7 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -1037,11 +1038,15 @@ async def abuild_checkpoint_state_accessor(
 
     Identical accessor construction, but the agent-factory assembly — which
     re-enters ``get_available_tools()`` and may block on MCP cache
-    initialization — runs off-loop via ``asyncio.to_thread`` so the Gateway
-    event loop keeps making progress (issue #5172). Repeat calls hit
-    ``_state_accessor_graph_cache`` and only pay the thread hop.
+    initialization — runs off-loop on the dedicated assembly pool so the
+    Gateway event loop keeps making progress (issue #5172). Repeat calls hit
+    ``_state_accessor_graph_cache`` and only pay the thread hop. A cold miss
+    may duplicate lead-agent assembly across concurrent readers when the
+    factory is not identity-stable (the cache validates the factory object,
+    and MCP discovery itself stays process-wide single-flight); the assembly
+    pool bounds how many duplicates run at once.
     """
-    return await asyncio.to_thread(
+    return await run_assembly(
         build_checkpoint_state_accessor,
         request,
         thread_id=thread_id,
