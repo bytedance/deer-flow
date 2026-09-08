@@ -590,8 +590,12 @@ class AioSandbox(Sandbox):
             # legitimately ends in whitespace would be corrupted and
             # never resolve again.
             # find -H dereferences only the start point (symlink-to-dir).
-            # An existing directory still prints itself via `find -type d`, so
-            # empty stdout is the 2>/dev/null missing-path case, not a real empty dir.
+            # An existing directory still prints itself via `find -type d`.
+            # Empty stdout with find exit 0 or 1 is the missing-path case; other
+            # statuses (e.g. 127, no find binary) are command failure, not FileNotFoundError.
+            exit_code = getattr(result.data, "exit_code", None)
+            if exit_code not in (0, 1):
+                raise OSError(f"Failed to list directory '{resolved}' in sandbox: command exited with code {exit_code}")
             entries = [line for line in output.split("\n") if line] if output else []
             if not entries:
                 raise FileNotFoundError(resolved)
