@@ -1329,3 +1329,17 @@ def test_list_dir_raises_when_find_returns_no_entries() -> None:
 
     with pytest.raises(FileNotFoundError):
         box.list_dir("/mnt/user-data/workspace")
+
+
+def test_list_dir_uses_find_H_to_dereference_start_point() -> None:
+    captured: list[tuple] = []
+
+    class _FindBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            captured.append(argv)
+            return types.SimpleNamespace(stdout="/mnt/user-data/workspace\n", stderr="", exit_code=0)
+
+    box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace"]
+    assert any(len(argv) >= 3 and str(argv[2]).startswith("find -H ") for argv in captured)

@@ -5231,6 +5231,17 @@ def test_list_dir_raises_when_find_returns_no_entries():
         sb.list_dir("/home/user/missing")
 
 
+def test_list_dir_uses_find_H_to_dereference_start_point():
+    # find defaults to -P, so a symlink start point (E2B /mnt/acp-workspace)
+    # would produce empty stdout and raise FileNotFoundError without -H.
+    listing = SimpleNamespace(stdout="/mnt/acp-workspace\n", stderr="", exit_code=0)
+    commands = FakeCommandsAPI([listing])
+    sb = _make_sandbox(FakeClient(commands=commands))
+
+    assert sb.list_dir("/mnt/acp-workspace") == ["/mnt/acp-workspace"]
+    assert commands.calls and commands.calls[0].startswith("find -H ")
+
+
 def test_glob_preserves_trailing_space_in_filename():
     listing = SimpleNamespace(stdout="/home/user/notes.txt \n", stderr="", exit_code=0)
     client = FakeClient(commands=FakeCommandsAPI([listing]))

@@ -626,6 +626,20 @@ class TestListDirSerialization:
         with pytest.raises(FileNotFoundError):
             sandbox.list_dir("/missing")
 
+    def test_list_dir_raises_oserror_when_result_data_is_none(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=None))
+
+        with pytest.raises(OSError, match="Failed to list directory"):
+            sandbox.list_dir("/test")
+
+    def test_list_dir_uses_find_H(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/test\n")))
+
+        sandbox.list_dir("/test")
+
+        command = sandbox._client.shell.exec_command.call_args.kwargs["command"]
+        assert command.startswith("find -H ")
+
 
 class TestNoChangeTimeout:
     """Verify that no_change_timeout is forwarded to every exec_command call."""

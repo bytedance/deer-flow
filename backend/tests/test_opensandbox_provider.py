@@ -144,7 +144,10 @@ class _FakeCommands:
 
     def _find(self, command: str) -> _Execution:
         tokens = shlex.split(command)
-        root = tokens[1].rstrip("/") or "/"
+        i = 1
+        while i < len(tokens) and tokens[i] in ("-H", "-L", "-P"):
+            i += 1
+        root = tokens[i].rstrip("/") or "/"
         include_dirs = "d" in tokens
         paths = list(self._owner.file_data)
         if include_dirs:
@@ -757,6 +760,14 @@ def test_sandbox_id_matches_shared_identity():
 
     assert OpenSandboxProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
     assert OpenSandboxProvider._sandbox_id("t-1", "") == derive_sandbox_scope_token(user_id="", thread_id="t-1")
+
+
+def test_list_dir_raises_when_find_returns_no_entries() -> None:
+    remote = _FakeRemote("remote")
+    box = _box(remote)
+
+    with pytest.raises(FileNotFoundError):
+        box.list_dir("/mnt/user-data/missing")
 
 
 def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:

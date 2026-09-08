@@ -341,7 +341,7 @@ class E2BSandbox(Sandbox):
             if client is None:
                 raise RuntimeError("sandbox client has been closed")
             try:
-                result = client.commands.run(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
+                result = client.commands.run(f"find -H {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
                 raise OSError(f"Failed to list_dir {resolved} in e2b sandbox: {e}") from e
@@ -349,6 +349,7 @@ class E2BSandbox(Sandbox):
             # splitlines() already removed the terminators; do NOT strip
             # entries — a filename that legitimately ends in whitespace
             # would be corrupted and never resolve again.
+            # find -H dereferences only the start point (symlink-to-dir).
             # An existing directory still prints itself via `find -type d`, so
             # empty stdout is the 2>/dev/null missing-path case, not a real empty dir.
             entries = [line for line in output.splitlines() if line]

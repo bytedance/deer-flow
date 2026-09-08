@@ -573,24 +573,28 @@ class AioSandbox(Sandbox):
         Returns:
             The contents of the directory.
         """
+        resolved = path
         with self._lock:
             try:
-                result = self._client.shell.exec_command(command=f"find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500", no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
+                result = self._client.shell.exec_command(command=f"find -H {shlex.quote(resolved)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500", no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
             except Exception as e:
                 logger.error(f"Failed to list directory in sandbox: {e}")
-                raise OSError(f"Failed to list directory '{path}' in sandbox: {e}") from e
-            output = result.data.output if result.data else ""
+                raise OSError(f"Failed to list directory '{resolved}' in sandbox: {e}") from e
+            if result.data is None:
+                raise OSError(f"Failed to list directory '{resolved}' in sandbox: empty response")
+            output = result.data.output or ""
             # find delimits records with "\n" and nothing else, so split
             # on that alone: splitlines() would also break on \v, \f,
             # \x1c-\x1e and \x85, all of which are legal inside a Linux
             # filename. Do NOT strip entries either — a filename that
             # legitimately ends in whitespace would be corrupted and
             # never resolve again.
+            # find -H dereferences only the start point (symlink-to-dir).
             # An existing directory still prints itself via `find -type d`, so
             # empty stdout is the 2>/dev/null missing-path case, not a real empty dir.
             entries = [line for line in output.split("\n") if line] if output else []
             if not entries:
-                raise FileNotFoundError(path)
+                raise FileNotFoundError(resolved)
             return entries
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:

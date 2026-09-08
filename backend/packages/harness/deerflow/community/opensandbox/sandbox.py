@@ -324,9 +324,10 @@ class OpenSandboxSandbox(Sandbox):
         if depth < 0:
             raise ValueError("max_depth must be non-negative")
         resolved = self._resolve_path(path)
-        execution = self._run(f"find {shlex.quote(resolved)} -maxdepth {depth} \\( -type f -o -type d \\) 2>/dev/null | head -500")
+        execution = self._run(f"find -H {shlex.quote(resolved)} -maxdepth {depth} \\( -type f -o -type d \\) 2>/dev/null | head -500")
         # splitlines() already removed the terminators; do NOT strip entries —
         # a filename that legitimately ends in whitespace would be corrupted.
+        # find -H dereferences only the start point (symlink-to-dir).
         # An existing directory still prints itself via `find -type d`, so
         # empty stdout is the 2>/dev/null missing-path case, not a real empty dir.
         entries = [line for line in execution_stdout(execution).splitlines() if line]

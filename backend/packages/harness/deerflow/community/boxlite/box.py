@@ -290,9 +290,10 @@ class BoxliteBox(Sandbox):
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
-        r = self._sh(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
+        r = self._sh(f"find -H {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
         # splitlines() already removed the terminators; do NOT strip entries —
         # a filename that legitimately ends in whitespace would be corrupted.
+        # find -H dereferences only the start point (symlink-to-dir).
         # An existing directory still prints itself via `find -type d`, so
         # empty stdout is the 2>/dev/null missing-path case, not a real empty dir.
         entries = [line for line in (r.stdout or "").splitlines() if line]
