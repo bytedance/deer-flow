@@ -614,6 +614,41 @@ class TestListDirSerialization:
         assert result == ["/a", "/b"]
         assert lock_was_held == [True], "list_dir must hold the lock during exec_command"
 
+    def test_list_dir_returns_empty_for_existing_empty_dir(self, sandbox):
+        """An empty directory should still return [] when command succeeds."""
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(data=SimpleNamespace(output="", exit_code=0))
+        )
+
+        assert sandbox.list_dir("/test/empty") == []
+
+    def test_list_dir_raises_file_not_found_for_missing_directory(self, sandbox):
+        """Missing paths should raise FileNotFoundError from list_dir."""
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(data=SimpleNamespace(output="", exit_code=2))
+        )
+
+        with pytest.raises(FileNotFoundError, match="Directory not found"):
+            sandbox.list_dir("/test/missing")
+        command = sandbox._client.shell.exec_command.call_args.kwargs["command"]
+        assert command.startswith("set -o pipefail; ")
+
+    def test_list_dir_raises_runtimeerror_for_nonzero_exit_with_output(self, sandbox):
+        """Non-zero exit status with stderr/output should bubble as RuntimeError."""
+        sandbox._client.shell.exec_command = MagicMock(
+            return_value=SimpleNamespace(data=SimpleNamespace(output="Permission denied", exit_code=13))
+        )
+
+        with pytest.raises(RuntimeError, match="Failed to list directory"):
+            sandbox.list_dir("/test/protected")
+
+    def test_list_dir_bubbles_command_exception(self, sandbox):
+        """Transport and SDK failures should bubble out of list_dir."""
+        sandbox._client.shell.exec_command = MagicMock(side_effect=RuntimeError("sandbox transport dead"))
+
+        with pytest.raises(RuntimeError, match="sandbox transport dead"):
+            sandbox.list_dir("/test")
+
 
 class TestNoChangeTimeout:
     """Verify that no_change_timeout is forwarded to every exec_command call."""

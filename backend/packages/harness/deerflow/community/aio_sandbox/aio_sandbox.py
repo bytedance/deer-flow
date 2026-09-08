@@ -575,8 +575,14 @@ class AioSandbox(Sandbox):
         """
         with self._lock:
             try:
-                result = self._client.shell.exec_command(command=f"find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500", no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
-                output = result.data.output if result.data else ""
+                result = self._client.shell.exec_command(command=f"set -o pipefail; find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500", no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
+                data = result.data
+                output = data.output if data else ""
+                exit_code = getattr(data, "exit_code", 0)
+                if exit_code not in (0, None):
+                    if not output:
+                        raise FileNotFoundError(f"Directory not found: {path}")
+                    raise RuntimeError(f"Failed to list directory '{path}': exit code {exit_code}")
                 if output:
                     # find delimits records with "\n" and nothing else, so split
                     # on that alone: splitlines() would also break on \v, \f,
@@ -588,7 +594,7 @@ class AioSandbox(Sandbox):
                 return []
             except Exception as e:
                 logger.error(f"Failed to list directory in sandbox: {e}")
-                return []
+                raise
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         """Write content to a file in the sandbox.

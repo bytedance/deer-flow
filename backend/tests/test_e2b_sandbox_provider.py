@@ -5204,6 +5204,38 @@ def test_list_dir_preserves_trailing_space_in_filename():
     assert sb.list_dir("/home/user") == ["/home/user/notes.txt ", "/home/user/sub"]
 
 
+def test_list_dir_returns_empty_for_existing_empty_directory():
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="", exit_code=0)]))
+    sb = _make_sandbox(client)
+
+    assert sb.list_dir("/home/user/empty") == []
+
+
+def test_list_dir_raises_file_not_found_for_missing_directory():
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="", exit_code=2)]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(FileNotFoundError, match="Directory not found"):
+        sb.list_dir("/home/user/missing")
+    assert client.commands.calls[0].startswith("set -o pipefail; ")
+
+
+def test_list_dir_raises_runtimeerror_for_nonzero_exit_with_output():
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="permission denied", stderr="", exit_code=13)]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(RuntimeError, match="Failed to list directory"):
+        sb.list_dir("/home/user/protected")
+
+
+def test_list_dir_bubbles_command_exception():
+    client = FakeClient(commands=FakeCommandsAPI([lambda _cmd: (_ for _ in ()).throw(RuntimeError("sandbox command failed"))]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(RuntimeError, match="sandbox command failed"):
+        sb.list_dir("/home/user")
+
+
 def test_glob_preserves_trailing_space_in_filename():
     listing = SimpleNamespace(stdout="/home/user/notes.txt \n", stderr="", exit_code=0)
     client = FakeClient(commands=FakeCommandsAPI([listing]))
