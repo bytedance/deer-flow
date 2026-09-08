@@ -18,6 +18,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from e2b import FileNotFoundException, TimeoutException
 from pydantic import ValidationError
 
 from deerflow.community.e2b_sandbox.capacity import (
@@ -5213,3 +5214,72 @@ def test_glob_preserves_trailing_space_in_filename():
 
     assert matches == ["/home/user/notes.txt "]
     assert truncated is False
+
+
+@pytest.mark.parametrize("missing_exc", [FileNotFoundError, FileNotFoundException])
+def test_append_creates_file_when_file_does_not_exist(missing_exc):
+    # Append has no native write mode, so a missing file must still create one
+    # containing only the new fragment. Both the e2b SDK exception and the
+    # stdlib one used by FakeFilesAPI / compatible clients count as not-found.
+    class MissingFilesAPI(FakeFilesAPI):
+        def read(self, path: str, *, format: str | None = None):
+            self.read_calls.append((path, format))
+            raise missing_exc(path)
+
+    files = MissingFilesAPI()
+    sb = _make_sandbox(FakeClient(files=files))
+
+    sb.write_file("/mnt/user-data/outputs/report.txt", "conclusion", append=True)
+
+    assert files.write_calls == [("/home/user/outputs/report.txt", "conclusion")]
+
+
+def test_append_does_not_overwrite_when_read_fails(caplog):
+    # If the pre-read fails for any reason other than not-found, we cannot
+    # confirm the existing contents. Continuing would write only the tail and
+    # destroy the original file. Fail closed: raise, and never call write.
+    existing = b"important report body"
+
+    class TimeoutFilesAPI(FakeFilesAPI):
+        def read(self, path: str, *, format: str | None = None):
+            self.read_calls.append((path, format))
+            raise TimeoutException("read timed out")
+
+    files = TimeoutFilesAPI(store={"/home/user/outputs/report.txt": existing})
+    sb = _make_sandbox(FakeClient(files=files))
+
+    with caplog.at_level("ERROR"), pytest.raises(TimeoutException, match="read timed out"):
+        sb.write_file("/mnt/user-data/outputs/report.txt", "conclusion", append=True)
+
+    assert files.write_calls == []
+    assert files.store["/home/user/outputs/report.txt"] == existing
+    assert "refusing to overwrite" in caplog.text
+    assert "Failed to write file" not in caplog.text
+
+
+def test_append_accumulates_existing_content():
+    # The rewrite exists to keep read-modify-write. If someone later drops
+    # `existing` and writes only the tail, the not-found / fail-closed tests
+    # would still pass.
+    files = FakeFilesAPI(store={"/home/user/outputs/report.txt": b"hello"})
+    sb = _make_sandbox(FakeClient(files=files))
+
+    sb.write_file("/mnt/user-data/outputs/report.txt", " world", append=True)
+
+    assert files.write_calls == [("/home/user/outputs/report.txt", "hello world")]
+
+
+def test_append_decodes_bytes_preimage():
+    # FakeFilesAPI.read() returns str for valid utf-8. A bytes pre-image is
+    # what hits the decode branch before concatenation.
+    class BytesFilesAPI(FakeFilesAPI):
+        def read(self, path: str, *, format: str | None = None):
+            self.read_calls.append((path, format))
+            return self.store[path]
+
+    files = BytesFilesAPI(store={"/home/user/outputs/report.txt": b"hello"})
+    sb = _make_sandbox(FakeClient(files=files))
+
+    sb.write_file("/mnt/user-data/outputs/report.txt", " world", append=True)
+
+    assert files.write_calls == [("/home/user/outputs/report.txt", "hello world")]
