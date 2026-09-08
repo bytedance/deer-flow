@@ -37,10 +37,7 @@ export type ScheduleFormState = {
   timezone: string;
 };
 
-export function intervalToSeconds(
-  amount: number,
-  unit: IntervalUnit,
-): number {
+export function intervalToSeconds(amount: number, unit: IntervalUnit): number {
   if (!Number.isInteger(amount) || amount < 1) {
     throw new Error("interval amount must be a positive integer");
   }
@@ -104,10 +101,7 @@ export function clampIntervalAmount(
   if (!Number.isFinite(amount)) {
     return min;
   }
-  return Math.min(
-    Math.max(min, Math.trunc(amount)),
-    maxIntervalAmount(unit),
-  );
+  return Math.min(Math.max(min, Math.trunc(amount)), maxIntervalAmount(unit));
 }
 
 export function hasScheduleSpec(spec: {

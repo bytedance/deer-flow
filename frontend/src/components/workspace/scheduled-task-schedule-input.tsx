@@ -39,9 +39,10 @@ export type ScheduleValue = {
   timezone: string;
 };
 
-function parseInitialInterval(spec: {
-  every_seconds?: number;
-}): { amount: number; unit: IntervalUnit } {
+function parseInitialInterval(spec: { every_seconds?: number }): {
+  amount: number;
+  unit: IntervalUnit;
+} {
   const raw = spec.every_seconds;
   if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) {
     return secondsToInterval(raw);
@@ -161,7 +162,9 @@ export function ScheduledTaskScheduleInput({
       const amount = clampIntervalAmount(intervalAmount, intervalUnit);
       onChangeRef.current({
         schedule_type: "interval",
-        schedule_spec: { every_seconds: intervalToSeconds(amount, intervalUnit) },
+        schedule_spec: {
+          every_seconds: intervalToSeconds(amount, intervalUnit),
+        },
         timezone,
       });
       return;
@@ -173,7 +176,15 @@ export function ScheduledTaskScheduleInput({
       schedule_spec: cron ? { cron } : {},
       timezone,
     });
-  }, [scheduleType, preset, parts, runAtLocal, timezone, intervalAmount, intervalUnit]);
+  }, [
+    scheduleType,
+    preset,
+    parts,
+    runAtLocal,
+    timezone,
+    intervalAmount,
+    intervalUnit,
+  ]);
 
   function updateParts(patch: Partial<CronParts>) {
     setParts((prev) => ({ ...prev, ...patch }));

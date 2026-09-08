@@ -319,7 +319,9 @@ export default function ScheduledTasksPage() {
             )}
             <Button
               onClick={() => {
-                const hasSchedule = hasScheduleSpec(createSchedule.schedule_spec);
+                const hasSchedule = hasScheduleSpec(
+                  createSchedule.schedule_spec,
+                );
                 if (
                   !title ||
                   !prompt ||
