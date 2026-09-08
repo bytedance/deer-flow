@@ -21,7 +21,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
 from app.gateway.authz import require_permission
@@ -428,6 +428,10 @@ class _MetadataRedactingResponse(BaseModel):
 
 class ThreadResponse(_MetadataRedactingResponse):
     """Response model for a single thread."""
+
+    # ThreadMetaStore records include internal lifecycle fields such as
+    # ``incarnation``. Keep the HTTP response as an explicit public projection.
+    model_config = ConfigDict(extra="ignore")
 
     thread_id: str = Field(description="Unique thread identifier")
     status: str = Field(default="idle", description="Thread status: idle, busy, interrupted, error")

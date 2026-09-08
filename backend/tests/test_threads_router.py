@@ -97,6 +97,17 @@ def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
     return app, store, checkpointer
 
 
+def test_thread_response_excludes_internal_incarnation() -> None:
+    response = threads.ThreadResponse.model_validate(
+        {
+            "thread_id": "thread-with-incarnation",
+            "incarnation": "a" * 32,
+        }
+    )
+
+    assert "incarnation" not in response.model_dump()
+
+
 def test_compact_rejects_run_owned_by_another_worker(monkeypatch) -> None:
     """The HTTP guard must consult the shared store, not only local run memory."""
     from deerflow.runtime import RunManager, RunStatus
