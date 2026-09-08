@@ -1,5 +1,15 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+**Durable batch acceptance**: `batch_task` persists optional per-item criteria and
+passes them to the native executor's existing untrusted report-contract input.
+Completed items reuse `acceptance_checks` through `batch_acceptance.py`, with
+owner-scoped thread paths, sandbox authorization and a client lease. Blocking
+reads drain before release on cancellation, and the batch item lease is renewed
+while checking. The nullable validated verdict survives repository queries and
+JSONL exports independently of execution status. No criteria, checker errors,
+and legacy rows have no verdict; they are not accepted by implication. Failed
+executions are not checked, and acceptance never changes automatic retry policy.
+
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
 **Registry and managed definitions**: Runtime resolution is built-in → `config.yaml custom_agents` → enabled administrator-managed definitions, followed by explicit `subagents.agents.<name>` overrides. Managed definitions are deployment-wide, persist through the same `agent_storage.backend` selection as Custom Agent definitions, and remain stored but are excluded from runtime when a built-in or later-added config definition owns the same name. The default Lead Agent sees the whole enabled catalog. A Custom Agent's `allowed_subagents` is snapshotted into run metadata (`None` = all, `[]` = hard deny, list = allowlist) and must filter both prompt discovery and `task` execution; never reload caller policy from mutable agent config inside the tool.
 **Benefit-based routing policy**: Enabling subagents exposes delegation as an optimization, not a default response to complexity. The lead prompt defaults to direct execution and permits `task` only when parallel latency, specialist capability, or context-isolation benefit clearly exceeds startup, duplicate-discovery, synthesis, state-conflict, and side-effect costs. Inter-agent output dependencies and overlapping mutable state are hard vetoes for parallel dispatch, while duplicate discovery and a cheap direct path remain costs rather than categorical vetoes; a bounded sequential chain may run in one subagent when specialist or context-isolation benefit clearly wins. Parallel scopes must be independent and non-overlapping, the lead uses the fewest useful subagents, and every later batch is re-evaluated while retaining any within-batch parallel benefit. When the enforced per-response limit is 1, the rendered prompt removes parallel and multi-batch benefit guidance and permits delegation only for material specialist or context-isolation benefit. Keep this policy aligned across `lead_agent/prompt.py`, the `task` tool description, and both built-in role descriptions; routing regressions are pinned in `tests/test_subagent_routing_prompt.py`, `tests/test_subagent_prompt_security.py`, and `tests/test_lead_agent_prompt.py`.

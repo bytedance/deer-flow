@@ -10,6 +10,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
+from deerflow.subagents.acceptance_checks import AcceptanceVerdict, validate_acceptance_verdict
+from deerflow.subagents.batch_runtime import BatchItemInput
 from deerflow.utils.time import coerce_iso
 
 BATCH_ACTIVE_STATUSES = ("queued", "running", "paused")
@@ -44,6 +46,7 @@ _ITEM_PUBLIC_FIELDS = (
     "error",
     "stop_reason",
     "token_usage",
+    "acceptance_criteria",
     "started_at",
     "completed_at",
     "created_at",
@@ -81,6 +84,7 @@ class SubagentBatchRepository:
     @staticmethod
     def _item_dict(row: SubagentBatchItemRow, *, include_result: bool = False) -> dict[str, Any]:
         data = {key: getattr(row, key) for key in _ITEM_PUBLIC_FIELDS}
+        data["acceptance_verdict"] = validate_acceptance_verdict(row.acceptance_verdict)
         if include_result:
             data["result"] = row.result
         for key in _ITEM_TIMESTAMP_FIELDS:
@@ -99,7 +103,7 @@ class SubagentBatchRepository:
         submission_key: str,
         title: str,
         subagent_type: str,
-        items: list[dict[str, str]],
+        items: list[BatchItemInput],
         max_live_items: int,
         max_running_items: int,
         max_attempts: int,
@@ -131,6 +135,7 @@ class SubagentBatchRepository:
                 item_key=item["key"],
                 position=position,
                 prompt=item["prompt"],
+                acceptance_criteria=item.get("acceptance_criteria"),
                 status="pending",
                 attempt=0,
                 result_truncated=False,
@@ -399,6 +404,7 @@ class SubagentBatchRepository:
         token_usage: dict[str, Any] | None,
         model_name: str | None,
         completed_at: datetime,
+        acceptance_verdict: AcceptanceVerdict | None = None,
     ) -> bool:
         async with self._sf() as session:
             item = (
@@ -422,12 +428,14 @@ class SubagentBatchRepository:
             item.stop_reason = stop_reason
             item.token_usage = token_usage
             item.updated_at = completed_at
+            item.acceptance_verdict = None
             if cancelled:
                 item.status = "cancelled"
                 item.error = "Cancelled by user"
                 item.completed_at = completed_at
             elif succeeded:
                 item.status = "succeeded"
+                item.acceptance_verdict = validate_acceptance_verdict(acceptance_verdict)
                 item.result = result
                 item.result_preview = result_preview
                 item.result_truncated = result_truncated
@@ -566,6 +574,7 @@ class SubagentBatchRepository:
             item.result = None
             item.result_preview = None
             item.result_truncated = False
+            item.acceptance_verdict = None
             item.completed_at = None
             item.cancel_requested_at = None
             item.updated_at = now

@@ -526,6 +526,13 @@ def _bootstrap_lock(engine: AsyncEngine, *, backend: str):
 # ---------------------------------------------------------------------------
 
 
+async def _require_forward_batch_schema(conn) -> None:
+    """The incarnation-only forward revision predates batch acceptance fields."""
+    columns = await conn.run_sync(lambda sync: {column["name"] for column in sa_inspect(sync).get_columns("subagent_batch_items")})
+    if not {"acceptance_criteria", "acceptance_verdict"} <= columns:
+        raise RuntimeError("bootstrap: forward-compatible revision lacks required batch acceptance columns; refusing to start")
+
+
 async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema: str = "") -> None:
     """Bring the DB schema to head.
 
@@ -597,6 +604,8 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
                         raise
                     async with engine.connect() as conn:
                         current_revision = await _read_database_revision(conn)
+                        if current_revision == _FORWARD_COMPATIBLE_REVISION:
+                            await _require_forward_batch_schema(conn)
                     if current_revision != _FORWARD_COMPATIBLE_REVISION:
                         raise
                     logger.warning(
@@ -604,6 +613,8 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
                         current_revision,
                     )
             elif database_revision == _FORWARD_COMPATIBLE_REVISION:
+                async with engine.connect() as conn:
+                    await _require_forward_batch_schema(conn)
                 logger.warning(
                     "bootstrap: database revision %s is newer than local head %s but is explicitly forward-compatible; skipping migration",
                     database_revision,

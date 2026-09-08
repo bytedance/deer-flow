@@ -18,13 +18,15 @@ The legacy branch handles pre-alembic databases that already have at least one D
 
 The empty-DB path keeps using `create_all` because `Base.metadata` is the only authoritative schema source — `create_all` renders both SQLite (JSON, type affinity) and Postgres (JSONB, partial indexes) correctly without anyone having to keep a hand-written baseline in lockstep. `0001_baseline.upgrade()` is therefore almost never executed in practice; it exists as a stamp target + chain root.
 
-**Rolling forward compatibility**: this migration tree deliberately remains at
-`0018_oauth_identity_pg_partial`, but an older Gateway may briefly share a
+**Rolling forward compatibility**: this migration tree includes
+`0019_batch_acceptance`, and a Gateway may share a
 database with the expand-only `0019_thread_incarnations` deployment. Bootstrap
 reads `alembic_version` while holding its backend lock and accepts exactly one
 row. A locally known revision follows the normal upgrade path. The one unknown
 revision `0019_thread_incarnations` is explicitly allowlisted: bootstrap logs a
-warning and leaves the newer schema untouched. Any other unknown revision, an
+warning and leaves the schema untouched only when the required batch acceptance
+columns are also present. An incarnation-only deployment based on 0018 lacks
+those columns and must refuse startup, including the SQLite upgrade-race path. Any other unknown revision, an
 empty version table, or multiple version rows fails closed. Do not broaden the
 allowlist without proving that old repositories can read, insert, and update
 through the newer schema; nullable additive columns are covered by
@@ -116,3 +118,5 @@ on installs that never enabled it. The convention is:
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch provisioning decision, locked revision validation, and the narrow 0019 forward-compatibility exception
 - `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps)
+
+- `migrations/versions/0019_batch_acceptance.py` — adds nullable per-item acceptance criteria and verdict JSON columns; legacy rows remain unchecked, and item execution status retains its existing meaning.

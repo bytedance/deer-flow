@@ -28,7 +28,7 @@ from deerflow.persistence.engine import close_engine, get_engine, init_engine_fr
 from deerflow.persistence.mcp_tasks import McpTaskRepository
 from deerflow.persistence.thread_meta import ThreadMetaRepository
 
-HEAD = "0018_oauth_identity_pg_partial"
+HEAD = "0019_batch_acceptance"
 POSTGRES_URL = os.environ.get("TEST_POSTGRES_URI")
 
 
