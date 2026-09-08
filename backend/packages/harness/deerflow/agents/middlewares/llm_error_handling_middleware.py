@@ -22,7 +22,7 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
-from deerflow.agents.middlewares.model_response import finish_reason, has_tool_call_intent, has_visible_content, last_ai_message
+from deerflow.agents.middlewares.model_response import append_visible_text, finish_reason, has_tool_call_intent, has_visible_content, last_ai_message
 from deerflow.config.app_config import AppConfig
 from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
 
@@ -38,8 +38,14 @@ class EmptyModelResponseError(RuntimeError):
 
     code = "EMPTY_RESPONSE"
 
-    def __init__(self, message: str = "Model returned a completed response with no content") -> None:
+    def __init__(
+        self,
+        message: str = "Model returned a completed response with no content",
+        *,
+        response_message: AIMessage | None = None,
+    ) -> None:
         super().__init__(message)
+        self.response_message = response_message
 
 
 def _raise_for_empty_response(response: ModelCallResult) -> None:
@@ -51,7 +57,7 @@ def _raise_for_empty_response(response: ModelCallResult) -> None:
         return
     reason = finish_reason(message)
     if reason in (None, "", "stop", "end_turn"):
-        raise EmptyModelResponseError()
+        raise EmptyModelResponseError(response_message=message)
 
 
 def _consume_empty_response_retry(request: ModelRequest) -> bool:
@@ -721,16 +727,25 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         error_type: str,
         reason: str,
         detail: str,
+        response_message: AIMessage | None = None,
     ) -> AIMessage:
-        return AIMessage(
-            content=content,
-            additional_kwargs={
+        additional_kwargs = dict(response_message.additional_kwargs or {}) if response_message is not None else {}
+        additional_kwargs.update(
+            {
                 "deerflow_error_fallback": True,
                 "error_type": error_type,
                 "error_reason": reason,
                 "error_detail": detail,
-            },
+            }
         )
+        if response_message is not None:
+            return response_message.model_copy(
+                update={
+                    "content": append_visible_text(response_message, content),
+                    "additional_kwargs": additional_kwargs,
+                }
+            )
+        return AIMessage(content=content, additional_kwargs=additional_kwargs)
 
     def _build_user_message(self, exc: BaseException, reason: str) -> str:
         detail = _extract_error_detail(exc)
@@ -766,6 +781,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             error_type=type(exc).__name__,
             reason=reason,
             detail=_extract_error_detail(exc),
+            response_message=exc.response_message if isinstance(exc, EmptyModelResponseError) else None,
         )
 
     def _build_retry_event(

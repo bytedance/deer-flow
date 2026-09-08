@@ -51,48 +51,6 @@ def append_visible_text(message: AIMessage, text: str) -> Any:
     return text
 
 
-def has_model_content(message: AIMessage) -> bool:
-    """Return whether a message contains any provider-produced content block."""
-    if has_tool_call_intent(message):
-        return True
-    additional_kwargs = message.additional_kwargs or {}
-    for field in ("reasoning_content", "reasoning", "thinking"):
-        value = additional_kwargs.get(field)
-        if isinstance(value, str) and len(value) > 0:
-            return True
-        if value not in (None, "", [], {}):
-            return True
-
-    content = message.content
-    if isinstance(content, str):
-        # Only zero content is empty; whitespace is still provider output.
-        return len(content) > 0
-    if not isinstance(content, list):
-        return content not in (None, "")
-
-    for block in content:
-        if isinstance(block, str):
-            if len(block) > 0:
-                return True
-            continue
-        if not isinstance(block, dict):
-            if block is not None:
-                return True
-            continue
-        block_type = block.get("type")
-        if block_type in {"text", "output_text", "reasoning", "thinking"}:
-            for field in ("text", "reasoning_content", "thinking", "reasoning", "content"):
-                value = block.get(field)
-                if isinstance(value, str) and len(value) > 0:
-                    return True
-                if value not in (None, "", [], {}):
-                    return True
-            continue
-        if block:
-            return True
-    return False
-
-
 def finish_reason(message: AIMessage) -> str | None:
     """Read and normalize common provider termination-reason fields."""
     for metadata in (message.response_metadata or {}, message.additional_kwargs or {}):

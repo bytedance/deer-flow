@@ -667,9 +667,9 @@ def build_middlewares(
     middlewares.append(TerminalResponseMiddleware())
 
     # A provider may also cap the final assistant response at the model output
-    # limit. Preserve the assistant content unchanged, but stamp a run-level
-    # stop_reason so Gateway consumers can tell a length-capped completion from
-    # a clean one.
+    # limit. Detector-matched caps stamp stop_reason=model_length_capped,
+    # suppress that response's tool calls, and append a length notice when no
+    # visible text was produced.
     middlewares.append(ModelLengthFinishReasonMiddleware())
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider

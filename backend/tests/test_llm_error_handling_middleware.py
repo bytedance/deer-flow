@@ -358,6 +358,25 @@ def test_nonvisible_stop_response_retries_then_returns_marked_fallback(
     assert result.additional_kwargs["error_reason"] == "empty_response"
 
 
+def test_empty_response_fallback_preserves_reasoning_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    thinking_block = {"type": "thinking", "thinking": "internal reasoning"}
+    message = AIMessage(
+        content=[thinking_block],
+        additional_kwargs={"reasoning_content": "provider reasoning"},
+        response_metadata={"finish_reason": "stop"},
+    )
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    result = middleware.wrap_model_call(SimpleNamespace(), lambda _request: message)
+
+    assert result.content[0] == thinking_block
+    assert result.content[-1]["type"] == "text"
+    assert "returned an empty response" in result.content[-1]["text"]
+    assert result.additional_kwargs["reasoning_content"] == "provider reasoning"
+    assert result.response_metadata == message.response_metadata
+
+
 def test_empty_model_response_container_retries_before_graph_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """生产环境的 ModelResponse.result 结构也必须在模型边界完成判空。"""
     middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
