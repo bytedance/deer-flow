@@ -2201,6 +2201,15 @@ class RunManager:
         )
 
         async with self._lock:
+            thread_records = self._thread_records_locked(thread_id)
+            # A worker can exit after raising the cancellation-finalization
+            # barrier but before scheduling its normal terminal eviction. Such
+            # a terminal record is no longer active, and a later admission is
+            # the next reliable opportunity to re-arm durable convergence.
+            for existing in thread_records:
+                if self._has_local_execution_authority(existing) and existing.status in _TERMINAL_RUN_STATUSES and existing.finalizing and not self._has_live_finalizer(existing):
+                    self.schedule_terminal_eviction(existing.run_id)
+
             claimed_durable_rows: dict[str, dict[str, Any]] = {}
             if idempotency_key is not None:
                 for existing in self._runs.values():
@@ -2238,7 +2247,7 @@ class RunManager:
 
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
-            local_inflight = [r for r in self._thread_records_locked(thread_id) if self._has_local_execution_authority(r) and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing)]
+            local_inflight = [r for r in thread_records if self._has_local_execution_authority(r) and (r.status in (RunStatus.pending, RunStatus.running) or self._has_live_finalizer(r))]
 
             if multitask_strategy in ("interrupt", "rollback") and any(record.operation_kind != ThreadOperationKind.run for record in local_inflight):
                 raise ConflictError(f"Thread {thread_id} has an active checkpoint write")

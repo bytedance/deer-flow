@@ -740,7 +740,8 @@ Store-backed terminal runs are removed from the Gateway's process-local indexes
 only after their complete terminal snapshot is durable. A live cancellation
 finalizer keeps later work on that thread behind its cleanup barrier, while a
 worker that has already exited cannot leave a stale barrier that blocks the
-thread indefinitely.
+thread indefinitely; the next admission also re-arms persistence-gated cleanup
+when that worker exited before scheduling it.
 
 #### LangSmith Tracing
 

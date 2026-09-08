@@ -15,6 +15,7 @@ from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import (
     TERMINAL_RUN_EVICTION_WARNING_RETRY_COUNT,
     CancelOutcome,
+    ConflictError,
     PersistenceRetryPolicy,
     RunManager,
     RunStartOutcome,
@@ -2151,6 +2152,8 @@ async def test_terminal_eviction_waits_for_finalizing_barrier(status):
     record.task = asyncio.create_task(release_worker.wait())
     await manager.set_finalizing(record.run_id, True)
     await manager.set_status(record.run_id, status)
+    with pytest.raises(ConflictError):
+        await manager.create_or_reject(record.thread_id, multitask_strategy="reject")
     newer = await manager.create(record.thread_id)
     wait_task = asyncio.create_task(manager.wait_for_prior_finalizing(record.thread_id, newer.run_id))
 
@@ -2179,7 +2182,9 @@ async def test_terminal_eviction_waits_for_finalizing_barrier(status):
 
 
 @pytest.mark.asyncio
-async def test_stranded_finalizing_barrier_does_not_block_later_run_or_eviction():
+async def test_stranded_finalizing_barrier_does_not_block_reject_admission_and_rearms_eviction(
+    monkeypatch: pytest.MonkeyPatch,
+):
     manager = RunManager(store=MemoryRunStore())
     stranded = await manager.create("thread-stranded-finalizing")
     await manager.set_finalizing(stranded.run_id, True)
@@ -2187,12 +2192,15 @@ async def test_stranded_finalizing_barrier_does_not_block_later_run_or_eviction(
     stranded.task = asyncio.create_task(asyncio.sleep(0))
     await stranded.task
 
-    newer = await manager.create(stranded.thread_id)
-    eviction = manager.schedule_terminal_eviction(
-        stranded.run_id,
-        delay=0,
-        retry_delay=0.01,
-    )
+    schedule_terminal_eviction = manager.schedule_terminal_eviction
+
+    def schedule_immediately(run_id: str):
+        return schedule_terminal_eviction(run_id, delay=0, retry_delay=0.01)
+
+    monkeypatch.setattr(manager, "schedule_terminal_eviction", schedule_immediately)
+
+    newer = await manager.create_or_reject(stranded.thread_id, multitask_strategy="reject")
+    eviction = manager._terminal_eviction_tasks.get(stranded.run_id)
     assert eviction is not None
 
     try:
