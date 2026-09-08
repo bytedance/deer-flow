@@ -1,3 +1,9 @@
+export function getTabularDelimiter(
+  language: string | null,
+): "," | "\t" | null {
+  return language === "csv" ? "," : language === "tsv" ? "\t" : null;
+}
+
 export type ArtifactViewMode = "code" | "preview";
 
 type ArtifactPreviewMessage = {

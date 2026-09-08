@@ -10,6 +10,7 @@ import type { PropsWithChildren } from "react";
 const mocks = rs.hoisted(() => ({ fetch: rs.fn() }));
 rs.mock("@/core/api/fetcher", () => ({ fetch: mocks.fetch }));
 
+import { PROJECTS_QUERY_KEY } from "@/core/projects/api";
 import { useArchiveThread } from "@/core/threads/archive";
 import { usePinThread } from "@/core/threads/hooks";
 
@@ -162,5 +163,28 @@ test("a late pin response cannot roll back the confirmed archive flag", async ()
     ...original,
     metadata: { deerflow_pinned: true, deerflow_archived: true },
   });
+  client.clear();
+});
+
+test("archive invalidates project-scoped thread lists on success", async () => {
+  mocks.fetch.mockResolvedValue(
+    new Response(JSON.stringify({ metadata: { deerflow_archived: true } })),
+  );
+  const { client, result } = setup();
+  const projectListKey = [...PROJECTS_QUERY_KEY, "threads", "proj-1"];
+  client.setQueryData(projectListKey, {
+    pages: [[{ ...original }]],
+    pageParams: [0],
+  });
+  const invalidate = rs.spyOn(client, "invalidateQueries");
+  await act(async () => {
+    await result.current.mutateAsync({ threadId: "chat", archived: true });
+  });
+  // The project page's thread list changes membership with the archive flag;
+  // every other thread mutation invalidates this prefix (regression: archive
+  // was the lone path leaving an open project page stale).
+  const keys = invalidate.mock.calls.map(([filters]) => filters?.queryKey);
+  expect(keys).toContainEqual([...PROJECTS_QUERY_KEY, "threads"]);
+  expect(client.getQueryState(projectListKey)?.isInvalidated).toBe(true);
   client.clear();
 });

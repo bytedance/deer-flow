@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0018_oauth_identity_pg_partial"
+HEAD = "0020_threads_meta_project_id"
 
 
 def _url(tmp_path: Path) -> str:
