@@ -1,5 +1,6 @@
 """Tests for AioSandbox concurrent command serialization (#1433)."""
 
+import logging
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -625,6 +626,14 @@ class TestListDirSerialization:
         sandbox._client.shell.exec_command = MagicMock(side_effect=ConnectionError("sandbox died"))
         with pytest.raises(ConnectionError, match="sandbox died"):
             sandbox.list_dir("/test")
+
+    def test_list_dir_command_failure_logs_warning(self, sandbox, caplog):
+        """The propagated failure must still leave a server-side trace."""
+        sandbox._client.shell.exec_command = MagicMock(side_effect=ConnectionError("sandbox died"))
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(ConnectionError):
+                sandbox.list_dir("/test")
+        assert any("Failed to list_dir /test in aio sandbox" in r.message for r in caplog.records)
 
 
 class TestNoChangeTimeout:

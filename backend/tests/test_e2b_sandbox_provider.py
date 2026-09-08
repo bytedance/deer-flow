@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import importlib
 import json
+import logging
 import os
 import threading
 import time
@@ -5222,6 +5223,19 @@ def test_list_dir_missing_path_raises_not_found():
     sb = _make_sandbox(FakeClient(commands=FakeCommandsAPI([listing])))
     with pytest.raises(FileNotFoundError, match="Directory not found"):
         sb.list_dir("/home/user/missing")
+
+
+def test_list_dir_command_failure_logs_warning(caplog):
+    # The propagated failure must still leave a server-side trace.
+    class FailingCommands:
+        def run(self, cmd, **kwargs):
+            raise RuntimeError("client closed mid-flight")
+
+    sb = _make_sandbox(FakeClient(commands=FailingCommands()))
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(RuntimeError):
+            sb.list_dir("/home/user")
+    assert any("Failed to list_dir /home/user in e2b sandbox" in r.message for r in caplog.records)
 
 
 def test_list_dir_closed_client_raises():

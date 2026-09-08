@@ -408,3 +408,43 @@ def test_lru_promotes_recently_used_thread(isolated_paths, tmp_path):
     assert ("default", "a") in provider._thread_sandboxes
     assert ("default", "b") not in provider._thread_sandboxes
     assert {("default", "a"), ("default", "c"), ("default", "d")} == set(provider._thread_sandboxes.keys())
+
+
+def test_list_dir_missing_path_raises_not_found(provider):
+    """#5263: a genuinely missing path must raise instead of answering
+    "(empty)", so the agent stops writing into directories it misread."""
+    sandbox_id = provider.acquire("alpha")
+    sbx = provider.get(sandbox_id)
+
+    with pytest.raises(FileNotFoundError, match="Directory not found"):
+        sbx.list_dir("/mnt/user-data/workspace/never-created")
+
+
+def test_list_dir_virtual_parent_without_host_dir_still_lists_mounts(isolated_paths, tmp_path):
+    """A container path that exists only as the parent of virtual mounts has
+    no host directory behind it; the overlay must still answer for it."""
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    custom_dir = tmp_path / "custom-real"
+    custom_dir.mkdir()
+    cfg = SimpleNamespace(
+        skills=SimpleNamespace(
+            container_path="/mnt/skills",
+            get_skills_path=lambda: skills_dir,
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        ),
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=[VolumeMountConfig(host_path=str(custom_dir), container_path="/mnt/virtual-only/custom", read_only=False)],
+        ),
+    )
+    with patch("deerflow.config.get_app_config", return_value=cfg):
+        local_provider = LocalSandboxProvider()
+        sandbox_id = local_provider.acquire("alpha")
+        sbx = local_provider.get(sandbox_id)
+
+        entries = sbx.list_dir("/mnt/virtual-only")
+
+        assert "/mnt/virtual-only/custom/" in entries

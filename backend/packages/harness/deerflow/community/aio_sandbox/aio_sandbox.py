@@ -577,9 +577,16 @@ class AioSandbox(Sandbox):
             # A failed or missing path used to come back as an empty listing,
             # so the agent wrote into directories that had contents. Only a
             # real empty directory may return empty now (#5263).
-            result = self._client.shell.exec_command(
-                command=f"test -d {shlex.quote(path)} || echo __deerflow_ls_missing__; find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d | head -500", no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT
-            )
+            # find's stderr stays suppressed: on AIO it is folded into the
+            # console output with no separate channel, so diagnostics like
+            # "Permission denied" would otherwise land in the listing.
+            try:
+                result = self._client.shell.exec_command(
+                    command=f"test -d {shlex.quote(path)} || echo __deerflow_ls_missing__; find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500", no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT
+                )
+            except Exception:
+                logger.warning("Failed to list_dir %s in aio sandbox", path, exc_info=True)
+                raise
             output = result.data.output if result.data else ""
             if output:
                 # find delimits records with "\n" and nothing else, so split

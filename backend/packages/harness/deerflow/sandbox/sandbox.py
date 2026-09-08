@@ -176,6 +176,12 @@ class Sandbox(ABC):
 
         Returns:
             The contents of the directory.
+
+        Raises:
+            FileNotFoundError: If the directory does not exist. Implementations
+                must raise rather than return an empty list, so a missing path
+                is never mistaken for an empty directory (#5263). Command or
+                transport failures propagate as the provider's own exceptions.
         """
         pass
 

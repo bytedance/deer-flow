@@ -344,7 +344,11 @@ class E2BSandbox(Sandbox):
             # A failed or missing path used to come back as an empty listing,
             # so the agent wrote into directories that had contents. Only a
             # real empty directory may return empty now (#5263).
-            result = client.commands.run(f"test -d {shlex.quote(resolved)} || echo __deerflow_ls_missing__; find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) | head -500")
+            try:
+                result = client.commands.run(f"test -d {shlex.quote(resolved)} || echo __deerflow_ls_missing__; find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) | head -500")
+            except Exception:
+                logger.warning("Failed to list_dir %s in e2b sandbox", resolved, exc_info=True)
+                raise
             output = getattr(result, "stdout", "") or ""
             # splitlines() already removed the terminators; do NOT strip
             # entries — a filename that legitimately ends in whitespace

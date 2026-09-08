@@ -20,7 +20,10 @@ def list_dir(path: str, max_depth: int = 2) -> list[str]:
     root_path = Path(path).resolve()
 
     if not root_path.is_dir():
-        return result
+        # Same contract as the remote providers: a missing path raises so the
+        # agent does not read it as an empty directory and write into it
+        # (#5263).
+        raise FileNotFoundError(f"Directory not found: {path}")
 
     def _is_within_root(candidate: Path) -> bool:
         try:

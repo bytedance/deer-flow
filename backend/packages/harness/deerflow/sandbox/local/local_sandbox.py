@@ -741,7 +741,16 @@ class LocalSandbox(Sandbox):
 
     def list_dir(self, path: str, max_depth=2) -> list[str]:
         resolved_path = self._resolve_path(path)
-        entries = list_dir(resolved_path, max_depth)
+        path_missing = False
+        try:
+            entries = list_dir(resolved_path, max_depth)
+        except FileNotFoundError:
+            # A virtual mount root (e.g. /mnt/skills) can exist only through
+            # its child mappings, with no real host directory behind it;
+            # fall through to the overlay below before declaring the path
+            # missing.
+            entries = []
+            path_missing = True
         # Reverse resolve local paths back to container paths and preserve
         # list_dir's trailing "/" marker for directories.
         result: list[str] = []
@@ -779,6 +788,8 @@ class LocalSandbox(Sandbox):
                     except OSError:
                         pass
 
+        if path_missing and not result:
+            raise FileNotFoundError(f"Directory not found: {path}")
         return sorted(result)
 
     def read_file(
