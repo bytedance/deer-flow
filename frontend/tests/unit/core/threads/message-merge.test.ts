@@ -2302,3 +2302,74 @@ test("a checkpoint message earlier than the loaded window is placed by its seq e
     "…new step 2",
   ]);
 });
+
+test("mergeMessages preserves canonical seq when a live copy without seq replaces the content (R3)", () => {
+  // Content replacement must not drop trusted ordering metadata: the live
+  // checkpoint copy refreshes the text, but the thread-global position the
+  // feed established stays attached to the merged message.
+  const history = buildVisibleHistoryMessages(
+    [
+      {
+        run_id: "run-1",
+        seq: 1,
+        content: { id: "h1", type: "human", content: "question" } as Message,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-09-08T00:00:00Z",
+      },
+      {
+        run_id: "run-1",
+        seq: 2,
+        content: { id: "a1", type: "ai", content: "draft" } as Message,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-09-08T00:00:01Z",
+      },
+    ],
+    new Set(),
+  );
+  const live = [
+    { id: "h1", type: "human", content: "question" } as Message,
+    { id: "a1", type: "ai", content: "final answer" } as Message,
+  ];
+
+  const merged = mergeMessages(history, live, []);
+
+  expect(merged.map((message) => message.content)).toEqual([
+    "question",
+    "final answer",
+  ]);
+  expect(
+    merged.map((message) => message.additional_kwargs?.deerflow_seq),
+  ).toEqual([1, 2]);
+  expect(merged.map((message) => message.run_id)).toEqual(["run-1", "run-1"]);
+});
+
+test("mergeMessages places a live message with seq inside the loaded window by position (R4)", () => {
+  // Identity anchors alone weave a pending live message before the NEXT shared
+  // anchor, inverting positions the server already settled: history
+  // H-first(1), A-second(3), A-last(5) plus live H-second(2), A-last(5) came
+  // out as 1,3,2,5. The trusted seq skeleton must produce 1,2,3,5.
+  const withSeq = (message: Message, seq: number) =>
+    ({
+      ...message,
+      additional_kwargs: { ...message.additional_kwargs, deerflow_seq: seq },
+    }) as Message;
+
+  const history = [
+    withSeq({ id: "h-first", type: "human", content: "first" } as Message, 1),
+    withSeq({ id: "a-second", type: "ai", content: "second" } as Message, 3),
+    withSeq({ id: "a-last", type: "ai", content: "last" } as Message, 5),
+  ];
+  const live = [
+    withSeq(
+      { id: "h-second", type: "human", content: "second q" } as Message,
+      2,
+    ),
+    withSeq({ id: "a-last", type: "ai", content: "last" } as Message, 5),
+  ];
+
+  const merged = mergeMessages(history, live, []);
+
+  expect(
+    merged.map((message) => message.additional_kwargs?.deerflow_seq),
+  ).toEqual([1, 2, 3, 5]);
+});
