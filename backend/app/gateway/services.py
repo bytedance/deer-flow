@@ -1693,12 +1693,18 @@ async def sse_consumer(
     connection, and a read-only observer closing a join must not cancel the
     run (a runs:read-only credential would otherwise cancel without
     runs:cancel just by disconnecting).
+
+    The same flag gates the terminal missing-stream branch. ``create_or_reject``
+    sets ``record.idempotency_reused`` on the shared cached record and never
+    clears it, so observer joins would inherit a sticky reuse signal. Creating
+    endpoints keep the default ``True`` and emit ``gap``; joins keep ``end``.
     """
     last_event_id = request.headers.get("Last-Event-ID")
     if await _terminal_record_stream_missing(bridge, record):
-        if record.idempotency_reused:
-            # Creating-endpoint retry: a bare `end` looks like "the original
-            # run produced nothing". Point the client at durable state instead.
+        if apply_on_disconnect:
+            # Creating endpoint: a bare `end` looks like the run produced
+            # nothing. Point the client at durable state instead. Observer
+            # joins pass apply_on_disconnect=False and keep `end`.
             yield format_sse(
                 "gap",
                 {

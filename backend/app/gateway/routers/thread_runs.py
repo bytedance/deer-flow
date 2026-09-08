@@ -965,7 +965,11 @@ async def wait_run(
         description="Retry key for idempotent run admission within this thread",
     ),
 ) -> dict:
-    """Create a run and block until it completes, returning the final state."""
+    """Create a run and block until it completes, returning the final state.
+
+    A reused in-flight run that this worker cannot observe returns the durable
+    status without blocking.
+    """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     record = await start_run(

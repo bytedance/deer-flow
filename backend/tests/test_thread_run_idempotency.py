@@ -292,6 +292,83 @@ async def test_sse_consumer_reused_terminal_missing_stream_yields_gap():
     assert "event: end" not in frames[0]
 
 
+@pytest.mark.anyio
+async def test_sse_consumer_observer_join_keeps_end_after_sticky_reuse_flag():
+    """Observer joins must not inherit create_or_reject's sticky reuse flag."""
+    from app.gateway.services import sse_consumer
+
+    record = RunRecord(
+        run_id="run-done",
+        thread_id="thread-1",
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect=DisconnectMode.continue_,
+        idempotency_reused=True,
+    )
+    request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
+
+    frames = [frame async for frame in sse_consumer(_LocalBridge(), record, request, MagicMock(), apply_on_disconnect=False)]
+
+    assert len(frames) == 1
+    assert frames[0].startswith("event: end\n")
+    assert "event: gap" not in frames[0]
+
+
+@pytest.mark.anyio
+async def test_observer_join_stays_end_after_real_manager_reuse():
+    """Join of a terminal missing stream stays `end` after a later key reuse.
+
+    ``create_or_reject`` sets ``idempotency_reused`` on the cached record that
+    ``RunManager.get()`` returns. Observer joins read that same object; the
+    missing-stream branch must still follow ``apply_on_disconnect``, not the
+    sticky flag.
+    """
+    from app.gateway.services import sse_consumer
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    first = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:same",
+    )
+    await manager.set_status(first.run_id, RunStatus.success)
+    request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
+
+    async def _frames(*, apply_on_disconnect: bool = True):
+        record = await manager.get(first.run_id)
+        assert record is not None
+        return [
+            frame
+            async for frame in sse_consumer(
+                _LocalBridge(),
+                record,
+                request,
+                manager,
+                apply_on_disconnect=apply_on_disconnect,
+            )
+        ]
+
+    before = await _frames(apply_on_disconnect=False)
+    assert before[0].startswith("event: end\n")
+
+    reused = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:same",
+    )
+    assert reused.run_id == first.run_id
+    assert reused.idempotency_reused is True
+
+    after = await _frames(apply_on_disconnect=False)
+    assert after[0].startswith("event: end\n")
+    assert "event: gap" not in after[0]
+
+    creating = await _frames()
+    assert creating[0].startswith("event: gap\n")
+    assert "event: end" not in creating[0]
+
+
 def _make_start_run_request(run_manager):
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
