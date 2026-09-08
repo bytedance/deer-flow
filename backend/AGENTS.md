@@ -318,12 +318,9 @@ For recency, DDGS 9.14.1 uses only enabled Brave, DuckDuckGo, and Yahoo engines
 that honor `timelimit`: `auto`/`all` resolves to this set, incompatible configured
 engines are removed, and an empty set falls back to it. Re-check on DDGS upgrades.
 
-### Tavily Page Extraction
+### Tavily Fetch
 
-Tavily `web_fetch` consumes the Extract API, whose successful results do not
-require a `title`. Use the result URL, then the requested URL, when a title is
-absent or empty. Preserve the 4096-character content limit and the existing
-error/no-results responses. Regression coverage lives in `test_tavily_tools.py`.
+Title fallback: result URL, then request URL.
 
 ### File Upload
 
