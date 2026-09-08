@@ -80,6 +80,8 @@ def test_same_idempotency_key_reuses_stream_run(monkeypatch):
     assert first.status_code == 200, first.text
     assert retry.status_code == 200, retry.text
     assert retry.headers["Content-Location"] == first.headers["Content-Location"]
+    assert "event: end" in first.text
+    assert "event: gap" not in first.text
     assert "event: gap" in retry.text
     assert "stream_replay_gap" in retry.text
     assert "reload_durable_state" in retry.text
@@ -283,7 +285,16 @@ async def test_sse_consumer_reused_terminal_missing_stream_yields_gap():
     )
     request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
 
-    frames = [frame async for frame in sse_consumer(_LocalBridge(), record, request, MagicMock())]
+    frames = [
+        frame
+        async for frame in sse_consumer(
+            _LocalBridge(),
+            record,
+            request,
+            MagicMock(),
+            emit_gap_on_missing_stream=True,
+        )
+    ]
 
     assert len(frames) == 1
     assert frames[0].startswith("event: gap\n")
@@ -315,13 +326,71 @@ async def test_sse_consumer_observer_join_keeps_end_after_sticky_reuse_flag():
 
 
 @pytest.mark.anyio
+async def test_sse_consumer_default_path_keeps_end_after_sticky_reuse_flag():
+    """Default sse_consumer, including stateless /api/runs/stream, must not emit gap
+    just because create_or_reject left idempotency_reused set, or because
+    apply_on_disconnect still defaults to True.
+    """
+    from app.gateway.services import sse_consumer
+
+    record = RunRecord(
+        run_id="run-done",
+        thread_id="thread-1",
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect=DisconnectMode.continue_,
+        store_only=True,
+        idempotency_reused=True,
+    )
+    request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
+
+    frames = [frame async for frame in sse_consumer(_LocalBridge(), record, request, MagicMock())]
+
+    assert len(frames) == 1
+    assert frames[0].startswith("event: end\n")
+    assert "event: gap" not in frames[0]
+
+
+@pytest.mark.anyio
+async def test_sse_consumer_missing_stream_gap_requires_explicit_flag():
+    """apply_on_disconnect must not select gap vs end by itself."""
+    from app.gateway.services import sse_consumer
+
+    record = RunRecord(
+        run_id="run-done",
+        thread_id="thread-1",
+        assistant_id=None,
+        status=RunStatus.success,
+        on_disconnect=DisconnectMode.continue_,
+        store_only=True,
+    )
+    request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
+
+    default_frames = [frame async for frame in sse_consumer(_LocalBridge(), record, request, MagicMock(), apply_on_disconnect=True)]
+    gap_frames = [
+        frame
+        async for frame in sse_consumer(
+            _LocalBridge(),
+            record,
+            request,
+            MagicMock(),
+            apply_on_disconnect=False,
+            emit_gap_on_missing_stream=True,
+        )
+    ]
+
+    assert default_frames[0].startswith("event: end\n")
+    assert gap_frames[0].startswith("event: gap\n")
+
+
+@pytest.mark.anyio
 async def test_observer_join_stays_end_after_real_manager_reuse():
     """Join of a terminal missing stream stays `end` after a later key reuse.
 
     ``create_or_reject`` sets ``idempotency_reused`` on the cached record that
     ``RunManager.get()`` returns. Observer joins read that same object; the
-    missing-stream branch must still follow ``apply_on_disconnect``, not the
-    sticky flag.
+    missing-stream branch must still follow ``emit_gap_on_missing_stream``,
+    not the sticky flag or ``apply_on_disconnect``.
     """
     from app.gateway.services import sse_consumer
 
@@ -335,7 +404,7 @@ async def test_observer_join_stays_end_after_real_manager_reuse():
     await manager.set_status(first.run_id, RunStatus.success)
     request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
 
-    async def _frames(*, apply_on_disconnect: bool = True):
+    async def _frames(*, apply_on_disconnect: bool = True, emit_gap_on_missing_stream: bool = False):
         record = await manager.get(first.run_id)
         assert record is not None
         return [
@@ -346,6 +415,7 @@ async def test_observer_join_stays_end_after_real_manager_reuse():
                 request,
                 manager,
                 apply_on_disconnect=apply_on_disconnect,
+                emit_gap_on_missing_stream=emit_gap_on_missing_stream,
             )
         ]
 
@@ -364,7 +434,11 @@ async def test_observer_join_stays_end_after_real_manager_reuse():
     assert after[0].startswith("event: end\n")
     assert "event: gap" not in after[0]
 
-    creating = await _frames()
+    after_default = await _frames()
+    assert after_default[0].startswith("event: end\n")
+    assert "event: gap" not in after_default[0]
+
+    creating = await _frames(emit_gap_on_missing_stream=True)
     assert creating[0].startswith("event: gap\n")
     assert "event: end" not in creating[0]
 

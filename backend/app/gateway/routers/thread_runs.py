@@ -930,7 +930,8 @@ async def stream_run(
     # Same shape join already rejects: a reused store-only handle on a
     # process-local bridge has no owner stream. Subscribing would create an
     # empty log and wait forever. Terminal reuse still goes through
-    # sse_consumer so a missing stream can emit gap rather than a bare end.
+    # sse_consumer with emit_gap_on_missing_stream so a missing stream emits
+    # gap rather than a bare end. First-time creates keep the default `end`.
     if record.store_only and not bridge.supports_cross_process and record.status in (RunStatus.pending, RunStatus.running):
         raise HTTPException(
             status_code=409,
@@ -938,7 +939,13 @@ async def stream_run(
         )
 
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        sse_consumer(
+            bridge,
+            record,
+            request,
+            run_mgr,
+            emit_gap_on_missing_stream=record.idempotency_reused,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

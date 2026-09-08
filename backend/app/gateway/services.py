@@ -1679,6 +1679,7 @@ async def sse_consumer(
     run_mgr: RunManager,
     *,
     apply_on_disconnect: bool = True,
+    emit_gap_on_missing_stream: bool = False,
 ):
     """Async generator that yields SSE frames from the bridge.
 
@@ -1694,17 +1695,18 @@ async def sse_consumer(
     run (a runs:read-only credential would otherwise cancel without
     runs:cancel just by disconnecting).
 
-    The same flag gates the terminal missing-stream branch. ``create_or_reject``
-    sets ``record.idempotency_reused`` on the shared cached record and never
-    clears it, so observer joins would inherit a sticky reuse signal. Creating
-    endpoints keep the default ``True`` and emit ``gap``; joins keep ``end``.
+    ``emit_gap_on_missing_stream`` is a separate creating-retry signal, default
+    ``False``. ``create_or_reject`` sets ``record.idempotency_reused`` on the
+    shared cached record and never clears it, so this function must not read
+    that flag. Thread-scoped ``/runs/stream`` passes True only for this
+    request's reuse; default callers (joins, stateless ``/api/runs/stream``,
+    tests) keep ``end`` when a terminal record's stream is gone.
     """
     last_event_id = request.headers.get("Last-Event-ID")
     if await _terminal_record_stream_missing(bridge, record):
-        if apply_on_disconnect:
-            # Creating endpoint: a bare `end` looks like the run produced
-            # nothing. Point the client at durable state instead. Observer
-            # joins pass apply_on_disconnect=False and keep `end`.
+        if emit_gap_on_missing_stream:
+            # Creating-endpoint retry: a bare `end` looks like the run
+            # produced nothing. Point the client at durable state instead.
             yield format_sse(
                 "gap",
                 {

@@ -212,7 +212,9 @@ state. Retrying a finished run whose SSE log is gone emits a `gap` frame
 (`stream_replay_gap`, `recovery: reload_durable_state`) on the creating
 `/runs/stream` endpoint and closes without an `end` frame; reload durable
 thread/run state instead of treating the stream as empty. Observer joins of
-that same run still end with `end`.
+that same run still end with `end`. Stateless `/api/langgraph/runs/stream`
+does not accept this header and keeps the existing missing-stream close of
+`end`; the `gap` signal is only on a thread-scoped creating retry.
 
 **Request Body:**
 ```json
