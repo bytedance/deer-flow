@@ -151,7 +151,13 @@ InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[byte
 # media today; the WeChat reader is path-only by design — see
 # _read_wechat_inbound_file). The bytes are buffered in memory before being
 # persisted, so an oversized attachment must be refused before it is fully
-# read, not after — mirrors DingTalkChannel._download_by_code.
+# read, not after — mirrors DingTalkChannel._download_by_code. 50 MB is a
+# deliberate default, not the platform ceiling: published WeCom callback
+# examples document files up to 100 MB, but the whole file is buffered (and
+# decrypt_file allocates a second copy), so the bound matches the sibling
+# channels' inbound caps (DingTalk's identically-sized 50 MB, WeChat's
+# max_inbound_file_bytes) and halves worst-case per-message buffering; a
+# legit-but-oversized file drops with a host-labeled warning naming the limit.
 MAX_INBOUND_URL_FILE_BYTES = 50 * 1024 * 1024
 
 # WeCom inbound media URLs come from the platform's WS frames (wecom.py passes
