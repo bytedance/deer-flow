@@ -9,24 +9,38 @@ Keep these invariants together when changing its buffer or progress handling:
 
 - **In-flight owner:** a threshold flush owns its detached batch until the
   wrapper starts; after that, the exact `put_batch` task owns the batch.
-  `_pending_flush_tasks` supervises wrappers, `_detached_write_tasks` supervises
-  writes whose result is still unknown, and `_flush_lock` serializes explicit
-  flushes. A progress snapshot remains owned by the journal and the module-level
-  cancellation registry until its task settles.
+  `_pending_flush_tasks` supervises wrappers, `_active_write_tasks` fences a
+  write started by an explicit `flush()` from the moment it is created until it
+  settles, and `_detached_write_tasks` supervises writes that outlived the flush
+  deadline. `_flush_lock` serializes explicit flushes. A progress snapshot
+  remains owned by the journal and the module-level cancellation registry until
+  its task settles.
 - **Deadline:** ordinary `flush()` waits at most the fixed cancellation-drain
   deadline for a write or in-flight progress snapshot. An unresolved write stays
   owned and its successors stay buffered; a hung progress snapshot is cancelled
   because it is best-effort. `flush_until_settled()` and `close(flush=True)` wait
-  for every predecessor outcome before detaching runtime dependencies.
+  for every predecessor outcome before detaching runtime dependencies. `flush()`
+  returns `False` when the deadline is reached with a predecessor still in
+  flight, so a caller that must order a downstream durable write can observe the
+  gap instead of treating the flush as complete.
 - **Terminal outcomes:** write success advances `feed_generation` once; explicit
   failure or write-task cancellation prepends the batch once; an unresolved
   write remains non-terminal and is never requeued. Caller cancellation is
   re-raised after the same outcome handling and does not cancel the store write.
+- **Lost-lease teardown:** `close(flush=False)` intentionally stops starting new
+  durable writes, but it does not drop supervision of a write already in flight.
+  `_active_write_tasks` / `_detached_write_tasks` are preserved so a late result
+  still advances `feed_generation` (or re-buffers a failure) instead of being
+  silently forgotten.
 - **Stale-work fence:** ordinary journal events have no durable lease token or
   idempotency key. Their safety fence is therefore to retain and observe the one
   original write task and never retry an ambiguous outcome. Successors cannot
   overtake it. A process loss also destroys that task and its volatile buffer;
-  only explicitly failed in-process writes are eligible for retry.
+  only explicitly failed in-process writes are eligible for retry. Write outcome
+  transitions are centralized: a write that settles within the deadline is
+  resolved by `_put_batch_cancellation_safe`, one that times out is resolved by
+  `_resolve_detached_write`, and no other code may bump `feed_generation` or
+  re-buffer a batch outside those two resolvers.
 
 The shared `runtime/cancellation.py::wait_for_task_until` helper absorbs repeated
 caller cancellation only within one absolute deadline. Compare
