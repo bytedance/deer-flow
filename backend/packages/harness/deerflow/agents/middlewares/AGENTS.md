@@ -1,13 +1,7 @@
 ### Middleware Chain
 
 Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values.
-Completed execution does not imply task acceptance. The delegation ledger derives
-follow-up hints from validated acceptance leaves, retaining bounded examples of
-both unmet and UNVERIFIED criteria after compaction. The Lead retains useful work,
-repairs or rechecks unmet conditions, and verifies load-bearing unknowns or keeps
-their uncertainty. Missing checklists remain self-reports. Keep the Lead prompt
-and `task` description aligned; no acceptance outcome changes execution status
-or starts an automatic retry loop, and existing delegation budgets still apply.
+Completed is not accepted; retain useful work and address acceptance gaps.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares` appends lead-only entries. Optional entries require their config/runtime condition.
 
