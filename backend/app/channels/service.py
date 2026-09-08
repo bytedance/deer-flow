@@ -388,13 +388,29 @@ class ChannelService:
         fail-fast ``is_running`` makes this reachable for a client thread that
         dies immediately (invalid token); the same hygiene applies to any
         channel that subscribes before its transport is confirmed.
+
+        Ownership mirrors ``ChannelService.stop()``: the instance is dropped
+        only after its ``stop()`` actually completes. A cancellation arriving
+        mid-cleanup (or a ``stop()`` that raises) leaves it tracked, so a
+        retried readiness attempt stops it again before replacing it and
+        service shutdown can still reach it — untracking first would orphan
+        resources nobody can clean up anymore. Startup retries cannot silently
+        replace a retained instance: ``ensure_channel_ready`` serializes on the
+        per-channel readiness lock and stops whatever non-running instance it
+        finds under the name before starting a fresh one.
         """
-        if self._channels.get(name) is channel:
-            self._channels.pop(name, None)
         try:
             await channel.stop()
+        except asyncio.CancelledError:
+            # Keep this transport owned by the service: the Gateway deadline
+            # interrupted cleanup, so detaching it here would hide resources
+            # that may still be in use (mirrors ChannelService.stop()).
+            raise
         except Exception:
             logger.exception("Error stopping channel after failed startup")
+            return
+        if self._channels.get(name) is channel:
+            self._channels.pop(name, None)
 
     async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Instantiate and start a single channel."""
