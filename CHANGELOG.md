@@ -112,6 +112,10 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Agents & runtime
 
+- **scheduler:** Scheduled tasks can pin `assistant_id` to `lead_agent` (the
+  default) or a custom agent the owner already has. Unknown or malformed names
+  return 422. The workspace create/edit form exposes the same choice.
+  ([#5286])
 - **middleware:** New `TokenBudgetMiddleware` enforces a per-run token budget,
   shared additively across the lead agent and subagents. ([#3412])
 - **middleware:** Structured tool-result metadata and a tool-progress state

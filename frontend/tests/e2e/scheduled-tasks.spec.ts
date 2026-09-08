@@ -337,3 +337,73 @@ test("detail pane falls back to a visible task after filters hide the selected t
     0,
   );
 });
+
+test("create posts the default lead_agent assistant_id", async ({ page }) => {
+  let createBody: Record<string, unknown> | null = null;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/api/scheduled-tasks")
+    ) {
+      createBody = request.postDataJSON() as Record<string, unknown>;
+    }
+  });
+  mockLangGraphAPI(page, { threads: [], scheduledTasks: [] });
+
+  await page.goto("/workspace/scheduled-tasks");
+  const createForm = page.getByTestId("scheduled-task-create-form");
+  await expect(createForm.getByTestId("scheduled-task-create-agent")).toContainText(
+    /Default agent \(lead_agent\)/i,
+  );
+  await createForm.getByRole("button", { name: "One-time" }).click();
+  await createForm.getByLabel("Run at").fill("2026-07-02T09:00");
+  await createForm.getByPlaceholder("Task title").fill("Agent pin");
+  await createForm.getByPlaceholder("Prompt").fill("Summarize thread");
+  await createForm.getByRole("button", { name: "Create" }).click();
+  await expect(page.getByRole("button", { name: /Agent pin/i })).toBeVisible();
+  expect(createBody).toMatchObject({ assistant_id: "lead_agent" });
+  await expect(page.getByTestId("scheduled-task-detail")).toContainText(
+    /Default agent \(lead_agent\)/i,
+  );
+});
+
+test("duplicate copies the source task assistant into the create form", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: [
+      {
+        id: "task-copy-agent",
+        thread_id: null,
+        context_mode: "fresh_thread_per_run",
+        assistant_id: "research-bot",
+        title: "Research digest",
+        prompt: "Summarize papers",
+        schedule_type: "cron",
+        schedule_spec: { cron: "0 9 * * *" },
+        timezone: "UTC",
+        status: "enabled",
+        next_run_at: "2026-07-02T01:00:00+00:00",
+        last_run_at: null,
+        last_run_id: null,
+        last_error: null,
+        run_count: 0,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      },
+    ],
+  });
+
+  await page.goto("/workspace/scheduled-tasks");
+  await expect(page.getByTestId("scheduled-task-detail")).toContainText(
+    "research-bot",
+  );
+  await page
+    .getByTestId("scheduled-task-detail")
+    .getByRole("button", { name: "Duplicate" })
+    .click();
+  await expect(
+    page.getByTestId("scheduled-task-create-agent"),
+  ).toContainText("research-bot");
+});

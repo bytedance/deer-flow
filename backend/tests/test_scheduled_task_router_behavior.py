@@ -1,7 +1,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from _router_auth_helpers import call_unwrapped
@@ -73,6 +73,7 @@ class _Repo:
             "user_id": kwargs["user_id"],
             "thread_id": kwargs["thread_id"],
             "context_mode": kwargs["context_mode"],
+            "assistant_id": kwargs.get("assistant_id"),
             "title": kwargs["title"],
             "prompt": kwargs["prompt"],
             "schedule_type": kwargs["schedule_type"],
@@ -202,6 +203,7 @@ async def test_create_scheduled_task_uses_repo():
 
     assert created["title"] == "Daily summary"
     assert created["user_id"] == "user-1"
+    assert created["assistant_id"] == "lead_agent"
     assert created["next_run_at"] == datetime(2027, 1, 1, 1, 0, tzinfo=UTC)
 
 
@@ -940,3 +942,294 @@ async def test_update_terminal_once_task_with_future_run_at_rearms_it():
 
     assert result["status"] == "enabled"
     assert result["next_run_at"] is not None
+
+
+def _create_request(**overrides):
+    kwargs = {
+        "title": "Daily summary",
+        "prompt": "Summarize thread",
+        "schedule_type": "cron",
+        "schedule_spec": {"cron": "0 9 * * *"},
+        "timezone": "UTC",
+    }
+    kwargs.update(overrides)
+    return scheduled_tasks.ScheduledTaskCreateRequest(**kwargs)
+
+
+async def _call_create(body, repo=None):
+    repo = repo or _Repo()
+    user = SimpleNamespace(id="user-1")
+    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True))
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_thread_store = scheduled_tasks.get_thread_store
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_thread_store = lambda _request: thread_store
+        scheduled_tasks.get_config = lambda: _Config()
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+        return await call_unwrapped(
+            scheduled_tasks.create_scheduled_task,
+            request=SimpleNamespace(),
+            body=body,
+        )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_thread_store = old_thread_store
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+
+@pytest.mark.asyncio
+async def test_create_explicit_lead_agent_is_accepted():
+    created = await _call_create(_create_request(assistant_id="lead_agent"))
+    assert created["assistant_id"] == "lead_agent"
+
+
+@pytest.mark.asyncio
+async def test_create_custom_assistant_id_is_normalized_and_persisted():
+    with patch(
+        "app.gateway.routers.scheduled_tasks.load_agent_config",
+        return_value=object(),
+    ) as loader:
+        created = await _call_create(_create_request(assistant_id="Research_Bot"))
+    assert created["assistant_id"] == "research-bot"
+    loader.assert_called_once_with("research-bot", user_id="user-1")
+
+
+@pytest.mark.asyncio
+async def test_create_unknown_assistant_id_is_rejected():
+    with patch(
+        "app.gateway.routers.scheduled_tasks.load_agent_config",
+        side_effect=FileNotFoundError("missing"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await _call_create(_create_request(assistant_id="missing-bot"))
+    assert exc_info.value.status_code == 422
+    assert "Unknown assistant_id" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_create_invalid_assistant_id_is_rejected():
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_create(_create_request(assistant_id="bad agent"))
+    assert exc_info.value.status_code == 422
+    assert "Invalid assistant_id" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_update_custom_assistant_id_is_persisted():
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-1",
+        user_id="user-1",
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id="lead_agent",
+        title="Daily summary",
+        prompt="Summarize thread",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_config = lambda: _Config()
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=SimpleNamespace(id="user-1"))
+        with patch(
+            "app.gateway.routers.scheduled_tasks.load_agent_config",
+            return_value=object(),
+        ):
+            updated = await call_unwrapped(
+                scheduled_tasks.update_scheduled_task,
+                task_id=task["id"],
+                request=SimpleNamespace(),
+                body=scheduled_tasks.ScheduledTaskUpdateRequest(assistant_id="triage-bot"),
+            )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+    assert updated["assistant_id"] == "triage-bot"
+
+
+async def _seed_task(repo: _Repo, **overrides):
+    kwargs = {
+        "task_id": "task-1",
+        "user_id": "user-1",
+        "thread_id": None,
+        "context_mode": "fresh_thread_per_run",
+        "assistant_id": "lead_agent",
+        "title": "Daily summary",
+        "prompt": "Summarize thread",
+        "schedule_type": "cron",
+        "schedule_spec": {"cron": "0 9 * * *"},
+        "timezone": "UTC",
+        "next_run_at": None,
+    }
+    kwargs.update(overrides)
+    return await repo.create(**kwargs)
+
+
+async def _call_update(repo: _Repo, task_id: str, body):
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_config = lambda: _Config()
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=SimpleNamespace(id="user-1"))
+        return await call_unwrapped(
+            scheduled_tasks.update_scheduled_task,
+            task_id=task_id,
+            request=SimpleNamespace(),
+            body=body,
+        )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+
+@pytest.mark.asyncio
+async def test_update_unknown_assistant_id_is_rejected():
+    repo = _Repo()
+    task = await _seed_task(repo)
+    with patch(
+        "app.gateway.routers.scheduled_tasks.load_agent_config",
+        side_effect=FileNotFoundError("missing"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await _call_update(
+                repo,
+                task["id"],
+                scheduled_tasks.ScheduledTaskUpdateRequest(assistant_id="missing-bot"),
+            )
+    assert exc_info.value.status_code == 422
+    assert "Unknown assistant_id" in exc_info.value.detail
+    assert repo.items[task["id"]]["assistant_id"] == "lead_agent"
+
+
+@pytest.mark.asyncio
+async def test_update_invalid_assistant_id_is_rejected():
+    repo = _Repo()
+    task = await _seed_task(repo)
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_update(
+            repo,
+            task["id"],
+            scheduled_tasks.ScheduledTaskUpdateRequest(assistant_id="bad agent"),
+        )
+    assert exc_info.value.status_code == 422
+    assert "Invalid assistant_id" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_update_omitting_assistant_id_keeps_existing():
+    repo = _Repo()
+    task = await _seed_task(repo, assistant_id="research-bot")
+    updated = await _call_update(
+        repo,
+        task["id"],
+        scheduled_tasks.ScheduledTaskUpdateRequest(title="Renamed"),
+    )
+    assert updated["title"] == "Renamed"
+    assert updated["assistant_id"] == "research-bot"
+
+
+@pytest.mark.asyncio
+async def test_create_interval_task_sets_next_run_from_now():
+    before = datetime.now(UTC)
+    created = await _call_create(
+        _create_request(
+            schedule_type="interval",
+            schedule_spec={"every_seconds": 90},
+            timezone="Asia/Shanghai",
+        )
+    )
+    after = datetime.now(UTC)
+    assert created["schedule_type"] == "interval"
+    assert created["schedule_spec"] == {"every_seconds": 90}
+    assert created["timezone"] == "Asia/Shanghai"
+    assert before + timedelta(seconds=90) <= created["next_run_at"] <= after + timedelta(seconds=90)
+    assert created["next_run_at"].utcoffset() == timedelta(0)
+
+
+@pytest.mark.asyncio
+async def test_create_interval_task_rejects_below_minimum_delay():
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_create(
+            _create_request(
+                schedule_type="interval",
+                schedule_spec={"every_seconds": 30},
+            )
+        )
+    assert exc_info.value.status_code == 422
+    assert "at least 60 seconds" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_create_interval_task_rejects_above_maximum():
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_create(
+            _create_request(
+                schedule_type="interval",
+                schedule_spec={"every_seconds": 30 * 24 * 3600 + 1},
+            )
+        )
+    assert exc_info.value.status_code == 422
+    assert "at most" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_create_interval_task_rejects_missing_every_seconds():
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_create(
+            _create_request(schedule_type="interval", schedule_spec={})
+        )
+    assert exc_info.value.status_code == 422
+    assert "every_seconds" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_update_interval_task_recomputes_next_run():
+    repo = _Repo()
+    task = await _seed_task(
+        repo,
+        schedule_type="interval",
+        schedule_spec={"every_seconds": 90},
+        next_run_at=datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
+    )
+    before = datetime.now(UTC)
+    updated = await _call_update(
+        repo,
+        task["id"],
+        scheduled_tasks.ScheduledTaskUpdateRequest(schedule_spec={"every_seconds": 120}),
+    )
+    after = datetime.now(UTC)
+    assert updated["schedule_spec"] == {"every_seconds": 120}
+    assert before + timedelta(seconds=120) <= updated["next_run_at"] <= after + timedelta(seconds=120)
+
+
+@pytest.mark.asyncio
+async def test_update_interval_task_rejects_below_minimum_delay():
+    repo = _Repo()
+    task = await _seed_task(
+        repo,
+        schedule_type="interval",
+        schedule_spec={"every_seconds": 90},
+        next_run_at=datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_update(
+            repo,
+            task["id"],
+            scheduled_tasks.ScheduledTaskUpdateRequest(schedule_spec={"every_seconds": 30}),
+        )
+    assert exc_info.value.status_code == 422
+    assert "at least 60 seconds" in exc_info.value.detail
