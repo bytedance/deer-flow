@@ -1,52 +1,37 @@
 ### Middleware Chain
 
-Summarization input can contain only AI/Tool messages after latest-user rescue.
-If the inherited human-anchored trimmer returns nothing, format that window and
-apply `_build_summary_input_text`'s text trimming with `strategy="last"` instead
-of retaining only its final message. This preserves the inherited trimmer's
-preference for recent content without changing the normal human-anchored path.
-If the window still contains a human message but that anchor is outside the
-token-limited tail, retain the existing final-message fallback. Do not restore
-the whole mixed window with head-first text trimming: that can discard recent
-tool results. Deterministic tail truncation marks omitted text with a leading
-`\n...\n` when the cap leaves room for both the marker and retained content.
-The budget applies to raw sections before HTML escaping, wrapper tags, and the
-summary prompt; it is not a hard limit on the final model request. Keep escaping
-after trimming so partial trimming cannot split escape entities. The factory
-must pass `trim_tokens_to_summarize=None` through explicitly, since omitting it
-restores LangChain's 4000-token default.
+After latest-user rescue, if the inherited trimmer empties an AI/Tool-only
+window, format it and use `_build_summary_input_text(strategy="last")`.
+Keep normal human-anchored trimming and the final-message fallback for mixed
+windows whose human anchor falls outside the token-limited tail; head-first
+restoration can lose recent tool results. Tail truncation prefixes `\n...\n`
+only when marker and content fit. Budget raw sections before HTML escaping,
+wrappers, and prompt (not the final request); escape after trimming to preserve
+entities. Pass `trim_tokens_to_summarize=None` explicitly through the factory;
+omission restores LangChain's 4000-token default.
 
 Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares` appends lead-only entries. Optional entries require their config/runtime condition.
 
-**Message provenance.** A middleware that injects or rewrites a message stamps
-`additional_kwargs` with the neutral provenance keys from
-`deerflow_extension_api.provenance` (`deerflow_content_kind`,
-`deerflow_producer_kind`, and optionally `deerflow_producer_entity_id`) via
-`provenance_kwargs()`. Stamp at injection/rewrite regardless of installed
-observers; downstream cannot recover the producer. All three
-keys are in `_SERVER_OWNED_MESSAGE_METADATA_KEYS`, so a caller cannot forge
-provenance on inbound messages. Currently stamped by: DynamicContext (reminder + memory),
-DurableContext (contract + data), SystemMessageCoalescing, ViewImage,
-SkillActivation. Summarization, Title, and Memory are deliberately absent:
-Summarization's and Title's own model calls are already attributed through
-system-model-call observation (`SystemOperationKind.SUMMARIZATION` /
-`.TITLE`), and the summary text they produce only ever enters a request via
-`DurableContextMiddleware`'s already-stamped `durable_context_data` block —
-there is no separate message of theirs to stamp. Memory only *reads*
-messages to queue them for extraction; the recalled-memory content that
-actually re-enters context is DynamicContext's `dynamic_context_memory`
-stamp, not anything Memory itself produces.
+**Message provenance.** At injection/rewrite, always stamp `additional_kwargs`
+via `deerflow_extension_api.provenance.provenance_kwargs()`:
+`deerflow_content_kind`, `deerflow_producer_kind`, optional
+`deerflow_producer_entity_id`. All are server-owned inbound metadata; stamp even
+without observers, since downstream cannot recover producers. Producers:
+DynamicContext (reminder/memory), DurableContext (contract/data),
+SystemMessageCoalescing, ViewImage, SkillActivation. Summarization/Title use
+`SystemOperationKind.SUMMARIZATION`/`.TITLE` model-call attribution; summaries
+enter via DurableContext's stamped `durable_context_data`, not separate
+messages. Memory only queues extraction; recall uses DynamicContext's
+`dynamic_context_memory` stamp.
 
-**Middleware self-description.** A middleware whose configuration changes agent
-behaviour implements `release_policy_parameters() -> dict[str, object]`
-(`deerflow_extension_api.release.ReleasePolicyProvider`, duck-typed — no base
-class). Values must be JSON-serialisable; long text is hashed with
-`canonical_hash` rather than embedded, because a declaration is an identity and
-not a copy of the prompt. `collect_release_policies()` gathers them from an
-assembled stack. Adding a behaviour-affecting field to a middleware means adding
-it to that middleware's declaration in the same change.
+**Middleware self-description.** Behaviour-configurable middleware implements
+`release_policy_parameters() -> dict[str, object]` (duck-typed
+`deerflow_extension_api.release.ReleasePolicyProvider`, no base class).
+Use JSON-serialisable values and `canonical_hash` for long text, not prompt
+copies. `collect_release_policies()` gathers stack declarations; update them
+alongside every behaviour-affecting field.
 
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 
