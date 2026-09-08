@@ -299,6 +299,7 @@ class ScheduledTaskService:
                 last_thread_id=launched_thread_id,
                 last_error=None,
                 increment_run_count=True,
+                task_run_id=task_run_id,
                 # Same race as the run-row write above: a fast-failing run's
                 # completion hook may have already finalized a `once` task.
                 protect_terminal=True,
@@ -368,6 +369,7 @@ class ScheduledTaskService:
                         # The transient itself is logged above.
                         last_error=None,
                         increment_run_count=True,
+                        task_run_id=task_run_id,
                         protect_terminal=True,
                     )
                 except Exception:
@@ -538,30 +540,15 @@ class ScheduledTaskService:
         if terminal_status is None:
             return
 
-        await self._task_run_repo.update_status(
-            task_run_id,
-            status=terminal_status,
+        await self._task_repo.complete_run(
+            task_id,
+            user_id=user_id,
+            task_run_id=task_run_id,
             run_id=record.run_id,
+            status=terminal_status,
             error=error,
             finished_at=datetime.now(UTC),
         )
-
-        task = await self._task_repo.get(task_id, user_id=user_id)
-        if task is None:
-            return
-
-        updates: dict[str, Any] = {"last_error": error}
-        if task["schedule_type"] == "once":
-            # The single occurrence is consumed either way (the run did launch,
-            # so re-arming risks duplicate side effects), but an interrupt ends
-            # as "cancelled", not "failed".
-            if terminal_status == "success":
-                updates["status"] = "completed"
-            elif terminal_status == "interrupted":
-                updates["status"] = "cancelled"
-            else:
-                updates["status"] = "failed"
-        await self._task_repo.update(task_id, user_id=user_id, updates=updates)
 
     async def start(self) -> None:
         if self._task is not None:

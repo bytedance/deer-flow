@@ -12,6 +12,7 @@ that partial-unique-index and ORM constraints are enforced.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import update
@@ -546,6 +547,56 @@ class TestReconcileStuckOnceTasksOutcomeAware:
 # ---------------------------------------------------------------------------
 # Regression: multiple historical runs for both reconciliation paths
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("recovery_method", ["cancel_stuck_once_tasks", "reconcile_stuck_once_tasks"])
+@pytest.mark.parametrize("newer_status", ["skipped", "queued", "launching", "running"])
+@pytest.mark.parametrize("older_clock_ahead_seconds", [30, 0], ids=["reversed-timestamps", "equal-timestamps"])
+async def test_once_recovery_uses_occurrence_order_despite_clock_skew(tmp_path, recovery_method, newer_status, older_clock_ahead_seconds):
+    """A newer admitted occurrence wins even when timestamps and IDs favor the older one."""
+    task_repo, run_repo = await _init_db(tmp_path)
+    try:
+        await _create_once_task(task_repo)
+        await _set_task_running(task_repo, "task-once-1")
+        # Exercise normal repository insertion; only the worker's clock changes.
+        # Descending UUID order must not break ties in favor of the old success.
+        with patch("deerflow.persistence.scheduled_task_runs.sql.datetime") as clock:
+            clock.now.return_value = _NOW + timedelta(seconds=older_clock_ahead_seconds)
+            older = await run_repo.create(
+                run_record_id="ffffffff-ffff-4fff-8fff-ffffffffffff",
+                task_id="task-once-1",
+                thread_id="thread-old",
+                scheduled_for=clock.now.return_value,
+                trigger="manual",
+                status="success",
+            )
+            clock.now.return_value = _NOW
+            newer = await run_repo.create(
+                run_record_id="00000000-0000-4000-8000-000000000000",
+                task_id="task-once-1",
+                thread_id="thread-new",
+                scheduled_for=clock.now.return_value,
+                trigger="manual",
+                status=newer_status,
+            )
+        assert older["created_at"] >= newer["created_at"]
+        assert older["scheduled_for"] >= newer["scheduled_for"]
+        kwargs = {"error": "interrupted: recovery"}
+        if recovery_method == "reconcile_stuck_once_tasks":
+            kwargs["now"] = _NOW + timedelta(minutes=1)
+        count = await getattr(task_repo, recovery_method)(**kwargs)
+
+        task = await _get_task(task_repo, "task-once-1")
+        assert task is not None
+        assert task["status"] == ("cancelled" if newer_status == "skipped" else "running")
+        assert count == (1 if newer_status == "skipped" else 0)
+        assert task["last_error"] is None
+        async with run_repo._sf() as session:
+            older_row = await session.get(ScheduledTaskRunRow, older["id"])
+            newer_row = await session.get(ScheduledTaskRunRow, newer["id"])
+            assert newer_row.occurrence_seq > older_row.occurrence_seq
+    finally:
+        await close_engine()
 
 
 class TestCancelStuckMultipleRuns:

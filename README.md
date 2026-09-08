@@ -1542,6 +1542,7 @@ Current MVP capabilities:
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks
 - Execute scheduled work through the normal DeerFlow run lifecycle
+- Recover newly admitted occurrences in database admission order, so clock skew and late older completions cannot replace a newer task result; count each proven launch once through retries and recovery
 
 Current MVP limits:
 
@@ -1557,6 +1558,7 @@ The background scheduler is single-instance by default. For a multi-pod deployme
 
 ### Upgrade Notes
 
+- Stop all Gateway writers before upgrading to occurrence-ordering recovery, then restart them on the updated version. Older writers do not participate in the sequence and accounting protocol. Existing history is left unsequenced and retains best-effort recovery; the upgrade does not reconstruct past order or repair historical counts.
 - Before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either keep the scheduler on exactly one Gateway worker or configure `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The upgraded Gateway rejects the unsafe combination at startup instead of starting silently.
 - In multi-instance mode, `scheduler.max_concurrent_runs` is a cluster-wide execution cap, not a per-Pod cap. It includes `launching` and `running` scheduled occurrences, so capacity does not multiply with the number of replicas; durable waiting rows remain outside the cap.
 - `scheduler.multi_instance` and the related scheduler, ownership, and run-event settings are startup-only. Apply changes with a coordinated restart of all Gateway Pods; changing the ConfigMap alone does not activate multi-instance recovery.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -31,6 +31,7 @@ class ScheduledTaskRow(Base):
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     run_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_occurrence_seq: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

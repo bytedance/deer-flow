@@ -10,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES, ScheduledTaskRow
+from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -64,7 +66,7 @@ class ScheduledTaskRepository:
 
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRow) -> dict[str, Any]:
-        data = row.to_dict()
+        data = row.to_dict(exclude={"last_occurrence_seq"})
         for key in (
             "created_at",
             "updated_at",
@@ -364,17 +366,17 @@ class ScheduledTaskRepository:
     async def release_queued_admission_lease(self, task_id: str) -> bool:
         """Recover a crash after queue insert but before parent-lease release."""
         async with self._sf() as session:
-            task = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            task = await self._lock_task(session, task_id)
             if task is None or task.status != "running" or task.lease_owner is None:
                 await session.rollback()
                 return False
             queued = await session.scalar(
-                select(ScheduledTaskRunRow.id).where(
+                select(ScheduledTaskRunRow).where(
                     ScheduledTaskRunRow.task_id == task_id,
                     ScheduledTaskRunRow.status == "queued",
                 )
             )
-            if queued is None:
+            if queued is None or not can_project(task, queued):
                 await session.rollback()
                 return False
             task.status = "enabled"
@@ -397,9 +399,10 @@ class ScheduledTaskRepository:
         increment_run_count: bool,
         protect_terminal: bool = False,
         expected_lease_owner: str | None = None,
+        task_run_id: str | None = None,
     ) -> bool:
         async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            row = await self._lock_task(session, task_id)
             if row is None:
                 return False
             if expected_lease_owner is not None and row.lease_owner != expected_lease_owner:
@@ -411,16 +414,33 @@ class ScheduledTaskRepository:
                 )
                 await session.rollback()
                 return False
-            if protect_terminal and row.status in TERMINAL_TASK_STATUSES:
+            occurrence = None
+            if task_run_id is not None:
+                occurrence = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
+                if occurrence is None or occurrence.task_id != task_id or occurrence.run_id not in (None, last_run_id):
+                    await session.rollback()
+                    return False
+            elif last_run_id is not None:
+                # Preserve direct repository callers that identify the launch
+                # by its durable run id rather than its occurrence id.
+                occurrence = await session.scalar(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.run_id == last_run_id).with_for_update())
+            should_increment_run_count = increment_run_count and (last_run_id is None or row.last_run_id != last_run_id)
+            if occurrence is not None:
+                if increment_run_count and last_run_id is not None:
+                    account_launch(row, occurrence, last_run_id)
+                should_increment_run_count = False
+                if not can_project(row, occurrence):
+                    await session.commit()
+                    return True
+            if protect_terminal and (row.status in TERMINAL_TASK_STATUSES or (occurrence is not None and occurrence.status in TERMINAL_RUN_STATUSES)):
                 # A fast-failing run can reach handle_run_completion (which
                 # finalizes a `once` task) before this launch-path write
-                # commits; keep the hook's status/error and only record the
-                # launch bookkeeping.
+                # commits. Cron parents stay enabled even after completion,
+                # so also protect the terminal occurrence's status/error.
                 pass
             else:
                 row.status = status
                 row.last_error = last_error
-            should_increment_run_count = increment_run_count and (last_run_id is None or row.last_run_id != last_run_id)
             row.next_run_at = _coerce_datetime(next_run_at)
             row.last_run_at = _coerce_datetime(last_run_at)
             row.last_run_id = last_run_id
@@ -430,6 +450,54 @@ class ScheduledTaskRepository:
             row.lease_owner = None
             row.lease_expires_at = None
             row.updated_at = datetime.now(UTC)
+            await session.commit()
+            return True
+
+    async def complete_run(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        task_run_id: str,
+        run_id: str,
+        status: str,
+        error: str | None,
+        finished_at: datetime,
+    ) -> bool:
+        """Commit occurrence completion, accounting and eligible parent outcome."""
+        async with self._sf() as session:
+            task = await self._lock_task(session, task_id)
+            occurrence = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
+            if occurrence is None or occurrence.task_id != task_id or occurrence.run_id not in (None, run_id) or (task is not None and task.user_id != user_id):
+                await session.rollback()
+                return False
+            occurrence.status = status
+            occurrence.run_id = run_id
+            occurrence.error = error
+            occurrence.finished_at = finished_at
+            occurrence.lease_owner = None
+            occurrence.lease_expires_at = None
+            if task is not None:
+                account_launch(task, occurrence, run_id)
+                if can_project(task, occurrence):
+                    if task.last_run_id != run_id:
+                        # A fast callback can beat launch bookkeeping. Finalize
+                        # its association and schedule before releasing the slot.
+                        launched_at = occurrence.started_at or occurrence.scheduled_for
+                        if launched_at.tzinfo is None:
+                            launched_at = launched_at.replace(tzinfo=UTC)
+                        task.last_run_at = launched_at
+                        task.last_run_id = run_id
+                        task.last_thread_id = occurrence.thread_id
+                        task.next_run_at = compute_next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=launched_at)
+                        task.lease_owner = None
+                        task.lease_expires_at = None
+                    task.last_error = error
+                    if task.schedule_type == "once":
+                        task.status = {"success": "completed", "failed": "failed", "interrupted": "cancelled"}[status]
+                    elif task.status != "paused":
+                        task.status = "enabled"
+                    task.updated_at = finished_at
             await session.commit()
             return True
 
@@ -485,11 +553,16 @@ class ScheduledTaskRepository:
         used for finalization must come from a fresh read.  ``populate_existing``
         bypasses the session identity map so a concurrently committed status is
         read back fresh.
+
+        Parent-locked sequence allocation defines recency across Gateway clocks.
+        Unsequenced legacy rows retain their old deterministic ordering; their
+        true insertion order cannot be reconstructed from caller timestamps.
         """
         stmt = (
             select(ScheduledTaskRunRow)
             .where(ScheduledTaskRunRow.task_id == task_id)
             .order_by(
+                ScheduledTaskRunRow.occurrence_seq.desc().nulls_last(),
                 ScheduledTaskRunRow.created_at.desc(),
                 ScheduledTaskRunRow.scheduled_for.desc(),
                 ScheduledTaskRunRow.id.desc(),
