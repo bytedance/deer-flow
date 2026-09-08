@@ -639,6 +639,7 @@ class TestListDirSerialization:
 
         command = sandbox._client.shell.exec_command.call_args.kwargs["command"]
         assert command.startswith("find -H ")
+        assert "\\( -type f -o -type d \\)" in command
 
 
 class TestNoChangeTimeout:
