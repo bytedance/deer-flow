@@ -470,6 +470,7 @@ export const enUS: Translations = {
       runAt: "Run at",
       timezone: "Timezone",
       intervalAmount: "Every",
+      intervalUnitSeconds: "seconds",
       intervalUnitMinutes: "minutes",
       intervalUnitHours: "hours",
     },

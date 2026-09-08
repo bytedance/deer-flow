@@ -379,6 +379,7 @@ export interface Translations {
       runAt: string;
       timezone: string;
       intervalAmount: string;
+      intervalUnitSeconds: string;
       intervalUnitMinutes: string;
       intervalUnitHours: string;
     };

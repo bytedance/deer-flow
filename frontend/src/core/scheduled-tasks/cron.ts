@@ -21,7 +21,7 @@ export type CronParts = {
 
 export type ScheduleType = "once" | "cron" | "interval";
 
-export type IntervalUnit = "minutes" | "hours";
+export type IntervalUnit = "seconds" | "minutes" | "hours";
 
 export const MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60;
 
@@ -43,7 +43,13 @@ export function intervalToSeconds(
   if (!Number.isInteger(amount) || amount < 1) {
     throw new Error("interval amount must be a positive integer");
   }
-  return unit === "hours" ? amount * 3600 : amount * 60;
+  if (unit === "hours") {
+    return amount * 3600;
+  }
+  if (unit === "minutes") {
+    return amount * 60;
+  }
+  return amount;
 }
 
 export function secondsToInterval(everySeconds: number): {
@@ -57,16 +63,27 @@ export function secondsToInterval(everySeconds: number): {
   ) {
     return { amount: everySeconds / 3600, unit: "hours" };
   }
+  if (
+    Number.isInteger(everySeconds) &&
+    everySeconds >= 60 &&
+    everySeconds % 60 === 0
+  ) {
+    return { amount: everySeconds / 60, unit: "minutes" };
+  }
   return {
-    amount: Math.max(1, Math.round(everySeconds / 60)),
-    unit: "minutes",
+    amount: Math.max(1, Math.trunc(everySeconds) || 1),
+    unit: "seconds",
   };
 }
 
 export function maxIntervalAmount(unit: IntervalUnit): number {
-  return unit === "hours"
-    ? MAX_INTERVAL_SECONDS / 3600
-    : MAX_INTERVAL_SECONDS / 60;
+  if (unit === "hours") {
+    return MAX_INTERVAL_SECONDS / 3600;
+  }
+  if (unit === "minutes") {
+    return MAX_INTERVAL_SECONDS / 60;
+  }
+  return MAX_INTERVAL_SECONDS;
 }
 
 export function hasScheduleSpec(spec: {
@@ -269,10 +286,19 @@ export function describeSchedule(
     const amount = state.intervalAmount ?? 1;
     const unit = state.intervalUnit ?? "minutes";
     if (zh) {
-      return unit === "hours" ? `每 ${amount} 小时` : `每 ${amount} 分钟`;
+      if (unit === "hours") {
+        return `每 ${amount} 小时`;
+      }
+      if (unit === "seconds") {
+        return `每 ${amount} 秒`;
+      }
+      return `每 ${amount} 分钟`;
     }
     if (unit === "hours") {
       return amount === 1 ? "Every hour" : `Every ${amount} hours`;
+    }
+    if (unit === "seconds") {
+      return amount === 1 ? "Every second" : `Every ${amount} seconds`;
     }
     return amount === 1 ? "Every minute" : `Every ${amount} minutes`;
   }

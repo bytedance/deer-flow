@@ -385,6 +385,9 @@ export function ScheduledTaskScheduleInput({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value="seconds">
+                {labels.fields.intervalUnitSeconds}
+              </SelectItem>
               <SelectItem value="minutes">
                 {labels.fields.intervalUnitMinutes}
               </SelectItem>

@@ -301,18 +301,51 @@ describe("describeSchedule", () => {
       ),
     ).toBe("Every hour");
   });
+
+  test("interval seconds en/zh omit timezone", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "seconds",
+          timezone: "Asia/Shanghai",
+        },
+        "en",
+      ),
+    ).toBe("Every 90 seconds");
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "seconds",
+          timezone: "Asia/Shanghai",
+        },
+        "zh",
+      ),
+    ).toBe("每 90 秒");
+  });
 });
 
 describe("interval conversion", () => {
   test("minutes and hours convert to seconds", () => {
+    expect(intervalToSeconds(90, "seconds")).toBe(90);
     expect(intervalToSeconds(90, "minutes")).toBe(5400);
     expect(intervalToSeconds(2, "hours")).toBe(7200);
   });
 
-  test("whole hours stay in hours; otherwise minutes", () => {
+  test("whole hours stay in hours; whole minutes stay in minutes", () => {
     expect(secondsToInterval(7200)).toEqual({ amount: 2, unit: "hours" });
     expect(secondsToInterval(5400)).toEqual({ amount: 90, unit: "minutes" });
-    expect(secondsToInterval(90)).toEqual({ amount: 2, unit: "minutes" });
+    expect(secondsToInterval(120)).toEqual({ amount: 2, unit: "minutes" });
+  });
+
+  test("edit/duplicate round-trip keeps intervals that are not whole minutes", () => {
+    const stored = 90;
+    const displayed = secondsToInterval(stored);
+    expect(displayed).toEqual({ amount: 90, unit: "seconds" });
+    expect(intervalToSeconds(displayed.amount, displayed.unit)).toBe(stored);
   });
 
   test("hasScheduleSpec accepts interval every_seconds", () => {

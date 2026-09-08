@@ -445,6 +445,7 @@ export const zhCN: Translations = {
       runAt: "运行时间",
       timezone: "时区",
       intervalAmount: "每",
+      intervalUnitSeconds: "秒",
       intervalUnitMinutes: "分钟",
       intervalUnitHours: "小时",
     },
