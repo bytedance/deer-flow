@@ -66,6 +66,12 @@ Middlewares execute in strict order, each handling a specific concern:
 | 8 | **ViewImageMiddleware** | Injects image data for vision-capable models (conditional) |
 | 9 | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
 
+When `loop_detection.enabled` is set, loop detection checks both repeated
+tool-call sets and per-tool frequency. Warnings do not skip the rest of a
+tool-call batch: any hard limit reached takes precedence and stops the entire
+batch before tool execution. Warning-only batches remain fully counted and
+receive a transient hint on the next model request.
+
 ### Sandbox System
 
 Per-thread isolated execution with virtual path translation:
