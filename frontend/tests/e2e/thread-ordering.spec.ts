@@ -65,7 +65,10 @@ function buildFixtureMessages(): FeedMessage[] {
   for (let turn = 20; turn <= 29; turn += 1) {
     messages.push(...turnMessages(turn));
   }
-  // A tool-using turn so the tool card association is verifiable.
+  // A tool-using turn so the tool card association is verifiable. Two tool
+  // calls put the web_search step above the LAST one — into the collapsed
+  // "more steps" region — so the payload check below exercises the real
+  // expand interaction instead of the always-open trailing step.
   messages.push({
     type: "human",
     id: "h-turn-30",
@@ -82,6 +85,12 @@ function buildFixtureMessages(): FeedMessage[] {
         args: { query: "turn-30 lookup" },
         type: "tool_call",
       },
+      {
+        id: "call-turn-30-b",
+        name: "web_fetch",
+        args: { url: "https://example.test/turn-30" },
+        type: "tool_call",
+      },
     ],
   });
   messages.push({
@@ -94,6 +103,13 @@ function buildFixtureMessages(): FeedMessage[] {
     content: JSON.stringify([
       { url: "https://example.test/turn-30", title: "tool-30 result payload" },
     ]),
+  });
+  messages.push({
+    type: "tool",
+    id: "t-turn-30-b",
+    tool_call_id: "call-turn-30-b",
+    name: "web_fetch",
+    content: "fetched page body",
   });
   messages.push({
     type: "ai",
@@ -237,17 +253,16 @@ test.describe("Thread message ordering", () => {
     ).toBeVisible();
     await expectGroupIndicesAscending(page);
 
-    // The tool turn keeps its card association: expand the collapsed tool
-    // step and the intermediate result payload is still there.
+    // The tool turn keeps its card association: the web_search step sits in
+    // the collapsed "more steps" region, so its intermediate result payload
+    // is hidden until the region is expanded — and must still be there after.
     await jumpToChapter(page, /turn-30 question/);
     const mainList = page.getByTestId("main-message-list");
     await expect(mainList.getByText("turn-30 answer")).toBeVisible();
-    const toolStep = mainList.getByText(
-      'Search on the web for "turn-30 lookup"',
-    );
-    await expect(toolStep).toBeVisible();
-    await toolStep.click();
-    await expect(mainList.getByText("tool-30 result payload")).toBeVisible();
+    const payload = mainList.getByText("tool-30 result payload");
+    await expect(payload).not.toBeVisible();
+    await mainList.getByRole("button", { name: "1 more step" }).click();
+    await expect(payload).toBeVisible();
 
     // Same server data after a refresh reconstructs the same order.
     await page.reload();
