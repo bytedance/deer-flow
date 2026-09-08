@@ -280,7 +280,7 @@ def check_models_configured(config_path: Path) -> CheckResult:
         return CheckResult("models configured", "skip")
     try:
         data = _load_yaml_file(config_path)
-        models = data.get("models", [])
+        models = data.get("models") or []
         if models:
             return CheckResult("models configured", "ok", f"{len(models)} model(s)")
         return CheckResult(
@@ -326,7 +326,7 @@ def check_llm_api_key(config_path: Path) -> list[CheckResult]:
         with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
-        for model in data.get("models", []):
+        for model in data.get("models") or []:
             # Collect all values that look like $ENV_VAR references
             def _collect_env_refs(obj: object) -> list[str]:
                 refs: list[str] = []
@@ -373,7 +373,7 @@ def check_llm_package(config_path: Path) -> list[CheckResult]:
             data = yaml.safe_load(f) or {}
 
         seen_packages: set[str] = set()
-        for model in data.get("models", []):
+        for model in data.get("models") or []:
             use = model.get("use", "")
             if ":" in use:
                 package_path = use.split(":")[0]
@@ -408,7 +408,7 @@ def check_llm_auth(config_path: Path) -> list[CheckResult]:
     results: list[CheckResult] = []
     try:
         data = _load_yaml_file(config_path)
-        for model in data.get("models", []):
+        for model in data.get("models") or []:
             use = model.get("use", "")
             model_name = model.get("name", "default")
 

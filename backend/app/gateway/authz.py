@@ -68,6 +68,10 @@ class Permissions:
     RUNS_CREATE = "runs:create"
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
+    # Projects
+    PROJECTS_READ = "projects:read"
+    PROJECTS_WRITE = "projects:write"
+    PROJECTS_DELETE = "projects:delete"
 
 
 class AuthContext:
@@ -149,6 +153,9 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.PROJECTS_READ,
+    Permissions.PROJECTS_WRITE,
+    Permissions.PROJECTS_DELETE,
 ]
 
 

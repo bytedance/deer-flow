@@ -16,6 +16,9 @@ const AUTH_DISABLED_PERMISSIONS = [
   "runs:create",
   "runs:read",
   "runs:cancel",
+  "projects:read",
+  "projects:write",
+  "projects:delete",
 ];
 
 test.describe("auth-disabled contract (real backend)", () => {
