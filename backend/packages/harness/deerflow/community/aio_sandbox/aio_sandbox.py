@@ -612,10 +612,9 @@ class AioSandbox(Sandbox):
         with self._lock:
             try:
                 if append:
-                    existing = self.read_file(path)
-                    if not existing.startswith("Error:"):
-                        content = existing + content
-                self._client.file.write_file(file=path, content=content)
+                    self._client.file.write_file(file=path, content=content, append=True)
+                else:
+                    self._client.file.write_file(file=path, content=content)
             except Exception as e:
                 logger.error(f"Failed to write file in sandbox: {e}")
                 raise

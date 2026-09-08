@@ -1479,6 +1479,12 @@ async def start_run(
                 )
 
                 if record.idempotency_reused:
+                    stored = record.kwargs or {}
+                    if stored.get("input") != body.input or record.assistant_id != body.assistant_id:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Idempotency-Key already used with a different request",
+                        )
                     return record
 
                 worker = run_after_metadata(record)
@@ -1673,6 +1679,7 @@ async def sse_consumer(
     run_mgr: RunManager,
     *,
     apply_on_disconnect: bool = True,
+    emit_gap_on_missing_stream: bool = False,
 ):
     """Async generator that yields SSE frames from the bridge.
 
@@ -1687,9 +1694,31 @@ async def sse_consumer(
     connection, and a read-only observer closing a join must not cancel the
     run (a runs:read-only credential would otherwise cancel without
     runs:cancel just by disconnecting).
+
+    ``emit_gap_on_missing_stream`` is a separate creating-retry signal, default
+    ``False``. ``create_or_reject`` sets ``record.idempotency_reused`` on the
+    shared cached record and never clears it, so this function must not read
+    that flag. Thread-scoped ``/runs/stream`` passes True only for this
+    request's reuse; default callers (joins, stateless ``/api/runs/stream``,
+    tests) keep ``end`` when a terminal record's stream is gone.
     """
     last_event_id = request.headers.get("Last-Event-ID")
     if await _terminal_record_stream_missing(bridge, record):
+        if emit_gap_on_missing_stream:
+            # Creating-endpoint retry: a bare `end` looks like the run
+            # produced nothing. Point the client at durable state instead.
+            yield format_sse(
+                "gap",
+                {
+                    "code": "stream_replay_gap",
+                    "run_id": record.run_id,
+                    "requested_event_id": last_event_id,
+                    "earliest_available_event_id": None,
+                    "latest_available_event_id": None,
+                    "recovery": "reload_durable_state",
+                },
+            )
+            return
         yield format_sse("end", None)
         return
 

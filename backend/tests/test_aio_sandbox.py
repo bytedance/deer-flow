@@ -714,35 +714,47 @@ class TestReadFile:
         )
 
 
+class TestWriteFile:
+    def test_append_uses_server_append_without_pre_read(self, sandbox):
+        sandbox._client.file.read_file = MagicMock(side_effect=RuntimeError("read timed out"))
+        sandbox._client.file.write_file = MagicMock()
+
+        sandbox.write_file("/mnt/user-data/workspace/report.txt", "tail", append=True)
+
+        sandbox._client.file.read_file.assert_not_called()
+        sandbox._client.file.write_file.assert_called_once_with(
+            file="/mnt/user-data/workspace/report.txt",
+            content="tail",
+            append=True,
+        )
+
+    def test_overwrite_keeps_existing_request_shape(self, sandbox):
+        sandbox._client.file.write_file = MagicMock()
+
+        sandbox.write_file("/mnt/user-data/workspace/report.txt", "replacement")
+
+        sandbox._client.file.write_file.assert_called_once_with(
+            file="/mnt/user-data/workspace/report.txt",
+            content="replacement",
+        )
+
+
 class TestConcurrentFileWrites:
     """Verify file write paths do not lose concurrent updates."""
 
     def test_append_should_preserve_both_parallel_writes(self, sandbox):
         storage = {"content": "seed\n"}
-        active_reads = 0
         state_lock = threading.Lock()
-        overlap_detected = threading.Event()
 
-        def overlapping_read_file(path):
-            nonlocal active_reads
+        def write_back(*, file, content, append=False, **kwargs):
             with state_lock:
-                active_reads += 1
-                snapshot = storage["content"]
-                if active_reads == 2:
-                    overlap_detected.set()
-
-            overlap_detected.wait(0.05)
-
-            with state_lock:
-                active_reads -= 1
-
-            return snapshot
-
-        def write_back(*, file, content, **kwargs):
-            storage["content"] = content
+                if append:
+                    storage["content"] += content
+                else:
+                    storage["content"] = content
             return SimpleNamespace(data=SimpleNamespace())
 
-        sandbox.read_file = overlapping_read_file
+        sandbox.read_file = MagicMock(side_effect=AssertionError("native append must not pre-read"))
         sandbox._client.file.write_file = write_back
 
         barrier = threading.Barrier(2)
