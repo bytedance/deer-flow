@@ -68,6 +68,10 @@ class Permissions:
     RUNS_CREATE = "runs:create"
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
+    # Projects
+    PROJECTS_READ = "projects:read"
+    PROJECTS_WRITE = "projects:write"
+    PROJECTS_DELETE = "projects:delete"
 
 
 class AuthContext:
@@ -149,6 +153,9 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.PROJECTS_READ,
+    Permissions.PROJECTS_WRITE,
+    Permissions.PROJECTS_DELETE,
 ]
 
 
@@ -286,6 +293,17 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
 
     results = await asyncio.gather(*[_evaluate(p) for p in _ALL_PERMISSIONS])
     return [p for p in results if p is not None]
+
+
+async def resolve_route_permissions_for_request(request: Request, user: Any) -> list[str]:
+    """Resolve the effective route permissions for a request's authenticated user.
+
+    Public wrapper pairing ``resolve_route_permissions`` with the internal-caller
+    heuristics of ``_is_internal_caller`` (auth source, synthetic internal role,
+    internal auth header), so middleware-less consumers resolve exactly what
+    ``_authenticate`` resolves and the two cannot drift apart.
+    """
+    return await resolve_route_permissions(user, is_internal=_is_internal_caller(request, user))
 
 
 class _AuthorizationUnavailable(Exception):
@@ -497,8 +515,7 @@ async def _authenticate(request: Request) -> AuthContext:
     if user is None:
         return AuthContext(user=None, permissions=[])
 
-    is_internal = _is_internal_caller(request, user)
-    permissions = await resolve_route_permissions(user, is_internal=is_internal)
+    permissions = await resolve_route_permissions_for_request(request, user)
     return AuthContext(user=user, permissions=permissions)
 
 

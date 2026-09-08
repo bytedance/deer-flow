@@ -236,6 +236,38 @@ export interface Translations {
     agentsDisabledTooltip: string;
     channels: string;
   };
+  // Sidebar projects section
+  projects: {
+    title: string;
+    newProject: string;
+    namePlaceholder: string;
+    moveToProject: string;
+    moveToProjectHint: string;
+    removeFromProject: string;
+    archive: string;
+    restore: string;
+    deleteProject: string;
+    deleteProjectConfirm: string;
+    archived: string;
+    empty: string;
+    newChat: string;
+    // Runtime states and actions
+    create: string;
+    createFailed: string;
+    moveFailed: string;
+    archiveFailed: string;
+    restoreFailed: string;
+    deleteFailed: string;
+    switchToGrouped: string;
+    switchToFlat: string;
+    // Project page
+    threads: string;
+    threadsLoadFailed: string;
+    untitled: string;
+    settings: string;
+    notFound: string;
+    projectUnavailable: string;
+  };
 
   // Thread-scoped MCP background tasks
   backgroundTasks: {
