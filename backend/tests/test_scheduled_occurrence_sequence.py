@@ -6,6 +6,7 @@ import asyncio
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
@@ -184,31 +185,66 @@ async def test_internal_sequence_fields_are_absent_from_repository_responses(occ
     assert await _sequence(first, "queued") == 1
 
 
-@pytest.mark.parametrize("include_sequenced", [False, True], ids=["legacy-only", "mixed-history"])
-async def test_recovery_order_preserves_legacy_fallback_but_prioritizes_sequence(occurrence_factories, include_sequenced):
+async def _insert_unsequenced_run(factory, run_id, *, created_at, status="success"):
+    """Insert without the repository: legacy history or a pre-upgrade writer."""
+    async with factory() as session:
+        session.add(
+            ScheduledTaskRunRow(
+                id=run_id,
+                task_id="task",
+                thread_id=f"thread-{run_id}",
+                scheduled_for=created_at,
+                created_at=created_at,
+                trigger="manual",
+                status=status,
+            )
+        )
+        await session.commit()
+
+
+async def _latest_run_id(factory):
+    async with factory() as session:
+        latest = await ScheduledTaskRepository._fetch_latest_run(session, "task")
+        assert latest is not None
+        return latest.id
+
+
+async def test_recovery_order_keeps_timestamp_fallback_for_legacy_only_history(occurrence_factories):
     first, _second = occurrence_factories
     await _create_task(first)
     now = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
     # Unsequenced history is deliberately not assigned guessed sequence values.
-    async with first() as session:
-        for index in range(2):
-            session.add(
-                ScheduledTaskRunRow(
-                    id=f"legacy-{index}",
-                    task_id="task",
-                    thread_id=f"thread-legacy-{index}",
-                    scheduled_for=now + timedelta(days=index),
-                    created_at=now + timedelta(days=365 + index),
-                    trigger="manual",
-                    status="success",
-                )
-            )
-        await session.commit()
-    if include_sequenced:
-        await _create_run(first, "sequenced")
-    async with first() as session:
-        latest = await ScheduledTaskRepository._fetch_latest_run(session, "task")
-        assert latest is not None
-        assert latest.id == ("sequenced" if include_sequenced else "legacy-1")
+    for index in range(2):
+        await _insert_unsequenced_run(first, f"legacy-{index}", created_at=now + timedelta(days=index))
+    assert await _latest_run_id(first) == "legacy-1"
     assert await _sequence(first, "legacy-0") is None
     assert await _sequence(first, "legacy-1") is None
+    assert await _high_water_mark(first) == 0
+
+
+@pytest.mark.parametrize("unsequenced_status", ["skipped", "running"])
+@pytest.mark.parametrize(
+    ("unsequenced_offset", "expected"),
+    [(timedelta(days=-365), "newer-sequenced"), (timedelta(seconds=30), "unsequenced")],
+    ids=["legacy-history-is-older", "pre-upgrade-writer-is-newer"],
+)
+async def test_recovery_order_compares_caller_time_only_against_unsequenced_rows(occurrence_factories, unsequenced_offset, expected, unsequenced_status):
+    """Sequence decides among sequenced rows even with reversed caller clocks.
+
+    An unsequenced row (legacy history or a pre-upgrade Gateway writer) beats
+    the sequence winner only when its caller timestamp is later: the previous
+    ordering for that pair, so a rolling upgrade cannot rank a genuinely newer
+    pre-upgrade admission below an older sequenced one.
+    """
+    first, second = occurrence_factories
+    await _create_task(first)
+    now = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+    # The later sequence carries the earlier caller clock: sequence still wins.
+    with patch("deerflow.persistence.scheduled_task_runs.sql.datetime") as clock:
+        clock.now.return_value = now + timedelta(seconds=30)
+        await _create_run(first, "older-sequenced")
+        clock.now.return_value = now
+        await _create_run(second, "newer-sequenced")
+    await _insert_unsequenced_run(first, "unsequenced", created_at=now + unsequenced_offset, status=unsequenced_status)
+    assert [await _sequence(first, run_id) for run_id in ("older-sequenced", "newer-sequenced", "unsequenced")] == [1, 2, None]
+    assert await _latest_run_id(first) == expected

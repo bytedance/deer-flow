@@ -562,24 +562,29 @@ class ScheduledTaskRepository:
         bypasses the session identity map so a concurrently committed status is
         read back fresh.
 
-        Parent-locked sequence allocation defines recency across Gateway clocks.
-        Unsequenced legacy rows retain their old deterministic ordering; their
-        true insertion order cannot be reconstructed from caller timestamps.
+        Among sequenced rows the parent-locked ``occurrence_seq`` is the only
+        recency key; caller clocks never reorder them.  An unsequenced row can
+        only be legacy history or an admission by a pre-upgrade Gateway writer,
+        so there is no sequence to compare it against.  It is preferred over the
+        sequence winner only when its caller timestamp is later, which is exactly
+        the pre-sequence ordering for that pair: a rolling upgrade degrades to
+        the previous behaviour instead of ranking every pre-upgrade admission
+        below every sequenced one.
         """
-        stmt = (
-            select(ScheduledTaskRunRow)
-            .where(ScheduledTaskRunRow.task_id == task_id)
-            .order_by(
-                ScheduledTaskRunRow.occurrence_seq.desc().nulls_last(),
-                ScheduledTaskRunRow.created_at.desc(),
-                ScheduledTaskRunRow.scheduled_for.desc(),
-                ScheduledTaskRunRow.id.desc(),
-            )
-            .limit(1)
-            .execution_options(populate_existing=True)
+        base = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id)
+        by_caller_time = (
+            ScheduledTaskRunRow.created_at.desc(),
+            ScheduledTaskRunRow.scheduled_for.desc(),
+            ScheduledTaskRunRow.id.desc(),
         )
-        result = await session.execute(stmt)
-        return result.scalars().first()
+        sequenced_stmt = base.where(ScheduledTaskRunRow.occurrence_seq.is_not(None)).order_by(ScheduledTaskRunRow.occurrence_seq.desc()).limit(1).execution_options(populate_existing=True)
+        sequenced = (await session.execute(sequenced_stmt)).scalars().first()
+        unsequenced_stmt = base.where(ScheduledTaskRunRow.occurrence_seq.is_(None))
+        if sequenced is not None:
+            unsequenced_stmt = unsequenced_stmt.where(ScheduledTaskRunRow.created_at > sequenced.created_at)
+        unsequenced_stmt = unsequenced_stmt.order_by(*by_caller_time).limit(1).execution_options(populate_existing=True)
+        newer_unsequenced = (await session.execute(unsequenced_stmt)).scalars().first()
+        return newer_unsequenced or sequenced
 
     @staticmethod
     def _finalise_once_task_from_run(
