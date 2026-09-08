@@ -294,6 +294,176 @@ async def test_release_claim_retries_transient_poll_failure(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_release_claim_after_same_worker_reclaim_cannot_clear_new_claim(tmp_path):
+    """A stale release from an older generation must be a no-op once the same
+    worker reclaims the task with a fresh per-claim token (token fencing)."""
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-fence", now=now)
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
+    old_token = claimed[0]["lease_token"]
+
+    reclaim_at = now + timedelta(seconds=61)  # after the 60s lease expires
+    reclaimed = await repo.claim_due_tasks(now=reclaim_at, lease_owner="worker-1", lease_seconds=61, limit=10)
+    assert reclaimed
+    new_token = reclaimed[0]["lease_token"]
+    assert new_token != old_token
+
+    # The stale release (old owner + old token) must not clear the new claim.
+    released = await repo.release_claim(
+        "task-fence",
+        lease_owner="worker-1",
+        lease_token=old_token,
+        next_poll_at=reclaim_at + timedelta(seconds=30),
+        error="stale release",
+    )
+    assert released is False
+
+    stored = await repo.get("task-fence", user_id="user-1")
+    assert stored is not None
+    assert stored["lease_owner"] == "worker-1"
+    assert stored["lease_token"] == new_token
+    assert stored["lease_expires_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_apply_snapshot_after_same_worker_reclaim_cannot_clear_new_claim(tmp_path):
+    """A poll snapshot from an older generation must not overwrite a newer claim."""
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-apply-fence", now=now)
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
+    old_token = claimed[0]["lease_token"]
+
+    reclaim_at = now + timedelta(seconds=61)
+    reclaimed = await repo.claim_due_tasks(now=reclaim_at, lease_owner="worker-1", lease_seconds=61, limit=10)
+    new_token = reclaimed[0]["lease_token"]
+    assert new_token != old_token
+
+    applied = await repo.apply_snapshot(
+        "task-apply-fence",
+        lease_owner="worker-1",
+        lease_token=old_token,
+        status="completed",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=reclaim_at,
+    )
+    assert applied is False
+
+    stored = await repo.get("task-apply-fence", user_id="user-1")
+    assert stored is not None
+    assert stored["lease_owner"] == "worker-1"
+    assert stored["lease_token"] == new_token
+    assert stored["status"] == "working"
+
+
+@pytest.mark.asyncio
+async def test_apply_cancel_snapshot_after_same_worker_reclaim_cannot_clear_new_claim(tmp_path):
+    """A cancel snapshot from an older generation must not overwrite a newer claim."""
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-cancel-fence", now=now)
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
+    old_token = claimed[0]["lease_token"]
+
+    reclaim_at = now + timedelta(seconds=61)
+    reclaimed = await repo.claim_due_tasks(now=reclaim_at, lease_owner="worker-1", lease_seconds=61, limit=10)
+    new_token = reclaimed[0]["lease_token"]
+    assert new_token != old_token
+
+    applied = await repo.apply_cancel_snapshot(
+        "task-cancel-fence",
+        lease_owner="worker-1",
+        lease_token=old_token,
+        status="cancelled",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        completed_at=reclaim_at,
+    )
+    assert applied is False
+
+    stored = await repo.get("task-cancel-fence", user_id="user-1")
+    assert stored is not None
+    assert stored["lease_owner"] == "worker-1"
+    assert stored["lease_token"] == new_token
+    assert stored["status"] == "working"
+
+
+@pytest.mark.asyncio
+async def test_finish_notification_run_after_reclaim_cannot_clear_new_claim(tmp_path):
+    """A stale notification finish must not clear a newer notification lease."""
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-notify-fence", now=now)
+    poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-notify-fence",
+        lease_owner="poller",
+        lease_token=poll_claim[0]["lease_token"],
+        status="input_required",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required={"prompt": "Approve?"},
+        next_poll_at=now,
+        polled_at=now,
+    )
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    await repo.mark_notification_dispatched(
+        "task-notify-fence",
+        lease_owner="notifier",
+        notification_lease_token=first[0]["notification_lease_token"],
+        dispatch_version=first[0]["dispatch_version"],
+        run_id="notify-run-1",
+        now=now,
+    )
+    reclaimed = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert reclaimed
+    new_notify_token = reclaimed[0]["notification_lease_token"]
+
+    finished = await repo.finish_notification_run(
+        "task-notify-fence",
+        lease_owner="notifier",
+        notification_lease_token="stale-notify-token",
+        dispatch_version=reclaimed[0]["dispatch_version"],
+        delivered=True,
+        next_notification_at=None,
+        error=None,
+        now=now,
+    )
+    assert finished is False
+
+    stored = await repo.get("task-notify-fence", user_id="user-1")
+    assert stored is not None
+    assert stored["notification_lease_owner"] == "notifier"
+    assert stored["notification_lease_token"] == new_notify_token
+
+
+@pytest.mark.asyncio
 async def test_release_poll_claim_after_cancellation_preserves_poll_failure_state(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
