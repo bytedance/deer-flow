@@ -562,29 +562,29 @@ class ScheduledTaskRepository:
         bypasses the session identity map so a concurrently committed status is
         read back fresh.
 
-        Among sequenced rows the parent-locked ``occurrence_seq`` is the only
-        recency key; caller clocks never reorder them.  An unsequenced row can
-        only be legacy history or an admission by a pre-upgrade Gateway writer,
-        so there is no sequence to compare it against.  It is preferred over the
-        sequence winner only when its caller timestamp is later, which is exactly
-        the pre-sequence ordering for that pair: a rolling upgrade degrades to
-        the previous behaviour instead of ranking every pre-upgrade admission
-        below every sequenced one.
+        Once any sequenced row exists, the parent-locked ``occurrence_seq`` is
+        the only recency key and the highest sequence wins: caller clocks never
+        reorder sequenced rows, and unsequenced rows (legacy history or an
+        admission by a pre-upgrade writer) are not consulted, matching the
+        ``can_project`` rule applied by every other parent write.  Only a task
+        whose history is entirely unsequenced keeps the previous timestamp
+        ordering.
         """
         base = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id)
-        by_caller_time = (
-            ScheduledTaskRunRow.created_at.desc(),
-            ScheduledTaskRunRow.scheduled_for.desc(),
-            ScheduledTaskRunRow.id.desc(),
-        )
         sequenced_stmt = base.where(ScheduledTaskRunRow.occurrence_seq.is_not(None)).order_by(ScheduledTaskRunRow.occurrence_seq.desc()).limit(1).execution_options(populate_existing=True)
         sequenced = (await session.execute(sequenced_stmt)).scalars().first()
-        unsequenced_stmt = base.where(ScheduledTaskRunRow.occurrence_seq.is_(None))
         if sequenced is not None:
-            unsequenced_stmt = unsequenced_stmt.where(ScheduledTaskRunRow.created_at > sequenced.created_at)
-        unsequenced_stmt = unsequenced_stmt.order_by(*by_caller_time).limit(1).execution_options(populate_existing=True)
-        newer_unsequenced = (await session.execute(unsequenced_stmt)).scalars().first()
-        return newer_unsequenced or sequenced
+            return sequenced
+        legacy_stmt = (
+            base.order_by(
+                ScheduledTaskRunRow.created_at.desc(),
+                ScheduledTaskRunRow.scheduled_for.desc(),
+                ScheduledTaskRunRow.id.desc(),
+            )
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
+        return (await session.execute(legacy_stmt)).scalars().first()
 
     @staticmethod
     def _finalise_once_task_from_run(
@@ -658,6 +658,10 @@ class ScheduledTaskRepository:
             reconciled = 0
             for task_row in stuck_rows:
                 run_row = await self._fetch_latest_run(session, task_row.id)
+                if run_row is not None and not can_project(task_row, run_row):
+                    # Same eligibility rule as every other parent write: a row
+                    # that cannot project leaves the parent untouched.
+                    continue
                 if self._finalise_once_task_from_run(task_row, run_row, error=error, now=now):
                     reconciled += 1
             await session.commit()
@@ -718,6 +722,9 @@ class ScheduledTaskRepository:
                 # Filtering by terminal status only could exclude a newer skipped
                 # or active row, causing us to finalise based on an older run.
                 run_row = await self._fetch_latest_run(session, task.id)
+                if run_row is not None and not can_project(task, run_row):
+                    # Same eligibility rule as every other parent write.
+                    continue
                 if self._finalise_once_task_from_run(task, run_row, error=error, now=now):
                     cancelled += 1
             await session.commit()

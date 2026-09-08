@@ -57,7 +57,8 @@ async def occurrence_factories(request, tmp_path):
             await engine.dispose()
 
 
-async def _create_task(factory, task_id="task"):
+async def _create_task(factory, task_id="task", *, schedule_type="cron"):
+    spec = {"cron": "* * * * *"} if schedule_type == "cron" else {"run_at": datetime(2026, 7, 15, 12, 0, tzinfo=UTC).isoformat()}
     return await ScheduledTaskRepository(factory).create(
         task_id=task_id,
         user_id="user-1",
@@ -66,8 +67,8 @@ async def _create_task(factory, task_id="task"):
         assistant_id=None,
         title="Occurrence ordering",
         prompt="p",
-        schedule_type="cron",
-        schedule_spec={"cron": "* * * * *"},
+        schedule_type=schedule_type,
+        schedule_spec=spec,
         timezone="UTC",
         next_run_at=None,
     )
@@ -223,18 +224,15 @@ async def test_recovery_order_keeps_timestamp_fallback_for_legacy_only_history(o
 
 
 @pytest.mark.parametrize("unsequenced_status", ["skipped", "running"])
-@pytest.mark.parametrize(
-    ("unsequenced_offset", "expected"),
-    [(timedelta(days=-365), "newer-sequenced"), (timedelta(seconds=30), "unsequenced")],
-    ids=["legacy-history-is-older", "pre-upgrade-writer-is-newer"],
-)
-async def test_recovery_order_compares_caller_time_only_against_unsequenced_rows(occurrence_factories, unsequenced_offset, expected, unsequenced_status):
-    """Sequence decides among sequenced rows even with reversed caller clocks.
+@pytest.mark.parametrize("unsequenced_offset", [timedelta(days=-365), timedelta(seconds=30)], ids=["legacy-history-is-older", "pre-upgrade-writer-is-newer"])
+async def test_recovery_lookup_prefers_the_highest_sequence_whenever_one_exists(occurrence_factories, unsequenced_offset, unsequenced_status):
+    """Sequence decides whenever a sequenced row exists.
 
-    An unsequenced row (legacy history or a pre-upgrade Gateway writer) beats
-    the sequence winner only when its caller timestamp is later: the previous
-    ordering for that pair, so a rolling upgrade cannot rank a genuinely newer
-    pre-upgrade admission below an older sequenced one.
+    Reversed caller clocks between sequenced rows do not matter, and an
+    unsequenced row (legacy history or a pre-upgrade Gateway writer) is not
+    consulted even when its caller timestamp is later: the lookup returns the
+    same row ``can_project`` accepts, so recovery cannot act on a row that the
+    other parent writes would reject.
     """
     first, second = occurrence_factories
     await _create_task(first)
@@ -247,4 +245,41 @@ async def test_recovery_order_compares_caller_time_only_against_unsequenced_rows
         await _create_run(second, "newer-sequenced")
     await _insert_unsequenced_run(first, "unsequenced", created_at=now + unsequenced_offset, status=unsequenced_status)
     assert [await _sequence(first, run_id) for run_id in ("older-sequenced", "newer-sequenced", "unsequenced")] == [1, 2, None]
-    assert await _latest_run_id(first) == expected
+    assert await _latest_run_id(first) == "newer-sequenced"
+
+
+@pytest.mark.parametrize("recovery_method", ["cancel_stuck_once_tasks", "reconcile_stuck_once_tasks"])
+@pytest.mark.parametrize(
+    ("sequenced_status", "unsequenced_status", "expected_status", "expected_count"),
+    [("running", "skipped", "running", 0), ("success", "running", "completed", 1)],
+    ids=["unsequenced-skipped-while-sequenced-active", "unsequenced-running-while-sequenced-success"],
+)
+async def test_once_recovery_projects_only_the_sequenced_occurrence(occurrence_factories, recovery_method, sequenced_status, unsequenced_status, expected_status, expected_count):
+    """A pre-upgrade row with a later caller timestamp cannot drive the parent.
+
+    Both symptoms from review: an unsequenced ``skipped`` row must not cancel a
+    parent whose sequenced occurrence is still live, and an unsequenced
+    ``running`` row must not stall finalisation of a parent whose sequenced
+    occurrence already succeeded.
+    """
+    first, _second = occurrence_factories
+    await _create_task(first, schedule_type="once")
+    task_repo = ScheduledTaskRepository(first)
+    await task_repo.update("task", user_id="user-1", updates={"status": "running"})
+    await _create_run(first, "sequenced", status=sequenced_status)
+    # A pre-upgrade node on a skewed clock: no sequence, later caller timestamp.
+    await _insert_unsequenced_run(first, "unsequenced", created_at=datetime.now(UTC) + timedelta(minutes=5), status=unsequenced_status)
+    assert await _sequence(first, "sequenced") == 1
+    assert await _high_water_mark(first) == 1
+
+    kwargs = {"error": "interrupted: recovery"}
+    if recovery_method == "reconcile_stuck_once_tasks":
+        kwargs["now"] = datetime.now(UTC) + timedelta(minutes=10)
+    for _ in range(2):  # a second pass must not change the outcome
+        count = await getattr(task_repo, recovery_method)(**kwargs)
+        task = await task_repo.get_internal("task")
+        assert task is not None
+        assert task["status"] == expected_status
+        assert task["last_error"] is None
+        assert count == expected_count
+        expected_count = 0 if expected_status == "completed" else expected_count
