@@ -727,9 +727,7 @@ class RunManager:
         before_created_at = _cursor_part(before_created_at)
         before_run_id = _cursor_part(before_run_id)
         if (before_created_at is None) != (before_run_id is None):
-            raise ValueError(
-                "before_created_at and before_run_id must be provided together"
-            )
+            raise ValueError("before_created_at and before_run_id must be provided together")
         if before_created_at is not None:
             try:
                 before_created_at = normalize_run_created_at_iso(before_created_at)

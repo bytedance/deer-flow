@@ -130,12 +130,8 @@ def test_runs_page_accepts_z_and_space_decoded_offset():
 
     assert spaced.status_code == 200
     assert zoned.status_code == 200
-    assert run_manager.list_by_thread.await_args_list[0].kwargs["before_created_at"] == (
-        "2026-01-02T00:00:00+00:00"
-    )
-    assert run_manager.list_by_thread.await_args_list[1].kwargs["before_created_at"] == (
-        "2026-01-02T00:00:00+00:00"
-    )
+    assert run_manager.list_by_thread.await_args_list[0].kwargs["before_created_at"] == ("2026-01-02T00:00:00+00:00")
+    assert run_manager.list_by_thread.await_args_list[1].kwargs["before_created_at"] == ("2026-01-02T00:00:00+00:00")
 
 
 def test_runs_page_is_not_captured_as_run_id():
