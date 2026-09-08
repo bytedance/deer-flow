@@ -3,15 +3,25 @@
 
 `ToolOutputBudgetMiddleware` is registered by default and externalizes tool
 results above `externalize_min_chars` (preview + file reference under
-`.tool-results/`). This probe quantifies the effect end to end: the same
-oversized tool result is written into a checkpointed graph through the
-middleware-wrapped and the raw unwrapped paths, and the resulting per-thread
-checkpoint storage (rows + bytes, same normalized shape as bench_channels) is
-reported for SQLite.
+`.tool-results/`). This probe quantifies the storage effect of that
+transformation: the same oversized tool result is driven through the
+middleware's `awrap_tool_call` (or run raw), the resulting ToolMessage is
+written into a checkpointed graph state, and the per-thread checkpoint
+storage (rows + bytes, same normalized shape as bench_channels) is reported
+for SQLite.
+
+Scope limit (state this when citing the numbers): the middleware is invoked
+manually and the resulting message is injected with ``aupdate_state`` — the
+production agent-factory path (middleware stack wiring, ThreadDataMiddleware
+runtime state, tool-node task writes) is NOT exercised. The probe therefore
+bounds the middleware's own transformation and the checkpoint cost of its
+output; by itself it cannot establish that "the default configuration
+covers item 4". A residual gap claim must name the concrete factory path
+and come with its own measurements.
 
 Item 4 of #4189 can be closed as covered if the wrapped path's checkpoint
-bytes stay flat as the result size grows; a residual gap means some real path
-still lands full text in state and should be named in the issue.
+bytes stay flat as the result size grows and no factory-path measurement
+shows full text landing in state.
 
 Usage:
     cd backend
@@ -60,11 +70,11 @@ async def _stats_sqlite(saver: AsyncSqliteSaver, thread_id: str) -> dict[str, in
     }
 
 
-def _make_graph(saver: Any, middleware: ToolOutputBudgetMiddleware | None, outputs_dir: Path | None) -> Any:
+def _make_graph(saver: Any) -> Any:
     def call_probe_tool(state: dict[str, Any]) -> dict[str, Any]:
-        # the tool "returns" an oversized result; when the middleware is
-        # installed it externalizes this via awrap_tool_call before it reaches
-        # state, otherwise the full text lands in the ToolMessage as-is
+        # the oversized result never flows through this node: the probe
+        # injects the (possibly externalized) ToolMessage via aupdate_state
+        # below, so the graph only provides a checkpointed state container
         return {}
 
     builder = StateGraph(ProbeState)
@@ -86,7 +96,7 @@ async def _run_path(
     async with AsyncSqliteSaver.from_conn_string(str(tmp / f"probe-{label}.sqlite")) as saver:
         await saver.setup()
         middleware = ToolOutputBudgetMiddleware() if wrapped else None
-        graph = _make_graph(saver, middleware, outputs_dir)
+        graph = _make_graph(saver)
 
         thread_id = f"probe-{label}"
         config = {"configurable": {"thread_id": thread_id}}

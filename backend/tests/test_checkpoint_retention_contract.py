@@ -38,7 +38,6 @@ from uuid import uuid4
 import pytest
 from langchain_core.messages import AnyMessage, HumanMessage
 from langgraph.channels import DeltaChannel
-from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import StateGraph
@@ -49,6 +48,7 @@ from app.gateway.checkpoint_lineage import (
     find_checkpoint_before_message,
 )
 from deerflow.agents.thread_state import merge_message_writes
+from deerflow.runtime.runs.worker import persist_run_durations
 
 
 class FullState(TypedDict):
@@ -60,9 +60,6 @@ class DeltaState(TypedDict):
         list[AnyMessage],
         DeltaChannel(merge_message_writes, snapshot_frequency=2),
     ]
-
-
-DURATION_ONLY_METADATA = {"writes": {"runtime_run_duration": {"seconds": 1.0}}}
 
 
 def _thread_id() -> str:
@@ -182,29 +179,62 @@ _POSTGRES_TABLES = (
 )
 
 
+def _normalized(
+    *,
+    checkpoint_rows: int,
+    checkpoint_bytes: int,
+    blob_rows: int,
+    blob_bytes: int,
+    write_rows: int,
+    write_bytes: int,
+) -> dict[str, int]:
+    """Same backend-neutral shape as ``bench_channels._normalized_storage_stats``."""
+    return {
+        "logical_checkpoint_bytes": checkpoint_bytes + blob_bytes,
+        "logical_write_bytes": write_bytes,
+        "checkpoint_rows": checkpoint_rows,
+        "checkpoint_bytes": checkpoint_bytes,
+        "blob_rows": blob_rows,
+        "blob_bytes": blob_bytes,
+        "write_rows": write_rows,
+        "write_bytes": write_bytes,
+    }
+
+
 async def _stats(env: _SaverEnv, thread_id: str) -> dict[str, int]:
-    """Per-thread rows/bytes in the backend-neutral measurement shape."""
+    """Per-thread rows/bytes in the backend-neutral measurement shape.
+
+    The memory branch must count ``saver.blobs``: InMemorySaver keeps the
+    serialized channel values there, so on the delta workload those rows are
+    the main payload and a storage-only baseline would undercount the very
+    growth this contract is supposed to measure.
+    """
     saver = env.saver
     if env.kind == "memory":
-        checkpoint_rows = checkpoint_bytes = write_rows = write_bytes = 0
+        checkpoint_rows = checkpoint_bytes = blob_rows = blob_bytes = write_rows = write_bytes = 0
         for namespace in saver.storage.get(thread_id, {}).values():
             for checkpoint, metadata, _parent in namespace.values():
                 checkpoint_rows += 1
                 checkpoint_bytes += len(checkpoint[1]) + len(metadata[1])
+        for (stored_thread, _ns, _channel, _version), (_type_tag, blob) in saver.blobs.items():
+            if stored_thread != thread_id:
+                continue
+            blob_rows += 1
+            blob_bytes += len(blob)
         for (stored_thread, _ns, _cp_id), writes in saver.writes.items():
             if stored_thread != thread_id:
                 continue
             for _task_id, _channel, (_type_tag, blob), _path in writes.values():
                 write_rows += 1
                 write_bytes += len(blob)
-        return {
-            "checkpoint_rows": checkpoint_rows,
-            "checkpoint_bytes": checkpoint_bytes,
-            "blob_rows": 0,
-            "blob_bytes": 0,
-            "write_rows": write_rows,
-            "write_bytes": write_bytes,
-        }
+        return _normalized(
+            checkpoint_rows=checkpoint_rows,
+            checkpoint_bytes=checkpoint_bytes,
+            blob_rows=blob_rows,
+            blob_bytes=blob_bytes,
+            write_rows=write_rows,
+            write_bytes=write_bytes,
+        )
     if env.kind == "sqlite":
         stats: dict[str, int] = {}
         for row_key, bytes_key, sql in _SQLITE_TABLES:
@@ -214,6 +244,8 @@ async def _stats(env: _SaverEnv, thread_id: str) -> dict[str, int]:
             stats[bytes_key] = int(row[1] or 0)
         stats["blob_rows"] = 0
         stats["blob_bytes"] = 0
+        stats["logical_checkpoint_bytes"] = stats["checkpoint_bytes"]
+        stats["logical_write_bytes"] = stats["write_bytes"]
         return stats
     stats = {}
     for row_key, bytes_key, sql in _POSTGRES_TABLES:
@@ -222,29 +254,102 @@ async def _stats(env: _SaverEnv, thread_id: str) -> dict[str, int]:
             row = await cursor.fetchone()
         stats[row_key] = int(row["rows"])
         stats[bytes_key] = int(row["bytes"] or 0)
+    stats["logical_checkpoint_bytes"] = stats["checkpoint_bytes"] + stats["blob_bytes"]
+    stats["logical_write_bytes"] = stats["write_bytes"]
     return stats
 
 
+async def _surviving_channel_versions(saver: Any, thread_id: str, deleted_id: str) -> set[Any]:
+    """Whole-thread pass over the checkpoints that are NOT being deleted.
+
+    Contract deletion mechanics: a row is an orphan only if no *surviving*
+    checkpoint references it. A real duration-only checkpoint copies its
+    parent's ``channel_versions`` verbatim, so the blob rows reachable from
+    the deleted node can be the very rows backing the surviving parent.
+    """
+    versions: set[Any] = set()
+    async for tuple_ in saver.alist(_config(thread_id), limit=None):
+        if tuple_.checkpoint.get("id") == deleted_id:
+            continue
+        channel_versions = (tuple_.checkpoint or {}).get("channel_versions")
+        if isinstance(channel_versions, dict):
+            versions.update(channel_versions.values())
+    return versions
+
+
 async def _delete_checkpoint(env: _SaverEnv, thread_id: str, checkpoint_id: str) -> None:
-    """Remove one checkpoint row directly from the backend (simulation of a retention delete)."""
+    """Jointly remove one checkpoint row, its writes rows, and the blob rows
+    exclusively owned by it — the deletion shape the contract doc mandates,
+    so the provably-safe scenarios exercise the same rule they prescribe."""
     saver = env.saver
+    survivor_versions = await _surviving_channel_versions(saver, thread_id, checkpoint_id)
     if env.kind == "memory":
         for namespace in saver.storage.get(thread_id, {}).values():
-            if checkpoint_id in namespace:
-                del namespace[checkpoint_id]
+            namespace.pop(checkpoint_id, None)
+        for key in [key for key in saver.writes if key[0] == thread_id and key[2] == checkpoint_id]:
+            saver.writes.pop(key, None)
+        for key in [key for key in saver.blobs if key[0] == thread_id and key[3] not in survivor_versions]:
+            del saver.blobs[key]
         return
     if env.kind == "sqlite":
         await saver.conn.execute(
             "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_id = ?",
             (thread_id, checkpoint_id),
         )
+        await saver.conn.execute(
+            "DELETE FROM writes WHERE thread_id = ? AND checkpoint_id = ?",
+            (thread_id, checkpoint_id),
+        )
         await saver.conn.commit()
         return
+    async with saver._cursor() as cursor:
+        await cursor.execute("SELECT DISTINCT version FROM checkpoint_blobs WHERE thread_id = %s", (thread_id,))
+        rows = await cursor.fetchall()
+    orphan_versions = [row["version"] for row in rows if row["version"] not in survivor_versions]
     async with saver._cursor() as cursor:
         await cursor.execute(
             "DELETE FROM checkpoints WHERE thread_id = %s AND checkpoint_id = %s",
             (thread_id, checkpoint_id),
         )
+        await cursor.execute(
+            "DELETE FROM checkpoint_writes WHERE thread_id = %s AND checkpoint_id = %s",
+            (thread_id, checkpoint_id),
+        )
+        if orphan_versions:
+            await cursor.execute(
+                "DELETE FROM checkpoint_blobs WHERE thread_id = %s AND version = ANY(%s)",
+                (thread_id, orphan_versions),
+            )
+
+
+async def _task_write_blobs(env: _SaverEnv, thread_id: str, task_id: str) -> list[Any]:
+    """Deserialize every writes row a task owns, so a scenario can prove its
+    row exists AND round-trips (a bare row-count can pass on rows that were
+    already there)."""
+    saver = env.saver
+    if env.kind == "memory":
+        found: list[Any] = []
+        for (stored_thread, _ns, _cp_id), writes in saver.writes.items():
+            if stored_thread != thread_id:
+                continue
+            for stored_task_id, _channel, typed, _path in writes.values():
+                if stored_task_id == task_id:
+                    found.append(saver.serde.loads_typed(typed))
+        return found
+    if env.kind == "sqlite":
+        async with saver.conn.execute(
+            "SELECT type, value FROM writes WHERE thread_id = ? AND task_id = ?",
+            (thread_id, task_id),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [saver.serde.loads_typed((row[0], row[1])) for row in rows]
+    async with saver._cursor() as cursor:
+        await cursor.execute(
+            "SELECT type, blob FROM checkpoint_writes WHERE thread_id = %s AND task_id = %s",
+            (thread_id, task_id),
+        )
+        rows = await cursor.fetchall()
+    return [saver.serde.loads_typed((row["type"], row["blob"])) for row in rows]
 
 
 def _report(name: str, data: dict[str, Any]) -> None:
@@ -373,52 +478,45 @@ async def test_pending_writes_are_retained_state_not_garbage(saver_env: _SaverEn
     """Scenario D: uncommitted writes are visible state; their rows are protected."""
     thread_id, checkpoint_ids, _message_ids = await _write_turns(saver_env, FullState, steps=2)
 
-    write = ("messages", ("human", b"pending-write"))
+    write = ("messages", b"pending-write")
     latest_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_ids[-1]}}
+    before = await _stats(saver_env, thread_id)
     await saver_env.saver.aput_writes(latest_config, [write], task_id="pending-task")
-
-    stats = await _stats(saver_env, thread_id)
-    assert stats["write_rows"] > 0, "put_writes must land in the writes table"
-    assert checkpoint_ids  # resume surface exists; orphan accounting lives in the contract doc
-    _report("pending_writes", {"stats": stats})
+    after = await _stats(saver_env, thread_id)
+    assert after["write_rows"] == before["write_rows"] + 1, "put_writes must land exactly its own row"
+    blobs = await _task_write_blobs(saver_env, thread_id, "pending-task")
+    assert blobs == [b"pending-write"], "the stored write must round-trip byte-identically"
+    _report("pending_writes", {"stats": after})
 
 
 @pytest.mark.anyio
 async def test_leaf_duration_checkpoint_deletion_is_safe(saver_env: _SaverEnv) -> None:
-    """Scenario E1: a trailing metadata-only leaf checkpoint can be deleted.
+    """Scenario E1 via the real runtime writer: a trailing duration-only leaf
+    can be deleted.
 
-    ``persist_run_durations`` appends duration-only checkpoints after a run
-    finishes. While such a checkpoint is a *leaf* (no later run has forked
-    from it), deleting it does not affect the finished run's lineage: the
-    lineage walk only ever steps through ancestors of the walk head, and a
-    leaf is nobody's ancestor. A duration-only checkpoint that a later run
-    has forked from is instead a chain link — deleting that shape requires
-    grafting the fork onto the grandparent, which is specified in the
-    contract doc and can only be produced by the real runtime (a bare
-    ``empty_checkpoint`` lacks the metadata LangGraph needs to resume from).
+    ``persist_run_durations`` appends the shape production actually writes:
+    a copy of the head checkpoint dict (``channel_values``/``channel_versions``
+    verbatim) with a fresh id/ts and metadata ``{"writes":
+    {"runtime_run_duration": {...}}, "source": "update", "step": ...}``. The
+    leaf therefore materializes the parent's payload, and on version-deduped
+    backends its blobs are the *same rows* backing the surviving parent — the
+    joint delete must leave them alone. A duration-only checkpoint that a
+    later run has forked from is instead a chain link; deleting that shape
+    requires grafting the fork onto the grandparent (contract doc) and is not
+    exercised here.
     """
     thread_id, checkpoint_ids, message_ids = await _write_turns(saver_env, FullState, steps=3)
+    stats_before = await _stats(saver_env, thread_id)
 
+    written = await persist_run_durations(checkpointer=saver_env.saver, thread_id=thread_id, durations={"run-1": 7})
+    assert written, "the real duration writer must append its metadata-only checkpoint"
     head = await saver_env.saver.aget_tuple(_config(thread_id))
-    head_checkpoint_id = head.checkpoint["id"]
-
-    # append a trailing duration-only checkpoint, as persist_run_durations
-    # does when a run finishes
-    duration_id = f"duration-{uuid4().hex}"
-    duration_checkpoint = empty_checkpoint()
-    duration_checkpoint["id"] = duration_id
-    await saver_env.saver.aput(
-        {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": "",
-                "checkpoint_id": head_checkpoint_id,
-            }
-        },
-        duration_checkpoint,
-        DURATION_ONLY_METADATA,
-        {},
-    )
+    duration_id = head.checkpoint["id"]
+    assert duration_id not in checkpoint_ids
+    stats_after_append = await _stats(saver_env, thread_id)
+    # the real clone materializes the parent payload; version-deduped storage
+    # must not grow blob rows when it lands (sqlite has no blob table: 0 == 0)
+    assert stats_after_append["blob_rows"] == stats_before["blob_rows"]
 
     # a trailing metadata-only leaf can be dropped (a cleanup that prunes
     # trailing duration checkpoints) without affecting the run's lineage
@@ -430,11 +528,14 @@ async def test_leaf_duration_checkpoint_deletion_is_safe(saver_env: _SaverEnv) -
     assert base is not None
     resumed = await saver_env.saver.aget_tuple(_config_thread(thread_id, checkpoint_ids[-1]))
     assert resumed is not None
+    # protected set item 5: the next turn resolves the head without an id
+    default_head = await saver_env.saver.aget_tuple(_config(thread_id))
+    assert default_head.checkpoint["id"] == checkpoint_ids[-1]
+    # shared-version safety: every blob backing the surviving parent survives
+    stats_after_delete = await _stats(saver_env, thread_id)
+    assert stats_after_delete["blob_rows"] == stats_after_append["blob_rows"]
+    assert stats_after_delete["checkpoint_rows"] == stats_before["checkpoint_rows"]
     _report("leaf_duration_deletion", {"deleted": duration_id, "head": checkpoint_ids[-1]})
-
-
-def graph_for(env: _SaverEnv) -> Any:
-    return _build_graph(FullState, env.saver)
 
 
 def _config_thread(thread_id: str, checkpoint_id: str) -> dict[str, Any]:
@@ -466,12 +567,15 @@ async def test_leaf_sibling_branch_deletion_is_safe(saver_env: _SaverEnv) -> Non
 
     await _delete_checkpoint(saver_env, thread_id, fork_checkpoint_id)
 
-    # the main line is untouched: its head is still explicitly addressable and
-    # the lineage walk still resolves (the forked checkpoint was a leaf)
-    mainline_head = await saver_env.saver.aget_tuple(_config_thread(thread_id, original_head_id))
-    assert mainline_head is not None
+    # the main line is untouched: the lineage walk still resolves (the forked
+    # checkpoint was a leaf), and protected set item 5 holds — default head
+    # resolution stays addressable, landing on the deleted leaf's surviving
+    # parent rather than the deleted id
     base = await _walk(saver_env, _config_thread(thread_id, original_head_id), message_ids[0])
     assert base is not None
+    default_head = await saver_env.saver.aget_tuple(_config(thread_id))
+    assert default_head is not None
+    assert default_head.checkpoint["id"] != fork_checkpoint_id
     resumed = await saver_env.saver.aget_tuple(_config_thread(thread_id, original_head_id))
     assert resumed is not None
     _report("leaf_sibling_deletion", {"fork": fork_checkpoint_id, "head": original_head_id})

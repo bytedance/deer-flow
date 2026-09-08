@@ -27,7 +27,7 @@ from protected rows and pins the verification method.
 | --------- | ----------------------- | ------------------ |
 | SQLite    | `checkpoints`           | `writes`           |
 | Postgres  | `checkpoints`, `checkpoint_blobs` | `checkpoint_writes` |
-| Memory    | `saver.storage`         | `saver.writes`     |
+| Memory    | `saver.storage`, `saver.blobs` | `saver.writes`     |
 
 (Note: SQLite has no separate blob table; channel values live inside the
 serialized checkpoint payload. Postgres splits blobs out.)
@@ -73,11 +73,22 @@ resume, (c) branch from an older visible turn, and (d) orphan row counts.
 
 ## Deletion mechanics
 
-- Deletion must cover the backend's tables jointly and account for orphans:
-  after deleting a checkpoint row, any `checkpoint_blobs` /
-  `checkpoint_writes` rows only reachable from it are orphans and must be
-  removed in the same transaction (Postgres), or shown to be absent (SQLite
-  keeps writes in `writes` keyed by checkpoint id).
+- Deletion must cover the backend's tables jointly and account for orphans, and
+  blob reachability must be computed from the **surviving checkpoints in a
+  whole-thread pass**: after deleting a checkpoint row, a `checkpoint_blobs` /
+  `checkpoint_writes` row is an orphan only if *no surviving checkpoint*
+  references it. The shared-version case is not hypothetical — the real
+  duration-only checkpoint is a copy of the head checkpoint dict
+  (`persist_run_history_metadata` replaces only id/ts), so it inherits the
+  parent's `channel_versions` verbatim, and on Postgres the blob rows
+  reachable from the deleted duration row are the same rows backing its
+  parent. An implementation that deletes blobs keyed by the removed
+  checkpoint's own `channel_versions` would corrupt the thread's newest
+  surviving state — exactly the failure class this contract exists to
+  prevent. (For the same reason a real duration-only leaf is not
+  payload-free: it materializes the parent's values under
+  `{"writes": {"runtime_run_duration": {...}}, "source": "update", "step":
+  ...}` metadata, which is what makes reclaiming it worthwhile.)
 - Failure semantics: if a proposed deletion cannot be proven safe against the
   protected set, it must not ship. Partial deletion that leaves a dangling
   `parent_config` converts a cleanup into a thread-level outage (branch and
