@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextvars
-import functools
 import logging
 import os
 import threading
@@ -85,13 +84,18 @@ async def run_assembly[**P, T](func: Callable[P, T], /, *args: P.args, **kwargs:
 
     loop = asyncio.get_running_loop()
     ctx = contextvars.copy_context()
-    call = functools.partial(func, *args, **kwargs)
-    future = loop.run_in_executor(_ASSEMBLY_EXECUTOR, ctx.run, call)
 
-    def _release(_done: object) -> None:
+    def _work() -> T:
+        # The decrement must ride the dispatched work item, not the asyncio
+        # future: if the submitting loop is closed while the worker is still
+        # running, the future never resolves and a future-done-callback would
+        # never fire, ratcheting the count up permanently and eventually
+        # firing the starvation warning with no starvation behind it.
         global _pending_assemblies
-        with _pending_lock:
-            _pending_assemblies -= 1
+        try:
+            return ctx.run(func, *args, **kwargs)
+        finally:
+            with _pending_lock:
+                _pending_assemblies -= 1
 
-    future.add_done_callback(_release)
-    return await future
+    return await loop.run_in_executor(_ASSEMBLY_EXECUTOR, _work)
