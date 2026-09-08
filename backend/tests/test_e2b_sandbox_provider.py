@@ -5205,6 +5205,32 @@ def test_list_dir_preserves_trailing_space_in_filename():
     assert sb.list_dir("/home/user") == ["/home/user/notes.txt ", "/home/user/sub"]
 
 
+def test_list_dir_raises_when_command_fails():
+    # A command-layer failure must not come back as an empty listing (#5263).
+    class FailingCommands:
+        def run(self, cmd, **kwargs):
+            raise RuntimeError("client closed mid-flight")
+
+    sb = _make_sandbox(FakeClient(commands=FailingCommands()))
+    with pytest.raises(RuntimeError, match="client closed mid-flight"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_missing_path_raises_not_found():
+    # A missing path used to print nothing and surface as "(empty)" upstream.
+    listing = SimpleNamespace(stdout="__deerflow_ls_missing__\n", stderr="", exit_code=0)
+    sb = _make_sandbox(FakeClient(commands=FakeCommandsAPI([listing])))
+    with pytest.raises(FileNotFoundError, match="Directory not found"):
+        sb.list_dir("/home/user/missing")
+
+
+def test_list_dir_closed_client_raises():
+    sb = _make_sandbox(FakeClient(commands=FakeCommandsAPI([])))
+    sb._client = None
+    with pytest.raises(RuntimeError, match="closed"):
+        sb.list_dir("/home/user")
+
+
 def test_glob_preserves_trailing_space_in_filename():
     listing = SimpleNamespace(stdout="/home/user/notes.txt \n", stderr="", exit_code=0)
     client = FakeClient(commands=FakeCommandsAPI([listing]))

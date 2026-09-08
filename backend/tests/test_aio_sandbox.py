@@ -614,6 +614,18 @@ class TestListDirSerialization:
         assert result == ["/a", "/b"]
         assert lock_was_held == [True], "list_dir must hold the lock during exec_command"
 
+    def test_list_dir_missing_path_raises_not_found(self, sandbox):
+        """A missing path must raise instead of reporting an empty directory (#5263)."""
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="__deerflow_ls_missing__\n")))
+        with pytest.raises(FileNotFoundError, match="Directory not found"):
+            sandbox.list_dir("/missing")
+
+    def test_list_dir_command_failure_propagates(self, sandbox):
+        """A command-layer exception must propagate, not mask as empty (#5263)."""
+        sandbox._client.shell.exec_command = MagicMock(side_effect=ConnectionError("sandbox died"))
+        with pytest.raises(ConnectionError, match="sandbox died"):
+            sandbox.list_dir("/test")
+
 
 class TestNoChangeTimeout:
     """Verify that no_change_timeout is forwarded to every exec_command call."""

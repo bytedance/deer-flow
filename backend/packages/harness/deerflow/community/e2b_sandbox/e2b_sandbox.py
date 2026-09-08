@@ -340,17 +340,19 @@ class E2BSandbox(Sandbox):
         with self._lock:
             client = self._client
             if client is None:
-                return []
-            try:
-                result = client.commands.run(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-                output = getattr(result, "stdout", "") or ""
-                # splitlines() already removed the terminators; do NOT strip
-                # entries — a filename that legitimately ends in whitespace
-                # would be corrupted and never resolve again.
-                return [line for line in output.splitlines() if line]
-            except Exception as e:
-                logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
-                return []
+                raise RuntimeError("sandbox client has been closed")
+            # A failed or missing path used to come back as an empty listing,
+            # so the agent wrote into directories that had contents. Only a
+            # real empty directory may return empty now (#5263).
+            result = client.commands.run(f"test -d {shlex.quote(resolved)} || echo __deerflow_ls_missing__; find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) | head -500")
+            output = getattr(result, "stdout", "") or ""
+            # splitlines() already removed the terminators; do NOT strip
+            # entries — a filename that legitimately ends in whitespace
+            # would be corrupted and never resolve again.
+            lines = [line for line in output.splitlines() if line]
+            if "__deerflow_ls_missing__" in lines:
+                raise FileNotFoundError(f"Directory not found: {resolved}")
+            return lines
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         resolved = self._resolve_path(path)
