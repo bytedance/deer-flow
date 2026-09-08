@@ -1,7 +1,7 @@
 """conversation shares (#4548).
 
 Revision ID: 0019_conversation_shares
-Revises: 0017_personal_access_tokens
+Revises: 0018_oauth_identity_pg_partial
 Create Date: 2026-08-28
 """
 

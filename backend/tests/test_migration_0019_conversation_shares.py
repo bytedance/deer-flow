@@ -21,7 +21,20 @@ pytestmark = pytest.mark.asyncio
 
 _SCRIPT_LOCATION = str(_MIGRATIONS_DIR)
 _REVISION = "0019_conversation_shares"
-_PREVIOUS = "0017_personal_access_tokens"
+_PREVIOUS = "0018_oauth_identity_pg_partial"
+
+
+def test_pins_immediate_parent_revision() -> None:
+    """The docstring renumber after main's 0017/0018 must not drift again."""
+    import importlib.util
+    from pathlib import Path
+
+    module_path = Path(_MIGRATIONS_DIR) / "versions" / "0019_conversation_shares.py"
+    spec = importlib.util.spec_from_file_location("migration_0019", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.down_revision == _PREVIOUS
+
 
 _EXPECTED_COLUMNS = {
     "id",

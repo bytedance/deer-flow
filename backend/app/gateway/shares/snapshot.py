@@ -1841,17 +1841,15 @@ def _neutralize_private_references(text: str) -> str:
     return text
 
 
-_PROBE_UNICODE_ESCAPE_RE = re.compile(
-    r"\\u(?:\{0*[0-9a-f]{1,6}\}|[0-9a-f]{4}|[0-9a-f]{2})", re.IGNORECASE
-)
+_PROBE_UNICODE_ESCAPE_RE = re.compile(r"\\u(?:\{0*[0-9a-f]{1,6}\}|[0-9a-f]{4}|[0-9a-f]{2})", re.IGNORECASE)
 
 
-def _probe_entity(match: "re.Match[str]") -> str:
+def _probe_entity(match: re.Match[str]) -> str:
     entity = _decode_entity(match.group(0), 0)
     return entity[0] if entity is not None else match.group(0)
 
 
-def _probe_unicode_escape(match: "re.Match[str]") -> str:
+def _probe_unicode_escape(match: re.Match[str]) -> str:
     decoded = _decode_unicode_escape(match.group(0)[1:])
     return decoded if decoded is not None else match.group(0)
 
