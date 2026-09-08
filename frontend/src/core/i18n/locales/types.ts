@@ -382,6 +382,7 @@ export interface Translations {
       intervalUnitSeconds: string;
       intervalUnitMinutes: string;
       intervalUnitHours: string;
+      intervalMinHint: string;
     };
     weekdays: {
       mon: string;

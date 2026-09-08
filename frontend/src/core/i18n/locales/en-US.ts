@@ -473,6 +473,7 @@ export const enUS: Translations = {
       intervalUnitSeconds: "seconds",
       intervalUnitMinutes: "minutes",
       intervalUnitHours: "hours",
+      intervalMinHint: "Minimum 60 seconds (the default server floor).",
     },
     weekdays: {
       mon: "Mon",

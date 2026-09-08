@@ -24,6 +24,7 @@ export type ScheduleType = "once" | "cron" | "interval";
 export type IntervalUnit = "seconds" | "minutes" | "hours";
 
 export const MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60;
+export const DEFAULT_INTERVAL_MIN_SECONDS = 60;
 
 export type ScheduleFormState = {
   scheduleType: ScheduleType;
@@ -84,6 +85,29 @@ export function maxIntervalAmount(unit: IntervalUnit): number {
     return MAX_INTERVAL_SECONDS / 60;
   }
   return MAX_INTERVAL_SECONDS;
+}
+
+export function minIntervalAmount(unit: IntervalUnit): number {
+  // Matches scheduler.min_once_delay_seconds default. Minutes/hours already
+  // start at 60s; seconds must not go below that or create/edit 422s.
+  if (unit === "seconds") {
+    return DEFAULT_INTERVAL_MIN_SECONDS;
+  }
+  return 1;
+}
+
+export function clampIntervalAmount(
+  amount: number,
+  unit: IntervalUnit,
+): number {
+  const min = minIntervalAmount(unit);
+  if (!Number.isFinite(amount)) {
+    return min;
+  }
+  return Math.min(
+    Math.max(min, Math.trunc(amount)),
+    maxIntervalAmount(unit),
+  );
 }
 
 export function hasScheduleSpec(spec: {

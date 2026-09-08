@@ -3,7 +3,9 @@ import { describe, expect, test } from "@rstest/core";
 import {
   describeSchedule,
   hasScheduleSpec,
+  clampIntervalAmount,
   intervalToSeconds,
+  minIntervalAmount,
   parseCron,
   secondsToInterval,
   serializeCron,
@@ -346,6 +348,15 @@ describe("interval conversion", () => {
     const displayed = secondsToInterval(stored);
     expect(displayed).toEqual({ amount: 90, unit: "seconds" });
     expect(intervalToSeconds(displayed.amount, displayed.unit)).toBe(stored);
+  });
+
+  test("seconds unit clamps below the default 60s server floor", () => {
+    expect(minIntervalAmount("seconds")).toBe(60);
+    expect(minIntervalAmount("minutes")).toBe(1);
+    expect(minIntervalAmount("hours")).toBe(1);
+    expect(clampIntervalAmount(30, "seconds")).toBe(60);
+    expect(clampIntervalAmount(90, "seconds")).toBe(90);
+    expect(clampIntervalAmount(1, "minutes")).toBe(1);
   });
 
   test("hasScheduleSpec accepts interval every_seconds", () => {

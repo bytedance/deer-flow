@@ -448,6 +448,7 @@ export const zhCN: Translations = {
       intervalUnitSeconds: "秒",
       intervalUnitMinutes: "分钟",
       intervalUnitHours: "小时",
+      intervalMinHint: "最短 60 秒（默认服务端下限）。",
     },
     weekdays: {
       mon: "周一",

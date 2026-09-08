@@ -14,8 +14,10 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import {
   describeSchedule,
+  clampIntervalAmount,
   intervalToSeconds,
   maxIntervalAmount,
+  minIntervalAmount,
   pad2,
   parseCron,
   secondsToInterval,
@@ -153,10 +155,7 @@ export function ScheduledTaskScheduleInput({
       return;
     }
     if (scheduleType === "interval") {
-      const amount = Math.min(
-        Math.max(1, Math.trunc(intervalAmount) || 1),
-        maxIntervalAmount(intervalUnit),
-      );
+      const amount = clampIntervalAmount(intervalAmount, intervalUnit);
       onChangeRef.current({
         schedule_type: "interval",
         schedule_spec: { every_seconds: intervalToSeconds(amount, intervalUnit) },
@@ -351,7 +350,7 @@ export function ScheduledTaskScheduleInput({
         <div className="flex gap-2">
           <Input
             type="number"
-            min={1}
+            min={minIntervalAmount(intervalUnit)}
             max={maxIntervalAmount(intervalUnit)}
             value={intervalAmount}
             onChange={(e) => {
@@ -360,10 +359,7 @@ export function ScheduledTaskScheduleInput({
                 return;
               }
               setIntervalAmount(
-                Math.min(
-                  Math.max(1, Math.trunc(next)),
-                  maxIntervalAmount(intervalUnit),
-                ),
+                clampIntervalAmount(next, intervalUnit),
               );
             }}
             aria-label={labels.fields.intervalAmount}
@@ -374,7 +370,7 @@ export function ScheduledTaskScheduleInput({
               const unit = value as IntervalUnit;
               setIntervalUnit(unit);
               setIntervalAmount((amount) =>
-                Math.min(amount, maxIntervalAmount(unit)),
+                clampIntervalAmount(amount, unit),
               );
             }}
           >
@@ -425,6 +421,14 @@ export function ScheduledTaskScheduleInput({
       >
         {preview}
       </div>
+      {scheduleType === "interval" && intervalUnit === "seconds" && (
+        <div
+          className="text-muted-foreground text-xs"
+          data-testid="schedule-interval-min-hint"
+        >
+          {labels.fields.intervalMinHint}
+        </div>
+      )}
     </div>
   );
 }
