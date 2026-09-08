@@ -7,6 +7,11 @@ import type { AgentThread, AgentThreadContext } from "./types";
 // client-supplied key. Keep in sync with the backend thread_meta constant and
 // the E2E mock-api constant.
 export const THREAD_PINNED_METADATA_KEY = "deerflow_pinned";
+export const THREAD_ARCHIVED_METADATA_KEY = "deerflow_archived";
+
+export function isThreadArchived(thread: Pick<AgentThread, "metadata">) {
+  return thread.metadata?.[THREAD_ARCHIVED_METADATA_KEY] === true;
+}
 
 export type ChannelThreadSource = {
   type: "im_channel";
