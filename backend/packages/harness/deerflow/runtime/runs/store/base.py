@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
+
+from deerflow.utils.time import coerce_iso
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,38 @@ class RunIdempotencyConflict(RuntimeError):
     def __init__(self, existing: dict[str, Any]) -> None:
         super().__init__(f"Run idempotency key already belongs to {existing.get('run_id')}")
         self.existing = existing
+
+
+def parse_run_created_at(value: object) -> datetime:
+    """Parse a stored run timestamp into an aware UTC datetime for keyset order."""
+    iso = coerce_iso(value)
+    if not iso:
+        return datetime.min.replace(tzinfo=UTC)
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def run_sort_key(created_at: object, run_id: str) -> tuple[datetime, str]:
+    """Total order for newest-first run listings: ``created_at`` then ``run_id``."""
+    return (parse_run_created_at(created_at), run_id)
+
+
+def run_is_before_cursor(
+    created_at: object,
+    run_id: str,
+    *,
+    before_created_at: str | None,
+    before_run_id: str | None,
+) -> bool:
+    """Return True when ``(created_at, run_id)`` is older than the keyset cursor."""
+    if not before_created_at or not before_run_id:
+        return True
+    return run_sort_key(created_at, run_id) < run_sort_key(before_created_at, before_run_id)
 
 
 class RunStore(abc.ABC):
@@ -89,6 +124,8 @@ class RunStore(abc.ABC):
         *,
         user_id: str | None = None,
         limit: int = 100,
+        before_created_at: str | None = None,
+        before_run_id: str | None = None,
     ) -> list[dict[str, Any]]:
         pass
 

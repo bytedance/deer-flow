@@ -112,6 +112,11 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Agents & runtime
 
+- **gateway:** `GET /api/threads/{thread_id}/runs/page` walks thread run history
+  with a `(created_at, run_id)` keyset cursor (`{data, has_more,
+  next_before_created_at, next_before_run_id}`). `GET /api/threads/{thread_id}/runs`
+  still returns a bare array of the newest 100 runs so LangGraph SDK clients keep
+  working. ([#5282])
 - **middleware:** New `TokenBudgetMiddleware` enforces a per-run token budget,
   shared additively across the lead agent and subagents. ([#3412])
 - **middleware:** Structured tool-result metadata and a tool-progress state
