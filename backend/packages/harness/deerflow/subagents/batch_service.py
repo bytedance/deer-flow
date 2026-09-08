@@ -24,6 +24,11 @@ from deerflow.subagents.executor import (
 
 logger = logging.getLogger(__name__)
 
+# Bound the supervised teardown wait so a stuck child cannot renew forever
+# and wedge a ``max_running`` slot. After this budget the item is left on
+# the durable lease-expiry recovery path instead of the ordinary retry.
+_TEARDOWN_WAIT_LEASE_PERIODS = 3
+
 
 def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
     if not records:
@@ -35,21 +40,29 @@ def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
     }
 
 
-def _execution_teardown_complete(result: Any) -> bool:
-    """True when a dispatched child is gone or has finished execution teardown.
+def _teardown_wait_budget_seconds(lease_seconds: float) -> float:
+    return max(float(lease_seconds), float(lease_seconds) * _TEARDOWN_WAIT_LEASE_PERIODS)
 
-    A cancel request or terminal business status is not enough when the result
-    exposes ``execution_done_event`` — that event is the stream-close teardown
-    primitive. Without it, a terminal status (or ``completed_at``) is the local
-    confirmation available on current main.
+
+def _execution_teardown_complete(result: Any) -> bool:
+    """True when a dispatched child is gone or isolated-loop teardown finished.
+
+    Terminal ``status`` / ``completed_at`` are not confirmation: ``_aexecute``
+    publishes CANCELLED/FAILED before its ``finally`` sandbox/holder release.
+    Only a vanished registry entry or the executor's
+    ``execution_teardown_event`` (set after ``run_with_timeout`` returns)
+    counts. A result without that signal cannot be confirmed.
     """
     if result is None:
         return True
-    done_event = getattr(result, "execution_done_event", None)
-    terminal = bool(result.status.is_terminal or getattr(result, "completed_at", None) is not None)
-    if done_event is not None:
-        return bool(done_event.is_set()) and terminal
-    return terminal
+    check = getattr(result, "is_execution_teardown_complete", None)
+    if callable(check):
+        return bool(check())
+    teardown_event = getattr(result, "execution_teardown_event", None)
+    is_set = getattr(teardown_event, "is_set", None)
+    if callable(is_set):
+        return bool(is_set())
+    return False
 
 
 class SubagentBatchService:
@@ -405,32 +418,59 @@ class SubagentBatchService:
         """Hold ownership until the dispatched child has torn down.
 
         Renews the durable lease while waiting so a slow teardown cannot be
-        reclaimed as a concurrent retry. Process shutdown raises
-        ``CancelledError`` and skips the ordinary immediate-retry path.
+        reclaimed as a concurrent retry. Returns ``False`` when teardown
+        cannot be confirmed, the wait budget expires, or the lease is
+        already lost — the item is then left for lease-expiry recovery
+        instead of the ordinary immediate-retry path. Process shutdown
+        raises ``CancelledError`` and also skips that retry path.
         """
         renew_every = max(1.0, self._config.lease_seconds / 3)
         status_poll_every = min(self._config.poll_interval_seconds, renew_every)
         loop = asyncio.get_running_loop()
-        next_renew_at = loop.time() + renew_every
+        next_renew_at = loop.time()
+        deadline = loop.time() + _teardown_wait_budget_seconds(self._config.lease_seconds)
+        lease_held = True
         while True:
             if _execution_teardown_complete(get_background_task_result(execution_id)):
-                return True
+                return lease_held
             now_monotonic = loop.time()
-            if now_monotonic >= next_renew_at:
-                lease = await self._repository.renew_item_lease(
+            if now_monotonic >= deadline:
+                logger.error(
+                    "Dispatched child teardown was not confirmed before wait budget elapsed (item_id=%s)",
                     item_id,
-                    lease_owner=self._lease_owner,
-                    lease_seconds=self._config.lease_seconds,
-                    now=datetime.now(UTC),
                 )
-                next_renew_at = loop.time() + renew_every
-                if not lease["valid"]:
-                    request_cancel_background_task(execution_id)
+                return False
+            if now_monotonic >= next_renew_at:
+                if not lease_held:
+                    next_renew_at = loop.time() + renew_every
+                else:
+                    try:
+                        lease = await self._repository.renew_item_lease(
+                            item_id,
+                            lease_owner=self._lease_owner,
+                            lease_seconds=self._config.lease_seconds,
+                            now=datetime.now(UTC),
+                        )
+                        next_renew_at = loop.time() + renew_every
+                        if not lease.get("valid") or lease.get("cancel_requested"):
+                            logger.warning(
+                                "Lost durable lease while waiting for dispatched child teardown (item_id=%s)",
+                                item_id,
+                            )
+                            return False
+                    except Exception:
+                        logger.exception(
+                            "Lease renewal failed while waiting for dispatched child teardown (item_id=%s)",
+                            item_id,
+                        )
+                        lease_held = False
+                        next_renew_at = loop.time() + renew_every
             try:
                 until_renew = max(0.0, next_renew_at - loop.time())
+                until_deadline = max(0.0, deadline - loop.time())
                 await asyncio.wait_for(
                     self._stop.wait(),
-                    timeout=min(status_poll_every, until_renew),
+                    timeout=min(status_poll_every, until_renew, until_deadline),
                 )
                 if self._stop.is_set():
                     raise asyncio.CancelledError

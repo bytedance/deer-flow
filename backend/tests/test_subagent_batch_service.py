@@ -346,7 +346,7 @@ async def test_bookkeeping_failure_does_not_overlap_unsupervised_retry(monkeypat
             latest = executions[f"execution-{execution_seq}"]
             latest.status = FakeStatus.COMPLETED
             latest.result = "retry-done"
-            latest.execution_done_event.set()
+            latest.execution_teardown_event.set()
             self.item_status = "running"
             return True
 
@@ -355,7 +355,7 @@ async def test_bookkeeping_failure_does_not_overlap_unsupervised_retry(monkeypat
             return {"valid": True, "cancel_requested": False}
 
         async def finalize_item(self, *_args, **kwargs):
-            live_running_at_finalize.append([eid for eid, row in executions.items() if not row.execution_done_event.is_set()])
+            live_running_at_finalize.append([eid for eid, row in executions.items() if not row.execution_teardown_event.is_set()])
             self.finalized = kwargs
             self.item_status = "queued"
             return True
@@ -377,28 +377,28 @@ async def test_bookkeeping_failure_does_not_overlap_unsupervised_retry(monkeypat
                 token_usage_records=None,
                 completed_at=None,
                 cancel_requested=False,
-                execution_done_event=threading.Event(),
+                execution_teardown_event=threading.Event(),
             )
             return execution_id
 
     def read_result(execution_id):
         nonlocal max_live_running
         result = executions[execution_id]
-        if not result.execution_done_event.is_set():
+        if not result.execution_teardown_event.is_set():
             owned_while_waiting.append(service._execution_ids.get("item-1"))
-        live = [eid for eid, row in executions.items() if not row.execution_done_event.is_set()]
+        live = [eid for eid, row in executions.items() if not row.execution_teardown_event.is_set()]
         max_live_running = max(max_live_running, len(live))
-        if result.cancel_requested and teardown_complete.is_set() and not result.execution_done_event.is_set():
+        if result.cancel_requested and teardown_complete.is_set() and not result.execution_teardown_event.is_set():
             result.status = FakeStatus.CANCELLED
             result.error = "Cancelled after supervisor bookkeeping failure"
-            result.execution_done_event.set()
+            result.execution_teardown_event.set()
         return result
 
     def request_cancel(execution_id):
         row = executions[execution_id]
         row.cancel_requested = True
         # Business-terminal cancellation is not teardown. The child stays
-        # live until the test releases execution_done_event.
+        # live until the test releases execution_teardown_event.
         row.status = FakeStatus.CANCELLED
         cancel_requested.set()
 
@@ -422,7 +422,7 @@ async def test_bookkeeping_failure_does_not_overlap_unsupervised_retry(monkeypat
 
     assert repository.finalized is None
     assert executions["execution-1"].status is FakeStatus.CANCELLED
-    assert not executions["execution-1"].execution_done_event.is_set()
+    assert not executions["execution-1"].execution_teardown_event.is_set()
     assert service._execution_ids.get("item-1") == "execution-1"
     assert repository.item_status == "leased"
 
@@ -433,7 +433,7 @@ async def test_bookkeeping_failure_does_not_overlap_unsupervised_retry(monkeypat
     assert repository.finalized["succeeded"] is False
     assert "mark_item_running" in (repository.finalized["error"] or "")
     assert live_running_at_finalize == [[]]
-    assert executions["execution-1"].execution_done_event.is_set()
+    assert executions["execution-1"].execution_teardown_event.is_set()
     assert service._execution_ids == {}
     assert owned_while_waiting
     assert all(owner == "execution-1" for owner in owned_while_waiting)
@@ -446,3 +446,237 @@ async def test_bookkeeping_failure_does_not_overlap_unsupervised_retry(monkeypat
     assert executions["execution-2"].status is FakeStatus.COMPLETED
     assert max_live_running == 1
     assert repository.mark_calls == 2
+
+
+def test_execution_teardown_complete_does_not_treat_terminal_status_as_done() -> None:
+    """Terminal CANCELLED/FAILED is published before isolated-loop teardown."""
+    assert service_module._execution_teardown_complete(None) is True
+
+    cancelled = SimpleNamespace(
+        status=FakeStatus.CANCELLED,
+        completed_at="now",
+    )
+    assert service_module._execution_teardown_complete(cancelled) is False
+
+    pending_event = threading.Event()
+    with_event = SimpleNamespace(
+        status=FakeStatus.CANCELLED,
+        completed_at="now",
+        execution_teardown_event=pending_event,
+    )
+    assert service_module._execution_teardown_complete(with_event) is False
+    pending_event.set()
+    assert service_module._execution_teardown_complete(with_event) is True
+
+
+def _bookkeeping_failure_item_repo(*, renew_lease):
+    class Repository:
+        def __init__(self) -> None:
+            self.item_status = "queued"
+            self.mark_calls = 0
+            self.finalized = None
+            self.lease_renewals = 0
+
+        async def claim_items(self, **_kwargs):
+            if self.item_status != "queued":
+                return []
+            self.item_status = "leased"
+            return [_batch_item()]
+
+        async def mark_item_running(self, *_args, **_kwargs):
+            self.mark_calls += 1
+            raise OSError("single synthetic transient DB write failure at mark_item_running")
+
+        async def renew_item_lease(self, *_args, **_kwargs):
+            self.lease_renewals += 1
+            return await renew_lease(self)
+
+        async def finalize_item(self, *_args, **kwargs):
+            self.finalized = kwargs
+            self.item_status = "queued"
+            return True
+
+    return Repository()
+
+
+def _dispatched_child_executor(executions: dict[str, SimpleNamespace]):
+    execution_seq = 0
+
+    class Executor:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def execute_async(self, _prompt, task_id=None):
+            nonlocal execution_seq
+            assert task_id == "item-1"
+            execution_seq += 1
+            execution_id = f"execution-{execution_seq}"
+            executions[execution_id] = SimpleNamespace(
+                status=FakeStatus.RUNNING,
+                result=None,
+                error=None,
+                stop_reason=None,
+                token_usage_records=None,
+                completed_at=None,
+                cancel_requested=False,
+                execution_teardown_event=threading.Event(),
+            )
+            return execution_id
+
+    return Executor, lambda: execution_seq
+
+
+def _patch_batch_item_service(monkeypatch, *, read_result, request_cancel) -> None:
+    monkeypatch.setattr(service_module, "get_app_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(service_module, "resolve_subagent_model_name", lambda *_args, **_kwargs: "model-a")
+    monkeypatch.setattr(service_module, "get_background_task_result", read_result)
+    monkeypatch.setattr(service_module, "request_cancel_background_task", request_cancel)
+    monkeypatch.setattr(service_module, "cleanup_background_task", lambda _execution_id: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+
+
+@pytest.mark.asyncio
+async def test_lease_lost_during_teardown_wait_refuses_immediate_retry(monkeypatch) -> None:
+    """A lost lease must stop the wait loop and must not finalize/retry."""
+    cancel_requested = asyncio.Event()
+    executions: dict[str, SimpleNamespace] = {}
+
+    async def renew_lease(_repo):
+        return {"valid": False, "cancel_requested": True}
+
+    repository = _bookkeeping_failure_item_repo(renew_lease=renew_lease)
+    Executor, current_seq = _dispatched_child_executor(executions)
+
+    def read_result(execution_id):
+        return executions[execution_id]
+
+    def request_cancel(execution_id):
+        row = executions[execution_id]
+        row.cancel_requested = True
+        row.status = FakeStatus.CANCELLED
+        cancel_requested.set()
+
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    _patch_batch_item_service(monkeypatch, read_result=read_result, request_cancel=request_cancel)
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1, lease_seconds=10),
+        runtime_config=SubagentRuntimeConfig(max_running=2),
+    )
+
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    await asyncio.wait_for(cancel_requested.wait(), timeout=1)
+    await asyncio.wait_for(asyncio.gather(*list(service._executions.values())), timeout=5)
+
+    assert repository.finalized is None
+    assert repository.item_status == "leased"
+    assert repository.lease_renewals >= 1
+    assert current_seq() == 1
+    assert not executions["execution-1"].execution_teardown_event.is_set()
+
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    assert current_seq() == 1
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_teardown_does_not_release_ordinary_immediate_retry(monkeypatch) -> None:
+    """If teardown cannot be confirmed, do not finalize onto the retry path."""
+    cancel_requested = asyncio.Event()
+    executions: dict[str, SimpleNamespace] = {}
+
+    async def renew_lease(_repo):
+        return {"valid": True, "cancel_requested": False}
+
+    repository = _bookkeeping_failure_item_repo(renew_lease=renew_lease)
+    Executor, current_seq = _dispatched_child_executor(executions)
+
+    def read_result(execution_id):
+        return executions[execution_id]
+
+    def request_cancel(execution_id):
+        row = executions[execution_id]
+        row.cancel_requested = True
+        # Terminal status alone must not count as teardown confirmation.
+        row.status = FakeStatus.CANCELLED
+        row.completed_at = "now"
+        cancel_requested.set()
+
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(service_module, "_teardown_wait_budget_seconds", lambda _lease: 0.3)
+    _patch_batch_item_service(monkeypatch, read_result=read_result, request_cancel=request_cancel)
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1, lease_seconds=10),
+        runtime_config=SubagentRuntimeConfig(max_running=2),
+    )
+
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    await asyncio.wait_for(cancel_requested.wait(), timeout=1)
+    await asyncio.wait_for(asyncio.gather(*list(service._executions.values())), timeout=2)
+
+    assert repository.finalized is None
+    assert repository.item_status == "leased"
+    assert executions["execution-1"].status is FakeStatus.CANCELLED
+    assert not executions["execution-1"].execution_teardown_event.is_set()
+    assert current_seq() == 1
+
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    assert current_seq() == 1
+
+
+@pytest.mark.asyncio
+async def test_teardown_wait_renewal_failure_does_not_escape_or_finalize(monkeypatch) -> None:
+    """Renewal exceptions stay inside the wait and take the lease-expire path."""
+    cancel_requested = asyncio.Event()
+    teardown_complete = threading.Event()
+    executions: dict[str, SimpleNamespace] = {}
+
+    async def renew_lease(_repo):
+        raise OSError("synthetic lease renewal failure")
+
+    repository = _bookkeeping_failure_item_repo(renew_lease=renew_lease)
+    Executor, current_seq = _dispatched_child_executor(executions)
+
+    def read_result(execution_id):
+        result = executions[execution_id]
+        if result.cancel_requested and teardown_complete.is_set() and not result.execution_teardown_event.is_set():
+            result.status = FakeStatus.CANCELLED
+            result.execution_teardown_event.set()
+        return result
+
+    def request_cancel(execution_id):
+        row = executions[execution_id]
+        row.cancel_requested = True
+        row.status = FakeStatus.CANCELLED
+        cancel_requested.set()
+
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    _patch_batch_item_service(monkeypatch, read_result=read_result, request_cancel=request_cancel)
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1, lease_seconds=10),
+        runtime_config=SubagentRuntimeConfig(max_running=2),
+    )
+
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    await asyncio.wait_for(cancel_requested.wait(), timeout=1)
+
+    async def _wait_for_failed_renewal() -> None:
+        while repository.lease_renewals < 1:
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(_wait_for_failed_renewal(), timeout=5)
+    teardown_complete.set()
+    await asyncio.wait_for(asyncio.gather(*list(service._executions.values())), timeout=2)
+
+    assert repository.finalized is None
+    assert repository.item_status == "leased"
+    assert repository.lease_renewals >= 1
+    assert executions["execution-1"].execution_teardown_event.is_set()
+    assert current_seq() == 1
+
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    assert current_seq() == 1

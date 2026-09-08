@@ -2935,6 +2935,43 @@ class TestCooperativeCancellation:
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "done: Task"
         assert result.error is None
+        assert result.is_execution_teardown_complete()
+
+    def test_execute_async_teardown_event_is_set_after_run_with_timeout_returns(self, executor_module, classes, base_config):
+        """Terminal status is published before isolated-loop teardown finishes."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        terminal_published = threading.Event()
+        release_teardown = threading.Event()
+
+        async def delayed_aexecute(_task, result_holder=None):
+            result_holder.try_set_terminal(SubagentStatus.FAILED, error="synthetic")
+            terminal_published.set()
+            deadline = asyncio.get_running_loop().time() + 5
+            while not release_teardown.is_set():
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(0.01)
+            return result_holder
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="teardown-signal-trace",
+        )
+        with patch.object(executor, "_aexecute", side_effect=delayed_aexecute):
+            task_id = executor.execute_async("Task")
+            assert terminal_published.wait(timeout=3), "terminal status was not published"
+            result = executor_module.get_background_task_result(task_id)
+            assert result is not None
+            assert result.status == SubagentStatus.FAILED
+            assert not result.is_execution_teardown_complete()
+            release_teardown.set()
+            assert result.execution_teardown_event.wait(timeout=3), "teardown event was not set after run_with_timeout"
+            assert result.is_execution_teardown_complete()
+        executor_module.cleanup_background_task(task_id)
 
     def test_execute_async_isolates_duplicate_external_task_ids(self, executor_module, classes, base_config):
         """Concurrent runs must not share registry entries when provider IDs collide."""
