@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, rs, test } from "@rstest/core";
 import { InfiniteQueryObserver, QueryClient } from "@tanstack/react-query";
 
+import { getMessageRunId } from "@/core/messages/run-duration";
 import {
   buildThreadMessagesPageUrl,
   buildVisibleHistoryMessages,
@@ -2342,7 +2343,10 @@ test("mergeMessages preserves canonical seq when a live copy without seq replace
   expect(
     merged.map((message) => message.additional_kwargs?.deerflow_seq),
   ).toEqual([1, 2]);
-  expect(merged.map((message) => message.run_id)).toEqual(["run-1", "run-1"]);
+  expect(merged.map((message) => getMessageRunId(message))).toEqual([
+    "run-1",
+    "run-1",
+  ]);
 });
 
 test("mergeMessages places a live message with seq inside the loaded window by position (R4)", () => {

@@ -1,6 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
+import { getMessageRunId } from "@/core/messages/run-duration";
 import {
   buildVisibleHistoryMessages,
   mergeRenderedMessageLedger,
@@ -118,7 +119,10 @@ test("trustedMessageSeq accepts only positive safe integers", () => {
 test("live content refresh without seq preserves seq, run_id, and turn_duration", () => {
   const history = [
     withKwargs(
-      { ...msg("h1", "human", "question", 1), run_id: "run-1" } as Message,
+      {
+        ...msg("h1", "human", "question", 1),
+        run_id: "run-1",
+      } as unknown as Message,
       { turn_duration: 42 },
     ),
     msg("a1", "ai", "draft", 2),
@@ -133,7 +137,7 @@ test("live content refresh without seq preserves seq, run_id, and turn_duration"
     "final",
   ]);
   expect(seqsOf(merged)).toEqual([1, 2]);
-  expect(merged[0]!.run_id).toBe("run-1");
+  expect(getMessageRunId(merged[0]!)).toBe("run-1");
   expect(merged[0]!.additional_kwargs?.turn_duration).toBe(42);
 });
 
