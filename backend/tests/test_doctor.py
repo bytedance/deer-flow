@@ -683,8 +683,10 @@ class TestCheckSandbox:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\nsandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\ntools:\n  # - name: bash\n")
         results = doctor.check_sandbox(cfg)
-        assert all("NoneType" not in (result.detail or "") for result in results)
-        assert any(result.status == "ok" for result in results)
+        # Empty `tools:` means no bash tool, so the path is deterministic.
+        assert len(results) == 1
+        assert results[0].status == "ok"
+        assert results[0].detail == "Local sandbox"
 
     def test_local_sandbox_with_disabled_host_bash_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
