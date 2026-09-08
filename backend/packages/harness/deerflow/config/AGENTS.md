@@ -58,7 +58,8 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
   remain finite. Redis-backed lease TTLs must be at least one millisecond and
   use at most half of Redis's signed 64-bit millisecond range, leaving
   deterministic headroom for conversion from a relative TTL to an absolute Unix
-  timestamp during validation.
+  timestamp during validation. The Redis store rounds fractional milliseconds
+  up so its integer TTL never shortens the validated lease.
 - `skills.path` / `skills.container_path` - Host and container paths to skills directory. AIO and E2B snapshot the container path at provider startup. Their local/remote backends and the Kubernetes provisioner require one canonical absolute non-root path outside reserved platform mounts; custom roots participate in deterministic sandbox identity, and E2B records the root in remote metadata.
 - `skills.deferred_discovery` - When `true`, replaces the full-metadata `<available_skills>` prompt block with a compact `<skill_index>` (names only) and registers the `describe_skill` tool so the agent fetches metadata on demand. Defaults to `false` (legacy full-metadata injection)
 - `title` - Auto-title generation (enabled, max_words, max_chars, model_name; null model_name uses fast local fallback, explicit model_name uses the prompt_template LLM path)

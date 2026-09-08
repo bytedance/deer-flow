@@ -19,6 +19,7 @@ import os
 import threading
 import time
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -420,6 +421,34 @@ def test_redis_lease_timing_allows_operational_ttl():
     )
 
     assert compute_lease_ttl(config) == 24 * 60 * 60
+
+
+@pytest.mark.parametrize(
+    ("renewal_interval_seconds", "expected_ttl_milliseconds"),
+    [
+        pytest.param(0.0009, 2, id="lower-bound"),
+        pytest.param((2**62 - 1024) / 2000, 2**62 - 1024, id="upper-bound"),
+    ],
+)
+def test_redis_store_rounds_validated_ttl_up_near_range_boundaries(renewal_interval_seconds, expected_ttl_milliseconds):
+    from deerflow.community.aio_sandbox.ownership.redis import RedisOwnershipStore
+
+    config = SandboxOwnershipConfig(
+        type="redis",
+        renewal_interval_seconds=renewal_interval_seconds,
+        ttl_multiplier=2,
+    )
+    ttl_seconds = compute_lease_ttl(config)
+
+    store = RedisOwnershipStore(
+        owner_id="A",
+        redis_url="redis://unused",
+        ttl_seconds=ttl_seconds,
+        client=MagicMock(),
+    )
+
+    assert store._ttl_ms == expected_ttl_milliseconds
+    assert store._ttl_ms >= ttl_seconds * 1000
 
 
 def test_owner_ids_are_unique_per_instance():
