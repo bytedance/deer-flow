@@ -1,4 +1,5 @@
 import logging
+import os
 
 from langchain.tools import BaseTool
 
@@ -6,7 +7,7 @@ from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
 from deerflow.reflection import resolve_variable
-from deerflow.sandbox.security import is_host_bash_allowed
+from deerflow.sandbox.security import is_host_bash_allowed, uses_local_sandbox_provider
 from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 from deerflow.tools.builtins import (
     ask_clarification_tool,
@@ -18,6 +19,7 @@ from deerflow.tools.builtins import (
     list_uploaded_files,
     present_file_tool,
     review_skill_package,
+    run_host_program_tool,
     task_tool,
     view_image_tool,
 )
@@ -109,6 +111,8 @@ def get_available_tools(
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
+    if os.name == "nt" and uses_local_sandbox_provider(config) and is_host_bash_allowed(config):
+        builtin_tools.append(run_host_program_tool)
     if is_mcp_task_runtime_available():
         builtin_tools.extend((list_background_tasks, cancel_background_task))
     if include_upload_tool:

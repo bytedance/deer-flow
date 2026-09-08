@@ -15,6 +15,13 @@ def _open(base, file, mode="r", *args, **kwargs):
     return base(file, mode, *args, encoding=kwargs.pop("encoding", "gbk"), **kwargs)
 
 
+def test_bounded_pipe_capture_normalizes_universal_newlines():
+    capture = _BoundedPipeCapture(normalize_newlines=True)
+    capture.append(b"first\r\nsecond\rthird\nfourth")
+
+    assert capture.read() == "first\nsecond\nthird\nfourth"
+
+
 def test_bounded_pipe_capture_decodes_non_utf8_output_with_configured_encoding():
     capture = _BoundedPipeCapture(encoding="cp1252")
     capture.append("caf\u00e9".encode("cp1252"))
