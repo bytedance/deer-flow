@@ -187,6 +187,10 @@ class RunRepository(RunStore):
                     and_(RunRow.created_at == cursor_dt, RunRow.run_id < before_run_id),
                 )
             )
+        # Keyset pages filter on (created_at, run_id) after thread_id. Existing
+        # indexes are (thread_id) and (thread_id, status), so each page still
+        # sorts matching rows. A covering (thread_id, created_at, run_id) index
+        # is a follow-up if deep paging shows up in profiles.
         stmt = stmt.order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)

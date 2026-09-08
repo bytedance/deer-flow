@@ -946,6 +946,25 @@ async def test_list_by_thread_keyset_is_stable_when_timestamps_tie():
 
 
 @pytest.mark.anyio
+async def test_list_by_thread_rejects_one_sided_keyset_cursor():
+    """A one-sided cursor would silently drop the bound; fail instead of paging from the start."""
+    manager = RunManager()
+    with pytest.raises(
+        ValueError,
+        match="before_created_at and before_run_id must be provided together",
+    ):
+        await manager.list_by_thread(
+            "thread-1",
+            before_created_at="2026-01-02T00:00:00+00:00",
+        )
+    with pytest.raises(
+        ValueError,
+        match="before_created_at and before_run_id must be provided together",
+    ):
+        await manager.list_by_thread("thread-1", before_run_id="r2")
+
+
+@pytest.mark.anyio
 async def test_create_defaults(manager: RunManager):
     """Create with no optional args should use defaults."""
     record = await manager.create("thread-1")

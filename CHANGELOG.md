@@ -2389,3 +2389,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5136]: https://github.com/bytedance/deer-flow/pull/5136
 [#5239]: https://github.com/bytedance/deer-flow/pull/5239
 [#5119]: https://github.com/bytedance/deer-flow/pull/5119
+[#5282]: https://github.com/bytedance/deer-flow/pull/5282

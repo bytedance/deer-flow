@@ -710,6 +710,10 @@ class RunManager:
             before_created_at: ISO timestamp of the last run on the previous page.
             before_run_id: Run id of the last run on the previous page.
         """
+        if (before_created_at is None) != (before_run_id is None):
+            raise ValueError(
+                "before_created_at and before_run_id must be provided together"
+            )
 
         def _page(records: list[RunRecord]) -> list[RunRecord]:
             return sorted(records, key=lambda record: run_sort_key(record.created_at, record.run_id), reverse=True)[:limit]
