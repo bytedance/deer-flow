@@ -30,6 +30,9 @@ _ALL_PERMISSIONS = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.PROJECTS_READ,
+    Permissions.PROJECTS_WRITE,
+    Permissions.PROJECTS_DELETE,
 ]
 
 
