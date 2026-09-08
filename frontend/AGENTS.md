@@ -86,6 +86,16 @@ NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:8001/api
 
 Leave these unset for the standard `make dev` / Docker flow, where nginx serves the public `/api/langgraph/*` prefix and rewrites it to Gateway's native `/api/*` routes.
 
+`make build-static` creates a standalone read-only demo and copies `.next/static`
+and `public` into the output. In static mode, `core/api/static-response.ts`
+resolves Gateway REST reads with empty capability/catalog responses or existing
+same-origin `/mock/api` fixtures; writes and unknown API routes fail locally.
+The homepage client counter calls `/github-stars`, outside the Gateway proxy.
+That dynamic route reads the server-only `GITHUB_OAUTH_TOKEN` at runtime, caches
+GitHub data for one hour, and returns 204 when the count is unavailable. Start
+the standalone server from `frontend/` with `node --env-file=.env
+.next/standalone/server.js` to load the current credentials.
+
 To reach a dev server on anything other than localhost — a LAN address, or a proxied hostname — list the host in `DEER_FLOW_DEV_ALLOWED_ORIGINS` (comma-separated; a full URL is reduced to its host). It feeds Next's `allowedDevOrigins`, which gates `/_next/*`, fonts, and HMR. Without it those requests get a 403 and the page renders server-side but never hydrates, so nothing on it — including the login form — responds. Development only; production builds ignore it.
 
 ## Resources
