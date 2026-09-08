@@ -1,26 +1,15 @@
-# CyliaTales
+# CyliaTales — launch branch
 
-From idea to cinematic saga: instant, interactive, multimodal story creation with studio-grade visuals, characters, and publishing.
+This branch (cyliatales-launch) contains the production-ready scaffolding for the children’s story studio (frontend, API routes, worker, Supabase schema, and launch assets).
 
-This repository is the scaffold for CyliaTales — a next-generation AI-first storytelling & character studio built to deliver studio-grade visuals, character consistency, parametric outfits, and end-to-end publishing & marketplace capabilities.
+Files added:
+- src/pages/index.tsx (landing)
+- src/pages/api/webhooks/lemon.ts (webhook handler stub)
+- supabase/schema.sql (DB schema)
+- worker/Dockerfile (worker container for FFmpeg + job runner)
+- worker/ffmpeg-compose.sh (compose script for images+audio -> MP4)
+- env.example (environment variable names)
+- pricing.md (final pricing & allowances)
+- launch-checklist.md (24-hour launch checklist)
 
-Goals
-- Ship an MVP that enables a single creator to produce a short illustrated story (10 panels) with consistent characters and export it as PDF/web-preview.
-- Build a Super-Agent orchestration layer for long-running creative sessions.
-- Provide a developer-friendly scaffold for backend, frontend, infra, and product artifacts.
-
-Structure
-- backend/        — FastAPI app, agents, workers, model adapters
-- frontend/       — Next.js app (editor shell and landing pages)
-- infra/          — Terraform / deployment stubs
-- docs/           — Product spec, ROADMAP, issues and templates
-- .github/        — workflows and community files
-
-Quick start (local dev, high level)
-1. Clone the repo
-2. Backend: cd backend && python -m venv .venv && .venv/bin/pip install -r requirements.txt && uvicorn app.main:app --reload
-3. Frontend: cd frontend && pnpm install && pnpm dev
-
-Note: This scaffold contains minimal starter code and product artifacts. Follow docs/ROADMAP.md and docs/ISSUES.md to proceed with the prioritized MVP.
-
-Maintainers: @hammouda202344
+Next steps: add secrets to Vercel/GitHub, deploy branch, and I'll generate the real demo once ELEVENLABS key is present.
