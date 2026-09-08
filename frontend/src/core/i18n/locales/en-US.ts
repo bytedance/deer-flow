@@ -339,6 +339,39 @@ export const enUS: Translations = {
     scheduledTasks: "Scheduled tasks",
     agentsDisabledTooltip: "Feature not enabled",
   },
+  // Sidebar projects section
+  projects: {
+    title: "Projects",
+    newProject: "New project",
+    namePlaceholder: "Project name",
+    moveToProject: "Move to project",
+    moveToProjectHint:
+      "Moving a chat doesn't remove the content already in it.",
+    removeFromProject: "Remove from project",
+    archive: "Archive",
+    restore: "Restore",
+    deleteProject: "Delete project",
+    deleteProjectConfirm:
+      "Deleting this project unlinks its chats. Chats, their history, and their files are not deleted.",
+    archived: "Archived",
+    empty: "No chats in this project yet.",
+    newChat: "New chat",
+    create: "Create",
+    createFailed: "Failed to create project",
+    moveFailed: "Failed to move chat",
+    archiveFailed: "Failed to archive project",
+    restoreFailed: "Failed to restore project",
+    deleteFailed: "Failed to delete project",
+    switchToGrouped: "Group chats by project",
+    switchToFlat: "Show flat chat list",
+    threads: "Chats",
+    threadsLoadFailed: "Couldn't load project chats",
+    untitled: "Untitled",
+    settings: "Settings",
+    notFound: "Project not found or deleted.",
+    projectUnavailable:
+      "Couldn't link the chat to the project. Your message was not sent — try again.",
+  },
 
   backgroundTasks: {
     label: "Background tasks",
