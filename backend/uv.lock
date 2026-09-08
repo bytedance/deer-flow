@@ -960,6 +960,7 @@ dependencies = [
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "tavily-python" },
     { name = "tiktoken" },
+    { name = "tzdata" },
 ]
 
 [package.optional-dependencies]
@@ -1054,6 +1055,7 @@ requires-dist = [
     { name = "tenki", marker = "extra == 'tenki'", specifier = ">=1.0.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.80" },
     { name = "tiktoken", specifier = ">=0.8.0" },
+    { name = "tzdata", specifier = ">=2025.1" },
 ]
 provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "monocle", "browser", "memory-zh"]
 
