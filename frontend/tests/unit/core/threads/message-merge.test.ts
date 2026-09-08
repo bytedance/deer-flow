@@ -142,7 +142,9 @@ test("mergeMessages preserves historical run metadata on a live checkpoint repla
     {
       ...checkpointAi,
       run_id: "run-1",
-      additional_kwargs: { turn_duration: 114 },
+      // The replacement keeps the trusted feed position alongside the run
+      // metadata: dropping deerflow_seq here was defect R3.
+      additional_kwargs: { turn_duration: 114, deerflow_seq: 1 },
     },
   ]);
 });
