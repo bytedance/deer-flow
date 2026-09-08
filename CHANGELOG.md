@@ -102,6 +102,12 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Added
 
+#### Scheduler
+- **scheduler:** Scheduled tasks accept `interval` (`schedule_spec.every_seconds`)
+  in addition to `once` and `cron`. Cadence is UTC `now + N` with no missed-beat
+  catch-up. N is at least `scheduler.min_once_delay_seconds` (default 60s) and at
+  most 30 days.
+
 #### Authentication
 - **auth:** Personal access tokens (PAT) for programmatic API access:
   `POST/GET/DELETE /api/v1/auth/pats` manage tokens (shown once, stored as

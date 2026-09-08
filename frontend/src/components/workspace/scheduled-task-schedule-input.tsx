@@ -14,23 +14,38 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import {
   describeSchedule,
+  intervalToSeconds,
+  maxIntervalAmount,
   pad2,
   parseCron,
+  secondsToInterval,
   serializeCron,
   utcToZonedLocalInput,
   WEEKDAYS,
   zonedLocalToUtcIso,
   type CronParts,
   type CronPreset,
+  type IntervalUnit,
   type ScheduleLocale,
+  type ScheduleType,
   type Weekday,
 } from "@/core/scheduled-tasks/cron";
 
 export type ScheduleValue = {
-  schedule_type: "once" | "cron";
-  schedule_spec: { cron?: string; run_at?: string };
+  schedule_type: ScheduleType;
+  schedule_spec: { cron?: string; run_at?: string; every_seconds?: number };
   timezone: string;
 };
+
+function parseInitialInterval(spec: {
+  every_seconds?: number;
+}): { amount: number; unit: IntervalUnit } {
+  const raw = spec.every_seconds;
+  if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) {
+    return secondsToInterval(raw);
+  }
+  return { amount: 60, unit: "minutes" };
+}
 
 const PRESETS: CronPreset[] = [
   "hourly",
@@ -91,7 +106,7 @@ export function ScheduledTaskScheduleInput({
   const schedLocale: ScheduleLocale = locale.startsWith("zh") ? "zh" : "en";
   const labels = t.scheduledTasks;
 
-  const [scheduleType, setScheduleType] = useState<"once" | "cron">(
+  const [scheduleType, setScheduleType] = useState<ScheduleType>(
     initial.schedule_type,
   );
   const [preset, setPreset] = useState<CronPreset>(
@@ -110,6 +125,11 @@ export function ScheduledTaskScheduleInput({
   );
   const [timezone, setTimezone] = useState<string>(
     initial.timezone || detectBrowserTimezone(),
+  );
+  const initialInterval = parseInitialInterval(initial.schedule_spec);
+  const [intervalAmount, setIntervalAmount] = useState(initialInterval.amount);
+  const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
+    initialInterval.unit,
   );
 
   // Hold the latest onChange in a ref so the effect below does not depend on
@@ -132,6 +152,18 @@ export function ScheduledTaskScheduleInput({
       });
       return;
     }
+    if (scheduleType === "interval") {
+      const amount = Math.min(
+        Math.max(1, Math.trunc(intervalAmount) || 1),
+        maxIntervalAmount(intervalUnit),
+      );
+      onChangeRef.current({
+        schedule_type: "interval",
+        schedule_spec: { every_seconds: intervalToSeconds(amount, intervalUnit) },
+        timezone,
+      });
+      return;
+    }
     const cron =
       preset === "custom" ? (parts.raw ?? "") : serializeCron(preset, parts);
     onChangeRef.current({
@@ -139,7 +171,7 @@ export function ScheduledTaskScheduleInput({
       schedule_spec: cron ? { cron } : {},
       timezone,
     });
-  }, [scheduleType, preset, parts, runAtLocal, timezone]);
+  }, [scheduleType, preset, parts, runAtLocal, timezone, intervalAmount, intervalUnit]);
 
   function updateParts(patch: Partial<CronParts>) {
     setParts((prev) => ({ ...prev, ...patch }));
@@ -178,7 +210,15 @@ export function ScheduledTaskScheduleInput({
   }
 
   const preview = describeSchedule(
-    { scheduleType, preset, parts, runAtLocal, timezone },
+    {
+      scheduleType,
+      preset,
+      parts,
+      runAtLocal,
+      intervalAmount,
+      intervalUnit,
+      timezone,
+    },
     schedLocale,
   );
 
@@ -199,6 +239,13 @@ export function ScheduledTaskScheduleInput({
             onClick={() => setScheduleType("once")}
           >
             {labels.scheduleType.once}
+          </Button>
+          <Button
+            variant={scheduleType === "interval" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setScheduleType("interval")}
+          >
+            {labels.scheduleType.interval}
           </Button>
         </div>
       )}
@@ -300,6 +347,53 @@ export function ScheduledTaskScheduleInput({
             </div>
           )}
         </>
+      ) : scheduleType === "interval" ? (
+        <div className="flex gap-2">
+          <Input
+            type="number"
+            min={1}
+            max={maxIntervalAmount(intervalUnit)}
+            value={intervalAmount}
+            onChange={(e) => {
+              const next = Number(e.target.value);
+              if (!Number.isFinite(next)) {
+                return;
+              }
+              setIntervalAmount(
+                Math.min(
+                  Math.max(1, Math.trunc(next)),
+                  maxIntervalAmount(intervalUnit),
+                ),
+              );
+            }}
+            aria-label={labels.fields.intervalAmount}
+          />
+          <Select
+            value={intervalUnit}
+            onValueChange={(value) => {
+              const unit = value as IntervalUnit;
+              setIntervalUnit(unit);
+              setIntervalAmount((amount) =>
+                Math.min(amount, maxIntervalAmount(unit)),
+              );
+            }}
+          >
+            <SelectTrigger
+              className="w-36"
+              data-testid="schedule-interval-unit"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="minutes">
+                {labels.fields.intervalUnitMinutes}
+              </SelectItem>
+              <SelectItem value="hours">
+                {labels.fields.intervalUnitHours}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       ) : (
         <Input
           type="datetime-local"

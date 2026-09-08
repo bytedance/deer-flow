@@ -940,3 +940,158 @@ async def test_update_terminal_once_task_with_future_run_at_rearms_it():
 
     assert result["status"] == "enabled"
     assert result["next_run_at"] is not None
+
+
+def _interval_create_request(**overrides):
+    kwargs = {
+        "title": "Every 90 minutes",
+        "prompt": "Ping",
+        "schedule_type": "interval",
+        "schedule_spec": {"every_seconds": 90},
+        "timezone": "UTC",
+    }
+    kwargs.update(overrides)
+    return scheduled_tasks.ScheduledTaskCreateRequest(**kwargs)
+
+
+async def _call_create(body, repo=None, config=None):
+    repo = repo or _Repo()
+    user = SimpleNamespace(id="user-1")
+    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True))
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_thread_store = scheduled_tasks.get_thread_store
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_thread_store = lambda _request: thread_store
+        scheduled_tasks.get_config = lambda: config or _Config()
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+        return await call_unwrapped(
+            scheduled_tasks.create_scheduled_task,
+            request=SimpleNamespace(),
+            body=body,
+        )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_thread_store = old_thread_store
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+
+async def _call_update(repo, task_id, body):
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_config = lambda: _Config()
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(
+            return_value=SimpleNamespace(id="user-1")
+        )
+        return await call_unwrapped(
+            scheduled_tasks.update_scheduled_task,
+            task_id=task_id,
+            request=SimpleNamespace(),
+            body=body,
+        )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+
+@pytest.mark.asyncio
+async def test_create_interval_task_sets_next_run_from_now():
+    before = datetime.now(UTC)
+    created = await _call_create(
+        _interval_create_request(
+            schedule_spec={"every_seconds": 90},
+            timezone="Asia/Shanghai",
+        )
+    )
+    after = datetime.now(UTC)
+    assert created["schedule_type"] == "interval"
+    assert created["schedule_spec"] == {"every_seconds": 90}
+    assert created["timezone"] == "Asia/Shanghai"
+    assert before + timedelta(seconds=90) <= created["next_run_at"] <= after + timedelta(seconds=90)
+    assert created["next_run_at"].utcoffset() == timedelta(0)
+
+
+@pytest.mark.asyncio
+async def test_create_interval_task_rejects_below_minimum_delay():
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_create(_interval_create_request(schedule_spec={"every_seconds": 30}))
+    assert exc_info.value.status_code == 422
+    assert "at least 60 seconds" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_create_interval_task_rejects_above_maximum():
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_create(
+            _interval_create_request(schedule_spec={"every_seconds": 30 * 24 * 3600 + 1})
+        )
+    assert exc_info.value.status_code == 422
+    assert "at most" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_create_interval_task_rejects_missing_every_seconds():
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_create(_interval_create_request(schedule_spec={}))
+    assert exc_info.value.status_code == 422
+    assert "every_seconds" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_update_interval_task_recomputes_next_run():
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-interval",
+        user_id="user-1",
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id="lead_agent",
+        title="Interval",
+        prompt="p",
+        schedule_type="interval",
+        schedule_spec={"every_seconds": 90},
+        timezone="UTC",
+        next_run_at=datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
+    )
+    before = datetime.now(UTC)
+    updated = await _call_update(
+        repo,
+        task["id"],
+        scheduled_tasks.ScheduledTaskUpdateRequest(schedule_spec={"every_seconds": 120}),
+    )
+    after = datetime.now(UTC)
+    assert updated["schedule_spec"] == {"every_seconds": 120}
+    assert before + timedelta(seconds=120) <= updated["next_run_at"] <= after + timedelta(seconds=120)
+
+
+@pytest.mark.asyncio
+async def test_update_interval_task_rejects_below_minimum_delay():
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-interval",
+        user_id="user-1",
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id="lead_agent",
+        title="Interval",
+        prompt="p",
+        schedule_type="interval",
+        schedule_spec={"every_seconds": 90},
+        timezone="UTC",
+        next_run_at=datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_update(
+            repo,
+            task["id"],
+            scheduled_tasks.ScheduledTaskUpdateRequest(schedule_spec={"every_seconds": 30}),
+        )
+    assert exc_info.value.status_code == 422
+    assert "at least 60 seconds" in exc_info.value.detail

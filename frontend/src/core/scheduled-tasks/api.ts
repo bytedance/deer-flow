@@ -54,7 +54,7 @@ export type ScheduledTaskPayload = {
   thread_id?: string | null;
   title: string;
   prompt: string;
-  schedule_type: "once" | "cron";
+  schedule_type: "once" | "cron" | "interval";
   schedule_spec: Record<string, unknown>;
   timezone: string;
 };

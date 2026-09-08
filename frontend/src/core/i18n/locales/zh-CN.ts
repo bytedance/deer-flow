@@ -372,6 +372,7 @@ export const zhCN: Translations = {
     scheduleType: {
       cron: "重复",
       once: "单次",
+      interval: "间隔",
     },
     preset: {
       label: "重复方式",
@@ -390,6 +391,9 @@ export const zhCN: Translations = {
       cronPlaceholder: "0 9 * * *",
       runAt: "运行时间",
       timezone: "时区",
+      intervalAmount: "每",
+      intervalUnitMinutes: "分钟",
+      intervalUnitHours: "小时",
     },
     weekdays: {
       mon: "周一",
@@ -426,6 +430,7 @@ export const zhCN: Translations = {
       allTypes: "全部类型",
       cron: "定时",
       once: "单次",
+      interval: "间隔",
     },
     detail: {
       contextMode: "上下文模式",

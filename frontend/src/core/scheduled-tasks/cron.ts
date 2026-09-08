@@ -19,14 +19,55 @@ export type CronParts = {
   raw?: string;
 };
 
+export type ScheduleType = "once" | "cron" | "interval";
+
+export type IntervalUnit = "minutes" | "hours";
+
+export const MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60;
+
 export type ScheduleFormState = {
-  scheduleType: "once" | "cron";
+  scheduleType: ScheduleType;
   preset?: CronPreset;
   parts?: CronParts;
   /** datetime-local wall value "YYYY-MM-DDTHH:mm", interpreted in `timezone`. */
   runAtLocal?: string;
+  intervalAmount?: number;
+  intervalUnit?: IntervalUnit;
   timezone: string;
 };
+
+export function intervalToSeconds(
+  amount: number,
+  unit: IntervalUnit,
+): number {
+  if (!Number.isInteger(amount) || amount < 1) {
+    throw new Error("interval amount must be a positive integer");
+  }
+  return unit === "hours" ? amount * 3600 : amount * 60;
+}
+
+export function secondsToInterval(everySeconds: number): {
+  amount: number;
+  unit: IntervalUnit;
+} {
+  if (
+    Number.isInteger(everySeconds) &&
+    everySeconds >= 3600 &&
+    everySeconds % 3600 === 0
+  ) {
+    return { amount: everySeconds / 3600, unit: "hours" };
+  }
+  return {
+    amount: Math.max(1, Math.round(everySeconds / 60)),
+    unit: "minutes",
+  };
+}
+
+export function maxIntervalAmount(unit: IntervalUnit): number {
+  return unit === "hours"
+    ? MAX_INTERVAL_SECONDS / 3600
+    : MAX_INTERVAL_SECONDS / 60;
+}
 
 export type ScheduleLocale = "en" | "zh";
 
@@ -208,6 +249,18 @@ export function describeSchedule(
   if (state.scheduleType === "once") {
     const runAt = (state.runAtLocal ?? "").replace("T", " ");
     return zh ? `单次 ${runAt} (${tz})` : `Once at ${runAt} (${tz})`;
+  }
+
+  if (state.scheduleType === "interval") {
+    const amount = state.intervalAmount ?? 1;
+    const unit = state.intervalUnit ?? "minutes";
+    if (zh) {
+      return unit === "hours" ? `每 ${amount} 小时` : `每 ${amount} 分钟`;
+    }
+    if (unit === "hours") {
+      return amount === 1 ? "Every hour" : `Every ${amount} hours`;
+    }
+    return amount === 1 ? "Every minute" : `Every ${amount} minutes`;
   }
 
   const parts = state.parts ?? {};

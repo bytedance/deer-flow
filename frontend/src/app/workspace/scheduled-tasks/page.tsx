@@ -107,7 +107,9 @@ export default function ScheduledTasksPage() {
   const [statusFilter, setStatusFilter] = useState<
     "all" | "enabled" | "paused" | "running" | "completed" | "failed"
   >("all");
-  const [typeFilter, setTypeFilter] = useState<"all" | "once" | "cron">("all");
+  const [typeFilter, setTypeFilter] = useState<
+    "all" | "once" | "cron" | "interval"
+  >("all");
   const [formError, setFormError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
@@ -140,7 +142,9 @@ export default function ScheduledTasksPage() {
       ? st.scheduleType.cron
       : v === "once"
         ? st.scheduleType.once
-        : v;
+        : v === "interval"
+          ? st.scheduleType.interval
+          : v;
   const statusLabel = (v: string) =>
     (st.status as Record<string, string>)[v] ?? v;
   const contextModeLabel = (v: string) =>
@@ -431,6 +435,13 @@ export default function ScheduledTasksPage() {
               onClick={() => setTypeFilter("once")}
             >
               {st.filters.once}
+            </Button>
+            <Button
+              variant={typeFilter === "interval" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setTypeFilter("interval")}
+            >
+              {st.filters.interval}
             </Button>
           </div>
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">

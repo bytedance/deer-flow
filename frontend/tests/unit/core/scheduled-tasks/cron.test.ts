@@ -2,7 +2,9 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   describeSchedule,
+  intervalToSeconds,
   parseCron,
+  secondsToInterval,
   serializeCron,
   utcToZonedLocalInput,
   zonedLocalToUtcIso,
@@ -258,6 +260,58 @@ describe("describeSchedule", () => {
         "en",
       ),
     ).toBe("Custom: */5 * * * * (UTC)");
+  });
+
+  test("interval minutes en/zh omit timezone", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "minutes",
+          timezone: "Asia/Shanghai",
+        },
+        "en",
+      ),
+    ).toBe("Every 90 minutes");
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "minutes",
+          timezone: "Asia/Shanghai",
+        },
+        "zh",
+      ),
+    ).toBe("每 90 分钟");
+  });
+
+  test("interval singular hour en", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 1,
+          intervalUnit: "hours",
+          timezone: "UTC",
+        },
+        "en",
+      ),
+    ).toBe("Every hour");
+  });
+});
+
+describe("interval conversion", () => {
+  test("minutes and hours convert to seconds", () => {
+    expect(intervalToSeconds(90, "minutes")).toBe(5400);
+    expect(intervalToSeconds(2, "hours")).toBe(7200);
+  });
+
+  test("whole hours stay in hours; otherwise minutes", () => {
+    expect(secondsToInterval(7200)).toEqual({ amount: 2, unit: "hours" });
+    expect(secondsToInterval(5400)).toEqual({ amount: 90, unit: "minutes" });
+    expect(secondsToInterval(90)).toEqual({ amount: 2, unit: "minutes" });
   });
 });
 

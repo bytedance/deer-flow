@@ -76,6 +76,11 @@
 
 ### 新增
 
+#### 调度器
+- **调度器：** 定时任务在 `once` 和 `cron` 之外新增 `interval`
+  （`schedule_spec.every_seconds`）。节奏为 UTC 的 `now + N`，不补跑错过的节拍。
+  N 不小于 `scheduler.min_once_delay_seconds`（默认 60 秒），不大于 30 天。
+
 #### 认证
 - **认证：** 新增用于程序化 API 访问的个人访问令牌（PAT）：
   `POST/GET/DELETE /api/v1/auth/pats` 用于管理令牌（仅展示一次，以 SHA-256

@@ -69,7 +69,7 @@ export type MockAPIOptions = {
     last_thread_id?: string | null;
     title: string;
     prompt: string;
-    schedule_type: "once" | "cron";
+    schedule_type: "once" | "cron" | "interval";
     schedule_spec: Record<string, unknown>;
     timezone: string;
     status:
@@ -482,7 +482,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         last_thread_id: null,
         title,
         prompt,
-        schedule_type: payload.schedule_type as "once" | "cron",
+        schedule_type: payload.schedule_type as "once" | "cron" | "interval",
         schedule_spec: (payload.schedule_spec as Record<string, unknown>) ?? {},
         timezone,
         status: "enabled" as const,
