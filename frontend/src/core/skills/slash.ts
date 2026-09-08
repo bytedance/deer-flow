@@ -12,6 +12,7 @@ import type { Skill } from "./type";
 export const RESERVED_SLASH_SKILL_NAMES = new Set([
   "agent",
   "bootstrap",
+  "context",
   "goal",
   "help",
   "memory",
