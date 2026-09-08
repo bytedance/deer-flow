@@ -748,11 +748,15 @@ async def test_workspace_changes_route_forwards_include_files_flag():
     assert calls["event_types"] == ["workspace_changes"]
 
 
-def test_normalize_symlink_target_strips_extended_length_drive_prefix():
+def test_normalize_symlink_target_strips_extended_length_drive_prefix(monkeypatch):
+    # The strip only applies on Windows hosts, so force the platform here;
+    # this test runs on the ubuntu-only CI too.
+    monkeypatch.setattr(os, "name", "nt")
     assert _normalize_symlink_target(r"\\?\C:\Users\u1\target.txt") == r"C:\Users\u1\target.txt"
 
 
-def test_normalize_symlink_target_strips_extended_length_unc_prefix():
+def test_normalize_symlink_target_strips_extended_length_unc_prefix(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
     assert _normalize_symlink_target(r"\\?\UNC\server\share\a.txt") == r"\\server\share\a.txt"
 
 
