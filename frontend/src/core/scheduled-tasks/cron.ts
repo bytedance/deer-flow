@@ -69,6 +69,20 @@ export function maxIntervalAmount(unit: IntervalUnit): number {
     : MAX_INTERVAL_SECONDS / 60;
 }
 
+export function hasScheduleSpec(spec: {
+  cron?: unknown;
+  run_at?: unknown;
+  every_seconds?: unknown;
+}): boolean {
+  if (typeof spec.cron === "string" && spec.cron.trim()) {
+    return true;
+  }
+  if (typeof spec.run_at === "string" && spec.run_at.trim()) {
+    return true;
+  }
+  return typeof spec.every_seconds === "number" && spec.every_seconds > 0;
+}
+
 export type ScheduleLocale = "en" | "zh";
 
 export const WEEKDAYS: Weekday[] = [

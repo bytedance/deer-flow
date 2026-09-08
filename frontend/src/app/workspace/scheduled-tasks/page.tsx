@@ -26,6 +26,7 @@ import {
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
 import { useI18n } from "@/core/i18n/hooks";
+import { hasScheduleSpec } from "@/core/scheduled-tasks/cron";
 import {
   useCreateScheduledTask,
   useUpdateScheduledTask,
@@ -215,12 +216,17 @@ export default function ScheduledTasksPage() {
     const spec = selectedTask.schedule_spec as {
       cron?: string;
       run_at?: string;
+      every_seconds?: number;
     };
     setEditSchedule({
       schedule_type: selectedTask.schedule_type,
       schedule_spec: {
         cron: typeof spec.cron === "string" ? spec.cron : undefined,
         run_at: typeof spec.run_at === "string" ? spec.run_at : undefined,
+        every_seconds:
+          typeof spec.every_seconds === "number"
+            ? spec.every_seconds
+            : undefined,
       },
       timezone: selectedTask.timezone || "UTC",
     });
@@ -313,9 +319,7 @@ export default function ScheduledTasksPage() {
             )}
             <Button
               onClick={() => {
-                const hasSchedule =
-                  Boolean(createSchedule.schedule_spec.cron) ||
-                  Boolean(createSchedule.schedule_spec.run_at);
+                const hasSchedule = hasScheduleSpec(createSchedule.schedule_spec);
                 if (
                   !title ||
                   !prompt ||
@@ -357,8 +361,7 @@ export default function ScheduledTasksPage() {
               disabled={
                 !title ||
                 !prompt ||
-                (!createSchedule.schedule_spec.cron &&
-                  !createSchedule.schedule_spec.run_at) ||
+                !hasScheduleSpec(createSchedule.schedule_spec) ||
                 (contextMode === "reuse_thread" && !targetThreadId) ||
                 createTask.isPending
               }

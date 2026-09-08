@@ -220,16 +220,30 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
                     )
                 schedule_spec["cron"] = normalize_cron_expression(raw_cron)
             if existing["schedule_type"] == "interval":
-                _validate_interval_seconds(
+                every_seconds = _validate_interval_seconds(
                     schedule_spec,
                     config.scheduler.min_once_delay_seconds,
                 )
-            next_run_at = compute_next_run_at(
-                existing["schedule_type"],
-                schedule_spec,
-                timezone,
-                now=datetime.now(UTC),
-            )
+                try:
+                    previous_seconds = parse_interval_seconds(dict(existing["schedule_spec"]))
+                except ValueError:
+                    previous_seconds = None
+                if previous_seconds == every_seconds and existing.get("next_run_at") is not None:
+                    next_run_at = existing["next_run_at"]
+                else:
+                    next_run_at = compute_next_run_at(
+                        existing["schedule_type"],
+                        schedule_spec,
+                        timezone,
+                        now=datetime.now(UTC),
+                    )
+            else:
+                next_run_at = compute_next_run_at(
+                    existing["schedule_type"],
+                    schedule_spec,
+                    timezone,
+                    now=datetime.now(UTC),
+                )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if existing["schedule_type"] == "once" and next_run_at is None:

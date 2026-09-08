@@ -1095,3 +1095,51 @@ async def test_update_interval_task_rejects_below_minimum_delay():
         )
     assert exc_info.value.status_code == 422
     assert "at least 60 seconds" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_update_interval_task_keeps_next_run_when_spec_unchanged():
+    repo = _Repo()
+    original_next = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    task = await repo.create(
+        task_id="task-interval",
+        user_id="user-1",
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id="lead_agent",
+        title="Interval",
+        prompt="p",
+        schedule_type="interval",
+        schedule_spec={"every_seconds": 90},
+        timezone="UTC",
+        next_run_at=original_next,
+    )
+    updated = await _call_update(
+        repo,
+        task["id"],
+        scheduled_tasks.ScheduledTaskUpdateRequest(
+            schedule_spec={"every_seconds": 90},
+            timezone="Asia/Shanghai",
+        ),
+    )
+    assert updated["timezone"] == "Asia/Shanghai"
+    assert updated["next_run_at"] == original_next
+
+
+@pytest.mark.asyncio
+async def test_create_interval_task_rejects_non_integer_every_seconds():
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_create(_interval_create_request(schedule_spec={"every_seconds": True}))
+    assert exc_info.value.status_code == 422
+    assert "every_seconds" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_create_interval_task_uses_configured_minimum_delay():
+    with pytest.raises(HTTPException) as exc_info:
+        await _call_create(
+            _interval_create_request(schedule_spec={"every_seconds": 90}),
+            config=_Config(min_once_delay_seconds=120),
+        )
+    assert exc_info.value.status_code == 422
+    assert "at least 120 seconds" in exc_info.value.detail

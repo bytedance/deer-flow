@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   describeSchedule,
+  hasScheduleSpec,
   intervalToSeconds,
   parseCron,
   secondsToInterval,
@@ -312,6 +313,14 @@ describe("interval conversion", () => {
     expect(secondsToInterval(7200)).toEqual({ amount: 2, unit: "hours" });
     expect(secondsToInterval(5400)).toEqual({ amount: 90, unit: "minutes" });
     expect(secondsToInterval(90)).toEqual({ amount: 2, unit: "minutes" });
+  });
+
+  test("hasScheduleSpec accepts interval every_seconds", () => {
+    expect(hasScheduleSpec({ every_seconds: 90 })).toBe(true);
+    expect(hasScheduleSpec({ cron: "0 9 * * *" })).toBe(true);
+    expect(hasScheduleSpec({ run_at: "2026-07-02T01:00:00+00:00" })).toBe(true);
+    expect(hasScheduleSpec({})).toBe(false);
+    expect(hasScheduleSpec({ every_seconds: 0 })).toBe(false);
   });
 });
 
