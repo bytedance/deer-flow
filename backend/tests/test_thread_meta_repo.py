@@ -61,6 +61,35 @@ class TestThreadMetaRepository:
         assert record["display_name"] == "original"
 
     @pytest.mark.anyio
+    async def test_claim_unowned_only_updates_null_owner(self, repo):
+        legacy = await repo.create("legacy", user_id=None)
+        await repo.create("owned", user_id="original-owner")
+
+        assert await repo.claim_unowned("missing", "owner-a") is False
+        assert await repo.claim_unowned("owned", "owner-a") is False
+        assert await repo.claim_unowned("legacy", "owner-a") is True
+        assert await repo.claim_unowned("legacy", "owner-b") is False
+
+        owned = await repo.get("owned", user_id=None)
+        claimed = await repo.get("legacy", user_id=None)
+        assert owned["user_id"] == "original-owner"
+        assert claimed["user_id"] == "owner-a"
+        assert claimed["updated_at"] == legacy["updated_at"]
+
+    @pytest.mark.anyio
+    async def test_concurrent_claim_unowned_has_exactly_one_winner(self, repo):
+        await repo.create("legacy-race", user_id=None)
+
+        outcomes = await asyncio.gather(
+            repo.claim_unowned("legacy-race", "owner-a"),
+            repo.claim_unowned("legacy-race", "owner-b"),
+        )
+
+        assert sorted(outcomes) == [False, True]
+        record = await repo.get("legacy-race", user_id=None)
+        assert record["user_id"] in {"owner-a", "owner-b"}
+
+    @pytest.mark.anyio
     async def test_update_display_name_can_remove_stale_metadata_atomically(self, repo):
         await repo.create("t1", display_name="Original (2)", metadata={"branch_title_sequence": 2, "keep": True})
 
@@ -601,6 +630,7 @@ class TestThreadMetaRepository:
         p = await projects.create(name="P", user_id="u1")
         record = await repo.create("t1", user_id="u1", project_id=p["id"])
         assert record["metadata"]["deerflow_project_id"] == p["id"]
+        assert len(record["incarnation"]) == 32
 
         with pytest.raises(ProjectNotAssignableError):
             await repo.create("t2", user_id="u1", project_id="missing")

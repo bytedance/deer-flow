@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import case, select, text, update
+from sqlalchemy import case, column, select, table, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -93,6 +93,24 @@ class ThreadMetaRepository(ThreadMetaStore):
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
+
+    async def claim_unowned(self, thread_id: str, owner: str) -> bool:
+        claim_target = table(
+            ThreadMetaRow.__tablename__,
+            column(ThreadMetaRow.thread_id.key),
+            column(ThreadMetaRow.user_id.key),
+        )
+        async with self._sf() as session:
+            result = await session.execute(
+                update(claim_target)
+                .where(
+                    claim_target.c.thread_id == thread_id,
+                    claim_target.c.user_id.is_(None),
+                )
+                .values(user_id=owner)
+            )
+            await session.commit()
+            return result.rowcount > 0
 
     async def set_project(
         self,

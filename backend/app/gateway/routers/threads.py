@@ -46,7 +46,7 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
-from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY
+from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
@@ -788,11 +788,8 @@ async def _resolve_existing_thread(
     """
     existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     if existing_record is None and thread_owner_user_id:
-        unscoped_record = await thread_store.get(thread_id, user_id=None)
-        if unscoped_record is not None:
-            if unscoped_record.get("user_id") != thread_owner_user_id:
-                await thread_store.update_owner(thread_id, thread_owner_user_id, user_id=None)
-            existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
+        await thread_store.claim_unowned(thread_id, thread_owner_user_id)
+        existing_record = await thread_store.get(thread_id, **thread_owner_kwargs)
     return existing_record
 
 
@@ -846,6 +843,9 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         # Fail closed: missing, foreign, or archived projects are
         # indistinguishable at the API surface.
         raise HTTPException(status_code=404, detail="Project not found") from None
+    except ThreadOwnershipConflictError:
+        # Do not reveal that a caller-chosen id belongs to another user.
+        raise HTTPException(status_code=404, detail="Thread not found") from None
     except IntegrityError:
         # The idempotency read above and this insert are not atomic: a
         # concurrent request for the same thread_id can commit in between, so

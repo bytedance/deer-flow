@@ -72,11 +72,11 @@ best-effort; multi-instance deployments should use Postgres.
 * **Idempotent revisions -- retry fallback.** Column revisions use the helpers
   in ``migrations/_helpers.py`` so repeated post-baseline changes, manual
   ALTERs, or retries after SQLite lock contention do not duplicate work.
-  During the 0018-to-0019 compatibility window, an old SQLite process also
+  During the compatibility window, a rollback-floor SQLite process also
   re-reads ``alembic_version`` after an Alembic ``CommandError``. It recovers
-  only when another process advanced the file to the explicitly reviewed 0019
-  and 0019 is still absent from the local migration tree; every other migration
-  failure remains fatal.
+  only when another process advanced the file to the explicitly reviewed
+  incarnation revision and that revision is absent from the rollback binary's
+  local migration tree; every other migration failure remains fatal.
 
 ``alembic upgrade head`` on a DB already at head is a no-op by alembic's own
 semantics, so the second-N-th actor simply observes head and exits.
@@ -109,22 +109,66 @@ _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _HEAD_REVISION: str | None = None
 _KNOWN_REVISIONS: frozenset[str] | None = None
 
-# One additive revision may be present when an older Gateway starts during the
-# thread-incarnation rollout. This allowlist was reviewed only for revision
+# One additive revision may be present when the 0020 rollback-floor Gateway
+# starts during the thread-incarnation rollout. This allowlist was reviewed
+# only for revision
 # ``0019_thread_incarnations`` adding nullable VARCHAR(32) columns
 # ``threads_meta.incarnation`` and ``mcp_tasks.thread_incarnation`` without a
-# server default, table, index, constraint, or data backfill. The owning 0019
-# change must cross-pin this revision id and schema shape in tests. Amending
-# that DDL requires re-auditing old-repository reads and writes before this
-# exception remains valid. The exception also requires every current ORM table
-# and column: the original 0018 + incarnation columns shape lacks projects and
-# is no longer compatible with this build. Both skip paths validate that floor.
-# Note: this tree's own chain already carries ``0019_projects`` /
-# ``0020_threads_meta_project_id`` off ``0018_oauth_identity_pg_partial``; the
-# ``0019_`` numeric prefix is intentionally reused. When the owning rollout
-# revision merges it must re-parent onto the current head (see
-# ``migrations/AGENTS.md``) so alembic never sees two heads off 0018.
+# server default, table, index, constraint, or data backfill. Tests cross-pin
+# this revision id and schema shape; amending that DDL requires re-auditing old
+# repository reads and writes before this exception remains valid. The
+# exception also requires every rollback-floor ORM table and column.
+#
+# The revision id was deployed briefly as an out-of-tree child of 0018 before
+# becoming the in-tree successor to ``0020_threads_meta_project_id``. Current
+# and future binaries that know this reused stamp validate the fixed
+# canonical-0019 floor before migrating onward. This code also uses that fixed
+# floor when tests remove 0019 from the local revision set to exercise the
+# unknown-revision path. The published 0020 rollback binary instead validates
+# its own ORM floor before skipping the revision.
 _FORWARD_COMPATIBLE_REVISION = "0019_thread_incarnations"
+
+# Fixed table/column floor produced by the canonical in-tree 0019 revision.
+# Never derive this from Base.metadata: future ORM fields belong to later
+# migrations and must not be required before those migrations run.
+_CANONICAL_0019_SCHEMA_FLOOR: dict[str, frozenset[str]] = {
+    "agents": frozenset("config created_at id name soul updated_at user_id".split()),
+    "channel_connections": frozenset(
+        "bot_user_id capabilities_json created_at external_account_id external_account_name id last_error_at last_seen_at metadata_json owner_user_id provider scopes_json status updated_at workspace_id workspace_name".split()
+    ),
+    "channel_conversations": frozenset("connection_id created_at external_conversation_id external_topic_id id owner_user_id provider thread_id updated_at".split()),
+    "channel_credentials": frozenset("connection_id encrypted_access_token encrypted_extra_json encrypted_refresh_token expires_at refresh_expires_at token_type updated_at version".split()),
+    "channel_oauth_states": frozenset("code_verifier_encrypted consumed_at created_at expires_at metadata_json nonce_hash owner_user_id provider redirect_after requested_scopes_json state_hash".split()),
+    "feedback": frozenset("comment created_at feedback_id message_id rating run_id thread_id user_id".split()),
+    "managed_subagents": frozenset("created_at definition id name updated_at".split()),
+    "mcp_tasks": frozenset(
+        """cancel_attempt_count cancel_requested_at completed_at consecutive_poll_error_count created_at dispatch_attempt dispatch_event dispatch_version driver_data driver_name error event_fingerprint event_version id input_required
+        last_cancel_error last_poll_error last_polled_at lease_expires_at lease_owner next_cancel_at next_notification_at next_poll_at notification_attempt_count notification_error notification_lease_expires_at
+        notification_lease_owner notification_run_id notification_status notified_version poll_attempt_count remote_task_id result result_artifact result_preview result_truncated run_id server_name status task_name
+        thread_id thread_incarnation tool_call_id updated_at user_id""".split()
+    ),
+    "personal_access_tokens": frozenset("created_at expires_at id last_used_at name revoked_at scopes token_digest user_id".split()),
+    "projects": frozenset("created_at id instructions name presentation status updated_at user_id".split()),
+    "run_events": frozenset("category content created_at event_metadata event_type id run_id seq thread_id user_id".split()),
+    "runs": frozenset(
+        """assistant_id cancel_action cancel_requested_at created_at error first_human_message follow_up_to_run_id idempotency_key kwargs_json last_ai_message lead_agent_tokens lease_expires_at llm_call_count
+        message_count metadata_json middleware_tokens model_name multitask_strategy operation_kind owner_worker_id run_id status stop_reason subagent_tokens thread_id token_usage_by_model total_input_tokens
+        total_output_tokens total_tokens updated_at user_id""".split()
+    ),
+    "scheduled_task_runs": frozenset("attempt_count created_at error finished_at id lease_expires_at lease_owner run_id scheduled_for started_at status task_id thread_id trigger".split()),
+    "scheduled_tasks": frozenset(
+        """assistant_id context_mode created_at id last_error last_run_at last_run_id last_thread_id lease_expires_at lease_owner next_run_at overlap_policy prompt run_count schedule_spec schedule_type
+        status thread_id timezone title updated_at user_id""".split()
+    ),
+    "subagent_batch_items": frozenset(
+        """acceptance_criteria acceptance_verdict attempt batch_id cancel_requested_at completed_at created_at error id item_key lease_expires_at lease_owner model_name position prompt result result_preview
+        result_truncated started_at status stop_reason token_usage updated_at""".split()
+    ),
+    "subagent_batches": frozenset("completed_at created_at execution_spec id max_attempts max_live_items max_running_items run_id status subagent_type submission_key thread_id title tool_call_id total_items updated_at user_id".split()),
+    "threads_meta": frozenset("assistant_id created_at display_name incarnation metadata_json project_id status thread_id updated_at user_id".split()),
+    "users": frozenset("created_at email id needs_setup oauth_id oauth_provider password_hash system_role token_version".split()),
+    "webhook_deliveries": frozenset("channel chat_id first_seen message_id workspace_id".split()),
+}
 
 # Baseline (stamp target for legacy DBs). Pinned here so the bootstrap layer
 # fails loudly if the baseline revision is ever renamed without updating the
@@ -325,25 +369,22 @@ async def _read_database_revision(conn: Any) -> str:
 
 
 def _validate_forward_schema(sync_conn: Any) -> None:
-    """Require the local repository schema before skipping unknown migrations.
+    """Require the fixed canonical-0019 schema before acting on its stamp.
 
     This is a presence check, not a general schema compatibility proof. The
-    allowlisted additive DDL still needs its separate read/write audit. Derive
-    the local floor from ORM metadata so a new mapped column cannot silently
-    invalidate the existing exception again.
+    allowlisted additive DDL still needs its separate read/write audit. The
+    floor remains independent of current ORM metadata so future revisions can
+    add their own schema after this validation succeeds.
     """
-    import deerflow.persistence.models  # noqa: F401
-    from deerflow.persistence.base import Base
-
     inspector = sa_inspect(sync_conn)
     tables = set(inspector.get_table_names())
     missing = []
-    for name, table in sorted(Base.metadata.tables.items()):
+    for name, required_columns in sorted(_CANONICAL_0019_SCHEMA_FLOOR.items()):
         if name not in tables:
             missing.append(name)
             continue
         columns = {column["name"] for column in inspector.get_columns(name)}
-        missing.extend(f"{name}.{column.name}" for column in table.columns if column.name not in columns)
+        missing.extend(f"{name}.{column_name}" for column_name in sorted(required_columns - columns))
     if missing:
         raise RuntimeError(
             f"bootstrap: revision {_FORWARD_COMPATIBLE_REVISION!r} is missing required local schema: {', '.join(missing)}; refusing to start. See docs/database-forward-revision-recovery.md for the audited offline migration path."
@@ -612,6 +653,13 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
             await asyncio.to_thread(_upgrade, cfg, "head")
 
         elif decision == "versioned":
+            # The same revision id once named a different out-of-tree schema.
+            # Validate canonical 0019 before upgrading a known revision or
+            # accepting it through the unknown-revision path that current
+            # tests use to simulate old 0020.
+            if database_revision == _FORWARD_COMPATIBLE_REVISION:
+                async with engine.connect() as conn:
+                    await conn.run_sync(_validate_forward_schema)
             if database_revision in known_revisions:
                 logger.info(
                     "bootstrap: branch=versioned revision=%s -> upgrade head (%s)",
@@ -638,8 +686,6 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
                         current_revision,
                     )
             elif database_revision == _FORWARD_COMPATIBLE_REVISION:
-                async with engine.connect() as conn:
-                    await conn.run_sync(_validate_forward_schema)
                 logger.warning(
                     "bootstrap: database revision %s is explicitly forward-compatible with local head %s and has its required tables and columns; skipping migration",
                     database_revision,

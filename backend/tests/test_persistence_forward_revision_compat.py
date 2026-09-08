@@ -20,6 +20,7 @@ import deerflow.persistence.models  # noqa: F401
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence import bootstrap as bootstrap_mod
 from deerflow.persistence.bootstrap import (
+    _CANONICAL_0019_SCHEMA_FLOOR,
     _FORWARD_COMPATIBLE_REVISION,
     _get_alembic_config,
     _upgrade,
@@ -67,6 +68,12 @@ async def _seed_rollback_head(engine) -> None:
     assert await _database_revision(engine) == ROLLBACK_HEAD
 
 
+async def _seed_incarnation_parent(engine) -> None:
+    cfg = _get_alembic_config(engine)
+    await asyncio.to_thread(_upgrade, cfg, INCARNATION_PARENT)
+    assert await _database_revision(engine) == INCARNATION_PARENT
+
+
 async def _add_forward_columns(engine) -> None:
     async with engine.begin() as conn:
         await conn.execute(sa.text("ALTER TABLE threads_meta ADD COLUMN incarnation VARCHAR(32)"))
@@ -88,9 +95,26 @@ def _simulate_rollback_binary(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def _seed_original_forward_schema(engine) -> None:
     # The rollout predates projects: seeding today's head masks missing columns.
-    await asyncio.to_thread(_upgrade, _get_alembic_config(engine), "0018_oauth_identity_pg_partial")
+    await asyncio.to_thread(_upgrade, _get_alembic_config(engine), ORIGINAL_INCARNATION_PARENT)
     await _add_forward_columns(engine)
     await _set_database_revision(engine, _FORWARD_COMPATIBLE_REVISION)
+
+
+@pytest.mark.asyncio
+async def test_canonical_0019_floor_matches_migration_schema(tmp_path: Path) -> None:
+    engine = create_async_engine(_url(tmp_path, "canonical-floor.db"))
+    try:
+        await asyncio.to_thread(_upgrade, _get_alembic_config(engine), CURRENT_HEAD)
+        async with engine.connect() as conn:
+
+            def reflect(sync_conn):
+                inspector = sa.inspect(sync_conn)
+                return {table: frozenset(column["name"] for column in inspector.get_columns(table)) for table in inspector.get_table_names() if table != "alembic_version"}
+
+            reflected = await conn.run_sync(reflect)
+        assert reflected == _CANONICAL_0019_SCHEMA_FLOOR
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -100,7 +124,8 @@ async def test_original_forward_schema_fails_closed(tmp_path: Path, monkeypatch:
     try:
         await _seed_original_forward_schema(engine)
         if concurrent:
-            await _set_database_revision(engine, "0018_oauth_identity_pg_partial")
+            await _set_database_revision(engine, ORIGINAL_INCARNATION_PARENT)
+            _simulate_rollback_binary(monkeypatch)
 
             def concurrent_upgrade(_cfg, _revision):
                 asyncio.run(_set_database_revision(engine, _FORWARD_COMPATIBLE_REVISION))
@@ -126,12 +151,16 @@ async def test_original_forward_schema_fails_closed(tmp_path: Path, monkeypatch:
         ("DROP TABLE projects", "projects"),
         ("ALTER TABLE projects DROP COLUMN instructions", "projects.instructions"),
         ("ALTER TABLE threads_meta DROP COLUMN project_id", "threads_meta.project_id"),
+        ("ALTER TABLE subagent_batch_items DROP COLUMN acceptance_criteria", "subagent_batch_items.acceptance_criteria"),
+        ("ALTER TABLE subagent_batch_items DROP COLUMN acceptance_verdict", "subagent_batch_items.acceptance_verdict"),
+        ("ALTER TABLE threads_meta DROP COLUMN incarnation", "threads_meta.incarnation"),
+        ("ALTER TABLE mcp_tasks DROP COLUMN thread_incarnation", "mcp_tasks.thread_incarnation"),
     ],
 )
-async def test_forward_revision_rejects_partial_project_schema(tmp_path: Path, ddl: str, missing: str) -> None:
+async def test_current_incarnation_revision_rejects_incomplete_schema(tmp_path: Path, ddl: str, missing: str) -> None:
     engine = create_async_engine(_url(tmp_path, "partial-projects.db"))
     try:
-        await _seed_rollback_head(engine)
+        await _seed_incarnation_parent(engine)
         await _add_forward_columns(engine)
         async with engine.begin() as conn:
             if "DROP COLUMN project_id" in ddl:
@@ -159,7 +188,7 @@ async def test_audited_original_forward_schema_can_upgrade_preserving_incarnatio
 
         # Documented offline operator recovery, only after verifying the exact
         # 0018 + two nullable columns shape. Bootstrap never re-stamps an unknown DB.
-        await asyncio.to_thread(alembic_command.stamp, _get_alembic_config(engine), "0018_oauth_identity_pg_partial", purge=True)
+        await asyncio.to_thread(alembic_command.stamp, _get_alembic_config(engine), ORIGINAL_INCARNATION_PARENT, purge=True)
         await bootstrap_schema(engine, backend="sqlite")
 
         assert await _database_revision(engine) == CURRENT_HEAD
@@ -170,6 +199,67 @@ async def test_audited_original_forward_schema_can_upgrade_preserving_incarnatio
             assert (await conn.execute(sa.text("SELECT incarnation FROM threads_meta WHERE thread_id = 'existing'"))).scalar_one() == "a" * 32
             columns = await conn.run_sync(lambda sync: sa.inspect(sync).get_columns("mcp_tasks"))
         assert "thread_incarnation" in {column["name"] for column in columns}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_known_canonical_0019_validates_fixed_floor_then_upgrades_to_future_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.persistence.base import Base
+
+    engine = create_async_engine(_url(tmp_path, "future-head.db"))
+    future_table = None
+    calls: list[str] = []
+    try:
+        await _seed_current_head(engine)
+        # Model a future binary whose ORM includes schema that only its next
+        # migration can add. Canonical 0019 must not be rejected for lacking it.
+        future_table = sa.Table("future_after_0019", Base.metadata, sa.Column("id", sa.String(), primary_key=True))
+        current_revisions = bootstrap_mod._get_known_revisions()
+        monkeypatch.setattr(
+            bootstrap_mod,
+            "_get_revision_metadata",
+            lambda: ("0022_future", current_revisions | {"0022_future"}),
+        )
+        monkeypatch.setattr(bootstrap_mod, "_upgrade", lambda _cfg, revision: calls.append(revision))
+
+        await bootstrap_schema(engine, backend="sqlite")
+
+        assert calls == ["head"]
+    finally:
+        if future_table is not None:
+            Base.metadata.remove(future_table)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_known_canonical_0019_rejects_missing_floor_before_future_upgrade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine(_url(tmp_path, "future-head-missing-floor.db"))
+    upgrade_called = False
+    try:
+        await _seed_original_forward_schema(engine)
+        current_revisions = bootstrap_mod._get_known_revisions()
+        monkeypatch.setattr(
+            bootstrap_mod,
+            "_get_revision_metadata",
+            lambda: ("0022_future", current_revisions | {"0022_future"}),
+        )
+
+        def future_upgrade(_cfg, _revision):
+            nonlocal upgrade_called
+            upgrade_called = True
+
+        monkeypatch.setattr(bootstrap_mod, "_upgrade", future_upgrade)
+
+        with pytest.raises(RuntimeError, match="missing required local schema: projects"):
+            await bootstrap_schema(engine, backend="sqlite")
+        assert upgrade_called is False
     finally:
         await engine.dispose()
 
@@ -333,11 +423,70 @@ async def test_multiple_alembic_versions_fail_closed(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_rollback_batch_writer_tolerates_acceptance_columns(tmp_path: Path) -> None:
+    engine = create_async_engine(_url(tmp_path, "batch-repository.db"))
+    try:
+        await _seed_current_head(engine)
+        old_items = sa.table(
+            "subagent_batch_items",
+            sa.column("id"),
+            sa.column("batch_id"),
+            sa.column("item_key"),
+            sa.column("position", sa.Integer()),
+            sa.column("prompt"),
+            sa.column("status"),
+            sa.column("attempt", sa.Integer()),
+            sa.column("result"),
+            sa.column("result_truncated", sa.Boolean()),
+            sa.column("created_at", sa.DateTime(timezone=True)),
+            sa.column("updated_at", sa.DateTime(timezone=True)),
+        )
+        now = datetime.now(UTC)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "INSERT INTO subagent_batches "
+                    "(id, user_id, thread_id, submission_key, title, subagent_type, "
+                    "status, total_items, max_live_items, max_running_items, "
+                    "max_attempts, execution_spec, created_at, updated_at) "
+                    "VALUES ('batch-1', 'user-1', 'thread-1', 'submission-1', "
+                    "'Batch', 'general-purpose', 'queued', 1, 1, 1, 2, '{}', "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
+            await conn.execute(
+                old_items.insert().values(
+                    id="item-1",
+                    batch_id="batch-1",
+                    item_key="item",
+                    position=0,
+                    prompt="Prompt",
+                    status="queued",
+                    attempt=0,
+                    result=None,
+                    result_truncated=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            fetched = (await conn.execute(sa.select(*old_items.c).where(old_items.c.id == "item-1"))).mappings().one()
+            assert "acceptance_criteria" not in fetched
+            assert "acceptance_verdict" not in fetched
+            await conn.execute(old_items.update().where(old_items.c.id == "item-1").values(status="succeeded", result="legacy result", updated_at=now))
+
+        async with engine.connect() as conn:
+            row = (await conn.execute(sa.text("SELECT status, result, acceptance_criteria, acceptance_verdict FROM subagent_batch_items WHERE id = 'item-1'"))).one()
+        assert row == ("succeeded", "legacy result", None, None)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_rollback_thread_writer_tolerates_forward_nullable_column(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "thread-repository.db"))
     try:
         await _seed_current_head(engine)
-        # This is the complete 0018 table shape. Keeping it independent from
+        # This is the complete 0020 table shape. Keeping it independent from
         # the current ORM prevents a future model change from silently making
         # this rollback-writer test aware of the forward column.
         old_threads = sa.table(
@@ -348,6 +497,7 @@ async def test_rollback_thread_writer_tolerates_forward_nullable_column(tmp_path
             sa.column("display_name"),
             sa.column("status"),
             sa.column("metadata_json", sa.JSON()),
+            sa.column("project_id"),
             sa.column("created_at", sa.DateTime(timezone=True)),
             sa.column("updated_at", sa.DateTime(timezone=True)),
         )
@@ -390,12 +540,12 @@ async def test_rollback_thread_writer_tolerates_forward_nullable_column(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_rollback_mcp_task_writer_tolerates_forward_nullable_column(tmp_path: Path) -> None:
+async def test_rollback_shaped_mcp_task_sql_tolerates_forward_nullable_column(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "mcp-repository.db"))
     try:
         await _seed_current_head(engine)
-        # This is the complete 0018 table shape, deliberately excluding only
-        # 0019's thread_incarnation column.
+        # This is the complete 0020 task table shape, deliberately excluding
+        # only the forward thread_incarnation column.
         old_tasks = sa.table(
             "mcp_tasks",
             sa.column("id"),

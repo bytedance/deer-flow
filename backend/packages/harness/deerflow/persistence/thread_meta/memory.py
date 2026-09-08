@@ -13,7 +13,7 @@ from typing import Any
 from langgraph.store.base import BaseStore
 
 from deerflow.persistence.json_compat import json_value_matches
-from deerflow.persistence.thread_meta.base import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, ThreadMetaStore, _ProjectFilterUnset
+from deerflow.persistence.thread_meta.base import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, ThreadMetaStore, ThreadOwnershipConflictError, _ProjectFilterUnset
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso, now_iso
@@ -66,6 +66,8 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         resolved_user_id = resolve_user_id(user_id, method_name="MemoryThreadMetaStore.create")
         async with self._thread_locks.hold(thread_id):
             existing = await self._store.aget(THREADS_NS, thread_id)
+            if existing is not None and resolved_user_id is not None and existing.value.get("user_id") != resolved_user_id:
+                raise ThreadOwnershipConflictError(thread_id)
             now = now_iso()
             record: dict[str, Any] = {
                 "thread_id": thread_id,
@@ -81,6 +83,16 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             }
             await self._store.aput(THREADS_NS, thread_id, record)
             return record
+
+    async def claim_unowned(self, thread_id: str, owner: str) -> bool:
+        async with self._thread_locks.hold(thread_id):
+            item = await self._store.aget(THREADS_NS, thread_id)
+            if item is None or item.value.get("user_id") is not None:
+                return False
+            record = dict(item.value)
+            record["user_id"] = owner
+            await self._store.aput(THREADS_NS, thread_id, record)
+            return True
 
     async def set_project(self, thread_id: str, project_id: str | None, *, user_id: str | None | _AutoSentinel = AUTO) -> bool:
         # Memory mode has no projects backend in Phase 1: membership moves
