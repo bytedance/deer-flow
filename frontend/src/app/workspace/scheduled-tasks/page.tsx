@@ -633,15 +633,19 @@ export default function ScheduledTasksPage() {
                       />
                       <Button
                         size="sm"
-                        onClick={() =>
+                        onClick={() => {
+                          const pinned =
+                            selectedTask.assistant_id ?? DEFAULT_ASSISTANT_ID;
                           updateTask.mutate({
                             title: editTitle,
                             prompt: editPrompt,
-                            assistant_id: editAssistantId,
+                            ...(editAssistantId !== pinned
+                              ? { assistant_id: editAssistantId }
+                              : {}),
                             schedule_spec: editSchedule.schedule_spec,
                             timezone: editSchedule.timezone || "UTC",
-                          })
-                        }
+                          });
+                        }}
                         disabled={updateTask.isPending}
                       >
                         {st.edit.submit}

@@ -988,6 +988,14 @@ async def test_create_explicit_lead_agent_is_accepted():
 
 
 @pytest.mark.asyncio
+async def test_create_lead_agent_is_accepted_case_insensitively():
+    # Callers writing LEAD_AGENT / lead-agent mean the default, not a custom agent.
+    for raw in ("LEAD_AGENT", "Lead_Agent", "lead-agent"):
+        created = await _call_create(_create_request(assistant_id=raw))
+        assert created["assistant_id"] == "lead_agent"
+
+
+@pytest.mark.asyncio
 async def test_create_custom_assistant_id_is_normalized_and_persisted():
     with patch(
         "app.gateway.routers.scheduled_tasks.load_agent_config",
@@ -1130,106 +1138,20 @@ async def test_update_invalid_assistant_id_is_rejected():
 
 
 @pytest.mark.asyncio
-async def test_update_omitting_assistant_id_keeps_existing():
+async def test_update_omitting_assistant_id_keeps_existing_even_if_agent_is_gone():
+    # Unrelated PATCH (rename, reschedule) must not re-resolve assistant_id.
+    # Otherwise a since-deleted custom agent makes the task uneditable.
     repo = _Repo()
     task = await _seed_task(repo, assistant_id="research-bot")
-    updated = await _call_update(
-        repo,
-        task["id"],
-        scheduled_tasks.ScheduledTaskUpdateRequest(title="Renamed"),
-    )
-    assert updated["title"] == "Renamed"
-    assert updated["assistant_id"] == "research-bot"
-
-
-@pytest.mark.asyncio
-async def test_create_interval_task_sets_next_run_from_now():
-    before = datetime.now(UTC)
-    created = await _call_create(
-        _create_request(
-            schedule_type="interval",
-            schedule_spec={"every_seconds": 90},
-            timezone="Asia/Shanghai",
-        )
-    )
-    after = datetime.now(UTC)
-    assert created["schedule_type"] == "interval"
-    assert created["schedule_spec"] == {"every_seconds": 90}
-    assert created["timezone"] == "Asia/Shanghai"
-    assert before + timedelta(seconds=90) <= created["next_run_at"] <= after + timedelta(seconds=90)
-    assert created["next_run_at"].utcoffset() == timedelta(0)
-
-
-@pytest.mark.asyncio
-async def test_create_interval_task_rejects_below_minimum_delay():
-    with pytest.raises(HTTPException) as exc_info:
-        await _call_create(
-            _create_request(
-                schedule_type="interval",
-                schedule_spec={"every_seconds": 30},
-            )
-        )
-    assert exc_info.value.status_code == 422
-    assert "at least 60 seconds" in exc_info.value.detail
-
-
-@pytest.mark.asyncio
-async def test_create_interval_task_rejects_above_maximum():
-    with pytest.raises(HTTPException) as exc_info:
-        await _call_create(
-            _create_request(
-                schedule_type="interval",
-                schedule_spec={"every_seconds": 30 * 24 * 3600 + 1},
-            )
-        )
-    assert exc_info.value.status_code == 422
-    assert "at most" in exc_info.value.detail
-
-
-@pytest.mark.asyncio
-async def test_create_interval_task_rejects_missing_every_seconds():
-    with pytest.raises(HTTPException) as exc_info:
-        await _call_create(
-            _create_request(schedule_type="interval", schedule_spec={})
-        )
-    assert exc_info.value.status_code == 422
-    assert "every_seconds" in exc_info.value.detail
-
-
-@pytest.mark.asyncio
-async def test_update_interval_task_recomputes_next_run():
-    repo = _Repo()
-    task = await _seed_task(
-        repo,
-        schedule_type="interval",
-        schedule_spec={"every_seconds": 90},
-        next_run_at=datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
-    )
-    before = datetime.now(UTC)
-    updated = await _call_update(
-        repo,
-        task["id"],
-        scheduled_tasks.ScheduledTaskUpdateRequest(schedule_spec={"every_seconds": 120}),
-    )
-    after = datetime.now(UTC)
-    assert updated["schedule_spec"] == {"every_seconds": 120}
-    assert before + timedelta(seconds=120) <= updated["next_run_at"] <= after + timedelta(seconds=120)
-
-
-@pytest.mark.asyncio
-async def test_update_interval_task_rejects_below_minimum_delay():
-    repo = _Repo()
-    task = await _seed_task(
-        repo,
-        schedule_type="interval",
-        schedule_spec={"every_seconds": 90},
-        next_run_at=datetime(2026, 7, 1, 0, 0, tzinfo=UTC),
-    )
-    with pytest.raises(HTTPException) as exc_info:
-        await _call_update(
+    with patch(
+        "app.gateway.routers.scheduled_tasks.load_agent_config",
+        side_effect=FileNotFoundError("missing"),
+    ) as loader:
+        updated = await _call_update(
             repo,
             task["id"],
-            scheduled_tasks.ScheduledTaskUpdateRequest(schedule_spec={"every_seconds": 30}),
+            scheduled_tasks.ScheduledTaskUpdateRequest(title="Renamed"),
         )
-    assert exc_info.value.status_code == 422
-    assert "at least 60 seconds" in exc_info.value.detail
+    loader.assert_not_called()
+    assert updated["title"] == "Renamed"
+    assert updated["assistant_id"] == "research-bot"

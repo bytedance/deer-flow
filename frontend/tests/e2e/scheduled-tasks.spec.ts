@@ -407,3 +407,54 @@ test("duplicate copies the source task assistant into the create form", async ({
     page.getByTestId("scheduled-task-create-agent"),
   ).toContainText("research-bot");
 });
+
+test("edit omits assistant_id when the agent is unchanged", async ({
+  page,
+}) => {
+  let patchBody: Record<string, unknown> | null = null;
+  page.on("request", (request) => {
+    if (
+      request.method() === "PATCH" &&
+      new URL(request.url()).pathname.includes("/api/scheduled-tasks/")
+    ) {
+      patchBody = request.postDataJSON() as Record<string, unknown>;
+    }
+  });
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: [
+      {
+        id: "task-edit-agent",
+        thread_id: null,
+        context_mode: "fresh_thread_per_run",
+        assistant_id: "research-bot",
+        title: "Research digest",
+        prompt: "Summarize papers",
+        schedule_type: "cron",
+        schedule_spec: { cron: "0 9 * * *" },
+        timezone: "UTC",
+        status: "enabled",
+        next_run_at: "2026-07-02T01:00:00+00:00",
+        last_run_at: null,
+        last_run_id: null,
+        last_error: null,
+        run_count: 0,
+        created_at: "2026-07-01T00:00:00+00:00",
+        updated_at: "2026-07-01T00:00:00+00:00",
+      },
+    ],
+  });
+
+  await page.goto("/workspace/scheduled-tasks");
+  await page
+    .getByTestId("scheduled-task-detail")
+    .getByRole("button", { name: "Edit" })
+    .click();
+  await page.getByPlaceholder("Edit title").fill("Renamed digest");
+  await page.getByRole("button", { name: "Save edit" }).click();
+  await expect(page.getByTestId("scheduled-task-detail")).toContainText(
+    "Renamed digest",
+  );
+  expect(patchBody).toMatchObject({ title: "Renamed digest" });
+  expect(patchBody).not.toHaveProperty("assistant_id");
+});

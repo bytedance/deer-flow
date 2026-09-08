@@ -51,9 +51,9 @@ async def resolve_scheduled_task_assistant_id(raw: str | None, *, user_id: str) 
     value = raw.strip()
     if not value:
         raise HTTPException(status_code=422, detail="assistant_id must not be empty")
-    if value == _DEFAULT_ASSISTANT_ID:
-        return _DEFAULT_ASSISTANT_ID
     normalized = value.lower().replace("_", "-")
+    if normalized == _DEFAULT_ASSISTANT_ID.replace("_", "-"):
+        return _DEFAULT_ASSISTANT_ID
     if not AGENT_NAME_PATTERN.fullmatch(normalized):
         raise HTTPException(
             status_code=422,
