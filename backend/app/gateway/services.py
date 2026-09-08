@@ -70,6 +70,7 @@ from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
+from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
@@ -875,6 +876,7 @@ def build_checkpoint_state_mutation_accessor(
 _STATE_ACCESSOR_GRAPH_CACHE_MAX = 64
 _state_accessor_graph_cache: dict[tuple[str | None, str, int | None], tuple[Any, Any, Any]] = {}
 _state_accessor_graph_cache_lock = threading.Lock()
+_state_accessor_graph_locks = AsyncKeyedLockTable[tuple[str | None, str, int | None]]()
 
 
 def _accessor_graph_cache_max(app_config: Any) -> int:
@@ -885,28 +887,50 @@ def _accessor_graph_cache_max(app_config: Any) -> int:
     )
 
 
-def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
-    app_config = (config.get("context") or {}).get("app_config")
-    key = (assistant_id, mode, snapshot_frequency)
-    # This function is called through asyncio.to_thread(). Serialize cache
-    # misses so concurrent state/history requests keep the original single-
-    # flight construction behavior without waiting on the Gateway event loop.
+def _cached_state_accessor_graph(key: tuple[str | None, str, int | None], agent_factory: Any, app_config: Any) -> Any | None:
     with _state_accessor_graph_cache_lock:
         cached = _state_accessor_graph_cache.get(key)
         if cached is not None and cached[0] is agent_factory and cached[1] is app_config:
             return cached[2]
+
+
+def _cache_state_accessor_graph(
+    key: tuple[str | None, str, int | None],
+    agent_factory: Any,
+    app_config: Any,
+    graph: Any,
+) -> None:
+    with _state_accessor_graph_cache_lock:
         if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
             _state_accessor_graph_cache.clear()
-        agent_result = agent_factory(config=config)
-        try:
-            from deerflow.agents.lead_agent.agent import unwrap_agent_graph
-
-            graph = unwrap_agent_graph(agent_result)
-        except Exception:
-            # A custom factory must keep working even if importing the lead
-            # assembly type fails.
-            graph = agent_result
         _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
+
+
+def _build_state_accessor_graph(agent_factory: Any, config: dict[str, Any]) -> Any:
+    agent_result = agent_factory(config=config)
+    try:
+        from deerflow.agents.lead_agent.agent import unwrap_agent_graph
+
+        return unwrap_agent_graph(agent_result)
+    except Exception:
+        # A custom factory must keep working even if importing the lead
+        # assembly type fails.
+        return agent_result
+
+
+async def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
+    app_config = (config.get("context") or {}).get("app_config")
+    key = (assistant_id, mode, snapshot_frequency)
+    cached = _cached_state_accessor_graph(key, agent_factory, app_config)
+    if cached is not None:
+        return cached
+
+    async with _state_accessor_graph_locks.hold(key):
+        cached = _cached_state_accessor_graph(key, agent_factory, app_config)
+        if cached is not None:
+            return cached
+        graph = await asyncio.to_thread(_build_state_accessor_graph, agent_factory, config)
+        _cache_state_accessor_graph(key, agent_factory, app_config, graph)
         return graph
 
 
@@ -1008,8 +1032,7 @@ async def build_checkpoint_state_accessor(
 
     agent_factory = resolve_agent_factory(assistant_id)
     try:
-        graph = await asyncio.to_thread(
-            _state_accessor_graph,
+        graph = await _state_accessor_graph(
             agent_factory,
             assistant_id,
             ctx.checkpoint_channel_mode,

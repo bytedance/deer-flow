@@ -936,7 +936,8 @@ async def test_build_checkpoint_state_accessor_accepts_lead_agent_assembly_facto
     assert graph.store is store
 
 
-def test_state_accessor_graph_cache_keys_on_snapshot_frequency():
+@pytest.mark.asyncio
+async def test_state_accessor_graph_cache_keys_on_snapshot_frequency():
     """The accessor-graph cache must not serve a graph compiled at a different
     delta snapshot cadence."""
     from app.gateway import services as gateway_services
@@ -950,19 +951,20 @@ def test_state_accessor_graph_cache_keys_on_snapshot_frequency():
 
     gateway_services._state_accessor_graph_cache.clear()
     try:
-        first = gateway_services._state_accessor_graph(fake_factory, None, "delta", 1000, {})
-        again = gateway_services._state_accessor_graph(fake_factory, None, "delta", 1000, {})
+        first = await gateway_services._state_accessor_graph(fake_factory, None, "delta", 1000, {})
+        again = await gateway_services._state_accessor_graph(fake_factory, None, "delta", 1000, {})
         assert again is first
         assert len(builds) == 1
 
-        other_cadence = gateway_services._state_accessor_graph(fake_factory, None, "delta", 250, {})
+        other_cadence = await gateway_services._state_accessor_graph(fake_factory, None, "delta", 250, {})
         assert other_cadence is not first
         assert len(builds) == 2
     finally:
         gateway_services._state_accessor_graph_cache.clear()
 
 
-def test_state_accessor_graph_cache_honors_configured_cap():
+@pytest.mark.asyncio
+async def test_state_accessor_graph_cache_honors_configured_cap():
     """database.checkpoint_graph_cache.accessor_graph_max bounds the cache;
     it is re-read per eviction check (hot-reloadable)."""
     from types import SimpleNamespace
@@ -981,11 +983,11 @@ def test_state_accessor_graph_cache_honors_configured_cap():
 
     gateway_services._state_accessor_graph_cache.clear()
     try:
-        gateway_services._state_accessor_graph(fake_factory, "a", "full", None, config)
-        gateway_services._state_accessor_graph(fake_factory, "b", "full", None, config)
+        await gateway_services._state_accessor_graph(fake_factory, "a", "full", None, config)
+        await gateway_services._state_accessor_graph(fake_factory, "b", "full", None, config)
         assert len(builds) == 2
         # Third distinct key exceeds the configured cap of 2: wholesale clear.
-        gateway_services._state_accessor_graph(fake_factory, "c", "full", None, config)
+        await gateway_services._state_accessor_graph(fake_factory, "c", "full", None, config)
         assert len(gateway_services._state_accessor_graph_cache) == 1
         assert len(builds) == 3
     finally:
