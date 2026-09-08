@@ -470,6 +470,11 @@ _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _WINDOWS_DRIVE_QUALIFIED_RE = re.compile(r"^[A-Za-z]:")
 _WINDOWS_DRIVE_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:/")
 _WINDOWS_UNC_ABSOLUTE_RE = re.compile(r"^//[^/]+/[^/]+(?:/|$)")
+#: A generated 8.3 component has at most six legal stem characters before a
+#: one-digit ``~N`` tail and may retain an extension of at most three legal
+#: characters. Lexical normalization cannot prove that it differs from the
+#: corresponding long name on a volume where short-name generation is active.
+_WINDOWS_SHORT_NAME_COMPONENT_RE = re.compile(r"^[A-Za-z0-9$%_'@~`!(){}^#&-]{1,6}~[1-9](?:\.[A-Za-z0-9$%_'@~`!(){}^#&-]{1,3})?$")
 #: PowerShell paths may name a provider/PSDrive before ``:`` (for example,
 #: ``FileSystem::C:/tmp`` or ``External:/tmp``). Those forms are absolute in
 #: PowerShell but look relative to POSIX path normalization.
@@ -727,18 +732,31 @@ def _selection_path_kind(value: str) -> str:
     return "relative"
 
 
+def _windows_volume_identifier(value: str) -> tuple[str, str] | None:
+    """Return a comparable drive or UNC-root identifier when one is present."""
+    path, _nodeid = _selection_path_parts(value)
+    slash_path = path.replace("\\", "/")
+    if _WINDOWS_DRIVE_QUALIFIED_RE.match(slash_path):
+        return "drive", ntpath.normcase(slash_path[:2])
+    if _WINDOWS_UNC_ABSOLUTE_RE.match(slash_path):
+        server, share, *_rest = slash_path[2:].split("/")
+        return "unc", ntpath.normcase(f"//{server}/{share}")
+    return None
+
+
 def _has_ambiguous_windows_component(value: str, *, windows_path_context: bool) -> bool:
     """Whether ordinary Win32 cleanup may alias a textual path component.
 
     Windows APIs normally discard trailing spaces and periods from path
-    components, while extended-length paths can preserve them. Without shell
-    and filesystem provenance, either interpretation is possible, so an
-    overlap decision involving such a spelling must fail closed.
+    components, while extended-length paths can preserve them. Generated 8.3
+    short names can also identify a longer component without any lexical
+    relationship. Without shell and filesystem provenance, these spellings
+    must make an overlap decision fail closed.
     """
     if not _uses_windows_selection_semantics(value, windows_path_context=windows_path_context):
         return False
     path, _nodeid = _selection_path_parts(value)
-    return any(component not in {"", ".", ".."} and component.endswith((" ", ".")) for component in path.replace("\\", "/").split("/"))
+    return any(component not in {"", ".", ".."} and (component.endswith((" ", ".")) or _WINDOWS_SHORT_NAME_COMPONENT_RE.fullmatch(component)) for component in path.replace("\\", "/").split("/"))
 
 
 def _normalize_selection_path(value: str, *, windows_path_context: bool) -> tuple[str, str | None, bool]:
@@ -783,6 +801,13 @@ def _negation_overlaps(criterion_token: str, negated_value: str, *, windows_path
         # can resolve POSIX-rooted spellings against the current drive or map
         # a drive onto a UNC share. Cross-family spellings can therefore alias
         # even when their lexical prefixes differ.
+        return True
+    a_volume = _windows_volume_identifier(criterion_token)
+    b_volume = _windows_volume_identifier(negated_value)
+    if a_volume is not None and b_volume is not None and a_volume != b_volume:
+        # Distinct drive letters can alias through SUBST or mapped drives, and
+        # distinct UNC roots can alias through DFS, DNS, or share mappings.
+        # The execution evidence records none of that volume provenance.
         return True
     if a_kind == "relative":
         a_path, _a_nodeid = _selection_path_parts(criterion_token)

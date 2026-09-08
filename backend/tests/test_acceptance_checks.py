@@ -1846,6 +1846,26 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["holds"] is True
 
+    def test_different_absolute_drive_exclusion_fails_closed_without_thread_context(self):
+        executions = [_bash_execution("pytest D:/ws/tests/security D:/ws/tests/unit --ignore E:/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest D:/ws/tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_different_unc_root_exclusion_fails_closed_without_thread_context(self):
+        target = "//server1/share/tests/security"
+        executions = [_bash_execution(f"pytest {target} //server1/share/tests/unit --ignore //server2/share/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_unrelated_exclusion_on_same_unc_root_keeps_matching(self):
+        target = "//server/share/tests/security"
+        executions = [_bash_execution(f"pytest {target} //server/share/tests/unit --ignore //server/share/tests/slow", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
     def test_windows_drive_root_exclusion_overlap_is_unprovable(self):
         executions = [_bash_execution("pytest D:/ D:/WS/tests/unit --ignore d:/ws/tests/security", output_tail="12 passed")]
         verdict = check_acceptance_criteria(["tests_passed:pytest D:/"], bash_executions=executions)
@@ -1917,6 +1937,19 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["checked"] is False
 
+    def test_different_drive_relative_exclusion_fails_closed_without_thread_context(self):
+        executions = [_bash_execution("pytest C:tests/security C:tests/unit --ignore D:tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest C:tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_unrelated_exclusion_on_same_drive_relative_root_keeps_matching(self):
+        target = "C:tests/security"
+        executions = [_bash_execution(f"pytest {target} C:tests/unit --ignore c:tests/slow", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
     def test_drive_relative_and_plain_relative_exclusion_fail_closed_without_thread_context(self):
         executions = [_bash_execution("pytest tests/security tests/unit --ignore D:tests/security", output_tail="12 passed")]
         verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
@@ -1981,6 +2014,27 @@ class TestTestsPassedLeaf:
         verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], thread_data=WINDOWS_THREAD_DATA, bash_executions=executions)
 
         assert verdict["leaves"][0]["checked"] is False
+
+    def test_windows_short_name_alias_exclusion_is_unprovable_without_thread_context(self):
+        target = "C:/longdirectoryname/tests/security"
+        executions = [_bash_execution(f"pytest {target} C:/longdirectoryname/tests/unit --ignore C:/LONGDI~1/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_relative_windows_short_name_alias_exclusion_is_unprovable_in_windows_context(self):
+        target = "longdirectoryname/tests/security"
+        executions = [_bash_execution(f"pytest {target} longdirectoryname/tests/unit --ignore LONGDI~1/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], thread_data=WINDOWS_THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_non_short_name_tilde_component_keeps_matching(self):
+        target = "C:/LONGDI~X/tests/security"
+        executions = [_bash_execution(f"pytest {target} C:/LONGDI~X/tests/unit --ignore C:/other/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
 
     def test_parent_traversal_in_consumed_target_with_exclusion_is_unprovable(self):
         executions = [_bash_execution("pytest tests/../security tests/unit --ignore security", output_tail="12 passed")]
