@@ -419,6 +419,17 @@ class SubagentResult:
             self.error = str(exc) or type(exc).__name__
             self.completed_at = self.completed_at or _utcnow()
 
+    def record_background_error(self, exc: Exception) -> None:
+        """Promote a provisional outcome to a non-fatal infrastructure failure."""
+        with self._state_lock:
+            if self._fatal_error is not None:
+                return
+            self.status = SubagentStatus.FAILED
+            self.result = None
+            self.stop_reason = None
+            self.error = str(exc) or type(exc).__name__
+            self.completed_at = self.completed_at or _utcnow()
+
     def get_fatal_error(self) -> BaseException | None:
         """Return the first original fatal captured by the background runner."""
         with self._state_lock:
@@ -2118,6 +2129,13 @@ class SubagentExecutor:
                         await _await_admitted_execution(execution)
                     except asyncio.CancelledError:
                         pass
+                    except Exception as exc:
+                        logger.exception(
+                            "[trace=%s] Subagent %s cancellation teardown failed",
+                            self.trace_id,
+                            self.config.name,
+                        )
+                        result.record_background_error(exc)
                     except BaseException as exc:
                         logger.exception(
                             "[trace=%s] Subagent %s cancellation teardown aborted",
@@ -2134,7 +2152,7 @@ class SubagentExecutor:
                 return result
             except Exception as exc:
                 logger.exception("[trace=%s] Subagent %s async execution failed", self.trace_id, self.config.name)
-                result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
+                result.record_background_error(exc)
                 return result
             except BaseException as exc:
                 logger.exception(
@@ -2212,7 +2230,18 @@ def request_cancel_background_task(execution_id: str) -> None:
         # registration handshake above either records this request for startup
         # or targets the already-running asyncio task.
         if loop is not None and task is not None:
-            loop.call_soon_threadsafe(task.cancel)
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                # A stale runner can outlive its persistent loop during process
+                # teardown or loop replacement. The cooperative cancel flag is
+                # already set; one stale runner must not abort cancellation of
+                # the remaining batch executions.
+                logger.warning(
+                    "Could not schedule cancellation for background execution %s",
+                    execution_id,
+                    exc_info=True,
+                )
         logger.info("Requested cancellation for background execution %s", execution_id)
 
 

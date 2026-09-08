@@ -53,6 +53,10 @@ logger = logging.getLogger(__name__)
 # Poll cadence for terminal-state waits in both the interrupted unwind and the
 # deferred registry cleaner.
 _SUBAGENT_POLL_INTERVAL_SECONDS = 5.0
+# Teardown fences are threading.Event instances in production. Polling them on
+# the caller loop avoids occupying the shared default executor and remains
+# promptly cancellable if the parent run is interrupted.
+_EXECUTION_FENCE_POLL_INTERVAL_SECONDS = 0.05
 
 # How long the generic-error unwind waits for a terminal result before
 # re-raising. This is deliberately a short grace period, not the full
@@ -78,7 +82,14 @@ async def _wait_for_execution_done_event(
         except TimeoutError:
             return False
         return True
-    return bool(await asyncio.to_thread(done_event.wait, timeout))
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not done_event.is_set():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return done_event.is_set()
+        await asyncio.sleep(min(_EXECUTION_FENCE_POLL_INTERVAL_SECONDS, remaining))
+    return True
 
 
 # Sentinel returned by ``_peek_subagent_result`` when the registry entry exists

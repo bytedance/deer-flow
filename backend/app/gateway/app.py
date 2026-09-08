@@ -472,6 +472,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         set_mcp_task_config_snapshot(None)
 
+        batch_shutdown_fatal: BaseException | None = None
         if getattr(app.state, "subagent_batch_service", None) is not None:
             app.state.subagent_batches_available = False
             try:
@@ -486,6 +487,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 )
             except Exception:
                 logger.exception("Failed to stop subagent batch service")
+            except BaseException as exc:
+                current_task = asyncio.current_task()
+                if isinstance(exc, asyncio.CancelledError) and current_task is not None and current_task.cancelling():
+                    raise
+                batch_shutdown_fatal = exc
+                logger.critical(
+                    "Fatal error while stopping subagent batch service; continuing Gateway resource cleanup",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
             finally:
                 from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
 
@@ -580,6 +590,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     await asyncio.to_thread(close)
                 except Exception:
                     logger.exception("Failed to close memory backend on shutdown")
+        if batch_shutdown_fatal is not None:
+            raise batch_shutdown_fatal
 
     logger.info("Shutting down API Gateway")
 

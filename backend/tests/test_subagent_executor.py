@@ -17,6 +17,7 @@ the real implementation in isolation.
 import asyncio
 import importlib
 import inspect
+import logging
 import sys
 import threading
 import time
@@ -3637,6 +3638,40 @@ class TestCooperativeCancellation:
         """Test that requesting cancellation on a nonexistent task does not raise."""
         executor_module.request_cancel_background_task("nonexistent-task")
 
+    def test_request_cancel_tolerates_stale_closed_runner_loop(
+        self,
+        executor_module,
+        classes,
+        caplog,
+    ):
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        execution_id = "closed-runner-loop"
+        result = SubagentResult(
+            task_id=execution_id,
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        loop = asyncio.new_event_loop()
+        loop.close()
+        runner = executor_module._BackgroundRunner(
+            loop=loop,
+            task=MagicMock(),
+        )
+        executor_module._background_tasks[execution_id] = result
+        executor_module._background_runners[execution_id] = runner
+
+        try:
+            with caplog.at_level(logging.WARNING):
+                executor_module.request_cancel_background_task(execution_id)
+
+            assert result.cancel_event.is_set()
+            assert runner.cancel_requested is True
+            assert any("Could not schedule cancellation" in record.getMessage() for record in caplog.records)
+        finally:
+            executor_module.force_cleanup_background_task(execution_id)
+
     def test_execute_async_cancellation_finishes_teardown_before_terminal(
         self,
         executor_module,
@@ -6125,6 +6160,73 @@ def test_execute_async_cancelled_child_fatal_teardown_fails_and_opens_fence(
         assert result.status is classes["SubagentStatus"].FAILED
         assert result.execution_done_event.is_set()
         assert isinstance(raised.value.__cause__, FatalTeardown)
+    finally:
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)
+
+
+def test_execute_async_cancelled_child_ordinary_teardown_is_not_fatal(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    started = threading.Event()
+    submitted = {}
+
+    async def ordinary_failure_on_cancel(_task, _result):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            _result.try_set_terminal(
+                classes["SubagentStatus"].CANCELLED,
+                error="Cancelled by user",
+            )
+            raise RuntimeError("ordinary cancellation teardown")
+
+    original_submit = executor_module._submit_to_isolated_loop_in_context
+
+    def capture_submit(context, coroutine_factory):
+        future = original_submit(context, coroutine_factory)
+        submitted["future"] = future
+        return future
+
+    executor = classes["SubagentExecutor"](
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with (
+            patch.object(
+                executor_module,
+                "_submit_to_isolated_loop_in_context",
+                side_effect=capture_submit,
+            ),
+            patch.object(
+                executor,
+                "_aexecute",
+                side_effect=ordinary_failure_on_cancel,
+            ),
+        ):
+            execution_id = executor.execute_async("Task")
+            assert started.wait(timeout=3)
+            executor_module.request_cancel_background_task(execution_id)
+            completed = submitted["future"].result(timeout=3)
+
+        result = executor_module.get_background_task_result(execution_id)
+        assert completed is result
+        assert result.status is classes["SubagentStatus"].FAILED
+        assert result.error == "ordinary cancellation teardown"
+        assert result.get_fatal_error() is None
+        assert result.execution_done_event.is_set()
     finally:
         if execution_id is not None:
             executor_module.cleanup_background_task(execution_id)

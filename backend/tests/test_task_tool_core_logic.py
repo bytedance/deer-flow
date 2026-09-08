@@ -9,7 +9,7 @@ import time
 import weakref
 from enum import Enum
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -1037,6 +1037,54 @@ async def test_task_tool_propagates_original_fatal_after_execution_fence(
 
     assert raised.value is fatal
     assert cleaned == ["execution-original-fatal"]
+
+
+@pytest.mark.asyncio
+async def test_threading_execution_fence_wait_does_not_use_default_executor(
+    monkeypatch,
+) -> None:
+    done_event = threading.Event()
+    sleep_calls: list[float] = []
+
+    async def set_fence_after_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+        done_event.set()
+
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", set_fence_after_sleep)
+    monkeypatch.setattr(
+        task_tool_module.asyncio,
+        "to_thread",
+        AsyncMock(side_effect=AssertionError("threading fence must not use to_thread")),
+    )
+
+    assert await task_tool_module._wait_for_execution_done_event(
+        done_event,
+        timeout=1.0,
+    )
+    assert sleep_calls == [task_tool_module._EXECUTION_FENCE_POLL_INTERVAL_SECONDS]
+
+
+@pytest.mark.asyncio
+async def test_threading_execution_fence_wait_respects_zero_timeout() -> None:
+    assert not await task_tool_module._wait_for_execution_done_event(
+        threading.Event(),
+        timeout=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_threading_execution_fence_wait_is_cancellable() -> None:
+    waiter = asyncio.create_task(
+        task_tool_module._wait_for_execution_done_event(
+            threading.Event(),
+            timeout=60,
+        ),
+    )
+    await asyncio.sleep(0)
+    waiter.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
 
 
 def test_task_tool_terminal_fence_wait_stays_within_polling_budget(

@@ -123,6 +123,70 @@ def test_shutdown_is_bounded_when_subagent_batch_stop_hangs():
     assert elapsed >= 0.04
 
 
+def test_subagent_batch_fatal_does_not_skip_remaining_gateway_cleanup():
+    import app.gateway.app as gateway_app
+
+    class BatchStopFatal(BaseException):
+        pass
+
+    async def run() -> tuple[BatchStopFatal, AsyncMock, MagicMock]:
+        fatal = BatchStopFatal("batch worker fatal")
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = True
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        fake_channel_service = MagicMock()
+        fake_channel_service.get_status.return_value = {}
+        browser_manager = SimpleNamespace(
+            close_all_sessions=AsyncMock(return_value=1),
+        )
+        memory_manager = MagicMock()
+        memory_manager.warm.return_value = None
+        memory_manager.shutdown_flush.return_value = True
+
+        async def fake_start(_startup_config, **_kwargs):
+            return fake_channel_service
+
+        with (
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch(
+                "app.gateway.app.get_gateway_config",
+                return_value=MagicMock(host="x", port=0),
+            ),
+            patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+            patch(
+                "app.channels.service.start_channel_service",
+                side_effect=fake_start,
+            ),
+            patch("app.channels.service.stop_channel_service", AsyncMock()),
+            patch(
+                "deerflow.community.browser_automation.get_browser_session_manager",
+                return_value=browser_manager,
+            ),
+            patch(
+                "deerflow.agents.memory.get_memory_manager",
+                return_value=memory_manager,
+            ),
+        ):
+            with pytest.raises(BatchStopFatal) as raised:
+                async with gateway_app.lifespan(app):
+                    app.state.subagent_batch_service = SimpleNamespace(
+                        stop=AsyncMock(side_effect=fatal),
+                    )
+
+        assert raised.value is fatal
+        return fatal, browser_manager.close_all_sessions, memory_manager
+
+    _fatal, close_browser_sessions, memory_manager = asyncio.run(run())
+
+    close_browser_sessions.assert_awaited_once()
+    memory_manager.shutdown_flush.assert_called_once_with(5.0)
+    memory_manager.close.assert_called_once_with()
+
+
 async def _run_lifespan_with_upload_staging_cleanup():
     from app.gateway.app import lifespan
 
