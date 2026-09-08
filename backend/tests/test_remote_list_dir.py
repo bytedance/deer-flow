@@ -171,13 +171,7 @@ def test_list_dir_command_head_truncation_is_not_an_error(tmp_path) -> None:
     fake_bin.mkdir()
     fake_find = fake_bin / "find"
     fake_find.write_text(
-        "#!/bin/sh\n"
-        "i=1\n"
-        "while [ \"$i\" -le 5000 ]; do\n"
-        "  echo \"/dir/f$i\"\n"
-        "  i=$((i+1))\n"
-        "done\n"
-        "exit 0\n",
+        '#!/bin/sh\ni=1\nwhile [ "$i" -le 5000 ]; do\n  echo "/dir/f$i"\n  i=$((i+1))\ndone\nexit 0\n',
         encoding="utf-8",
     )
     fake_find.chmod(fake_find.stat().st_mode | stat.S_IEXEC)
