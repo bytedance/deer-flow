@@ -39,9 +39,15 @@ jobs:
           --github-annotations
 
   lint-scripts:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     # The liveness check is wall-clock dependent (~15s); leave headroom for a
-    # cold runner.
+    # cold runner. windows-latest runs the script under Git Bash, which is the
+    # environment #5177 was reported on: the powershell.exe probe and the
+    # CRLF handling in closed_port() only execute on that OS.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
