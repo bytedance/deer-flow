@@ -251,6 +251,9 @@ This section accumulates work toward the **2.1.0** milestone
   verticals) and Tencent Cloud WSA - plus native recency filters
   (day/week/month/year) shared across DDGS, Brave, Tavily, and SearXNG.
   ([#5023], [#5057], [#5099])
+- **community:** New Sofya `web_search` and `web_fetch` provider - search
+  results carry the content of each page, capped per result so a default
+  search stays inline. ([#5239])
 - **knowledge:** Opt-in read-only RAGFlow retrieval exposes a
   `knowledge_search(query)` agent tool over configured RAGFlow datasets, with
   a dataset-ID allowlist and credential/dataset-id redaction on error paths.
@@ -2379,4 +2382,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5117]: https://github.com/bytedance/deer-flow/pull/5117
 [#5133]: https://github.com/bytedance/deer-flow/pull/5133
 [#5136]: https://github.com/bytedance/deer-flow/pull/5136
+[#5239]: https://github.com/bytedance/deer-flow/pull/5239
 [#5119]: https://github.com/bytedance/deer-flow/pull/5119
