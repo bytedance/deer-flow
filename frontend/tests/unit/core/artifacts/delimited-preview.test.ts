@@ -60,6 +60,43 @@ describe("delimited preview parser", () => {
     expect(() => parse('a\n"bad"x\n', true)).toThrow();
     expect(() => parse('a\n"bad"x\n')).toThrow();
   });
+  it.each(["," as const, "\t" as const])(
+    "ignores embedded CRs in an incomplete quoted field for delimiter %j",
+    (delimiter) => {
+      const prefix = `ID${delimiter}Note\r\n001${delimiter}good\r\n"hello\rworld\rthird`;
+      const content = prefix + "x".repeat(1_048_576 - prefix.length);
+      expect(parse(content, true, delimiter)).toEqual({
+        rows: [
+          ["ID", "Note"],
+          ["001", "good"],
+        ],
+        columnCount: 2,
+        limited: true,
+        unevenRows: false,
+      });
+    },
+  );
+  it.each(["\r\n", "\n", "\r"])(
+    "finds %j record boundaries after a quoted multiline first field",
+    (newline) => {
+      expect(
+        parse(
+          `"hello\rworld\nwith ""quotes""",Note${newline}001,good${newline}`,
+        ).rows,
+      ).toEqual([
+        ['hello\rworld\nwith "quotes"', "Note"],
+        ["001", "good"],
+      ]);
+    },
+  );
+  it("does not treat a literal quote inside an unquoted field as an opening quote", () => {
+    expect(
+      parse('inch",Note\r\n001,good\r\n"unfinished\ra\rb', true).rows,
+    ).toEqual([
+      ['inch"', "Note"],
+      ["001", "good"],
+    ]);
+  });
   it("bounds records and fields while reporting actual sample width", () => {
     const result = parse(
       Array.from({ length: 300 }, () =>

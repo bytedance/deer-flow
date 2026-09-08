@@ -9,6 +9,29 @@ import {
 
 export type { DelimitedPreviewResult } from "./delimited-preview-types";
 
+/** Find the first record separator outside quoted fields, even in a prefix. */
+function detectRecordNewline(content: string, delimiter: string) {
+  let quoted = false;
+  let fieldStart = true;
+  for (let index = 0; index < content.length; index++) {
+    const char = content[index];
+    if (quoted) {
+      if (char === '"') {
+        if (content[index + 1] === '"') index++;
+        else quoted = false;
+      }
+      continue;
+    }
+    if (char === '"' && fieldStart) quoted = true;
+    else if (char === "\r") return content[index + 1] === "\n" ? "\r\n" : "\r";
+    else if (char === "\n") return "\n";
+    fieldStart = char === delimiter;
+  }
+  // No complete record separator: Papa still validates quotes and the caller
+  // drops an unfinished terminal record when the input is truncated.
+  return "\n";
+}
+
 /** Parse only the bounded, already-loaded sample. Runs exclusively in a Worker. */
 export function parseDelimitedPreview({
   content,
@@ -27,6 +50,8 @@ export function parseDelimitedPreview({
   let firstWidth: number | undefined;
   Papa.parse<string[]>(input, {
     delimiter,
+    // Papa's auto-detection can count CRs inside an unfinished quoted field.
+    newline: detectRecordNewline(input, delimiter),
     header: false,
     dynamicTyping: false,
     skipEmptyLines: false,
