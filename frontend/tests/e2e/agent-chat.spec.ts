@@ -47,6 +47,57 @@ test.describe("Agent chat", () => {
     ).toBeVisible();
   });
 
+  test("continues an IM-selected thread with the same agent from the sidebar", async ({
+    page,
+  }) => {
+    const threadId = "00000000-0000-0000-0000-000000000168";
+    let streamBody: Record<string, unknown> | undefined;
+    mockLangGraphAPI(page, {
+      agents: [
+        {
+          name: "researcher",
+          description: "Research agent selected from an IM channel",
+        },
+      ],
+      threads: [
+        {
+          thread_id: threadId,
+          title: "IM research conversation",
+          metadata: {
+            channel_source: { type: "im_channel", provider: "telegram" },
+            channel_agent_name: "researcher",
+            agent_name: "researcher",
+          },
+        },
+      ],
+      runStreamHandler: async (route) => {
+        streamBody = route.request().postDataJSON() as Record<string, unknown>;
+        await handleRunStream(route);
+      },
+    });
+
+    await page.goto("/workspace/chats/new");
+    const threadLink = page
+      .locator("[data-sidebar='sidebar']")
+      .locator(`a[href='/workspace/agents/researcher/chats/${threadId}']`);
+    await expect(threadLink).toBeVisible({ timeout: 15_000 });
+    await threadLink.click();
+    await page.waitForURL(`**/workspace/agents/researcher/chats/${threadId}`);
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Continue this research");
+    await textarea.press("Enter");
+
+    await expect.poll(() => streamBody).toBeDefined();
+    expect(streamBody).toMatchObject({
+      context: {
+        agent_name: "researcher",
+        thread_id: threadId,
+      },
+    });
+  });
+
   test("mobile agent welcome keeps the sidebar trigger clickable", async ({
     page,
   }) => {
