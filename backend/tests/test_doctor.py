@@ -282,7 +282,16 @@ class TestCheckWebSearch:
         cfg.write_text("config_version: 5\ntools:\n  # - name: web_search\n")
         result = doctor.check_web_search(cfg)
         assert result.status == "warn"
-        assert "NoneType" not in (result.detail or "")
+        assert result.detail == "no web_search tool in config"
+
+    def test_scalar_tools_entry_warns_without_traceback(self, tmp_path):
+        # A bare string entry is not a mapping; `t.get("name")` used to raise
+        # AttributeError, which the broad handler rendered as the check result.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - web_search\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "no web_search tool in config"
 
     def test_tavily_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
