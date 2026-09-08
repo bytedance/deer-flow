@@ -46,6 +46,11 @@ artifact. New automatic capture entry points must reuse the shared progress
 encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
 drift.
 
+Tavily Extract success responses do not require a `title`. The community
+`web_fetch` formatter uses the result URL as the display heading when the title
+is missing or empty; keep that fallback and the 4096-character content bound
+covered in `tests/test_tavily_tools.py`.
+
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
 `DeerFlowClient` provides in-process access without HTTP or a FastAPI dependency. It shares Gateway's `deerflow` modules, config files, data directories, and response schemas for compatible consumers.

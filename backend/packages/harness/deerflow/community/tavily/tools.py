@@ -62,6 +62,7 @@ def web_fetch_tool(url: str) -> str:
         return f"Error: {res['failed_results'][0]['error']}"
     elif "results" in res and len(res["results"]) > 0:
         result = res["results"][0]
-        return f"# {result['title']}\n\n{result['raw_content'][:4096]}"
+        title = result.get("title") or result["url"]
+        return f"# {title}\n\n{result['raw_content'][:4096]}"
     else:
         return "Error: No results found"

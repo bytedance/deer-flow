@@ -3,7 +3,9 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from deerflow.community.tavily.tools import web_search_tool
+import pytest
+
+from deerflow.community.tavily.tools import web_fetch_tool, web_search_tool
 
 
 def _tavily_response() -> dict:
@@ -41,3 +43,54 @@ def test_web_search_omits_time_range_from_default_tavily_call() -> None:
             web_search_tool.invoke({"query": "stable documentation"})
 
     client.search.assert_called_once_with("stable documentation", max_results=5)
+
+
+@pytest.mark.parametrize("title", [None, ""])
+def test_web_fetch_uses_url_when_extract_title_is_missing_or_empty(title: str | None) -> None:
+    result = {
+        "url": "https://example.com/report",
+        "raw_content": "Important report findings.",
+        "images": [],
+    }
+    if title is not None:
+        result["title"] = title
+    client = MagicMock()
+    client.extract.return_value = {"results": [result], "failed_results": []}
+
+    with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
+        output = web_fetch_tool.invoke({"url": "https://example.com/report"})
+
+    assert output == "# https://example.com/report\n\nImportant report findings."
+
+
+def test_web_fetch_preserves_failed_result_message() -> None:
+    client = MagicMock()
+    client.extract.return_value = {"results": [], "failed_results": [{"error": "not found"}]}
+
+    with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
+        output = web_fetch_tool.invoke({"url": "https://example.com/missing"})
+
+    assert output == "Error: not found"
+
+
+def test_web_fetch_preserves_no_results_message() -> None:
+    client = MagicMock()
+    client.extract.return_value = {"results": [], "failed_results": []}
+
+    with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
+        output = web_fetch_tool.invoke({"url": "https://example.com/missing"})
+
+    assert output == "Error: No results found"
+
+
+def test_web_fetch_preserves_content_limit() -> None:
+    client = MagicMock()
+    client.extract.return_value = {
+        "results": [{"title": "Report", "url": "https://example.com/report", "raw_content": "x" * 5000}],
+        "failed_results": [],
+    }
+
+    with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
+        output = web_fetch_tool.invoke({"url": "https://example.com/report"})
+
+    assert output == f"# Report\n\n{'x' * 4096}"
