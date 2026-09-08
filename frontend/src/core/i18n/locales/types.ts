@@ -106,6 +106,27 @@ export interface Translations {
     missingTarget: string;
   };
 
+  artifactTable: {
+    title: string;
+    header: string;
+    column: (index: number) => string;
+    total: (count: number) => string;
+    sample: (count: number) => string;
+    range: (start: number, end: number, limited: boolean) => string;
+    columnsLimited: string;
+    uneven: string;
+    empty: string;
+    incomplete: string;
+    failed: string;
+    retry: string;
+    previous: string;
+    next: string;
+    cell: (row: number, column: number) => string;
+    cellValue: string;
+    missing: string;
+    savedVersion: string;
+  };
+
   artifactArchive: {
     downloadCurrent: (count: number) => string;
     currentVersionNotice: string;
