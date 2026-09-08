@@ -150,7 +150,7 @@ def test_initialize_response_leaves_permissions_unresolved(client):
     assert resp.json()["permissions"] is None
 
 
-def test_auth_disabled_me_includes_default_admin_permissions(monkeypatch, _setup_auth, tmp_path):
+def test_auth_disabled_me_includes_default_admin_permissions(monkeypatch, _setup_auth):
     from app.gateway.app import create_app
     from app.gateway.auth.config import AuthConfig, set_auth_config
 

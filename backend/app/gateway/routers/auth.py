@@ -569,10 +569,10 @@ async def get_me(request: Request):
         # it instead of evaluating the provider a second time.
         permissions: list[str] = list(auth.permissions)
     else:
-        # Middleware-less composition: resolve exactly as AuthMiddleware would.
-        from app.gateway.authz import _is_internal_caller, resolve_route_permissions
+        # Middleware-less composition: resolve exactly as _authenticate does.
+        from app.gateway.authz import resolve_route_permissions_for_request
 
-        permissions = await resolve_route_permissions(user, is_internal=_is_internal_caller(request, user))
+        permissions = await resolve_route_permissions_for_request(request, user)
     return UserResponse(
         id=str(user.id),
         email=user.email,
