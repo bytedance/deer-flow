@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock
 
 from app.channels.message_bus import MessageBus, OutboundMessage
 from app.channels.wecom import (
+    _TRUNCATION_MARKER,
+    _WECOM_MAX_CHUNK_BATCH,
     _WECOM_MAX_CONTENT_BYTES,
     WeComChannel,
     _clip_to_byte_limit,
@@ -89,6 +91,30 @@ class TestSplitForByteLimit:
         for chunk in chunks:
             assert _byte_len(chunk) <= _WECOM_MAX_CONTENT_BYTES
         assert "".join(chunks) == text
+
+    def test_limit_narrower_than_one_character_still_advances(self):
+        # limit=3 cannot hold even one 4-byte emoji: the window decodes to an
+        # empty string and a hard cut of 0 would spin forever. The split must
+        # take the character anyway and terminate with content intact.
+        chunks = _split_for_byte_limit("😀" * 5, 3)
+        assert "".join(chunks) == "😀" * 5
+        assert len(chunks) == 5
+
+    def test_split_caps_chunk_batch_with_truncation_marker(self):
+        text = "x" * (_WECOM_MAX_CONTENT_BYTES * 25)
+        chunks = _split_for_byte_limit(text, _WECOM_MAX_CONTENT_BYTES)
+        assert len(chunks) == _WECOM_MAX_CHUNK_BATCH
+        for chunk in chunks:
+            assert _byte_len(chunk) <= _WECOM_MAX_CONTENT_BYTES
+        assert chunks[-1].endswith(_TRUNCATION_MARKER)
+        # The kept prefix is verbatim; only the collapsed tail is clipped.
+        assert "".join(chunks[:-1]) == text[: _WECOM_MAX_CONTENT_BYTES * (_WECOM_MAX_CHUNK_BATCH - 1)]
+
+    def test_split_under_cap_is_not_marked(self):
+        text = "x" * (_WECOM_MAX_CONTENT_BYTES * 3)
+        chunks = _split_for_byte_limit(text, _WECOM_MAX_CONTENT_BYTES)
+        assert len(chunks) == 3
+        assert not chunks[-1].endswith(_TRUNCATION_MARKER)
 
 
 class TestSendWsContentLimit:

@@ -38,6 +38,9 @@ def _open_binary(path: str):
 # passive stream replies and active markdown pushes.
 _WECOM_MAX_CONTENT_BYTES = 20480
 _TRUNCATION_MARKER = "\n\n... (truncated)"
+# One push must not flood the chat with an unbounded run of messages: keep the
+# first few chunks and collapse the rest into one truncated tail.
+_WECOM_MAX_CHUNK_BATCH = 10
 
 
 def _clip_to_byte_limit(text: str, limit: int) -> str:
@@ -67,10 +70,24 @@ def _split_for_byte_limit(text: str, limit: int) -> list[str]:
             # Keep the delimiter on this chunk's tail: the sequential messages
             # must round-trip to the original text exactly.
             cut += 1
+        if cut == 0:
+            # limit is narrower than one whole character; take it anyway so
+            # the loop always advances.
+            cut = 1
         chunks.append(remaining[:cut])
         remaining = remaining[cut:]
     if remaining:
         chunks.append(remaining)
+    if len(chunks) > _WECOM_MAX_CHUNK_BATCH:
+        logger.warning(
+            "WeCom push of %d bytes split into %d messages, capping at %d",
+            len(text.encode("utf-8")),
+            len(chunks),
+            _WECOM_MAX_CHUNK_BATCH,
+        )
+        kept = chunks[: _WECOM_MAX_CHUNK_BATCH - 1]
+        kept.append(_clip_to_byte_limit("".join(chunks[_WECOM_MAX_CHUNK_BATCH - 1 :]), limit))
+        return kept
     return chunks
 
 
