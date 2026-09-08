@@ -28,6 +28,10 @@ Usage:
     python scripts/benchmark/checkpoint/bench_tool_result_probe.py \
         [--result-bytes 50000] [--outputs-dir .tool-results-probe]
 
+--outputs-dir may contain unrelated files: the probe creates and removes
+only its own ``probe-run-*`` child inside it (externalized samples land
+there), while SQLite databases go to a unique per-run temp directory.
+
 Output: JSON on stdout.
 """
 
@@ -36,9 +40,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated, Any, TypedDict
+from uuid import uuid4
 
 from langchain_core.messages import AnyMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -90,10 +96,10 @@ async def _run_path(
     *,
     wrapped: bool,
     outputs_dir: Path | None,
+    tmp_dir: Path,
 ) -> dict[str, Any]:
-    tmp = Path(".probe-tmp")
-    tmp.mkdir(exist_ok=True)
-    async with AsyncSqliteSaver.from_conn_string(str(tmp / f"probe-{label}.sqlite")) as saver:
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_dir / f"probe-{label}.sqlite")) as saver:
         await saver.setup()
         middleware = ToolOutputBudgetMiddleware() if wrapped else None
         graph = _make_graph(saver)
@@ -130,10 +136,10 @@ async def _run_path(
     }
 
 
-async def _main(result_bytes: int, outputs_dir: Path) -> dict[str, Any]:
-    raw = await _run_path("raw-unwrapped", result_bytes, wrapped=False, outputs_dir=None)
-    externalized = await _run_path("budget-externalized", result_bytes, wrapped=True, outputs_dir=outputs_dir)
-    truncated = await _run_path("budget-truncated", result_bytes, wrapped=True, outputs_dir=None)
+async def _main(result_bytes: int, outputs_dir: Path, tmp_dir: Path) -> dict[str, Any]:
+    raw = await _run_path("raw-unwrapped", result_bytes, wrapped=False, outputs_dir=None, tmp_dir=tmp_dir)
+    externalized = await _run_path("budget-externalized", result_bytes, wrapped=True, outputs_dir=outputs_dir, tmp_dir=tmp_dir)
+    truncated = await _run_path("budget-truncated", result_bytes, wrapped=True, outputs_dir=None, tmp_dir=tmp_dir)
     return {
         "result_bytes": result_bytes,
         "paths": [raw, externalized, truncated],
@@ -144,6 +150,26 @@ async def _main(result_bytes: int, outputs_dir: Path) -> dict[str, Any]:
     }
 
 
+def run_probe(result_bytes: int, outputs_dir: Path, tmp_dir: Path) -> dict[str, Any]:
+    """Drive one probe run, cleaning up only directories this run owns.
+
+    ``outputs_dir`` may be user-supplied and may pre-exist with unrelated
+    files: the run writes into (and removes) a fresh owned ``probe-run-*``
+    child of it, never the directory itself or anything beside it. ``tmp_dir``
+    hosts the per-run SQLite databases and is emptied by the cleanup.
+    """
+    import shutil
+
+    owned_outputs = outputs_dir / f"probe-run-{uuid4().hex[:8]}"
+    owned_outputs.mkdir(parents=True, exist_ok=False)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        return asyncio.run(_main(result_bytes, owned_outputs, tmp_dir))
+    finally:
+        shutil.rmtree(owned_outputs, ignore_errors=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-bytes", type=int, default=50_000)
@@ -152,13 +178,8 @@ def main() -> None:
 
     outputs_dir: Path = args.outputs_dir
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        report = asyncio.run(_main(args.result_bytes, outputs_dir))
-    finally:
-        import shutil
-
-        shutil.rmtree(outputs_dir, ignore_errors=True)
-        shutil.rmtree(".probe-tmp", ignore_errors=True)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="deerflow-probe-"))
+    report = run_probe(args.result_bytes, outputs_dir, tmp_dir)
 
     json.dump(report, __import__("sys").stdout, indent=2)
     print()

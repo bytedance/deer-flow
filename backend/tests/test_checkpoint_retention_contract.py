@@ -352,8 +352,10 @@ async def _task_write_blobs(env: _SaverEnv, thread_id: str, task_id: str) -> lis
     return [saver.serde.loads_typed((row["type"], row["blob"])) for row in rows]
 
 
-def _report(name: str, data: dict[str, Any]) -> None:
-    """Append one scenario result to the optional JSON report file."""
+def _report(name: str, data: dict[str, Any], backend: str) -> None:
+    """Append one scenario result to the optional JSON report file, keyed by
+    the parameterized backend so one multi-backend pytest invocation keeps one
+    entry per backend instead of overwriting a single shared key."""
     path = os.environ.get("DEERFLOW_RETENTION_REPORT")
     if not path:
         return
@@ -361,7 +363,7 @@ def _report(name: str, data: dict[str, Any]) -> None:
     if os.path.exists(path):
         with open(path, encoding="utf-8") as handle:
             report = json.load(handle)
-    report.setdefault(name, {})[os.environ.get("DEERFLOW_RETENTION_BACKEND", "run")] = data
+    report.setdefault(name, {})[backend] = data
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, sort_keys=True)
 
@@ -433,7 +435,7 @@ async def test_growth_baseline_full_vs_delta(saver_env: _SaverEnv) -> None:
     # byte comparisons are cadence- and backend-dependent — the report above
     # is what feeds the retention design, these assertions pin the shape.
     assert measurements["delta"][-1]["write_rows"] > 0, "delta mode must land per-step payloads in writes"
-    _report("growth_baseline", measurements)
+    _report("growth_baseline", measurements, saver_env.kind)
 
 
 @pytest.mark.anyio
@@ -455,7 +457,7 @@ async def test_deleting_branch_ancestor_breaks_lineage_loudly(saver_env: _SaverE
 
     with pytest.raises(CheckpointLineageError):
         await _walk(saver_env, head_config, message_ids[1])
-    _report("branch_ancestor_deletion", {"deleted": branch_point_id})
+    _report("branch_ancestor_deletion", {"deleted": branch_point_id}, saver_env.kind)
 
 
 @pytest.mark.anyio
@@ -486,7 +488,7 @@ async def test_pending_writes_are_retained_state_not_garbage(saver_env: _SaverEn
     assert after["write_rows"] == before["write_rows"] + 1, "put_writes must land exactly its own row"
     blobs = await _task_write_blobs(saver_env, thread_id, "pending-task")
     assert blobs == [b"pending-write"], "the stored write must round-trip byte-identically"
-    _report("pending_writes", {"stats": after})
+    _report("pending_writes", {"stats": after}, saver_env.kind)
 
 
 @pytest.mark.anyio
@@ -535,7 +537,7 @@ async def test_leaf_duration_checkpoint_deletion_is_safe(saver_env: _SaverEnv) -
     stats_after_delete = await _stats(saver_env, thread_id)
     assert stats_after_delete["blob_rows"] == stats_after_append["blob_rows"]
     assert stats_after_delete["checkpoint_rows"] == stats_before["checkpoint_rows"]
-    _report("leaf_duration_deletion", {"deleted": duration_id, "head": checkpoint_ids[-1]})
+    _report("leaf_duration_deletion", {"deleted": duration_id, "head": checkpoint_ids[-1]}, saver_env.kind)
 
 
 def _config_thread(thread_id: str, checkpoint_id: str) -> dict[str, Any]:
@@ -578,4 +580,16 @@ async def test_leaf_sibling_branch_deletion_is_safe(saver_env: _SaverEnv) -> Non
     assert default_head.checkpoint["id"] != fork_checkpoint_id
     resumed = await saver_env.saver.aget_tuple(_config_thread(thread_id, original_head_id))
     assert resumed is not None
-    _report("leaf_sibling_deletion", {"fork": fork_checkpoint_id, "head": original_head_id})
+    _report("leaf_sibling_deletion", {"fork": fork_checkpoint_id, "head": original_head_id}, saver_env.kind)
+
+
+def test_report_keeps_one_entry_per_backend(tmp_path: Any, monkeypatch: Any) -> None:
+    """The report must retain one entry per parameterized backend: memory and
+    SQLite results coexist in the same file instead of overwriting a shared
+    key (which silently discarded the memory baseline)."""
+    monkeypatch.setenv("DEERFLOW_RETENTION_REPORT", str(tmp_path / "report.json"))
+    _report("growth_baseline", {"checkpoint_rows": 7}, "memory")
+    _report("growth_baseline", {"checkpoint_rows": 9}, "sqlite")
+    with open(tmp_path / "report.json", encoding="utf-8") as handle:
+        data = json.load(handle)
+    assert data["growth_baseline"] == {"memory": {"checkpoint_rows": 7}, "sqlite": {"checkpoint_rows": 9}}
