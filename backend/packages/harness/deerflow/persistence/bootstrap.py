@@ -13,11 +13,13 @@ Combines two ideas:
 Three-branch decision (see ``_decide_state``)
 ---------------------------------------------
 
-| DB state                              | Action                                  |
-|---------------------------------------|-----------------------------------------|
-| empty (no DeerFlow tables)            | ``create_all`` + ``alembic stamp head`` |
-| legacy (DeerFlow tables, no alembic)  | ``create_all`` (baseline tables only, as backfill) + ``stamp 0001_baseline`` + ``upgrade head`` |
-| versioned (``alembic_version`` row)   | ``alembic upgrade head``                |
+| DB state                                      | Action                                  |
+|-----------------------------------------------|-----------------------------------------|
+| empty (no DeerFlow tables)                    | ``create_all`` + ``alembic stamp head`` |
+| legacy (DeerFlow tables, no alembic)          | ``create_all`` (baseline tables only, as backfill) + ``stamp 0001_baseline`` + ``upgrade head`` |
+| versioned (one locally known revision)        | ``alembic upgrade head``                |
+| reviewed forward revision with local columns | warn and skip migration                 |
+| unknown, empty, or multiple revision rows     | refuse to start                         |
 
 The legacy branch handles pre-alembic databases that already have at least one
 DeerFlow-owned table. ``create_all`` runs first because stamping at
@@ -70,6 +72,11 @@ best-effort; multi-instance deployments should use Postgres.
 * **Idempotent revisions -- retry fallback.** Column revisions use the helpers
   in ``migrations/_helpers.py`` so repeated post-baseline changes, manual
   ALTERs, or retries after SQLite lock contention do not duplicate work.
+  During the 0018-to-0019 compatibility window, an old SQLite process also
+  re-reads ``alembic_version`` after an Alembic ``CommandError``. It recovers
+  only when another process advanced the file to the explicitly reviewed 0019
+  and 0019 is still absent from the local migration tree; every other migration
+  failure remains fatal.
 
 ``alembic upgrade head`` on a DB already at head is a no-op by alembic's own
 semantics, so the second-N-th actor simply observes head and exits.
@@ -87,6 +94,7 @@ from typing import Any
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -99,6 +107,24 @@ _MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 # Cached migration head, computed once per process from the disk script tree.
 _HEAD_REVISION: str | None = None
+_KNOWN_REVISIONS: frozenset[str] | None = None
+
+# One additive revision may be present when an older Gateway starts during the
+# thread-incarnation rollout. This allowlist was reviewed only for revision
+# ``0019_thread_incarnations`` adding nullable VARCHAR(32) columns
+# ``threads_meta.incarnation`` and ``mcp_tasks.thread_incarnation`` without a
+# server default, table, index, constraint, or data backfill. The owning 0019
+# change must cross-pin this revision id and schema shape in tests. Amending
+# that DDL requires re-auditing old-repository reads and writes before this
+# exception remains valid. The exception also requires every current ORM table
+# and column: the original 0018 + incarnation columns shape lacks projects and
+# is no longer compatible with this build. Both skip paths validate that floor.
+# Note: this tree's own chain already carries ``0019_projects`` /
+# ``0020_threads_meta_project_id`` off ``0018_oauth_identity_pg_partial``; the
+# ``0019_`` numeric prefix is intentionally reused. When the owning rollout
+# revision merges it must re-parent onto the current head (see
+# ``migrations/AGENTS.md``) so alembic never sees two heads off 0018.
+_FORWARD_COMPATIBLE_REVISION = "0019_thread_incarnations"
 
 # Baseline (stamp target for legacy DBs). Pinned here so the bootstrap layer
 # fails loudly if the baseline revision is ever renamed without updating the
@@ -268,6 +294,60 @@ def _get_head_revision() -> str:
             raise RuntimeError("alembic has no head revision -- versions/ directory is empty")
         _HEAD_REVISION = head
     return _HEAD_REVISION
+
+
+def _get_known_revisions() -> frozenset[str]:
+    """Return every revision id available in the local migration tree."""
+    global _KNOWN_REVISIONS
+    if _KNOWN_REVISIONS is None:
+        cfg = AlembicConfig()
+        cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
+        script = ScriptDirectory.from_config(cfg)
+        _KNOWN_REVISIONS = frozenset(revision.revision for revision in script.walk_revisions())
+    return _KNOWN_REVISIONS
+
+
+def _get_revision_metadata() -> tuple[str, frozenset[str]]:
+    """Load the local head and revision set off the event loop."""
+    return _get_head_revision(), _get_known_revisions()
+
+
+async def _read_database_revision(conn: Any) -> str:
+    """Read and validate the database's single alembic revision row."""
+    result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+    rows = list(result.scalars())
+    if len(rows) != 1:
+        raise RuntimeError(f"bootstrap: expected exactly one alembic_version row, found {len(rows)}")
+    revision = rows[0]
+    if not isinstance(revision, str) or not revision:
+        raise RuntimeError("bootstrap: alembic_version contains an empty revision")
+    return revision
+
+
+def _validate_forward_schema(sync_conn: Any) -> None:
+    """Require the local repository schema before skipping unknown migrations.
+
+    This is a presence check, not a general schema compatibility proof. The
+    allowlisted additive DDL still needs its separate read/write audit. Derive
+    the local floor from ORM metadata so a new mapped column cannot silently
+    invalidate the existing exception again.
+    """
+    import deerflow.persistence.models  # noqa: F401
+    from deerflow.persistence.base import Base
+
+    inspector = sa_inspect(sync_conn)
+    tables = set(inspector.get_table_names())
+    missing = []
+    for name, table in sorted(Base.metadata.tables.items()):
+        if name not in tables:
+            missing.append(name)
+            continue
+        columns = {column["name"] for column in inspector.get_columns(name)}
+        missing.extend(f"{name}.{column.name}" for column in table.columns if column.name not in columns)
+    if missing:
+        raise RuntimeError(
+            f"bootstrap: revision {_FORWARD_COMPATIBLE_REVISION!r} is missing required local schema: {', '.join(missing)}; refusing to start. See docs/database-forward-revision-recovery.md for the audited offline migration path."
+        )
 
 
 def _reflect_state(sync_conn: Any) -> dict[str, bool]:
@@ -495,12 +575,13 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
     schema must already exist (``init_engine`` issues ``CREATE SCHEMA`` before
     calling this). Ignored for non-postgres backends.
     """
-    head = _get_head_revision()
+    head, known_revisions = await asyncio.to_thread(_get_revision_metadata)
     cfg = _get_alembic_config(engine, postgres_schema=postgres_schema if backend == "postgres" else "")
 
     async with _bootstrap_lock(engine, backend=backend):
         async with engine.connect() as conn:
             state = await conn.run_sync(_reflect_state)
+            database_revision = await _read_database_revision(conn) if state["has_alembic_version"] else None
         decision = _decide_state(state)
 
         if decision == "empty":
@@ -531,8 +612,41 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
             await asyncio.to_thread(_upgrade, cfg, "head")
 
         elif decision == "versioned":
-            logger.info("bootstrap: branch=versioned -> upgrade head (%s)", head)
-            await asyncio.to_thread(_upgrade, cfg, "head")
+            if database_revision in known_revisions:
+                logger.info(
+                    "bootstrap: branch=versioned revision=%s -> upgrade head (%s)",
+                    database_revision,
+                    head,
+                )
+                try:
+                    await asyncio.to_thread(_upgrade, cfg, "head")
+                except CommandError:
+                    # SQLite has no cross-process bootstrap mutex. Another
+                    # process may advance 0018 to the reviewed 0019 after this
+                    # process reads the version but before Alembic starts.
+                    # Do not apply this recovery once 0019 belongs to the local
+                    # tree: a new binary's migration failure must stay fatal.
+                    if backend != "sqlite" or _FORWARD_COMPATIBLE_REVISION in known_revisions:
+                        raise
+                    async with engine.connect() as conn:
+                        current_revision = await _read_database_revision(conn)
+                        if current_revision != _FORWARD_COMPATIBLE_REVISION:
+                            raise
+                        await conn.run_sync(_validate_forward_schema)
+                    logger.warning(
+                        "bootstrap: database advanced concurrently to explicitly forward-compatible revision %s; skipping the stale local upgrade",
+                        current_revision,
+                    )
+            elif database_revision == _FORWARD_COMPATIBLE_REVISION:
+                async with engine.connect() as conn:
+                    await conn.run_sync(_validate_forward_schema)
+                logger.warning(
+                    "bootstrap: database revision %s is explicitly forward-compatible with local head %s and has its required tables and columns; skipping migration",
+                    database_revision,
+                    head,
+                )
+            else:
+                raise RuntimeError(f"bootstrap: database revision {database_revision!r} is not known to this build (local head {head!r}); refusing to start")
 
         else:  # pragma: no cover -- defensive
             raise RuntimeError(f"bootstrap: unhandled decision {decision!r}")

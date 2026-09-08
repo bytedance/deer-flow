@@ -1,36 +1,38 @@
 ### Middleware Chain
 
+After latest-user rescue, if the inherited trimmer empties an AI/Tool-only
+window, format it and use `_build_summary_input_text(strategy="last")`.
+Keep normal human-anchored trimming and the final-message fallback for mixed
+windows whose human anchor falls outside the token-limited tail; head-first
+restoration can lose recent tool results. Tail truncation prefixes `\n...\n`
+only when marker and content fit. Budget raw sections before HTML escaping,
+wrappers, and prompt (not the final request); escape after trimming to preserve
+entities. Pass `trim_tokens_to_summarize=None` explicitly through the factory;
+omission restores LangChain's 4000-token default.
+
 Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values.
+Completed is not accepted; retain useful work and address acceptance gaps.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares` appends lead-only entries. Optional entries require their config/runtime condition.
 
-**Message provenance.** A middleware that injects or rewrites a message stamps
-`additional_kwargs` with the neutral provenance keys from
-`deerflow_extension_api.provenance` (`deerflow_content_kind`,
-`deerflow_producer_kind`, and optionally `deerflow_producer_entity_id`) via
-`provenance_kwargs()`. Stamp at injection/rewrite regardless of installed
-observers; downstream cannot recover the producer. All three
-keys are in `_SERVER_OWNED_MESSAGE_METADATA_KEYS`, so a caller cannot forge
-provenance on inbound messages. Currently stamped by: DynamicContext (reminder + memory),
-DurableContext (contract + data), SystemMessageCoalescing, ViewImage,
-SkillActivation. Summarization, Title, and Memory are deliberately absent:
-Summarization's and Title's own model calls are already attributed through
-system-model-call observation (`SystemOperationKind.SUMMARIZATION` /
-`.TITLE`), and the summary text they produce only ever enters a request via
-`DurableContextMiddleware`'s already-stamped `durable_context_data` block —
-there is no separate message of theirs to stamp. Memory only *reads*
-messages to queue them for extraction; the recalled-memory content that
-actually re-enters context is DynamicContext's `dynamic_context_memory`
-stamp, not anything Memory itself produces.
+**Message provenance.** At injection/rewrite, always stamp `additional_kwargs`
+via `deerflow_extension_api.provenance.provenance_kwargs()`:
+`deerflow_content_kind`, `deerflow_producer_kind`, optional
+`deerflow_producer_entity_id`. All are server-owned inbound metadata; stamp even
+without observers, since downstream cannot recover producers. Producers:
+DynamicContext (reminder/memory), DurableContext (contract/data),
+SystemMessageCoalescing, ViewImage, SkillActivation. Summarization/Title use
+`SystemOperationKind.SUMMARIZATION`/`.TITLE` model-call attribution; summaries
+enter via DurableContext's stamped `durable_context_data`, not separate
+messages. Memory only queues extraction; recall uses DynamicContext's
+`dynamic_context_memory` stamp.
 
-**Middleware self-description.** A middleware whose configuration changes agent
-behaviour implements `release_policy_parameters() -> dict[str, object]`
-(`deerflow_extension_api.release.ReleasePolicyProvider`, duck-typed — no base
-class). Values must be JSON-serialisable; long text is hashed with
-`canonical_hash` rather than embedded, because a declaration is an identity and
-not a copy of the prompt. `collect_release_policies()` gathers them from an
-assembled stack. Adding a behaviour-affecting field to a middleware means adding
-it to that middleware's declaration in the same change.
+**Middleware self-description.** Behaviour-configurable middleware implements
+`release_policy_parameters() -> dict[str, object]` (duck-typed
+`deerflow_extension_api.release.ReleasePolicyProvider`, no base class).
+Use JSON-serialisable values and `canonical_hash` for long text, not prompt
+copies. `collect_release_policies()` gathers stack declarations; update them
+alongside every behaviour-affecting field.
 
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 
@@ -95,6 +97,17 @@ Before changing a later authorization phase, read the [authorization RFC](../../
 27. **SystemMessageCoalescingMiddleware** - Merges every SystemMessage into a single leading SystemMessage per request; provider-agnostic fix for strict backends (vLLM/SGLang/Qwen/Anthropic) that reject non-leading system messages. Touches the per-request payload only (checkpoint state unchanged); on midnight crossings only the latest `dynamic_context_reminder` SystemMessage survives. The subagent builder places its date-only context middleware immediately before this coalescer, so the built-in subagent prompt and hidden date reminder still reach providers as one leading system block
 28. **SubagentLimitMiddleware** - *(optional, if `subagent_enabled`)* Truncates excess ordinary `task` tool calls to enforce both the per-response concurrency limit (`max_concurrent_subagents`, resolved against startup `subagent_runtime.max_running` and the 1-64 safety range before construction) and the per-run total delegation cap (`max_total_subagents` runtime override or `subagents.max_total_per_run`, default 6, clamped to 1-50). The total cap counts current-run entries in the durable delegation ledger (entries are tagged with `run_id` when captured), so repeated planning checkpoints in one run cannot keep launching legal-sized batches indefinitely, while later user turns in the same thread get a fresh run budget. Explicit durable `batch_task` calls are a separate mode with persisted total/live/running limits and are not rewritten into ordinary ledger entries. If the ordinary cap is exhausted, the middleware strips remaining `task` calls, forces `finish_reason="stop"`, and appends a visible limit note so the run can synthesize existing results instead of ending with an empty tool-call response.
 29. **LoopDetectionMiddleware** - *(optional, if `loop_detection.enabled`)* Detects repeated tool-call loops; hard-stop clears both structured `tool_calls` and raw provider tool-call metadata before forcing a final text answer; stamps `loop_capped` via `consume_stop_reason` (#3875 Phase 2), symmetric to `TokenBudgetMiddleware`; persists warned-state transitions (first per call hash or per tool-frequency burst) and hard stops as `middleware:loop_detection`, attributed with `is_subagent` and the optional `agent_id`, without tool arguments, message content, tool results, or argument-derived hashes. Ordinary task subagents get dedicated recorder keys through a parent-loop proxy; never pass `RunJournal` into their isolated loop. Durable batch subagents have no parent run journal and do not persist these transitions
+   Loop decisions are severity-first across both detection layers: a warning
+   candidate never short-circuits frequency accounting for the remaining calls
+   in an admitted batch. A hard limit can stop scanning immediately because it
+   rejects the entire batch. Only the selected warning is marked and logged;
+   hash warnings still precede frequency warnings when neither layer stops the
+   run. Among simultaneous frequency-warning candidates, the first crossing in
+   model tool-call order remains selected for compatibility; later calls are
+   still counted and can warn in a later batch. A frequency warning whose burst
+   decays within the batch must not leave a stale suppression mark.
+   `tests/test_loop_detection_middleware.py` covers mixed-tool batches, window
+   decay, overrides, and sync/async compiled-graph execution.
 30. **TokenBudgetMiddleware** - *(optional, if `token_budget.enabled`)* Enforces per-run token limits
 31. **Custom middlewares** - *(optional)* Any `custom_middlewares` passed to `build_middlewares` are injected here, before config-declared extensions and the terminal-response/safety/clarification tail
 32. **Configured extension middlewares** - *(optional, if `extensions.middlewares` is set in `config.yaml` or `extensions_config.json`)* Zero-argument `AgentMiddleware` classes loaded from `module.path:ClassName` entries via `deerflow.reflection.resolve_class`. Missing packages, invalid classes, and broken modules fail loudly at agent creation. These run after built-ins/programmatic custom middleware and after the lead/subagent loop/token guards, but before the terminal-response/safety/clarification tail; subagents receive the same configured extension middleware class list before their safety tail. Treat these files as trusted operator config because middleware paths instantiate arbitrary code. Gateway skill/MCP toggle endpoints preserve this field through `to_file_dict()` but must not add a write path for `extensions.middlewares` without an explicit trust-boundary review. Lead-only vs subagent-only middleware lists and per-context constructor parameters are not expressible in this MVP.
