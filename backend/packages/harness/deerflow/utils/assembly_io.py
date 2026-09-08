@@ -31,9 +31,9 @@ def _default_assembly_workers() -> int:
 _ASSEMBLY_WORKERS = _default_assembly_workers()
 _ASSEMBLY_EXECUTOR = ThreadPoolExecutor(max_workers=_ASSEMBLY_WORKERS, thread_name_prefix="assembly")
 
-# Pending (submitted, unfinished) assembly count. Increments on the event loop
-# before dispatch and decrements from the future's done callback; guarded for
-# multi-loop test environments.
+# Pending (submitted, unfinished) assembly count. Increments on the event
+# loop before dispatch and decrements from the dispatched work item's
+# `finally` on a pool thread; guarded for multi-loop test environments.
 _pending_assemblies = 0
 _pending_lock = threading.Lock()
 _last_starvation_log = 0.0
