@@ -35,6 +35,8 @@ const network = rs.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
 );
 
 beforeEach(() => {
+  rs.stubEnv("HOSTNAME", undefined);
+  rs.stubEnv("PORT", undefined);
   env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY = "true";
   env.NEXT_PUBLIC_BACKEND_BASE_URL = "";
   network.mockReset();
@@ -43,6 +45,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  rs.unstubAllEnvs();
   rs.unstubAllGlobals();
 });
 
@@ -98,9 +101,9 @@ describe("static website API requests", () => {
       installed: false,
     });
     expect(network.mock.calls.map(([url]) => url)).toEqual([
-      "http://localhost:2026/mock/api/skills",
-      "http://localhost:2026/mock/api/mcp/config",
-      "http://localhost:2026/mock/api/integrations/lark/status",
+      "http://127.0.0.1:3000/mock/api/skills",
+      "http://127.0.0.1:3000/mock/api/mcp/config",
+      "http://127.0.0.1:3000/mock/api/integrations/lark/status",
     ]);
     await expect(fetchFeatures()).resolves.toMatchObject({
       agents_api: { enabled: false },
@@ -123,7 +126,7 @@ describe("static website API requests", () => {
     expect(
       (
         await apiFetch(
-          new Request("http://localhost:2026/api/subagents", {
+          new Request("http://127.0.0.1:3000/api/subagents", {
             method: "DELETE",
           }),
         )
@@ -132,6 +135,29 @@ describe("static website API requests", () => {
     expect(network).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["demo.internal", undefined, "http://demo.internal:3000"],
+    [undefined, "4000", "http://127.0.0.1:4000"],
+    ["demo.internal", "4000", "http://demo.internal:4000"],
+  ])(
+    "uses the server origin with HOSTNAME=%s and PORT=%s",
+    async (hostname, port, origin) => {
+      rs.stubEnv("HOSTNAME", hostname);
+      rs.stubEnv("PORT", port);
+      await apiFetch("/api/skills");
+      expect(network).toHaveBeenCalledWith(
+        `${origin}/mock/api/skills`,
+        expect.anything(),
+      );
+      network.mockClear();
+      const response = await apiFetch(
+        new Request(`${origin}/api/subagents`, { method: "DELETE" }),
+      );
+      expect(response.status).toBe(405);
+      expect(network).not.toHaveBeenCalled();
+    },
+  );
+
   it("leaves demo assets and unrelated external requests intact", async () => {
     await apiFetch("/demo/threads/demo/thread.json");
     await apiFetch("https://external.example/api/features");
@@ -139,6 +165,8 @@ describe("static website API requests", () => {
   });
 
   it("uses the current browser origin for fixtures and respects cancellation", async () => {
+    rs.stubEnv("HOSTNAME", "demo.internal");
+    rs.stubEnv("PORT", "4000");
     rs.stubGlobal("window", { location: { origin: "http://127.0.0.1:3000" } });
     await apiFetch("/api/skills");
     expect(network).toHaveBeenCalledWith(
