@@ -26,6 +26,7 @@ import {
   isHiddenFromUIMessage,
 } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
+import { PROJECTS_QUERY_KEY } from "../projects/api";
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
@@ -41,6 +42,7 @@ import {
 import {
   branchThreadFromTurn,
   fetchThreadTokenUsage,
+  moveThreadToProject,
   patchThreadMetadata,
   searchThreadsByArchive,
   type ThreadMetadataPatch,
@@ -65,7 +67,10 @@ import type {
   RunMessage,
   ThreadTokenUsageResponse,
 } from "./types";
-import { THREAD_PINNED_METADATA_KEY } from "./utils";
+import {
+  THREAD_PINNED_METADATA_KEY,
+  THREAD_PROJECT_METADATA_KEY,
+} from "./utils";
 
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
@@ -1507,6 +1512,11 @@ export function invalidateStoppedThreadCaches(
   void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
   void queryClient.invalidateQueries({
     queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+  });
+  // A finished run updates the title/recency the project page thread list
+  // shows ([...PROJECTS_QUERY_KEY, "threads", id, ...]).
+  void queryClient.invalidateQueries({
+    queryKey: [...PROJECTS_QUERY_KEY, "threads"],
   });
 
   if (!threadId || isMock) {
@@ -3138,6 +3148,58 @@ export function usePinThread() {
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
       });
+      // Pin changes the ordering the project page thread list shows
+      // ([...PROJECTS_QUERY_KEY, "threads", id, ...]); without this, cached
+      // pages keep the old order and pagination can duplicate or skip
+      // entries across the refetch boundary.
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+      });
+    },
+  });
+}
+
+export function useMoveThreadToProject(options?: {
+  onError?: (
+    error: Error,
+    variables: { threadId: string; projectId: string | null },
+  ) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      threadId,
+      projectId,
+    }: {
+      threadId: string;
+      projectId: string | null;
+    }) => moveThreadToProject(threadId, projectId),
+    // Hook-level error handler: survives the caller's dropdown unmounting,
+    // unlike a per-mutate `onError` passed from inside a closing menu.
+    onError: options?.onError,
+    async onSuccess(_response, { threadId, projectId }) {
+      // An older GET must not overwrite the confirmed affiliation. Match all
+      // metadata variants, including an initial read with no cached snapshot.
+      await queryClient.cancelQueries({
+        queryKey: ["thread", "metadata", threadId],
+      });
+      setThreadMetadataInCaches(queryClient, threadId, {
+        [THREAD_PROJECT_METADATA_KEY]: projectId,
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ["thread", "metadata", threadId],
+      });
+    },
+    onSettled() {
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      });
+      // Moving a thread changes membership of project thread lists
+      // ([...PROJECTS_QUERY_KEY, "threads", id, ...]).
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+      });
     },
   });
 }
@@ -3320,6 +3382,11 @@ export function useDeleteThread() {
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
       });
+      // Deleting a thread changes membership of project thread lists
+      // ([...PROJECTS_QUERY_KEY, "threads", id, ...]).
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+      });
     },
   });
 }
@@ -3352,6 +3419,11 @@ export function useRenameThread() {
       for (const filter of filters) {
         void queryClient.invalidateQueries(filter);
       }
+      // The project page thread list is REST-shaped, not covered by
+      // setThreadTitleInCaches; invalidate it so renamed titles refresh.
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+      });
     },
   });
 }

@@ -250,3 +250,15 @@ describe("requiresAuthenticatedViewer", () => {
     ).toBe(true);
   });
 });
+
+test.each(["csv", "tsv", "CSV"])(
+  "opens %s data in the shared viewer",
+  (extension) => {
+    expect(
+      resolveArtifactOpenURL({
+        filepath: `/mnt/user-data/outputs/data.${extension}`,
+        threadId,
+      }),
+    ).toContain(ARTIFACT_VIEWER_ROUTE);
+  },
+);

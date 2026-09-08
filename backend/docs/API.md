@@ -189,7 +189,37 @@ Execute the agent with input.
 ```http
 POST /api/langgraph/threads/{thread_id}/runs
 Content-Type: application/json
+Idempotency-Key: <unique key for this logical request>  # optional
 ```
+
+The thread-scoped create, stream, and wait endpoints accept an optional
+`Idempotency-Key` header. Retrying with the same authenticated user, `thread_id`,
+and key reuses the existing run instead of executing the input again. The key is
+shared across `/runs`, `/runs/stream`, and `/runs/wait` for a given user and
+thread, so the same key string cannot back two different calls even across those
+endpoints. Reuse is bound to the original `input` and `assistant_id`; a retry
+that changes either returns 409. Generate a new key for every intentional user
+action; reuse a key only when retrying that same action after an uncertain HTTP
+result. Keys may be at most 255 characters. Stateless `/api/langgraph/runs/*`
+endpoints do not support this header because requests without an explicit thread
+create a new temporary conversation.
+
+Retrying a still-running run that this worker cannot stream returns 409 from
+`/runs/stream` (`Run ... is not active on this worker and cannot be streamed`)
+with no `Retry-After`. The same shape on `/runs/wait` returns 200
+`{"status": "<durable status>", "error": ...}` without blocking for a final
+state. Retrying a finished run through `/runs/wait` also returns that durable
+status payload rather than the latest thread checkpoint: a later run on the
+same thread may have advanced the head, and `/wait` does not claim that head
+as this run's result. That status is the durable row after completion, not
+the hydrated record from admission time. The original creating `/wait` still
+returns this run's checkpoint even if a retry overlaps while it is waiting. Retrying a finished run whose SSE log is gone emits a `gap` frame
+(`stream_replay_gap`, `recovery: reload_durable_state`) on the creating
+`/runs/stream` endpoint and closes without an `end` frame; reload durable
+thread/run state instead of treating the stream as empty. Observer joins of
+that same run still end with `end`. Stateless `/api/langgraph/runs/stream`
+does not accept this header and keeps the existing missing-stream close of
+`end`; the `gap` signal is only on a thread-scoped creating retry.
 
 **Request Body:**
 ```json
@@ -290,6 +320,7 @@ Stream responses in real-time.
 ```http
 POST /api/langgraph/threads/{thread_id}/runs/stream
 Content-Type: application/json
+Idempotency-Key: <unique key for this logical request>  # optional
 ```
 
 Same request body as Create Run. Returns SSE stream.
