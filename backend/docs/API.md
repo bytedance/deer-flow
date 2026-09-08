@@ -1216,3 +1216,18 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs/stream \
 > `config.recursion_limit` explicitly — see the [Create Run](#create-run)
 > section for details. Scheduled-task launches use
 > `scheduler.recursion_limit` from `config.yaml` instead of a client body.
+
+## Chat archive and restore
+
+`POST /api/threads/search` accepts `archived: true` for archived chats or
+`archived: false` for recent chats (including legacy rows without an archive flag).
+Omit the field or use null to include both. Filtering applies before `limit` and
+`offset` and is scoped to the authenticated user. Combine it with the existing
+`metadata` and `status` filters when needed.
+
+Archive with `PATCH /api/threads/{thread_id}` and body
+`{"metadata":{"deerflow_archived":true}}`; use false to restore. The flag must be
+a JSON boolean. Writes containing only boolean pin/archive flags preserve
+`updated_at` and all other metadata. The owner-checked endpoint returns the normal
+thread metadata response; original thread and artifact URLs remain available.
+Archiving does not cancel runs, pause schedules, or change retention.

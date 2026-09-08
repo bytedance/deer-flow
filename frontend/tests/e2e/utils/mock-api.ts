@@ -680,18 +680,26 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   });
 
   // Thread search — sidebar thread list & chats list page
-  void page.route("**/api/langgraph/threads/search", async (route) => {
+  void page.route(/\/api\/(?:langgraph\/)?threads\/search$/, async (route) => {
     let body = sortThreadSearchResults(threads).map(threadSearchResult);
 
     let limit: number | undefined;
     let offset = 0;
     try {
       const postData = route.request().postDataJSON() as {
+        archived?: boolean;
         limit?: number;
         offset?: number;
         metadata?: Record<string, unknown>;
       } | null;
       if (postData) {
+        if (typeof postData.archived === "boolean") {
+          body = body.filter(
+            (thread) =>
+              (Reflect.get(thread.metadata, "deerflow_archived") === true) ===
+              postData.archived,
+          );
+        }
         if (typeof postData.limit === "number") {
           limit = postData.limit;
         }

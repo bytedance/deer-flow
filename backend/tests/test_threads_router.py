@@ -50,8 +50,8 @@ class _PermissiveThreadMetaStore(MemoryThreadMetaStore):
     async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
         return await super().create(thread_id, assistant_id=assistant_id, user_id=None, display_name=display_name, metadata=metadata)
 
-    async def search(self, *, metadata=None, status=None, limit=100, offset=0, user_id=None):  # type: ignore[override]
-        return await super().search(metadata=metadata, status=status, limit=limit, offset=offset, user_id=None)
+    async def search(self, *, metadata=None, status=None, limit=100, offset=0, user_id=None, archived=None):  # type: ignore[override]
+        return await super().search(metadata=metadata, status=status, limit=limit, offset=offset, user_id=None, archived=archived)
 
 
 class _ThreadTestRunManager:
@@ -1140,7 +1140,8 @@ def test_get_thread_preserves_metadata_status_without_checkpoint(stored_status: 
     assert response.json()["status"] == stored_status
 
 
-def test_patch_thread_pin_returns_iso_and_preserves_updated_at() -> None:
+@pytest.mark.parametrize("key", [THREAD_PINNED_METADATA_KEY, "deerflow_archived"])
+def test_patch_thread_pin_returns_iso_and_preserves_updated_at(key) -> None:
     """A pin/unpin PATCH must not bump ``updated_at``.
 
     Pinning or unpinning a chat does not represent conversation activity.
@@ -1172,7 +1173,7 @@ def test_patch_thread_pin_returns_iso_and_preserves_updated_at() -> None:
     with TestClient(app) as client:
         response = client.patch(
             f"/api/threads/{thread_id}",
-            json={"metadata": {THREAD_PINNED_METADATA_KEY: True}},
+            json={"metadata": {key: True}},
         )
 
     assert response.status_code == 200, response.text
@@ -1182,7 +1183,7 @@ def test_patch_thread_pin_returns_iso_and_preserves_updated_at() -> None:
     # ``touch=False`` preserves the original ``updated_at``; both timestamps
     # derive from the same legacy value, so they coerce to the same ISO string.
     assert body["updated_at"] == body["created_at"]
-    assert body["metadata"] == {"k": "v0", THREAD_PINNED_METADATA_KEY: True}
+    assert body["metadata"] == {"k": "v0", key: True}
 
 
 def test_patch_thread_non_pin_metadata_bumps_updated_at() -> None:
@@ -3867,3 +3868,69 @@ class TestRestReadsCarryMessageSeq:
         assert response.status_code == 200, response.text
         messages = response.json()["values"]["messages"]
         assert "deerflow_seq" not in (messages[0].get("additional_kwargs") or {})
+
+
+def test_archive_search_filter_and_restore_through_api():
+    app, store, _ = _build_thread_app()
+
+    async def seed():
+        for name, metadata in [("active", {}), ("archived", {"deerflow_archived": True})]:
+            await store.aput(THREADS_NS, name, {"metadata": metadata, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"})
+
+    asyncio.run(seed())
+    with TestClient(app) as client:
+        active = client.post("/api/threads/search", json={"archived": False, "limit": 1})
+        assert active.status_code == 200
+        assert [r["thread_id"] for r in active.json()] == ["active"]
+        archived = client.post("/api/threads/search", json={"archived": True})
+        assert [r["thread_id"] for r in archived.json()] == ["archived"]
+        assert len(client.post("/api/threads/search", json={}).json()) == 2
+        restored = client.patch("/api/threads/archived", json={"metadata": {"deerflow_archived": False}})
+        assert restored.status_code == 200
+        assert client.post("/api/threads/search", json={"archived": True}).json() == []
+
+
+@pytest.mark.parametrize("value", ["true", 1, None, {}])
+def test_archive_patch_rejects_non_boolean(value):
+    app, _, _ = _build_thread_app()
+    with TestClient(app) as client:
+        result = client.patch("/api/threads/invalid", json={"metadata": {"deerflow_archived": value}})
+    assert result.status_code == 422
+
+
+def test_archived_chat_keeps_original_link_and_artifact_download(tmp_path, monkeypatch):
+    from app.gateway.routers import artifacts
+
+    app, store, _ = _build_thread_app()
+    app.include_router(artifacts.router)
+    artifact = tmp_path / "report.txt"
+    artifact.write_text("Completed report", encoding="utf-8")
+    monkeypatch.setattr(artifacts, "resolve_thread_virtual_path", lambda *args, **kwargs: artifact)
+
+    async def seed():
+        await store.aput(THREADS_NS, "report", {"metadata": {}, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"})
+
+    asyncio.run(seed())
+    with TestClient(app) as client:
+        response = client.patch("/api/threads/report", json={"metadata": {"deerflow_archived": True}})
+        assert response.status_code == 200
+        assert client.get("/api/threads/report").status_code == 200
+        download = client.get("/api/threads/report/artifacts/mnt/user-data/outputs/report.txt?download=true")
+        assert download.status_code == 200
+        assert download.text == "Completed report"
+        assert "attachment" in download.headers["content-disposition"]
+    assert artifact.read_text(encoding="utf-8") == "Completed report"
+
+
+def test_archive_patch_cannot_modify_another_users_thread():
+    app, store, _ = _build_thread_app()
+    app.state.thread_store = MemoryThreadMetaStore(store)
+
+    async def seed():
+        await store.aput(THREADS_NS, "private", {"user_id": "someone-else", "metadata": {}})
+
+    asyncio.run(seed())
+    with TestClient(app) as client:
+        response = client.patch("/api/threads/private", json={"metadata": {"deerflow_archived": True}})
+        assert response.status_code == 404
+    assert asyncio.run(store.aget(THREADS_NS, "private")).value["metadata"] == {}

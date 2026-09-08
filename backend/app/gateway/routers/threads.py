@@ -46,7 +46,7 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
-from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY
+from deerflow.persistence.thread_meta import THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
@@ -137,9 +137,9 @@ def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in metadata.items() if k not in _SERVER_RESERVED_METADATA_KEYS}
 
 
-def _is_pin_metadata_patch(metadata: dict[str, Any]) -> bool:
-    """Return True for the narrow pin/unpin PATCH shape."""
-    return set(metadata) == {THREAD_PINNED_METADATA_KEY} and isinstance(metadata.get(THREAD_PINNED_METADATA_KEY), bool)
+def _is_organization_metadata_patch(metadata: dict[str, Any]) -> bool:
+    """Recognize list-organization writes that must preserve activity time."""
+    return bool(metadata) and set(metadata) <= {THREAD_PINNED_METADATA_KEY, THREAD_ARCHIVED_METADATA_KEY} and all(isinstance(value, bool) for value in metadata.values())
 
 
 def _message_id(message: Any) -> str | None:
@@ -451,6 +451,7 @@ class ThreadCreateRequest(BaseModel):
 class ThreadSearchRequest(BaseModel):
     """Request body for searching threads."""
 
+    archived: bool | None = Field(default=None, strict=True, description="Archive filter; omitted includes all, false includes legacy unarchived threads")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata filter (exact match)")
     limit: int = Field(default=100, ge=1, le=1000, description="Maximum results")
     offset: int = Field(default=0, ge=0, description="Pagination offset")
@@ -498,6 +499,13 @@ class ThreadPatchRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata to merge")
 
     _strip_reserved = field_validator("metadata")(classmethod(lambda cls, v: _strip_reserved_metadata(v)))
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_archive_flag(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if THREAD_ARCHIVED_METADATA_KEY in value and not isinstance(value[THREAD_ARCHIVED_METADATA_KEY], bool):
+            raise ValueError("deerflow_archived must be a boolean")
+        return value
 
 
 class ThreadStateUpdateRequest(BaseModel):
@@ -1083,6 +1091,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
         rows = await repo.search(
             metadata=body.metadata or None,
             status=body.status,
+            **({"archived": body.archived} if body.archived is not None else {}),
             limit=body.limit,
             offset=body.offset,
         )
@@ -1117,10 +1126,10 @@ async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: R
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     # ``body.metadata`` already stripped by ``ThreadPatchRequest._strip_reserved``.
-    # Pin/unpin is not conversation activity, so it must not bump ``updated_at``.
+    # Pin/unpin and archive/restore are not conversation activity, so it must not bump ``updated_at``.
     # Other metadata PATCH callers keep the public endpoint's existing recency
     # contract unless they get their own explicit no-touch API surface.
-    touch = not _is_pin_metadata_patch(body.metadata)
+    touch = not _is_organization_metadata_patch(body.metadata)
     try:
         await thread_store.update_metadata(thread_id, body.metadata, touch=touch)
     except Exception:
