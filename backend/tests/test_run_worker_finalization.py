@@ -15,6 +15,7 @@ outer teardown guard must still schedule eviction on those paths.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -25,6 +26,8 @@ from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager, RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
+
+_CLEANUP_MARKER: ContextVar[str | None] = ContextVar("cleanup_marker", default=None)
 
 
 class _FakeAgent:
@@ -85,6 +88,7 @@ class _SpyRunManager:
 class _FakeBridge:
     def __init__(self, *, fail_publish_end: bool = False) -> None:
         self.fail_publish_end = fail_publish_end
+        self.cleanup_markers: list[str | None] = []
 
     async def publish(self, _run_id, event, payload) -> None:
         return None
@@ -95,6 +99,7 @@ class _FakeBridge:
         return None
 
     async def cleanup(self, _run_id, *, delay: int = 0) -> None:
+        self.cleanup_markers.append(_CLEANUP_MARKER.get())
         return None
 
 
@@ -112,20 +117,26 @@ async def test_run_agent_finalization_schedules_eviction():
     record.abort_event = asyncio.Event()
     ctx = RunContext(checkpointer=None)
 
-    await run_agent(
-        _FakeBridge(),
-        run_manager,
-        record,
-        ctx=ctx,
-        agent_factory=lambda config: _FakeAgent(),
-        graph_input={"messages": []},
-        config={"configurable": {"thread_id": "thread-finalize"}},
-    )
+    bridge = _FakeBridge()
+    marker_token = _CLEANUP_MARKER.set("run-context")
+    try:
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=ctx,
+            agent_factory=lambda config: _FakeAgent(),
+            graph_input={"messages": []},
+            config={"configurable": {"thread_id": "thread-finalize"}},
+        )
+    finally:
+        _CLEANUP_MARKER.reset(marker_token)
     await asyncio.sleep(0)
 
     scheduled_ids = [run_id for run_id, _kwargs in run_manager.scheduled_cleanup_calls]
     assert scheduled_ids == ["run-finalize"], f"run_agent finalization must schedule eviction for the run exactly once; got {run_manager.scheduled_cleanup_calls!r}"
     assert run_manager.direct_cleanup_calls == []
+    assert bridge.cleanup_markers == [None]
 
 
 @pytest.mark.asyncio
