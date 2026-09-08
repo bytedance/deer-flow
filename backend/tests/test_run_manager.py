@@ -962,6 +962,45 @@ async def test_list_by_thread_rejects_one_sided_keyset_cursor():
         match="before_created_at and before_run_id must be provided together",
     ):
         await manager.list_by_thread("thread-1", before_run_id="r2")
+    with pytest.raises(
+        ValueError,
+        match="before_created_at and before_run_id must be provided together",
+    ):
+        await manager.list_by_thread(
+            "thread-1",
+            before_created_at="2026-01-02T00:00:00+00:00",
+            before_run_id="",
+        )
+    with pytest.raises(
+        ValueError,
+        match="before_created_at must be an ISO-8601 timestamp",
+    ):
+        await manager.list_by_thread(
+            "thread-1",
+            before_created_at="not-a-timestamp",
+            before_run_id="r2",
+        )
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_keyset_accepts_space_decoded_offset():
+    """Query-decoded '+00:00' (a space) must still walk to the older page."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    for run_id, created_at in (
+        ("r1", "2026-01-01T00:00:00+00:00"),
+        ("r2", "2026-01-02T00:00:00+00:00"),
+        ("r3", "2026-01-03T00:00:00+00:00"),
+    ):
+        await store.put(run_id, thread_id="thread-1", status="success", created_at=created_at)
+
+    older = await manager.list_by_thread(
+        "thread-1",
+        limit=2,
+        before_created_at="2026-01-02T00:00:00 00:00",
+        before_run_id="r2",
+    )
+    assert [run.run_id for run in older] == ["r1"]
 
 
 @pytest.mark.anyio

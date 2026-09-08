@@ -52,13 +52,38 @@ class RunIdempotencyConflict(RuntimeError):
         self.existing = existing
 
 
+def normalize_run_created_at_iso(value: str) -> str:
+    """Make a run timestamp parseable as ISO-8601.
+
+    ``Z`` becomes ``+00:00``. An unencoded ``+`` in a query string arrives as a
+    space (``...T00:00:00 00:00``); restore the offset ``+``.
+    """
+    value = value.strip().replace("Z", "+00:00")
+    if "T" in value and " " in value and "+" not in value.split("T", 1)[1]:
+        date, _, rest = value.partition("T")
+        time_part, sep, offset = rest.rpartition(" ")
+        if sep and offset.replace(":", "").isdigit():
+            value = f"{date}T{time_part}+{offset}"
+    return value
+
+
+def format_run_cursor_created_at(value: str) -> str:
+    """UTC keyset cursor using ``Z`` so ``+`` is not decoded as space in query strings."""
+    dt = datetime.fromisoformat(normalize_run_created_at_iso(value))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    else:
+        dt = dt.astimezone(UTC)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 def parse_run_created_at(value: object) -> datetime:
     """Parse a stored run timestamp into an aware UTC datetime for keyset order."""
     iso = coerce_iso(value)
     if not iso:
         return datetime.min.replace(tzinfo=UTC)
     try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(normalize_run_created_at_iso(iso))
     except ValueError:
         return datetime.min.replace(tzinfo=UTC)
     if dt.tzinfo is None:

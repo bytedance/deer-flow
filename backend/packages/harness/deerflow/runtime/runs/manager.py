@@ -21,7 +21,13 @@ from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
-from .store.base import EditReplayVisibility, RunIdempotencyConflict, run_is_before_cursor, run_sort_key
+from .store.base import (
+    EditReplayVisibility,
+    RunIdempotencyConflict,
+    normalize_run_created_at_iso,
+    run_is_before_cursor,
+    run_sort_key,
+)
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -55,6 +61,14 @@ _SQLITE_UNIQUE_ERRORCODE = sqlite3.SQLITE_CONSTRAINT_UNIQUE
 def _generate_worker_id() -> str:
     """Generate a unique worker identifier: ``hostname:hex_uuid``."""
     return f"{socket.gethostname()}:{uuid.uuid4().hex}"
+
+
+def _cursor_part(value: str | None) -> str | None:
+    """Treat missing/blank cursor fields as absent so a one-sided empty string fails."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _is_unique_violation(exc: BaseException) -> bool:
@@ -710,10 +724,18 @@ class RunManager:
             before_created_at: ISO timestamp of the last run on the previous page.
             before_run_id: Run id of the last run on the previous page.
         """
+        before_created_at = _cursor_part(before_created_at)
+        before_run_id = _cursor_part(before_run_id)
         if (before_created_at is None) != (before_run_id is None):
             raise ValueError(
                 "before_created_at and before_run_id must be provided together"
             )
+        if before_created_at is not None:
+            try:
+                before_created_at = normalize_run_created_at_iso(before_created_at)
+                datetime.fromisoformat(before_created_at)
+            except ValueError:
+                raise ValueError("before_created_at must be an ISO-8601 timestamp") from None
 
         def _page(records: list[RunRecord]) -> list[RunRecord]:
             return sorted(records, key=lambda record: run_sort_key(record.created_at, record.run_id), reverse=True)[:limit]

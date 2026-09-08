@@ -48,6 +48,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import strip_injecte
 from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
+from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
@@ -1054,11 +1055,13 @@ async def wait_run(
     return {"status": record.status.value, "error": record.error}
 
 
-def _parse_run_page_created_at(value: str) -> None:
+def _parse_run_page_created_at(value: str) -> str:
     try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        normalized = normalize_run_created_at_iso(value)
+        datetime.fromisoformat(normalized)
     except ValueError:
         raise HTTPException(status_code=422, detail="before_created_at must be an ISO-8601 timestamp") from None
+    return normalized
 
 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
@@ -1091,7 +1094,7 @@ async def list_runs_page(
             detail="before_created_at and before_run_id must be provided together",
         )
     if before_created_at is not None:
-        _parse_run_page_created_at(before_created_at)
+        before_created_at = _parse_run_page_created_at(before_created_at)
 
     run_mgr = get_run_manager(request)
     user_id = await get_current_user(request)
@@ -1108,7 +1111,7 @@ async def list_runs_page(
     return ThreadRunsPageResponse(
         data=[_record_to_response(record) for record in page],
         has_more=has_more,
-        next_before_created_at=last.created_at if last else None,
+        next_before_created_at=format_run_cursor_created_at(last.created_at) if last else None,
         next_before_run_id=last.run_id if last else None,
     )
 

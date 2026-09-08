@@ -79,7 +79,7 @@ def test_runs_page_returns_envelope_and_has_more():
     body = response.json()
     assert [row["run_id"] for row in body["data"]] == ["r3", "r2"]
     assert body["has_more"] is True
-    assert body["next_before_created_at"] == "2026-01-02T00:00:00+00:00"
+    assert body["next_before_created_at"] == "2026-01-02T00:00:00Z"
     assert body["next_before_run_id"] == "r2"
     kwargs = run_manager.list_by_thread.await_args.kwargs
     assert kwargs["limit"] == 3
@@ -107,6 +107,35 @@ def test_runs_page_passes_cursor_through():
     kwargs = run_manager.list_by_thread.await_args.kwargs
     assert kwargs["before_created_at"] == "2026-01-02T00:00:00+00:00"
     assert kwargs["before_run_id"] == "r2"
+
+
+def test_runs_page_accepts_z_and_space_decoded_offset():
+    """Unencoded +00:00 arrives as a space; Z cursors must round-trip too."""
+    app, run_manager = _make_app([_record("r1", "2026-01-01T00:00:00+00:00")])
+    with TestClient(app) as client:
+        spaced = client.get(
+            "/api/threads/thread-1/runs/page",
+            params={
+                "before_created_at": "2026-01-02T00:00:00 00:00",
+                "before_run_id": "r2",
+            },
+        )
+        zoned = client.get(
+            "/api/threads/thread-1/runs/page",
+            params={
+                "before_created_at": "2026-01-02T00:00:00Z",
+                "before_run_id": "r2",
+            },
+        )
+
+    assert spaced.status_code == 200
+    assert zoned.status_code == 200
+    assert run_manager.list_by_thread.await_args_list[0].kwargs["before_created_at"] == (
+        "2026-01-02T00:00:00+00:00"
+    )
+    assert run_manager.list_by_thread.await_args_list[1].kwargs["before_created_at"] == (
+        "2026-01-02T00:00:00+00:00"
+    )
 
 
 def test_runs_page_is_not_captured_as_run_id():

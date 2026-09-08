@@ -21,6 +21,7 @@ from deerflow.runtime.runs.store.base import (
     RunIdempotencyConflict,
     RunStore,
     StatusFinalization,
+    normalize_run_created_at_iso,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -176,7 +177,7 @@ class RunRepository(RunStore):
         if resolved_user_id is not None:
             stmt = stmt.where(RunRow.user_id == resolved_user_id)
         if before_created_at and before_run_id:
-            cursor_dt = datetime.fromisoformat(before_created_at.replace("Z", "+00:00"))
+            cursor_dt = datetime.fromisoformat(normalize_run_created_at_iso(before_created_at))
             if cursor_dt.tzinfo is None:
                 cursor_dt = cursor_dt.replace(tzinfo=UTC)
             else:
