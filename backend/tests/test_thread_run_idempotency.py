@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from _router_auth_helpers import make_authed_test_app
+from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -282,6 +283,129 @@ def test_wait_reused_completed_run_does_not_return_later_checkpoint(monkeypatch)
     assert response.status_code == 200, response.text
     assert response.json() == {"status": "success", "error": None}
     assert "LATER_RUN_RESULT" not in response.text
+
+
+@pytest.mark.anyio
+async def test_wait_original_request_keeps_checkpoint_when_retry_overlaps():
+    """An overlapping retry must not suppress the original creating /wait result."""
+    from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
+
+    bridge = MemoryStreamBridge()
+    record = RunRecord(
+        run_id="run-a",
+        thread_id="thread-1",
+        assistant_id=None,
+        status=RunStatus.running,
+        on_disconnect=DisconnectMode.continue_,
+        store_only=False,
+        idempotency_reused=False,
+    )
+    record.task = asyncio.create_task(asyncio.Event().wait())
+    snapshot = SimpleNamespace(
+        config={"configurable": {"checkpoint_id": "cp-a"}},
+        values={"messages": [{"type": "ai", "content": "FIRST_RUN_RESULT"}]},
+    )
+    request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
+
+    async def fake_start_run(body, thread_id, request, *, idempotency_key=None, require_existing_thread=False):
+        del body, thread_id, request, idempotency_key, require_existing_thread
+        return record
+
+    async def fake_aget(config):
+        del config
+        return snapshot
+
+    with (
+        patch.object(thread_runs, "start_run", fake_start_run),
+        patch.object(thread_runs, "get_stream_bridge", return_value=bridge),
+        patch.object(thread_runs, "get_run_manager", return_value=MagicMock()),
+        patch.object(
+            thread_runs,
+            "build_checkpoint_state_accessor",
+            lambda *args, **kwargs: (SimpleNamespace(aget=fake_aget), {}),
+        ),
+        patch.object(thread_runs, "serialize_channel_values_for_api", lambda values: values),
+    ):
+        wait_task = asyncio.create_task(
+            call_unwrapped(
+                thread_runs.wait_run,
+                "thread-1",
+                RunCreateRequest(input={"messages": []}),
+                request,
+            )
+        )
+        await asyncio.sleep(0.05)
+        record.idempotency_reused = True
+        record.status = RunStatus.success
+        await bridge.publish_end(record.run_id)
+        result = await asyncio.wait_for(wait_task, timeout=2)
+
+    record.task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await record.task
+
+    assert result["messages"][0]["content"] == "FIRST_RUN_RESULT"
+
+
+@pytest.mark.anyio
+async def test_wait_peer_refreshes_status_after_owner_completes():
+    """A cross-worker reuse must not keep admission-time running after END."""
+    from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
+
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+    bridge = MemoryStreamBridge()
+    bridge.supports_cross_process = True
+    input_payload = {"messages": [{"role": "user", "content": "hello"}]}
+    first = await owner.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:same",
+        kwargs={"input": input_payload, "config": None},
+    )
+    await owner.set_status(first.run_id, RunStatus.running)
+    reused = await peer.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:same",
+        kwargs={"input": input_payload, "config": None},
+    )
+    assert reused.run_id == first.run_id
+    assert reused.store_only is True
+    assert reused.idempotency_reused is True
+    assert reused.status == RunStatus.running
+    request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
+
+    async def fake_start_run(body, thread_id, request, *, idempotency_key=None, require_existing_thread=False):
+        del body, thread_id, request, idempotency_key, require_existing_thread
+        return reused
+
+    with (
+        patch.object(thread_runs, "start_run", fake_start_run),
+        patch.object(thread_runs, "get_stream_bridge", return_value=bridge),
+        patch.object(thread_runs, "get_run_manager", return_value=peer),
+        patch.object(
+            thread_runs,
+            "build_checkpoint_state_accessor",
+            side_effect=AssertionError("reused wait must not read latest checkpoint"),
+        ),
+    ):
+        wait_task = asyncio.create_task(
+            call_unwrapped(
+                thread_runs.wait_run,
+                "thread-1",
+                RunCreateRequest(input=input_payload),
+                request,
+            )
+        )
+        await asyncio.sleep(0.05)
+        await owner.set_status(first.run_id, RunStatus.success)
+        await bridge.publish_end(first.run_id)
+        result = await asyncio.wait_for(wait_task, timeout=2)
+
+    assert result == {"status": "success", "error": None}
+    assert reused.status == RunStatus.success
 
 
 def test_scope_http_run_idempotency_key_ignores_header_default():

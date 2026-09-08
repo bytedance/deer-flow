@@ -93,6 +93,34 @@ def _scope_http_run_idempotency_key(request: Request, thread_id: str, key: str |
     return f"http-run:{digest}"
 
 
+async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
+    """Overlay durable status/error onto a hydrated store-only record."""
+    if not getattr(record, "store_only", False):
+        return record
+    store = getattr(run_mgr, "_store", None)
+    get = getattr(store, "get", None)
+    if get is None:
+        return record
+    try:
+        row = get(record.run_id)
+        if hasattr(row, "__await__"):
+            row = await row
+    except Exception:
+        logger.exception("Failed to refresh store-backed run %s", getattr(record, "run_id", None))
+        return record
+    if not isinstance(row, dict):
+        return record
+    raw_status = row.get("status")
+    if raw_status:
+        try:
+            record.status = RunStatus(raw_status)
+        except ValueError:
+            pass
+    if "error" in row:
+        record.error = row.get("error")
+    return record
+
+
 def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
     return is_duration_only_checkpoint(checkpoint_tuple)
 
@@ -981,11 +1009,16 @@ async def wait_run(
         request,
         idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
     )
+    # Capture before waiting: create_or_reject mutates the shared cached
+    # record's idempotency_reused flag, so an overlapping retry must not
+    # change this request's checkpoint-vs-status decision.
+    reused = bool(getattr(record, "idempotency_reused", False))
 
     # Reused/hydrated records have no local task. Wait on the bridge when this
     # worker can observe it; otherwise return durable status rather than
     # serializing whatever checkpoint happens to exist.
     if getattr(record, "store_only", False) and not getattr(bridge, "supports_cross_process", False):
+        record = await _refresh_store_backed_run(run_mgr, record)
         return {"status": record.status.value, "error": record.error}
 
     if record.task is not None or getattr(record, "store_only", False):
@@ -995,7 +1028,7 @@ async def wait_run(
 
     # Idempotent reuse is not bound to a run-specific checkpoint id. The latest
     # thread head may be a later run, so do not claim it as this run's result.
-    if completed and not getattr(record, "idempotency_reused", False):
+    if completed and not reused:
         try:
             accessor, config = build_checkpoint_state_accessor(
                 request,
@@ -1009,6 +1042,8 @@ async def wait_run(
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
+    if completed:
+        record = await _refresh_store_backed_run(run_mgr, record)
     return {"status": record.status.value, "error": record.error}
 
 

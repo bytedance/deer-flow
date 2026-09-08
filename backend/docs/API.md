@@ -211,7 +211,9 @@ with no `Retry-After`. The same shape on `/runs/wait` returns 200
 state. Retrying a finished run through `/runs/wait` also returns that durable
 status payload rather than the latest thread checkpoint: a later run on the
 same thread may have advanced the head, and `/wait` does not claim that head
-as this run's result. Retrying a finished run whose SSE log is gone emits a `gap` frame
+as this run's result. That status is the durable row after completion, not
+the hydrated record from admission time. The original creating `/wait` still
+returns this run's checkpoint even if a retry overlaps while it is waiting. Retrying a finished run whose SSE log is gone emits a `gap` frame
 (`stream_replay_gap`, `recovery: reload_durable_state`) on the creating
 `/runs/stream` endpoint and closes without an `end` frame; reload durable
 thread/run state instead of treating the stream as empty. Observer joins of
