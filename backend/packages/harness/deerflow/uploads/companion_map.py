@@ -12,7 +12,8 @@ reused, while an in-place edit of the same inode stays attached.
 The sidecar JSON lives beside the files it describes and is hidden from
 listings. Reads open it no-follow with a byte and entry cap so a sandbox
 cannot turn the mapping file into an unbounded Gateway parse. Writes prune
-to those same caps (oldest entries first) and unpin evicted rows so this
+to those same caps (oldest entries first, binary-searching the serialized
+size) and unpin evicted rows so this
 module cannot persist a map its own reader would drop. Companion deletion
 renames the directory entry to a quarantine name, then verifies the moved
 inode against the pin before unlinking, so a sandbox replacement of the
@@ -482,16 +483,32 @@ def _serialized_map_bytes(mapping: dict[str, CompanionEntry]) -> int:
 def _trim_mapping_to_limits(
     mapping: dict[str, CompanionEntry],
 ) -> tuple[dict[str, CompanionEntry], list[CompanionEntry]]:
-    """Drop oldest rows until the payload fits the reader caps."""
+    """Drop oldest rows until the payload fits the reader caps.
+
+    Byte-cap eviction binary-searches the drop count so the exclusive flock is
+    not held across a quadratic ``json.dumps`` loop.
+    """
     items = list(mapping.items())
     evicted: list[CompanionEntry] = []
-    while len(items) > MAX_COMPANION_MAP_ENTRIES:
-        evicted.append(items.pop(0)[1])
-    while items and _serialized_map_bytes(dict(items)) > MAX_COMPANION_MAP_BYTES:
-        if len(items) == 1:
-            raise ValueError(f"Companion map exceeds {MAX_COMPANION_MAP_BYTES} bytes even after pruning")
-        evicted.append(items.pop(0)[1])
-    return dict(items), evicted
+    overflow = len(items) - MAX_COMPANION_MAP_ENTRIES
+    if overflow > 0:
+        evicted.extend(entry for _, entry in items[:overflow])
+        items = items[overflow:]
+    if not items:
+        return {}, evicted
+    if _serialized_map_bytes(dict(items)) <= MAX_COMPANION_MAP_BYTES:
+        return dict(items), evicted
+    if _serialized_map_bytes(dict(items[-1:])) > MAX_COMPANION_MAP_BYTES:
+        raise ValueError(f"Companion map exceeds {MAX_COMPANION_MAP_BYTES} bytes even after pruning")
+    lo, hi = 1, len(items) - 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if _serialized_map_bytes(dict(items[mid:])) <= MAX_COMPANION_MAP_BYTES:
+            hi = mid
+        else:
+            lo = mid + 1
+    evicted.extend(entry for _, entry in items[:lo])
+    return dict(items[lo:]), evicted
 
 
 def _persist_unlocked(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> None:

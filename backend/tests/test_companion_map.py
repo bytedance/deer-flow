@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import math
 import os
 import stat
 from pathlib import Path
@@ -832,6 +833,38 @@ class TestSidecarWriteBounds:
 
         assert load_companion_map(tmp_path) == {"a.pdf": "a.md", "b.pdf": "b.md"}
         assert companion_identity_path(tmp_path, oldest.id).exists()
+
+    def test_trim_raises_when_one_entry_exceeds_byte_cap(self, monkeypatch):
+        monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_BYTES", 10)
+        mapping = {"huge.pdf": CompanionEntry(name="huge.md", size=1, mtime_ns=1, dev=1, ino=1, id="y" * 32)}
+        with pytest.raises(ValueError, match="even after pruning"):
+            companion_map_mod._trim_mapping_to_limits(mapping)
+
+    @pytest.mark.parametrize("keep", [1, 8, 63])
+    def test_trim_byte_cap_matches_oldest_first_policy_without_per_eviction_dumps(self, monkeypatch, keep):
+        n = 64
+        mapping = {f"{i:04d}.pdf": CompanionEntry(name=f"{i:04d}.md", size=i, mtime_ns=i, dev=1, ino=i, id="x" * 32) for i in range(n)}
+        cap = companion_map_mod._serialized_map_bytes(dict(list(mapping.items())[-keep:]))
+        monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_BYTES", cap)
+        monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_ENTRIES", n)
+
+        calls = {"n": 0}
+        real = companion_map_mod._serialized_map_bytes
+
+        def counting(candidate):
+            calls["n"] += 1
+            return real(candidate)
+
+        monkeypatch.setattr(companion_map_mod, "_serialized_map_bytes", counting)
+
+        kept, evicted = companion_map_mod._trim_mapping_to_limits(mapping)
+        expected_keys = [f"{i:04d}.pdf" for i in range(n - keep, n)]
+        assert list(kept) == expected_keys
+        assert [entry.name for entry in evicted] == [f"{i:04d}.md" for i in range(n - keep)]
+        assert real(kept) <= cap
+        # Full map + last-row fail-closed check + binary search over n-1 cut points.
+        # keep=63 (drop 1) is the common path; comparing dumps to evicted count would fail it.
+        assert calls["n"] <= 2 + math.ceil(math.log2(n - 1))
 
 
 class TestReplacementCleansPreviousCompanion:
