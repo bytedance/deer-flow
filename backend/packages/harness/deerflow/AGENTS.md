@@ -46,10 +46,7 @@ artifact. New automatic capture entry points must reuse the shared progress
 encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
 drift.
 
-Tavily Extract success responses do not require a `title`. The community
-`web_fetch` formatter uses the result URL as the display heading when the title
-is missing or empty; keep that fallback and the 4096-character content bound
-covered in `tests/test_tavily_tools.py`.
+Tavily: title or result URL; 4096-char cap. Tests: tests/test_tavily_tools.py.
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
