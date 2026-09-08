@@ -674,6 +674,57 @@ class TestBufferFlush:
         assert [event["event_type"] for event in events] == ["run.delivery"]
 
     @pytest.mark.anyio
+    async def test_flush_propagates_cancellation_while_write_pending(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.5, raising=False)
+
+        class HangingMemoryStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+                self.cancelled = False
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                self.started.set()
+                try:
+                    await self.finish.wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+                return await super().put_batch(batch)
+
+        store = HangingMemoryStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal.record_delivery()
+        flush_task = asyncio.create_task(journal.flush())
+
+        try:
+            await store.started.wait()
+            await asyncio.sleep(0)  # flush is now inside the bounded write wait
+            flush_task.cancel()
+            await asyncio.sleep(0)  # deliver the cancellation into that wait
+            assert not flush_task.done()
+            store.finish.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(flush_task, timeout=0.2)
+        finally:
+            store.finish.set()
+            await asyncio.gather(flush_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+        assert store.calls == 1
+        assert store.cancelled is False
+        events = await store.list_events("t1", "r1")
+        assert [event["event_type"] for event in events] == ["run.delivery"]
+
+    @pytest.mark.anyio
     async def test_flush_ignores_already_handled_cancellation_request(self, journal_setup):
         journal, store = journal_setup
         reached_after_flush = False
