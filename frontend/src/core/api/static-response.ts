@@ -14,7 +14,7 @@ export async function staticApiResponse(
 ): Promise<Response | null> {
   const origin =
     typeof window === "undefined"
-      ? "http://localhost:2026"
+      ? `http://${process.env.HOSTNAME ?? "127.0.0.1"}:${process.env.PORT ?? "3000"}`
       : window.location.origin;
   const url = new URL(input, origin);
   const roots = [
