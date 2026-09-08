@@ -45,3 +45,13 @@ class ScheduledTaskRow(Base):
 # Import these from deerflow.persistence.scheduled_tasks.model in both modules.
 TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"success", "failed", "skipped", "interrupted"})
 ACTIVE_RUN_STATUSES: frozenset[str] = frozenset({"queued", "launching", "running"})
+
+# Parent ``once`` task status projected from a terminal occurrence status.
+# Shared by the completion path and both recovery paths so the mapping
+# cannot drift between them.
+ONCE_TASK_STATUS_BY_RUN_STATUS: dict[str, str] = {
+    "success": "completed",
+    "failed": "failed",
+    "interrupted": "cancelled",
+    "skipped": "cancelled",
+}

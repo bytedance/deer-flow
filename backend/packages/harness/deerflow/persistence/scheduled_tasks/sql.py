@@ -11,7 +11,7 @@ from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
-from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES, ScheduledTaskRow
+from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, ScheduledTaskRow
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
 
@@ -418,6 +418,12 @@ class ScheduledTaskRepository:
             if task_run_id is not None:
                 occurrence = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
                 if occurrence is None or occurrence.task_id != task_id or occurrence.run_id not in (None, last_run_id):
+                    logger.warning(
+                        "Fenced stale scheduled-task launch update for task %s: occurrence %s does not belong to run %s",
+                        task_id,
+                        task_run_id,
+                        last_run_id,
+                    )
                     await session.rollback()
                     return False
             elif last_run_id is not None:
@@ -465,6 +471,8 @@ class ScheduledTaskRepository:
         finished_at: datetime,
     ) -> bool:
         """Commit occurrence completion, accounting and eligible parent outcome."""
+        if status not in TERMINAL_RUN_STATUSES:
+            raise ValueError(f"unsupported terminal occurrence status: {status!r}")
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             occurrence = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
@@ -494,9 +502,9 @@ class ScheduledTaskRepository:
                         task.lease_expires_at = None
                     task.last_error = error
                     if task.schedule_type == "once":
-                        task.status = {"success": "completed", "failed": "failed", "interrupted": "cancelled"}[status]
-                    elif task.status != "paused":
-                        task.status = "enabled"
+                        # Only a once task consumes its parent on completion;
+                        # cron parents keep whatever status they already hold.
+                        task.status = ONCE_TASK_STATUS_BY_RUN_STATUS[status]
                     task.updated_at = finished_at
             await session.commit()
             return True
@@ -594,17 +602,12 @@ class ScheduledTaskRepository:
         occurrence that must be retried by a later recovery pass.
         """
         if run_row is not None and run_row.status in TERMINAL_RUN_STATUSES:
+            task_row.status = ONCE_TASK_STATUS_BY_RUN_STATUS[run_row.status]
             if run_row.status == "success":
-                task_row.status = "completed"
                 task_row.last_error = None
-            elif run_row.status == "failed":
-                task_row.status = "failed"
-                task_row.last_error = run_row.error
             elif run_row.status == "interrupted":
-                task_row.status = "cancelled"
                 task_row.last_error = run_row.error or error
-            elif run_row.status == "skipped":
-                task_row.status = "cancelled"
+            else:
                 task_row.last_error = run_row.error
             task_row.updated_at = now
             return True
