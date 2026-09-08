@@ -1,6 +1,7 @@
 import { resolveStaticDemoArtifact } from "@/core/threads/static-demo";
 import { checkCodeFile, getFileName } from "@/core/utils/files";
 
+import { getTabularDelimiter } from "./preview";
 import { urlOfArtifact } from "./utils";
 
 /** Standalone route that renders a stored artifact with the app's own renderer. */
@@ -30,7 +31,7 @@ export function resolveStoredArtifactLanguage(filepath: string) {
 /**
  * Target for the artifacts panel's "open in new window" action.
  *
- * Markdown goes to the in-app viewer route, which renders it with the same
+ * Markdown and tabular files go to the in-app viewer route, which renders it with the same
  * components as the panel instead of handing the browser a `text/markdown`
  * response it can only show as raw source. Everything else keeps the raw
  * Gateway URL — notably HTML/SVG, which the Gateway deliberately serves as a
@@ -45,7 +46,8 @@ export function resolveArtifactOpenURL({
   threadId: string;
   isMock?: boolean;
 }) {
-  if (resolveStoredArtifactLanguage(filepath) !== "markdown") {
+  const language = resolveStoredArtifactLanguage(filepath);
+  if (language !== "markdown" && getTabularDelimiter(language) === null) {
     return urlOfArtifact({ filepath, threadId, isMock });
   }
   return buildArtifactViewerURL({ filepath, threadId, isMock });

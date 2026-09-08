@@ -128,6 +128,32 @@ export const enUS: Translations = {
     missingTarget: "This link does not say which artifact to display.",
   },
 
+  artifactTable: {
+    title: "Table preview",
+    header: "First row as header",
+    column: (index) => `Column ${index}`,
+    total: (count) => `${count} rows`,
+    sample: (count) => `Preview of first ${count} rows`,
+    range: (start, end, limited) =>
+      `${start}–${end}${limited ? " of preview" : ""}`,
+    columnsLimited: "Showing the first 50 columns of the preview.",
+    uneven:
+      "Some rows have different numbers of fields. Missing fields are marked.",
+    empty: "This file is empty.",
+    incomplete:
+      "No complete records fit in this preview. View the source or download the file.",
+    failed:
+      "Unable to preview this table reliably. View the source or download the file.",
+    retry: "Retry preview",
+    previous: "Previous page",
+    next: "Next page",
+    cell: (row, column) => `View cell: row ${row}, column ${column}`,
+    cellValue: "Cell value",
+    missing: "Missing",
+    savedVersion:
+      "Opens or downloads the saved file. Your draft has not been saved.",
+  },
+
   artifactArchive: {
     downloadCurrent: (count) =>
       `Download current versions (${count} ${count === 1 ? "file" : "files"})`,

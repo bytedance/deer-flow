@@ -125,6 +125,28 @@ export const zhCN: Translations = {
     missingTarget: "该链接没有指明要展示哪个文件。",
   },
 
+  artifactTable: {
+    title: "表格预览",
+    header: "首行作为表头",
+    column: (index) => `列 ${index}`,
+    total: (count) => `共 ${count} 行`,
+    sample: (count) => `预览前 ${count} 行`,
+    range: (start, end, limited) =>
+      `${limited ? "预览 " : ""}${start}–${end} 行`,
+    columnsLimited: "仅展示预览样本的前 50 列。",
+    uneven: "部分行的字段数量不同，缺失字段已标记。",
+    empty: "文件为空。",
+    incomplete: "当前预览范围内没有完整记录，请查看源码或下载文件。",
+    failed: "无法可靠预览此表格，请查看源码或下载文件。",
+    retry: "重新预览",
+    previous: "上一页",
+    next: "下一页",
+    cell: (row, column) => `查看第 ${row} 行、第 ${column} 列`,
+    cellValue: "单元格内容",
+    missing: "缺失",
+    savedVersion: "打开或下载的是已保存文件，当前草稿尚未保存。",
+  },
+
   artifactArchive: {
     downloadCurrent: (count) => `下载当前版本（${count} 个文件）`,
     currentVersionNotice:
