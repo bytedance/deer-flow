@@ -1921,8 +1921,8 @@ class RunManager:
         lifetime; it bounds the in-memory record registries rather than the
         store's own history.
 
-        The task (or ``None``, above) is kept strongly referenced in
-        ``self._cleanup_tasks`` so it cannot be garbage-collected mid-delay;
+        Scheduled eviction tasks are kept strongly referenced in
+        ``self._cleanup_tasks`` so they cannot be garbage-collected mid-delay;
         :meth:`shutdown` cancels any eviction tasks that are still pending.
 
         Callers must invoke this only after the run has reached a terminal
