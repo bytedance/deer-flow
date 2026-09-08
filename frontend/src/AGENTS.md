@@ -63,6 +63,13 @@
    as removable "missing" entries instead of silently widening the allowlist.
 6. Components subscribe to thread state and render updates
 
+Project moves in `core/threads/hooks.ts` cancel all per-thread metadata query
+variants after the write succeeds, merge only `deerflow_project_id`, then
+invalidate/refetch that metadata prefix. This fences delayed pre-move reads and
+restarts initial reads that have no cached snapshot. Search and project-thread
+lists are invalidated on settlement. Keep the delayed-read regression in
+`tests/unit/core/threads/move-thread.dom.test.tsx` for moves and removal.
+
 The chat header's context-window control is intentionally persistent: while `context_usage` is unavailable, `ContextUsageBadge` renders a gauge placeholder rather than unmounting; once data arrives, the same position shows the percentage. `useThreadTokenUsage` retains placeholder data only when the response `thread_id` still matches the active route, so same-thread refetches do not flicker and cross-thread navigation never displays the previous chat's usage.
 
 Settings skill uploads reject archives larger than 100 MiB before starting the

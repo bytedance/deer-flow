@@ -3185,10 +3185,17 @@ export function useMoveThreadToProject(options?: {
     // Hook-level error handler: survives the caller's dropdown unmounting,
     // unlike a per-mutate `onError` passed from inside a closing menu.
     onError: options?.onError,
-    onSuccess(response, { threadId, projectId }) {
+    async onSuccess(_response, { threadId, projectId }) {
+      // An older GET must not overwrite the confirmed affiliation. Match all
+      // metadata variants, including an initial read with no cached snapshot.
+      await queryClient.cancelQueries({
+        queryKey: ["thread", "metadata", threadId],
+      });
       setThreadMetadataInCaches(queryClient, threadId, {
-        ...(response.metadata ?? {}),
         [THREAD_PROJECT_METADATA_KEY]: projectId,
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ["thread", "metadata", threadId],
       });
     },
     onSettled() {

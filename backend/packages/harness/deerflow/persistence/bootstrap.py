@@ -18,7 +18,7 @@ Three-branch decision (see ``_decide_state``)
 | empty (no DeerFlow tables)                    | ``create_all`` + ``alembic stamp head`` |
 | legacy (DeerFlow tables, no alembic)          | ``create_all`` (baseline tables only, as backfill) + ``stamp 0001_baseline`` + ``upgrade head`` |
 | versioned (one locally known revision)        | ``alembic upgrade head``                |
-| reviewed forward-compatible revision 0019     | warn and skip migration                 |
+| reviewed forward revision with local columns | warn and skip migration                 |
 | unknown, empty, or multiple revision rows     | refuse to start                         |
 
 The legacy branch handles pre-alembic databases that already have at least one
@@ -116,7 +116,9 @@ _KNOWN_REVISIONS: frozenset[str] | None = None
 # server default, table, index, constraint, or data backfill. The owning 0019
 # change must cross-pin this revision id and schema shape in tests. Amending
 # that DDL requires re-auditing old-repository reads and writes before this
-# exception remains valid.
+# exception remains valid. The exception also requires every current ORM table
+# and column: the original 0018 + incarnation columns shape lacks projects and
+# is no longer compatible with this build. Both skip paths validate that floor.
 # Note: this tree's own chain already carries ``0019_projects`` /
 # ``0020_threads_meta_project_id`` off ``0018_oauth_identity_pg_partial``; the
 # ``0019_`` numeric prefix is intentionally reused. When the owning rollout
@@ -320,6 +322,32 @@ async def _read_database_revision(conn: Any) -> str:
     if not isinstance(revision, str) or not revision:
         raise RuntimeError("bootstrap: alembic_version contains an empty revision")
     return revision
+
+
+def _validate_forward_schema(sync_conn: Any) -> None:
+    """Require the local repository schema before skipping unknown migrations.
+
+    This is a presence check, not a general schema compatibility proof. The
+    allowlisted additive DDL still needs its separate read/write audit. Derive
+    the local floor from ORM metadata so a new mapped column cannot silently
+    invalidate the existing exception again.
+    """
+    import deerflow.persistence.models  # noqa: F401
+    from deerflow.persistence.base import Base
+
+    inspector = sa_inspect(sync_conn)
+    tables = set(inspector.get_table_names())
+    missing = []
+    for name, table in sorted(Base.metadata.tables.items()):
+        if name not in tables:
+            missing.append(name)
+            continue
+        columns = {column["name"] for column in inspector.get_columns(name)}
+        missing.extend(f"{name}.{column.name}" for column in table.columns if column.name not in columns)
+    if missing:
+        raise RuntimeError(
+            f"bootstrap: revision {_FORWARD_COMPATIBLE_REVISION!r} is missing required local schema: {', '.join(missing)}; refusing to start. See docs/database-forward-revision-recovery.md for the audited offline migration path."
+        )
 
 
 def _reflect_state(sync_conn: Any) -> dict[str, bool]:
@@ -602,15 +630,18 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
                         raise
                     async with engine.connect() as conn:
                         current_revision = await _read_database_revision(conn)
-                    if current_revision != _FORWARD_COMPATIBLE_REVISION:
-                        raise
+                        if current_revision != _FORWARD_COMPATIBLE_REVISION:
+                            raise
+                        await conn.run_sync(_validate_forward_schema)
                     logger.warning(
                         "bootstrap: database advanced concurrently to explicitly forward-compatible revision %s; skipping the stale local upgrade",
                         current_revision,
                     )
             elif database_revision == _FORWARD_COMPATIBLE_REVISION:
+                async with engine.connect() as conn:
+                    await conn.run_sync(_validate_forward_schema)
                 logger.warning(
-                    "bootstrap: database revision %s is newer than local head %s but is explicitly forward-compatible; skipping migration",
+                    "bootstrap: database revision %s is explicitly forward-compatible with local head %s and has its required tables and columns; skipping migration",
                     database_revision,
                     head,
                 )

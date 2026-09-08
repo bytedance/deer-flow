@@ -1490,6 +1490,15 @@ later through the move menu. Runs never modify membership: submitting a message
 cannot assign or reassign a conversation. Moving a conversation out of a project
 keeps it unassigned until it is explicitly moved again.
 
+Moving a conversation refreshes its header affiliation as well as the project
+lists, including when an older metadata request is still in flight.
+
+Projects require the current database tables and columns. A database stamped
+`0019_thread_incarnations` from the older 0018-based rollout is rejected at
+startup if the project schema is missing. Follow the
+[offline database recovery procedure](docs/database-forward-revision-recovery.md)
+before starting this build against that database.
+
 ## Scheduled Tasks
 
 DeerFlow now includes a first-class scheduled-task MVP in the workspace.
