@@ -159,7 +159,11 @@ class _FakeSandbox:
             match = re.search(r"(?:^|[\s;{])find(?:\s+-[HLP])*\s+(\S+)", script)
             root = match.group(1).strip("'\"") if match else ""
             hits = [p for p in self.files if p == root or p.startswith(f"{root.rstrip('/')}/")]
-            return _FakeResult(stdout=("\n".join(hits) + "\n").encode() if hits else b"")
+            listing = ("\n".join(hits) + "\n") if hits else ""
+            if "__DF_FIND_STATUS__:" in script:
+                status = 0 if hits else 1
+                return _FakeResult(stdout=f"{listing}\n__DF_FIND_STATUS__:{status}\n".encode(), exit_code=status)
+            return _FakeResult(stdout=listing.encode())
         if script.startswith("grep "):
             # grep <flags> -e <pattern> <root> 2>/dev/null | head -N
             tokens = shlex.split(script)

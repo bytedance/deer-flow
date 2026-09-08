@@ -150,6 +150,11 @@ class _FakeCommands:
         if include_dirs:
             paths.extend(self._owner.directories)
         matches = sorted(path for path in set(paths) if path == root or path.startswith(f"{root}/"))
+        if "__DF_FIND_STATUS__:" in command:
+            status = 0 if matches else 1
+            marker = f"__DF_FIND_STATUS__:{status}"
+            stdout = (*matches, "", marker) if matches else ("", marker)
+            return _execution(stdout=stdout, exit_code=status)
         return _execution(stdout=tuple(matches))
 
     def _grep(self, command: str) -> _Execution:
