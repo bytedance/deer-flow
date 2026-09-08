@@ -684,6 +684,15 @@ def _python_import_bindings(node: ast.Import | ast.ImportFrom) -> Iterator[tuple
             yield alias.asname or alias.name, f"{node.module}.{alias.name}" if node.module and not node.level else None
 
 
+def _python_parameter_names(args: ast.arguments) -> set[str]:
+    """Every name a function's parameter list binds in the function's own scope."""
+    names = {arg.arg for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
+    for extra in (args.vararg, args.kwarg):
+        if extra is not None:
+            names.add(extra.arg)
+    return names
+
+
 class _PythonImportScopes:
     """Import bindings per scope, resolved outward from the use like the names they stand for.
 
@@ -707,10 +716,16 @@ class _PythonImportScopes:
         self._parents: dict[ast.AST, ast.AST] = {}
         # Names a scope declares `global` (True) or `nonlocal` (False).
         self._declared: dict[ast.AST, dict[str, bool]] = {}
+        # Names a scope binds by any means -- parameter, assignment, import, definition -- which is
+        # what decides where a `nonlocal` declaration in a nested function lands.
+        self._bound: dict[ast.AST, set[str]] = {}
         self._views: dict[ast.AST, _PythonScopeAliases] = {}
 
     def enter(self, scope: ast.AST, parent: ast.AST) -> None:
         self._parents[scope] = parent
+
+    def bound(self, scope: ast.AST, names: Iterable[str]) -> None:
+        self._bound.setdefault(scope, set()).update(names)
 
     def declare(self, scope: ast.AST, declaration: ast.Global | ast.Nonlocal) -> None:
         self._declared.setdefault(scope, {}).update(dict.fromkeys(declaration.names, isinstance(declaration, ast.Global)))
@@ -758,18 +773,26 @@ class _PythonImportScopes:
         while name in self._declared.get(current, {}):
             if self._declared[current][name]:
                 return self._module
-            enclosing = self._enclosing_function(current)
+            enclosing = self._enclosing_function_binding(current, name)
             if enclosing is None:
-                # `nonlocal` with no enclosing function is a SyntaxError; leave it where it is.
+                # `nonlocal` with no enclosing function binding the name is a SyntaxError; leave it.
                 return scope
             current = enclosing
         return current
 
-    def _enclosing_function(self, scope: ast.AST) -> ast.AST | None:
+    def _enclosing_function_binding(self, scope: ast.AST, name: str) -> ast.AST | None:
+        """The function a `nonlocal name` at `scope` refers to: the nearest enclosing one that binds it.
+
+        A function that merely sits between the two without binding the name is skipped, as the
+        runtime skips it; one that declares the name `nonlocal` itself is returned so the caller
+        keeps following the chain from there.
+        """
         current = self._parents.get(scope)
-        while current is not None and not isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        while current is not None:
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) and (name in self._declared.get(current, {}) or name in self._bound.get(current, ())):
+                return current
             current = self._parents.get(current)
-        return current
+        return None
 
 
 @dataclass(frozen=True)
@@ -827,10 +850,18 @@ def _collect_python_aliases(tree: ast.AST) -> _PythonImportScopes:
     for node, scope in _walk_python_scopes(tree):
         if isinstance(node, _PYTHON_SCOPE_NODES):
             scopes.enter(node, scope)
+            if not isinstance(node, ast.ClassDef):
+                # Parameters bind inside the function, although their defaults and annotations are
+                # walked in the enclosing scope, so they are recorded here rather than as visited.
+                scopes.bound(node, _python_parameter_names(node.args))
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
             scopes.declare(scope, node)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            pending.extend((scope, name, path) for name, path in _python_import_bindings(node))
+            bindings = list(_python_import_bindings(node))
+            pending.extend((scope, name, path) for name, path in bindings)
+            scopes.bound(scope, (name for name, _path in bindings))
+        if not isinstance(node, ast.arg):
+            scopes.bound(scope, _heuristic_bound_names(node))
     for scope, name, path in pending:
         scopes.bind(scope, name, path)
     return scopes
@@ -1302,11 +1333,7 @@ def _client_unstable_aliases(body: list[ast.AST], analysis: _ClientAnalysis) -> 
 
 def _client_scope_bindings(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:
     """Names that shadow inherited constructor aliases throughout a function scope."""
-    args = node.args
-    names = {arg.arg for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
-    for extra in (args.vararg, args.kwarg):
-        if extra is not None:
-            names.add(extra.arg)
+    names = _python_parameter_names(node.args)
     declared: set[str] = set()
     for statement in node.body if isinstance(node.body, list) else [node.body]:
         _collect_client_scope_bindings(statement, names, declared, analysis)

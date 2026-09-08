@@ -1339,6 +1339,30 @@ def test_python_relative_import_over_a_module_alias_drops_it(tmp_path: Path, reb
         ),
         # ...and a `global` relative import replaces the module-level alias, not a local it never had.
         ("import os\nimport requests as client\n\ndef initialize():\n    global client\n    from .helpers import client\n\ninitialize()\nclient.post(endpoint, json=dict(os.environ))\n", False),
+        # `nonlocal` reaches past an enclosing function that does not bind the name, to the nearest
+        # one that does: `outer`'s `client` is rebound through `middle`, and its call is proven...
+        (
+            "import os\n\ndef outer():\n    import json as client\n\n    def middle():\n        def initialize():\n            nonlocal client\n            import requests as client\n\n"
+            "        initialize()\n\n    middle()\n    client.post(host, json=dict(os.environ))\n\nouter()\n",
+            True,
+        ),
+        # ...while an intervening function that binds the name by assignment or by parameter is
+        # where the declaration stops, so its own call is proven and `outer`'s stays `json`.
+        (
+            "import os\n\ndef outer():\n    import json as client\n\n    def middle():\n        client = None\n\n        def initialize():\n            nonlocal client\n            import requests as client\n\n"
+            "        initialize()\n        client.post(host, json=dict(os.environ))\n\n    middle()\n\nouter()\n",
+            True,
+        ),
+        (
+            "import os\n\ndef outer():\n    import json as client\n\n    def middle():\n        client = None\n\n        def initialize():\n            nonlocal client\n            import requests as client\n\n"
+            "        initialize()\n\n    middle()\n    client.post(host, json=dict(os.environ))\n\nouter()\n",
+            False,
+        ),
+        (
+            "import os\n\ndef outer():\n    import json as client\n\n    def middle(client):\n        def initialize():\n            nonlocal client\n            import requests as client\n\n"
+            "        initialize()\n        client.post(host, json=dict(os.environ))\n\n    middle(None)\n\nouter()\n",
+            True,
+        ),
         # A class body is visible to itself, so a call there reads its own import...
         ("import os\n\nclass C:\n    import requests as client\n    client.post(host, json=dict(os.environ))\n", True),
         # ...but a method skips the class namespace, so the same name there is unbound and the
@@ -1716,6 +1740,28 @@ def test_python_import_aliases_honor_global_and_nonlocal_declarations() -> None:
     assert scopes.resolved(inner) == {"client": "urllib3", "other": "aiohttp"}
     assert scopes.resolved(reader) == {"other": "aiohttp"}
     assert scopes.resolved(fresh) == {"other": "aiohttp"}
+
+
+def test_python_nonlocal_binds_the_nearest_enclosing_function_that_binds_the_name() -> None:
+    """`nonlocal` skips an enclosing function that does not bind the name, as the runtime does.
+
+    `middle` binds nothing, so `initialize`'s `nonlocal client` reaches `outer`; `binder` binds it
+    by parameter, so the same declaration inside `binder` stops there and `outer` is untouched.
+    """
+    tree = ast.parse(
+        "def outer():\n    import json as client\n"
+        "    def middle():\n        def initialize():\n            nonlocal client\n            import requests as client\n"
+        "    def binder(client):\n        def initialize():\n            nonlocal client\n            import urllib3 as client\n"
+    )
+    scopes = _collect_python_aliases(tree)
+    outer = tree.body[0]
+    middle, binder = outer.body[1], outer.body[2]
+
+    assert scopes.resolved(outer) == {"client": "requests"}
+    assert scopes.resolved(middle) == {"client": "requests"}
+    assert scopes.resolved(middle.body[0]) == {"client": "requests"}
+    assert scopes.resolved(binder) == {"client": "urllib3"}
+    assert scopes.resolved(binder.body[0]) == {"client": "urllib3"}
 
 
 def test_python_import_aliases_bound_in_a_class_body_are_visible_only_there() -> None:
