@@ -159,13 +159,18 @@ MAX_INBOUND_URL_FILE_BYTES = 50 * 1024 * 1024
 # WeChat's ``full_url``; the fetch is therefore gated to platform-owned hosts
 # before streaming, mirroring WechatChannel._is_allowed_media_url. Two
 # families: qq.com hosts, and the temporary signed COS links WeCom actually
-# serves media from — ``ww-aibot-img-<numeric bot id>.cos.<region>.myqcloud.com``
-# (published callback examples; valid ~5 minutes). The COS shape is pinned
-# with an exact regex rather than a ``myqcloud.com`` suffix because any
-# Tencent Cloud account can create a COS bucket, so the bare suffix would
-# trust arbitrary object storage.
+# serves media from — ``ww-aibot-img-<APPID>.cos.<region>.myqcloud.com``
+# (published callback examples; valid ~5 minutes). The COS numeric suffix is
+# the owner's Tencent Cloud APPID and the bucket name is user-chosen, so any
+# Tencent Cloud account could register a matching ``ww-aibot-img-*`` bucket:
+# the shape alone proves nothing about ownership. Only the APPID observed in
+# Tencent's published aibot callback examples (1258476243) is trusted by
+# default; media from any other account — including a future WeCom rotation
+# to a new APPID — goes through the operator suffix list
+# ``channels.wecom.allowed_media_hosts``.
 WECOM_ALLOWED_MEDIA_HOST_SUFFIXES = ("qq.com",)
-_WECOM_MEDIA_COS_HOST_RE = re.compile(r"^ww-aibot-img-\d+\.cos\.[a-z0-9-]+\.myqcloud\.com$")
+_WECOM_MEDIA_COS_APPIDS = frozenset({"1258476243"})
+_WECOM_MEDIA_COS_HOST_RE = re.compile(r"^ww-aibot-img-(?P<appid>\d+)\.cos\.[a-z0-9-]+\.myqcloud\.com$")
 
 _METADATA_DROP_KEYS = frozenset({"raw_message", "ref_msg"})
 
@@ -189,9 +194,23 @@ async def _read_http_inbound_file(file_info: dict[str, Any], client: httpx.Async
 
     chunks: list[bytes] = []
     total = 0
-    async with client.stream("GET", url) as response:
+    # The transfer must stay undecoded: aiter_bytes() transparently decodes
+    # Content-Encoding, and the decoder allocates the whole decompressed body
+    # before yielding a single chunk — a compressed response from an admitted
+    # host would blow past the cap exactly like the unbounded read this
+    # reader exists to prevent. Identity is requested up front, any residual
+    # encoding is refused before reading, and aiter_raw() never decodes.
+    async with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
         response.raise_for_status()
-        async for chunk in response.aiter_bytes():
+        encoding = (response.headers.get("content-encoding") or "").strip().lower()
+        if encoding and encoding != "identity":
+            logger.warning(
+                "[Manager] inbound file response uses Content-Encoding %r, dropping before decode: %s",
+                encoding,
+                _inbound_file_label(file_info, url),
+            )
+            return None
+        async for chunk in response.aiter_raw():
             total += len(chunk)
             if total > MAX_INBOUND_URL_FILE_BYTES:
                 logger.warning(
@@ -242,13 +261,31 @@ def _inbound_file_label(file_info: dict[str, Any], url: str | None = None, idx: 
     return f"#{idx}" if idx is not None else "<unnamed>"
 
 
+def _reader_error_summary(exc: BaseException) -> str:
+    """Sanitized exception summary for inbound-media reader failures.
+
+    httpx exceptions format the full request URL into their message —
+    ``HTTPStatusError`` includes the path and query, i.e. the signed download
+    credentials — and rendering the traceback (``logger.exception``) would
+    reproduce them verbatim, so only the class name and explicitly safe
+    fields ever reach the logs.
+    """
+    summary = type(exc).__name__
+    if isinstance(exc, httpx.HTTPStatusError):
+        summary = f"{summary} ({exc.response.status_code})"
+    return summary
+
+
 def _is_allowed_wecom_media_url(url: str, extra_suffixes: frozenset[str] | tuple[str, ...] | list[str] = ()) -> bool:
     """Platform-owned-host gate for WeCom inbound media fetches.
 
     Matching semantics mirror ``WechatChannel._is_allowed_media_url``: http/https
     only, and ``notqq.com`` / ``qq.com.evil.io`` never match a ``qq.com`` suffix.
-    The COS shape is matched exactly (see ``_WECOM_MEDIA_COS_HOST_RE``), so an
-    arbitrary COS bucket or a lookalike domain never matches. Operator-supplied
+    The COS shape is matched exactly (see ``_WECOM_MEDIA_COS_HOST_RE``) AND its
+    numeric suffix must be one of the verified WeCom-owned APPIDs
+    (``_WECOM_MEDIA_COS_APPIDS``) — the suffix is a Tencent Cloud account
+    APPID and bucket names are user-chosen, so the shape alone would admit
+    any account that registers a lookalike bucket. Operator-supplied
     ``channels.wecom.allowed_media_hosts`` suffixes are merged in on top of the
     hard-coded families (see ``_wecom_extra_media_host_suffixes``).
     """
@@ -263,7 +300,8 @@ def _is_allowed_wecom_media_url(url: str, extra_suffixes: frozenset[str] | tuple
         return False
     if any(host == suffix or host.endswith(f".{suffix}") for suffix in (*WECOM_ALLOWED_MEDIA_HOST_SUFFIXES, *extra_suffixes)):
         return True
-    return _WECOM_MEDIA_COS_HOST_RE.fullmatch(host) is not None
+    cos_match = _WECOM_MEDIA_COS_HOST_RE.fullmatch(host)
+    return cos_match is not None and cos_match.group("appid") in _WECOM_MEDIA_COS_APPIDS
 
 
 def _wecom_extra_media_host_suffixes() -> frozenset[str]:
@@ -1084,11 +1122,15 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
             else:
                 try:
                     data = await file_reader(f, client)
-                except Exception:
-                    logger.exception(
-                        "[Manager] failed to read inbound file: channel=%s, file=%s",
+                except Exception as exc:
+                    # Sanitized on purpose: the URL-bearing exception message
+                    # and traceback must not reach the logs (see
+                    # _reader_error_summary).
+                    logger.warning(
+                        "[Manager] failed to read inbound file: channel=%s, file=%s, error=%s",
                         msg.channel_name,
                         _inbound_file_label(f, idx=idx),
+                        _reader_error_summary(exc),
                     )
                     continue
 

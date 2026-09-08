@@ -128,6 +128,21 @@ def _media_url_host(url: str) -> str:
         return ""
 
 
+def _media_download_error_summary(exc: BaseException) -> str:
+    """Sanitized exception summary for inbound-media download failures.
+
+    httpx exceptions format the full request URL into their message —
+    ``HTTPStatusError`` includes the path and query, i.e. the CDN download
+    credentials — so only the class name and explicitly safe fields are ever
+    surfaced; the raw exception must not reach a ``logger.exception`` site
+    (the polling loop's per-message handler would render its traceback).
+    """
+    summary = type(exc).__name__
+    if isinstance(exc, httpx.HTTPStatusError):
+        summary = f"{summary} ({exc.response.status_code})"
+    return summary
+
+
 def _detect_image_extension_and_mime(content: bytes) -> tuple[str, str] | None:
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
         return ".png", "image/png"
@@ -989,16 +1004,33 @@ class WechatChannel(Channel):
 
         The bytes are buffered in memory before being decrypted and persisted,
         so an oversized attachment must be refused before it is fully read, not
-        after (mirrors ``DingTalkChannel._download_by_code``). Returns ``None``
-        when the download was aborted by the cap; an HTTP-level failure still
-        raises for the caller's per-message error handling to log.
+        after (mirrors ``DingTalkChannel._download_by_code``). The transfer is
+        kept undecoded — identity requested, unexpected Content-Encoding
+        refused before reading, ``aiter_raw`` used — because the transparent
+        decoder allocates the full decompressed body before yielding, which
+        would blow past the cap for a compressed response. Returns ``None``
+        when the download was aborted by the cap or rejected for its
+        encoding; other HTTP-level failures raise for the caller's
+        per-message error handling.
         """
         client = await self._ensure_client()
         chunks: list[bytes] = []
         total = 0
-        async with client.stream("GET", url, timeout=timeout or self.DEFAULT_CDN_TIMEOUT) as response:
+        async with client.stream(
+            "GET",
+            url,
+            timeout=timeout or self.DEFAULT_CDN_TIMEOUT,
+            headers={"Accept-Encoding": "identity"},
+        ) as response:
             response.raise_for_status()
-            async for chunk in response.aiter_bytes():
+            encoding = (response.headers.get("content-encoding") or "").strip().lower()
+            if encoding and encoding != "identity":
+                logger.warning(
+                    "[WeChat] inbound media response uses Content-Encoding %r, aborting before decode",
+                    encoding,
+                )
+                return None
+            async for chunk in response.aiter_raw():
                 total += len(chunk)
                 if max_bytes is not None and max_bytes > 0 and total > max_bytes:
                     logger.warning("[WeChat] inbound media download exceeds %d bytes, aborting before full read", max_bytes)
@@ -1126,7 +1158,19 @@ class WechatChannel(Channel):
         # CIPHERTEXT, which PKCS#7 padding makes up to a full block larger — a
         # boundary-sized valid attachment must not be rejected for its padding.
         # The exact post-decryption check below remains the authority.
-        encrypted = await self._download_cdn_bytes(full_url, max_bytes=self._stream_cap_for(self._max_inbound_image_bytes))
+        try:
+            encrypted = await self._download_cdn_bytes(full_url, max_bytes=self._stream_cap_for(self._max_inbound_image_bytes))
+        except httpx.HTTPError as exc:
+            # The URL-bearing exception must not escape to the polling loop's
+            # logger.exception; the attachment is dropped and the message
+            # continues, same as the other skip paths above.
+            logger.warning(
+                "[WeChat] inbound image download failed, skipping message_id=%s host=%s error=%s",
+                message_id,
+                _media_url_host(full_url),
+                _media_download_error_summary(exc),
+            )
+            return None
         if encrypted is None:
             logger.warning("[WeChat] inbound image exceeds size limit (%d bytes), skipping message_id=%s", self._max_inbound_image_bytes, message_id)
             return None
@@ -1187,7 +1231,18 @@ class WechatChannel(Channel):
             return None
 
         # Plaintext limit vs ciphertext cap: see the image path above.
-        encrypted = await self._download_cdn_bytes(full_url, max_bytes=self._stream_cap_for(self._max_inbound_file_bytes))
+        try:
+            encrypted = await self._download_cdn_bytes(full_url, max_bytes=self._stream_cap_for(self._max_inbound_file_bytes))
+        except httpx.HTTPError as exc:
+            # See the image path: the URL-bearing exception must not escape
+            # to the polling loop's logger.exception.
+            logger.warning(
+                "[WeChat] inbound file download failed, skipping message_id=%s host=%s error=%s",
+                message_id,
+                _media_url_host(full_url),
+                _media_download_error_summary(exc),
+            )
+            return None
         if encrypted is None:
             logger.warning("[WeChat] inbound file exceeds size limit (%d bytes), skipping message_id=%s", self._max_inbound_file_bytes, message_id)
             return None

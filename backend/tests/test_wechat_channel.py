@@ -1628,14 +1628,77 @@ def test_handle_update_skips_media_from_disallowed_host(tmp_path: Path):
     _run(go())
 
 
+def test_handle_update_http_download_failure_is_sanitized_not_raised(tmp_path: Path, caplog):
+    """An HTTP failure during the media download drops that attachment with a
+    sanitized log instead of escaping to the polling loop's logger.exception.
+
+    httpx.HTTPStatusError formats the signed URL (path + query credentials)
+    into its message, so letting it propagate would render the URL in the
+    per-message traceback. Reproduced with a real 403 mock transport.
+    """
+    import httpx
+
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        bus = MessageBus()
+        published = []
+
+        async def capture(msg):
+            published.append(msg)
+
+        bus.publish_inbound = capture  # type: ignore[method-assign]
+
+        channel = WechatChannel(bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+        channel._client = httpx.AsyncClient(  # type: ignore[assignment]
+            transport=httpx.MockTransport(lambda _request: httpx.Response(403))
+        )
+        try:
+            await channel._handle_update(
+                {
+                    "message_type": 1,
+                    "message_id": 202,
+                    "from_user_id": "wx-user-1",
+                    "context_token": "ctx-403-1",
+                    "item_list": [
+                        {
+                            "type": 2,
+                            "image_item": {
+                                "aeskey": b"1234567890abcdef".hex(),
+                                "media": {"full_url": "https://cdn.weixin.qq.com/private/BearerSecret?token=QuerySecret"},
+                            },
+                        }
+                    ],
+                }
+            )
+        finally:
+            await channel._client.aclose()
+
+        # The image is dropped and, with no text either, nothing is published.
+        assert published == []
+
+    with caplog.at_level(logging.WARNING, logger="app.channels.wechat"):
+        _run(go())
+
+    assert "BearerSecret" not in caplog.text
+    assert "QuerySecret" not in caplog.text
+    assert "/private/" not in caplog.text
+    # The operator still sees what failed and for which host.
+    assert "HTTPStatusError (403)" in caplog.text
+    assert "cdn.weixin.qq.com" in caplog.text
+
+
 class _FakeStreamResponse:
     def __init__(self, chunks: list[bytes]):
         self._chunks = chunks
+        self.headers: dict[str, str] = {}
 
     def raise_for_status(self) -> None:
         return None
 
-    async def aiter_bytes(self):
+    # Deliberately no aiter_bytes: the reader must consume undecoded bytes, so
+    # an accidental switch back to the decoding iterator fails loudly here.
+    async def aiter_raw(self):
         for chunk in self._chunks:
             yield chunk
 
@@ -1655,7 +1718,7 @@ class _FakeStreamingClient:
     def __init__(self, chunks: list[bytes]):
         self._chunks = chunks
 
-    def stream(self, _method: str, _url: str, timeout: float | None = None) -> _FakeStreamContext:
+    def stream(self, _method: str, _url: str, timeout: float | None = None, **_kwargs) -> _FakeStreamContext:
         return _FakeStreamContext(_FakeStreamResponse(self._chunks))
 
 
@@ -1672,6 +1735,85 @@ def test_download_cdn_bytes_aborts_when_stream_exceeds_cap():
         assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x", max_bytes=6) == b"abcdef"
         assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x", max_bytes=None) == b"abcdef"
         assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x", max_bytes=0) == b"abcdef"
+
+    _run(go())
+
+
+def test_download_cdn_bytes_rejects_compressed_response_before_decode(caplog):
+    """aiter_bytes() would transparently decode Content-Encoding, allocating the
+    whole decompressed body before the cap sees a byte — an ~8 KB gzip wire
+    chunk decoding to 8 MiB (reproduced here) bypasses max_bytes entirely. The
+    download must request identity and refuse a residual encoding before
+    reading, even with the cap disabled."""
+    import gzip
+
+    import httpx
+
+    from app.channels.wechat import WechatChannel
+
+    class _AsyncChunks(httpx.AsyncByteStream):
+        def __init__(self, chunks: list[bytes]):
+            self._chunks = chunks
+
+        async def __aiter__(self):
+            for chunk in self._chunks:
+                yield chunk
+
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"Content-Encoding": "gzip"},
+            stream=_AsyncChunks([gzip.compress(b"\x00" * (8 * 1024 * 1024))]),
+        )
+
+    async def go():
+        channel = WechatChannel(MessageBus(), config={"bot_token": "test-token"})
+        channel._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[assignment]
+        try:
+            # Cap disabled: the old aiter_bytes() code path would happily
+            # return the 8 MiB decompressed payload here.
+            assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x", max_bytes=None) is None
+            # With a cap in place the rejection still happens for the encoding,
+            # before any decode/size accounting.
+            assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x", max_bytes=1024 * 1024) is None
+        finally:
+            await channel._client.aclose()
+
+    with caplog.at_level(logging.WARNING, logger="app.channels.wechat"):
+        _run(go())
+
+    assert "Content-Encoding" in caplog.text
+    assert "exceeds" not in caplog.text  # rejected for the encoding, not the size
+    assert seen_requests[0].headers.get("accept-encoding") == "identity"
+
+
+def test_download_cdn_bytes_streams_identity_response():
+    """An unencoded response still round-trips through a real httpx transport."""
+    import httpx
+
+    from app.channels.wechat import WechatChannel
+
+    class _AsyncChunks(httpx.AsyncByteStream):
+        def __init__(self, chunks: list[bytes]):
+            self._chunks = chunks
+
+        async def __aiter__(self):
+            for chunk in self._chunks:
+                yield chunk
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_AsyncChunks([b"abcdef"]))
+
+    async def go():
+        channel = WechatChannel(MessageBus(), config={"bot_token": "test-token"})
+        channel._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[assignment]
+        try:
+            assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x") == b"abcdef"
+        finally:
+            await channel._client.aclose()
 
     _run(go())
 

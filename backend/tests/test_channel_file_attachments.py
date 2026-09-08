@@ -597,13 +597,16 @@ class TestManagerArtifactResolution:
 
 
 class _FakeStreamResponse:
-    def __init__(self, chunks: list[bytes]):
+    def __init__(self, chunks: list[bytes], headers: dict[str, str] | None = None):
         self._chunks = chunks
+        self.headers = headers or {}
 
     def raise_for_status(self) -> None:
         return None
 
-    async def aiter_bytes(self):
+    # Deliberately no aiter_bytes: the reader must consume undecoded bytes, so
+    # an accidental switch back to the decoding iterator fails loudly here.
+    async def aiter_raw(self):
         for chunk in self._chunks:
             yield chunk
 
@@ -623,7 +626,7 @@ class _FakeStreamingClient:
     def __init__(self, chunks: list[bytes]):
         self._chunks = chunks
 
-    def stream(self, _method: str, _url: str) -> _FakeStreamContext:
+    def stream(self, _method: str, _url: str, **_kwargs) -> _FakeStreamContext:
         return _FakeStreamContext(_FakeStreamResponse(self._chunks))
 
 
@@ -652,15 +655,87 @@ class TestHttpInboundFileReader:
 
         assert _run(_read_http_inbound_file({"filename": "x.bin"}, _FakeStreamingClient([]))) is None  # type: ignore[arg-type]
 
+    def test_compressed_response_is_rejected_before_decode(self, caplog):
+        """aiter_bytes() would transparently decode Content-Encoding, and the
+        decoder allocates the whole decompressed body before yielding a chunk
+        — a gzip bomb from an admitted host would bypass the byte cap (one
+        ~8 KB wire chunk decoding to 8 MiB, reproduced here). The reader must
+        request identity and refuse any residual encoding before reading."""
+        import gzip as _gzip
+        import logging as _logging
+
+        import httpx
+
+        from app.channels import manager
+
+        class _AsyncChunks(httpx.AsyncByteStream):
+            def __init__(self, chunks: list[bytes]):
+                self._chunks = chunks
+
+            async def __aiter__(self):
+                for chunk in self._chunks:
+                    yield chunk
+
+        seen_requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_requests.append(request)
+            return httpx.Response(
+                200,
+                headers={"Content-Encoding": "gzip"},
+                stream=_AsyncChunks([_gzip.compress(b"\x00" * (8 * 1024 * 1024))]),
+            )
+
+        async def go():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            try:
+                return await manager._read_http_inbound_file({"url": "https://cdn.example/x", "filename": "x.bin"}, client)
+            finally:
+                await client.aclose()
+
+        with caplog.at_level(_logging.WARNING, logger="app.channels.manager"):
+            result = _run(go())
+
+        assert result is None
+        assert "Content-Encoding" in caplog.text
+        # Identity is requested up front so a compliant server never compresses.
+        assert seen_requests[0].headers.get("accept-encoding") == "identity"
+
+    def test_identity_response_round_trips(self):
+        """An unencoded response still streams and joins as before (real httpx transport)."""
+        import httpx
+
+        from app.channels.manager import _read_http_inbound_file
+
+        class _AsyncChunks(httpx.AsyncByteStream):
+            def __init__(self, chunks: list[bytes]):
+                self._chunks = chunks
+
+            async def __aiter__(self):
+                for chunk in self._chunks:
+                    yield chunk
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=_AsyncChunks([b"ab"]))
+
+        async def go():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            try:
+                return await _read_http_inbound_file({"url": "https://cdn.example/x", "filename": "x.bin"}, client)
+            finally:
+                await client.aclose()
+
+        assert _run(go()) == b"ab"
+
 
 class _RecordingStreamClient(_FakeStreamingClient):
     def __init__(self, chunks: list[bytes]):
         super().__init__(chunks)
         self.streamed_urls: list[str] = []
 
-    def stream(self, method: str, url: str) -> _FakeStreamContext:
+    def stream(self, method: str, url: str, **kwargs) -> _FakeStreamContext:
         self.streamed_urls.append(url)
-        return super().stream(method, url)
+        return super().stream(method, url, **kwargs)
 
 
 class TestWecomMediaUrlGate:
@@ -725,16 +800,22 @@ class TestWecomMediaUrlGate:
         assert client.streamed_urls == [realistic]
 
     def test_arbitrary_cos_bucket_never_matches(self):
-        """Any Tencent Cloud account can create a COS bucket, so only the pinned
-        ww-aibot-img-<numeric id> shape matches — not a custom bucket name, a
-        non-numeric bot id, or a lookalike domain."""
+        """The COS numeric suffix is the owner's Tencent Cloud APPID and bucket
+        names are user-chosen, so only the APPID observed in Tencent's
+        published aibot callback examples (1258476243) matches — not a custom
+        bucket name, a different account's APPID, or a lookalike domain."""
         from app.channels.manager import _is_allowed_wecom_media_url
 
         assert not _is_allowed_wecom_media_url("https://my-own-bucket.cos.ap-guangzhou.myqcloud.com/x?sign=1")
         assert not _is_allowed_wecom_media_url("https://attacker-prefix-1.cos.ap-guangzhou.myqcloud.com/x?sign=1")
         assert not _is_allowed_wecom_media_url("https://ww-aibot-img-evil.cos.ap-guangzhou.myqcloud.com/x?sign=1")
         assert not _is_allowed_wecom_media_url("https://ww-aibot-img-123.cos.ap-guangzhou.myqcloud.com.evil.io/x")
-        assert _is_allowed_wecom_media_url("https://ww-aibot-img-0.cos.ap-shanghai.myqcloud.com/x")
+        # Same bucket prefix, different Tencent Cloud account (reviewer repro):
+        # any account can register a "ww-aibot-img-*" bucket of its own.
+        assert not _is_allowed_wecom_media_url("https://ww-aibot-img-1250000000.cos.ap-guangzhou.myqcloud.com/x?sign=1")
+        assert not _is_allowed_wecom_media_url("https://ww-aibot-img-0.cos.ap-shanghai.myqcloud.com/x")
+        # The verified APPID is trusted across regions.
+        assert _is_allowed_wecom_media_url("https://ww-aibot-img-1258476243.cos.ap-shanghai.myqcloud.com/x")
 
     def test_oversize_rejection_does_not_log_url_credentials(self, monkeypatch, caplog):
         """Signed media URLs carry credentials in path and query; only the host may be logged."""
@@ -809,6 +890,56 @@ class TestWecomMediaUrlGate:
         assert "QuerySecret" not in logged
         assert "/private/" not in logged
         assert "host=ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com" in logged
+
+    def test_http_failure_does_not_log_url_credentials(self, tmp_path, monkeypatch, caplog):
+        """A real HTTP failure must not leak the signed URL through the
+        exception traceback.
+
+        httpx.HTTPStatusError formats the full request URL (path + query, i.e.
+        the download credentials) into its message; logger.exception would
+        render it verbatim. Reproduces the reviewer's mock-transport 403
+        through the real _ingest_inbound_files() and asserts against the
+        fully formatted logs (caplog.text includes rendered tracebacks).
+        """
+        import logging as _logging
+
+        import httpx
+
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        secret_url = "https://ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com/private/BearerSecret?token=QuerySecret"
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403)
+
+        real_async_client = httpx.AsyncClient
+
+        def patched_async_client(**kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return real_async_client(**kwargs)
+
+        monkeypatch.setattr(manager.httpx, "AsyncClient", patched_async_client)
+
+        msg = InboundMessage(
+            channel_name="wecom",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachment",
+            files=[{"url": secret_url}],
+        )
+
+        with caplog.at_level(_logging.WARNING, logger="app.channels.manager"):
+            with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir):
+                assert _run(manager._ingest_inbound_files("thread-1", msg)) == []
+
+        assert "BearerSecret" not in caplog.text
+        assert "QuerySecret" not in caplog.text
+        assert "/private/" not in caplog.text
+        # The operator still sees what failed and for which host.
+        assert "HTTPStatusError (403)" in caplog.text
+        assert "ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com" in caplog.text
 
     def test_operator_media_host_suffixes_extend_the_wecom_gate(self):
         from app.channels.manager import _is_allowed_wecom_media_url

@@ -572,7 +572,9 @@ channels:
     bot_id: $WECOM_BOT_ID
     bot_secret: $WECOM_BOT_SECRET
     # Optional: extra host suffixes inbound media downloads may come from, in
-    # addition to the built-in qq.com family and WeCom's COS media hosts
+    # addition to the built-in qq.com family and WeCom's official COS media
+    # host (ww-aibot-img-1258476243.<region>.myqcloud.com); add one here if
+    # WeCom rotates to a new COS account or media goes through a proxy
     allowed_media_hosts: []
 
   slack:
