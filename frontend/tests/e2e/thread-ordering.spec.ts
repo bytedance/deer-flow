@@ -89,7 +89,11 @@ function buildFixtureMessages(): FeedMessage[] {
     id: "t-turn-30",
     tool_call_id: "call-turn-30",
     name: "web_search",
-    content: "tool-30 result payload",
+    // web_search steps render parsed search-result items, so the payload is
+    // the JSON-stringified array the real tool produces.
+    content: JSON.stringify([
+      { url: "https://example.test/turn-30", title: "tool-30 result payload" },
+    ]),
   });
   messages.push({
     type: "ai",
@@ -233,12 +237,17 @@ test.describe("Thread message ordering", () => {
     ).toBeVisible();
     await expectGroupIndicesAscending(page);
 
-    // The tool turn keeps its card association: expand the collapsed steps
-    // and the intermediate result is still there.
+    // The tool turn keeps its card association: expand the collapsed tool
+    // step and the intermediate result payload is still there.
     await jumpToChapter(page, /turn-30 question/);
-    await expect(
-      page.getByTestId("main-message-list").getByText("turn-30 answer"),
-    ).toBeVisible();
+    const mainList = page.getByTestId("main-message-list");
+    await expect(mainList.getByText("turn-30 answer")).toBeVisible();
+    const toolStep = mainList.getByText(
+      'Search on the web for "turn-30 lookup"',
+    );
+    await expect(toolStep).toBeVisible();
+    await toolStep.click();
+    await expect(mainList.getByText("tool-30 result payload")).toBeVisible();
 
     // Same server data after a refresh reconstructs the same order.
     await page.reload();
@@ -369,18 +378,30 @@ test.describe("Thread message ordering", () => {
     await expect(page.getByText("final-turn answer")).toBeVisible({
       timeout: 15_000,
     });
-    const questionBox = await page
-      .getByTestId("main-message-list")
-      .getByText("final-turn question", { exact: true })
-      .first()
-      .boundingBox();
-    const answerBox = await page
-      .getByTestId("main-message-list")
-      .getByText("final-turn answer")
-      .boundingBox();
-    expect(questionBox).not.toBeNull();
-    expect(answerBox).not.toBeNull();
-    expect(answerBox!.y).toBeGreaterThan(questionBox!.y);
+    // DOM relative order, not viewport coordinates: stick-to-bottom smooth
+    // scrolling makes two separate boundingBox reads race each other.
+    const questionBeforeAnswer = await page.evaluate(() => {
+      const list = document.querySelector('[data-testid="main-message-list"]');
+      if (!list) {
+        return null;
+      }
+      const leaf = (text: string) =>
+        [...list.querySelectorAll("div, p")].find(
+          (element) =>
+            element.children.length === 0 && element.textContent === text,
+        );
+      const question = leaf("final-turn question");
+      const answer = leaf("final-turn answer");
+      if (!question || !answer) {
+        return null;
+      }
+      return (
+        (question.compareDocumentPosition(answer) &
+          Node.DOCUMENT_POSITION_FOLLOWING) !==
+        0
+      );
+    });
+    expect(questionBeforeAnswer).toBe(true);
 
     // The finishing refetch observed the extended feed; the established
     // order — including the compacted head — is unchanged.
@@ -396,6 +417,50 @@ test.describe("Thread message ordering", () => {
     // Refresh against the same server data: identical order.
     await page.reload();
     await expect(page.getByText("final-turn answer")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expectGroupIndicesAscending(page);
+  });
+
+  test("custom agent chat shares the same ordering across pagination and refresh", async ({
+    page,
+  }) => {
+    // The Custom Agent route renders the same ChatPage/message pipeline; this
+    // pins the shared link so the ordering contract cannot regress on one
+    // path only.
+    const rows = toFeedRows(buildFixtureMessages());
+    mockLangGraphAPI(page, {
+      agents: [
+        {
+          name: "ordering-agent",
+          description: "Agent for the ordering regression",
+        },
+      ],
+      threads: [
+        {
+          ...THREAD,
+          agent_name: "ordering-agent",
+          messages: rows.map((row) => row.content),
+        },
+      ],
+    });
+    await mockPaginatedFeed(page, rows);
+
+    await page.goto(`/workspace/agents/ordering-agent/chats/${MOCK_THREAD_ID}`);
+
+    await expect(page.getByText("turn-31 answer")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expectGroupIndicesAscending(page);
+
+    await loadAllHistoryPages(page);
+    await expect(
+      page.getByTestId("main-message-list").getByText("turn-0 question"),
+    ).toBeVisible();
+    await expectGroupIndicesAscending(page);
+
+    await page.reload();
+    await expect(page.getByText("turn-31 answer")).toBeVisible({
       timeout: 15_000,
     });
     await expectGroupIndicesAscending(page);

@@ -44,7 +44,6 @@ import {
 import {
   dedupeMessagesByIdentity,
   insertByTrustedSeq,
-  isNonEmptyString,
   isValidMessageSeq,
   MESSAGE_SEQ_KEY,
   mergeMessages,
@@ -186,6 +185,11 @@ export function buildThreadSubmitMessages({
 const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_RUN_MESSAGES: RunMessage[] = [];
 const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
+
+function isNonEmptyString(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
 const EMPTY_THREAD_VALUES: AgentThreadState = {
   title: "",
   messages: [],

@@ -410,3 +410,26 @@ test("dedupeMessagesByIdentity keeps the last visible copy per identity", () => 
   const visible = msg("x", "human", "visible");
   expect(dedupeMessagesByIdentity([hidden, visible])).toEqual([visible]);
 });
+
+test("a seq carried only by a hidden control copy still positions its visible twin", () => {
+  // Fallback path: no *visible* copy of the identity carries a seq, so the
+  // hidden control copy's valid seq is the only trustworthy position. Using
+  // it keeps the visible twin inside the skeleton instead of dropping it to
+  // the unpositioned tail; a visible copy with its own seq would win instead
+  // (covered by the hidden-control test above).
+  const hiddenControl = withKwargs(msg("m1", "system", "control", 2), {
+    hide_from_ui: true,
+  });
+  const history = [
+    msg("h0", "human", "q", 1),
+    hiddenControl,
+    msg("a3", "ai", "tail", 3),
+  ];
+  const live = [msg("m1", "ai", "visible twin")];
+
+  const merged = mergeMessages(history, live, []);
+
+  expect(idsOf(merged)).toEqual(["h0", "m1", "a3"]);
+  expect(seqsOf(merged)).toEqual([1, 2, 3]);
+  expect(merged[1]!.content).toBe("visible twin");
+});

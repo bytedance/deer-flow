@@ -35,10 +35,6 @@ export const MESSAGE_SEQ_KEY = "deerflow_seq";
 
 const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
 
-export function isNonEmptyString(value: string | undefined): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
 export function messageIdentity(message: Message): string | undefined {
   if (
     "tool_call_id" in message &&
