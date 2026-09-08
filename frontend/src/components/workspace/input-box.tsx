@@ -297,6 +297,7 @@ export function InputBox({
   onContextChange,
   onFollowupsVisibilityChange,
   onGoalChange,
+  onPrepareThread,
   onSubmit,
   onStop,
   ...props
@@ -340,6 +341,16 @@ export function InputBox({
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
   onGoalChange?: (goal: GoalState | null) => void;
+  /**
+   * Prepare a not-yet-materialized thread before a builtin command creates
+   * it server-side. The `/goal <condition>` PUT endpoint materializes a
+   * missing thread row itself, so a project-scoped new chat uses this to
+   * assign membership first — the later idempotent thread create would
+   * otherwise return that unassigned row without the project. Only runs for
+   * goal-set: status/clear never create a thread server-side. Rejecting
+   * aborts the command and keeps the composer's text for a retry.
+   */
+  onPrepareThread?: () => void | Promise<void>;
   onSubmit?: (
     message: PromptInputMessage,
     options?: InputBoxSubmitOptions,
@@ -1193,6 +1204,35 @@ export function InputBox({
           // clearing it (PromptInput only preserves input on a rejected submit).
           return Promise.reject(new Error("goal-too-long"));
         }
+        if (submitAction.command.kind === "set") {
+          // A goal-set PUT creates the thread server-side when missing, so a
+          // project-scoped new chat must assign membership first. The prepare
+          // callback toasts its own failure; reject so the composer keeps the
+          // text for a retry instead of issuing an unassigned goal.
+          //
+          // Fence against conversation switches while preparation runs: the
+          // goal PUT registers its AbortController only when it starts, so
+          // the thread-change/unmount cleanup cannot cancel an in-flight
+          // prepare. Capture the goal-request epoch before the await — the
+          // cleanup bumps it via abortGoalRequest — and drop the stale
+          // continuation before it can clear the new conversation's composer
+          // or launch the abandoned submission.
+          const requestEpoch = goalRequestStateRef.current.sequence;
+          try {
+            await onPrepareThread?.();
+          } catch (error) {
+            return Promise.reject(
+              error instanceof Error
+                ? error
+                : new Error("thread preparation failed"),
+            );
+          }
+          if (goalRequestStateRef.current.sequence !== requestEpoch) {
+            // Reject (not resolve) so PromptInput keeps the current
+            // conversation's composer text untouched.
+            return Promise.reject(new Error("goal-preparation-stale"));
+          }
+        }
         promptHistoryIndexRef.current = null;
         promptHistoryDraftRef.current = "";
         setFollowups([]);
@@ -1229,6 +1269,7 @@ export function InputBox({
       handleCompactCommand,
       handleGoalCommand,
       handleStopStreaming,
+      onPrepareThread,
       selectedSlashSkill,
       status,
       submitThreadMessage,
