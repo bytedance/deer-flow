@@ -1880,6 +1880,41 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["checked"] is False
 
+    def test_psdrive_relative_exclusion_fails_closed_without_thread_context(self):
+        target = "Data:/tests/security"
+        executions = [_bash_execution(f"pytest {target} Data:/tests/unit --ignore Data:tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_provider_qualified_psdrive_relative_exclusion_fails_closed(self):
+        target = "Data:/tests/security"
+        executions = [_bash_execution(f"pytest {target} Data:/tests/unit --ignore FileSystem::data:tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_psdrive_absolute_exclusion_fails_closed_for_relative_criterion(self):
+        target = "Data:tests/security"
+        executions = [_bash_execution(f"pytest {target} Data:tests/unit --ignore Data:/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_psdrive_relative_deselect_fails_closed_for_absolute_nodeid(self):
+        target = "Data:/tests/security/test_x.py::test_a"
+        executions = [_bash_execution(f"pytest {target} Data:/tests/unit --deselect Data:tests/security/test_x.py", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_unrelated_exclusion_on_same_relative_psdrive_keeps_matching(self):
+        target = "Data:tests/security"
+        executions = [_bash_execution(f"pytest {target} Data:tests/unit --ignore data:tests/slow", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
     def test_unrelated_exclusion_on_same_psdrive_keeps_matching(self):
         target = "Data:/tests/security"
         executions = [_bash_execution(f"pytest {target} Data:/tests/unit --ignore data:/tests/slow", output_tail="12 passed")]
@@ -1911,6 +1946,41 @@ class TestTestsPassedLeaf:
     def test_provider_qualified_psdrive_keeps_pytest_nodeid_case_sensitive(self):
         target = "Data:/tests/x.py::TestA"
         executions = [_bash_execution(f"pytest {target} Data:/tests/y.py --deselect FileSystem::data:/tests/X.PY::testa", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_provider_qualified_unc_case_alias_exclusion_fails_closed(self):
+        target = "FileSystem:://srv/share/tests/security"
+        executions = [_bash_execution(f"pytest {target} FileSystem:://srv/share/tests/unit --ignore FileSystem:://srv/SHARE/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_provider_qualified_distinct_unc_root_exclusion_fails_closed(self):
+        target = "FileSystem:://srv/share/tests/security"
+        executions = [_bash_execution(f"pytest {target} FileSystem:://srv/share/tests/unit --ignore FileSystem:://srv/other/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_provider_qualified_unrelated_unc_exclusion_keeps_matching(self):
+        target = "FileSystem:://srv/share/tests/security"
+        executions = [_bash_execution(f"pytest {target} FileSystem:://srv/share/tests/unit --ignore FileSystem:://srv/share/tests/slow", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_provider_qualified_unc_preserves_pytest_nodeid_boundary(self):
+        target = "FileSystem:://srv/share/tests/x.py::TestA"
+        executions = [_bash_execution(f"pytest {target} FileSystem:://srv/share/tests/y.py --deselect FileSystem:://srv/SHARE/tests/x.py::TestA", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_provider_qualified_unc_keeps_pytest_nodeid_case_sensitive(self):
+        target = "FileSystem:://srv/share/tests/x.py::TestA"
+        executions = [_bash_execution(f"pytest {target} FileSystem:://srv/share/tests/y.py --deselect FileSystem:://srv/SHARE/tests/X.PY::testa", output_tail="12 passed")]
         verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
 
         assert verdict["leaves"][0]["holds"] is True

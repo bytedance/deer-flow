@@ -479,10 +479,14 @@ _WINDOWS_SHORT_NAME_COMPONENT_RE = re.compile(r"^[A-Za-z0-9$%_'@~`!(){}^#&-]{1,6
 #: ``FileSystem::C:/tmp`` or ``External:/tmp``). Those forms are absolute in
 #: PowerShell but look relative to POSIX path normalization.
 _POWERSHELL_DRIVE_QUALIFIED_RE = re.compile(r"^[^/\\:]+:")
-#: A provider-qualified filesystem path carries a second drive designator
-#: after PowerShell's ``Provider::`` prefix. Keep that delimiter distinct from
-#: pytest's later ``::nodeid`` separator.
-_POWERSHELL_PROVIDER_DRIVE_QUALIFIED_RE = re.compile(r"^[^/\\:]+::(?P<drive>[^/\\:]+):")
+#: A provider-qualified filesystem path carries either a drive designator or
+#: a UNC root after PowerShell's ``Provider::`` prefix. Keep that delimiter
+#: distinct from pytest's later ``::nodeid`` separator.
+_POWERSHELL_PROVIDER_QUALIFIED_RE = re.compile(r"^[^/\\:]+::(?P<path>(?:[^/\\:]+:|//))")
+#: Unlike drive-letter paths, a named PSDrive may have a multi-character name.
+#: A separator after the colon distinguishes root-anchored from drive-relative
+#: spellings whose resolution depends on that PSDrive's remembered location.
+_POWERSHELL_DRIVE_ABSOLUTE_RE = re.compile(r"^[^/\\:]+:/")
 #: ``cmd.exe`` expands paired-percent environment references before running
 #: the command. Without shell provenance, a token such as ``%TEMP%`` cannot
 #: be treated as the literal relative path seen by the POSIX parser.
@@ -709,7 +713,7 @@ def _thread_uses_windows_paths(thread_data: Mapping[str, Any] | None) -> bool:
 
 def _selection_path_parts(value: str) -> tuple[str, str | None]:
     """Split a runner selection into its filesystem path and pytest nodeid."""
-    provider_match = _POWERSHELL_PROVIDER_DRIVE_QUALIFIED_RE.match(value)
+    provider_match = _POWERSHELL_PROVIDER_QUALIFIED_RE.match(value)
     nodeid_start = provider_match.end() if provider_match is not None else 0
     marker_index = value.find("::", nodeid_start)
     if marker_index < 0:
@@ -718,11 +722,11 @@ def _selection_path_parts(value: str) -> tuple[str, str | None]:
 
 
 def _without_powershell_provider(path: str) -> str:
-    """Return the drive-qualified portion of a provider-qualified path."""
-    provider_match = _POWERSHELL_PROVIDER_DRIVE_QUALIFIED_RE.match(path)
+    """Return the rooted portion of a provider-qualified filesystem path."""
+    provider_match = _POWERSHELL_PROVIDER_QUALIFIED_RE.match(path)
     if provider_match is None:
         return path
-    return path[provider_match.start("drive") :]
+    return path[provider_match.start("path") :]
 
 
 def _has_parent_path_component(value: str) -> bool:
@@ -746,7 +750,9 @@ def _selection_path_kind(value: str) -> str:
     if slash_path.startswith("/"):
         return "posix_absolute"
     if _POWERSHELL_DRIVE_QUALIFIED_RE.match(slash_path) and not _WINDOWS_DRIVE_QUALIFIED_RE.match(slash_path):
-        return "powershell_drive_qualified"
+        if _POWERSHELL_DRIVE_ABSOLUTE_RE.match(slash_path):
+            return "powershell_drive_absolute"
+        return "powershell_drive_relative"
     return "relative"
 
 
