@@ -486,6 +486,43 @@ test("a later shared anchor ends the live-only result's trailing segment", () =>
   ).toEqual(["start", "result", "shared", "end", "after"]);
 });
 
+test.each([2, 9])(
+  "bridge preserves an unrendered prefix before a rescued seq anchor (history ends at %s)",
+  (endSeq) => {
+    const start = msg("old-start", "human", "old question", 1);
+    const end = msg("old-end", "ai", "old answer", endSeq);
+    const step = msg("step", "ai", "not rendered before compaction");
+    const result = msg("result", "ai", "persisted result", 3);
+    // Compaction can capture these messages before React commits a frame,
+    // while canonical history still lacks both of them.
+    const resolved = resolveTransientHistoryBridge(
+      [start, end],
+      [step, result],
+    );
+    const expected =
+      endSeq < 3 ? [start, end, step, result] : [start, step, result, end];
+
+    expect(resolved).toEqual(expected);
+    expect(mergeMessages(resolved, [], [])).toEqual(expected);
+    // Once history catches up, canonical content wins without duplicates.
+    expect(resolveTransientHistoryBridge(expected, [step, result])).toBe(
+      expected,
+    );
+  },
+);
+
+test("a rescued seq anchor preserves following steps before the first loaded anchor", () => {
+  const start = msg("start", "human", "old question", 1);
+  const end = msg("end", "ai", "old answer", 9);
+  const before = msg("before", "ai", "preceding step");
+  const result = msg("result", "ai", "persisted result", 3);
+  const after = msg("after", "ai", "following step");
+
+  expect(
+    resolveTransientHistoryBridge([start, end], [before, result, after, end]),
+  ).toEqual([start, before, result, after, end]);
+});
+
 test.each(["before", "after"] as const)(
   "bridge keeps an unsequenced step %s its rescued sequenced neighbor",
   (side) => {

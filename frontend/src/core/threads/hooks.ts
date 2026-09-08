@@ -799,12 +799,17 @@ export function resolveTransientHistoryBridge(
   );
   let pending: Message[] = [];
   let lastAnchorIdentity: string | undefined;
-  let hasCanonicalAnchor = false;
 
   for (const identity of bridgeOrder) {
     if (anchorIdentities.has(identity)) {
       if (pending.length > 0) {
-        if (hasCanonicalAnchor) {
+        // A rescued seq anchor preserves its captured prefix even if React
+        // has not rendered it yet. Only a leading prefix anchored to loaded
+        // history needs proof that it does not span an unloaded cursor gap.
+        if (
+          lastAnchorIdentity !== undefined ||
+          !presentIdentities.has(identity)
+        ) {
           beforeAnchor.set(identity, [
             ...(beforeAnchor.get(identity) ?? []),
             ...pending,
@@ -837,12 +842,7 @@ export function resolveTransientHistoryBridge(
           }
         }
       }
-      // The prefix before the first loaded anchor has no trustworthy position:
-      // cursor pages containing its intervening history may not be loaded yet.
-      // The sole exception is a prefix whose exact relative position was
-      // already committed to the previous UI frame.
       pending = [];
-      hasCanonicalAnchor = true;
       lastAnchorIdentity = identity;
       continue;
     }
@@ -853,7 +853,7 @@ export function resolveTransientHistoryBridge(
     }
   }
 
-  // No bridge identity overlaps canonical history. This is the original
+  // No bridge identity overlaps a positioned row. This is the original
   // persistence-gap case: loaded history is older and the rescued live turns
   // belong after it.
   if (!lastAnchorIdentity) {
