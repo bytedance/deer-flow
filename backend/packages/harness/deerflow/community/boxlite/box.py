@@ -294,8 +294,11 @@ class BoxliteBox(Sandbox):
         # splitlines() already removed the terminators; do NOT strip entries —
         # a filename that legitimately ends in whitespace would be corrupted.
         # find -H dereferences only the start point (symlink-to-dir).
-        # An existing directory still prints itself via `find -type d`, so
-        # empty stdout is the 2>/dev/null missing-path case, not a real empty dir.
+        # An existing directory still prints itself via `find -type d`.
+        # Empty stdout with find exit 0 or 1 is the missing-path case; other
+        # statuses (e.g. 127, no find binary) are command failure, not FileNotFoundError.
+        if r.exit_code not in (0, 1):
+            raise OSError(f"Failed to list_dir {resolved}: command exited with code {r.exit_code}")
         entries = [line for line in (r.stdout or "").splitlines() if line]
         if not entries:
             raise FileNotFoundError(resolved)

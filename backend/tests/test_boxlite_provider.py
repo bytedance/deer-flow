@@ -1331,6 +1331,18 @@ def test_list_dir_raises_when_find_returns_no_entries() -> None:
         box.list_dir("/mnt/user-data/workspace")
 
 
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
+    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    class _MissingBinaryBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout="", stderr="", exit_code=127)
+
+    box = BoxliteBox("box-id", box=_MissingBinaryBox(), run=_fake_run)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        box.list_dir("/mnt/user-data/workspace")
+
+
 def test_list_dir_uses_find_H_to_dereference_start_point() -> None:
     captured: list[tuple] = []
 

@@ -328,8 +328,14 @@ class OpenSandboxSandbox(Sandbox):
         # splitlines() already removed the terminators; do NOT strip entries —
         # a filename that legitimately ends in whitespace would be corrupted.
         # find -H dereferences only the start point (symlink-to-dir).
-        # An existing directory still prints itself via `find -type d`, so
-        # empty stdout is the 2>/dev/null missing-path case, not a real empty dir.
+        # An existing directory still prints itself via `find -type d`.
+        # Empty stdout with find exit 0 or 1 is the missing-path case; other
+        # statuses (e.g. 127, no find binary) are command failure, not FileNotFoundError.
+        error = getattr(execution, "error", None)
+        exit_code = getattr(execution, "exit_code", None)
+        if error is not None or exit_code not in (0, 1):
+            detail = f"{getattr(error, 'name', type(error).__name__)}: {getattr(error, 'value', error)}" if error is not None else f"command exited with code {exit_code}"
+            raise OSError(f"Failed to list_dir {resolved}: {detail}")
         entries = [line for line in execution_stdout(execution).splitlines() if line]
         if not entries:
             raise FileNotFoundError(resolved)

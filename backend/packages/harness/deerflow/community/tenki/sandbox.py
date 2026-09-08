@@ -372,8 +372,12 @@ class TenkiSandbox(Sandbox):
         # splitlines() already removed the terminators; do NOT strip entries —
         # a filename that legitimately ends in whitespace would be corrupted.
         # BusyBox find supports -H (find [-HL]); dereference only the start point.
-        # An existing directory still prints itself via `find -type d`, so
-        # empty stdout is the 2>/dev/null missing-path case, not a real empty dir.
+        # An existing directory still prints itself via `find -type d`.
+        # Empty stdout with find exit 0 or 1 is the missing-path case; other
+        # statuses (e.g. 127, no find binary) are command failure, not FileNotFoundError.
+        exit_code = getattr(r, "exit_code", None)
+        if exit_code not in (0, 1):
+            raise OSError(f"Failed to list_dir {resolved}: command exited with code {exit_code}")
         entries = [self._virtual_path(line) for line in (r.stdout_text or "").splitlines() if line]
         if not entries:
             raise FileNotFoundError(resolved)

@@ -1029,6 +1029,15 @@ def test_list_dir_raises_when_find_returns_no_entries() -> None:
         box.list_dir("/mnt/user-data/missing")
 
 
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
+    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box._sh = lambda *args, **kwargs: _FakeResult(exit_code=127)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        box.list_dir("/mnt/user-data/workspace")
+
+
 def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     # "notes.txt " (trailing space) is a legal Linux filename; find prints it
     # verbatim, one entry per line, so a per-line strip() corrupts the name.
