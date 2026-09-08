@@ -18,6 +18,13 @@ import { cn } from "@/lib/utils";
 
 import { GithubIcon } from "./github-icon";
 import { Tooltip } from "./tooltip";
+// Workspace sections that have an index route (/workspace/<section>/page.tsx)
+// and can therefore be linked to from the breadcrumb.
+const LINKABLE_SECTIONS: Record<string, true> = {
+  agents: true,
+  chats: true,
+  "scheduled-tasks": true,
+};
 
 export function WorkspaceContainer({
   className,
@@ -69,7 +76,7 @@ export function WorkspaceHeader({
               <>
                 <BreadcrumbSeparator className="hidden md:block" />
                 <BreadcrumbItem>
-                  {segments.length >= 2 ? (
+                  {segments[1] && LINKABLE_SECTIONS[segments[1]] ? (
                     <BreadcrumbLink asChild>
                       <Link href={`/${segments[0]}/${segments[1]}`}>
                         {nameOfSegment(segments[1], t)}

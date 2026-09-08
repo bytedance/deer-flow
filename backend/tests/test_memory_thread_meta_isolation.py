@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from langgraph.store.memory import InMemoryStore
 
+from deerflow.persistence.projects import ProjectNotAssignableError
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -209,3 +210,27 @@ async def test_explicit_none_bypasses_filter(store):
 
     row = await store.get("t-alpha", user_id=None)
     assert row is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_create_with_project_id_fails_closed(store):
+    """Memory mode has no projects backend; a create carrying a project id
+    must fail closed (ProjectNotAssignableError) instead of silently
+    persisting an unassigned thread — the router maps the error to 404 and
+    the frontend keeps the composer for a retry, matching the SQL store's
+    missing/foreign/archived project behavior."""
+    with _as_user(USER_A):
+        with pytest.raises(ProjectNotAssignableError):
+            await store.create("t-proj", project_id="p1")
+
+        # Nothing persisted, and the store's project filter fails closed too.
+        assert await store.search() == []
+        assert await store.search(project_id="p1") == []
+
+        # Unscoped creates still work.
+        await store.create("t-plain")
+        assert [r["thread_id"] for r in await store.search()] == ["t-plain"]
+
+        # Membership moves report rejection (never a silent unassign).
+        assert await store.set_project("t-plain", "p1") is False
