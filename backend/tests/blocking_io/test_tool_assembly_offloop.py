@@ -34,6 +34,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.extensions import get_agent_build_extensions
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.worker import RunContext, run_agent
@@ -207,7 +208,10 @@ async def test_batch_item_assembles_off_loop(monkeypatch, tmp_path):
     async def _finalize_item(item_id, **kwargs):
         finalize_calls.append({"item_id": item_id, **kwargs})
 
-    service._repository = SimpleNamespace(finalize_item=_finalize_item)
+    async def _renew_item_lease(item_id, **_kwargs):
+        return {"valid": True, "cancel_requested": False}
+
+    service._repository = SimpleNamespace(finalize_item=_finalize_item, renew_item_lease=_renew_item_lease)
 
     item = {
         "id": "item-1",
@@ -246,6 +250,17 @@ async def test_run_agent_assembles_off_loop(monkeypatch, tmp_path):
     cfg.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
     observed_threads: list = []
+    # Sentinel bound via ctx.extensions: pins that run_assembly() preserves
+    # ContextVars, so bind_agent_build_extensions reaches the factory. Dropping
+    # the ctx.run in run_assembly makes the factory observe the startup
+    # fallback instead, with no error — this is the regression nothing else
+    # in the suite catches.
+    sentinel_extensions = SimpleNamespace(
+        id="sentinel-extensions",
+        needs_task_store=False,
+        has_task_lifecycle=False,
+    )
+    observed_extensions: list = []
 
     class _DummyStreamAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
@@ -253,6 +268,7 @@ async def test_run_agent_assembles_off_loop(monkeypatch, tmp_path):
 
     def _factory(*, config):
         observed_threads.append(threading.current_thread())
+        observed_extensions.append(get_agent_build_extensions())
         # Real production blocking read (executed inside a deerflow.* frame):
         # trips the strict gate when the factory runs on the loop.
         ExtensionsConfig.from_file()
@@ -265,7 +281,7 @@ async def test_run_agent_assembles_off_loop(monkeypatch, tmp_path):
         SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock()),
         run_manager,
         record,
-        ctx=RunContext(checkpointer=None, event_store=MemoryRunEventStore()),
+        ctx=RunContext(checkpointer=None, event_store=MemoryRunEventStore(), extensions=sentinel_extensions),
         agent_factory=_factory,
         graph_input={},
         config={},
@@ -273,6 +289,7 @@ async def test_run_agent_assembles_off_loop(monkeypatch, tmp_path):
 
     assert observed_threads, "agent assembly must be invoked"
     assert all(thread is not threading.main_thread() for thread in observed_threads)
+    assert observed_extensions == [sentinel_extensions], "the factory must observe the run-bound extension snapshot, not the startup fallback"
 
 
 async def test_state_accessor_build_assembles_off_loop(monkeypatch, tmp_path):

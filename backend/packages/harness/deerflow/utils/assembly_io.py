@@ -8,6 +8,8 @@ import contextvars
 import functools
 import logging
 import os
+import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
@@ -27,7 +29,16 @@ def _default_assembly_workers() -> int:
     return 8
 
 
-_ASSEMBLY_EXECUTOR = ThreadPoolExecutor(max_workers=_default_assembly_workers(), thread_name_prefix="assembly")
+_ASSEMBLY_WORKERS = _default_assembly_workers()
+_ASSEMBLY_EXECUTOR = ThreadPoolExecutor(max_workers=_ASSEMBLY_WORKERS, thread_name_prefix="assembly")
+
+# Pending (submitted, unfinished) assembly count. Increments on the event loop
+# before dispatch and decrements from the future's done callback; guarded for
+# multi-loop test environments.
+_pending_assemblies = 0
+_pending_lock = threading.Lock()
+_last_starvation_log = 0.0
+_STARVATION_LOG_INTERVAL_SECONDS = 30.0
 
 
 def _shutdown_assembly_executor() -> None:
@@ -54,7 +65,33 @@ async def run_assembly[**P, T](func: Callable[P, T], /, *args: P.args, **kwargs:
     agent-assembly helpers such as ``bind_agent_build_extensions`` keep
     working inside the worker thread.
     """
+    global _pending_assemblies, _last_starvation_log
+
+    with _pending_lock:
+        _pending_assemblies += 1
+        pending = _pending_assemblies
+        # Saturation is invisible otherwise: workers parked on a hung MCP
+        # server leave later assemblies queued indefinitely while the loop
+        # stays healthy. Warn at most once per interval while starved.
+        warn = pending > _ASSEMBLY_WORKERS and (time.monotonic() - _last_starvation_log) > _STARVATION_LOG_INTERVAL_SECONDS
+        if warn:
+            _last_starvation_log = time.monotonic()
+    if warn:
+        logger.warning(
+            "Assembly pool saturated: %d pending assemblies on %d workers; agent assembly is starved (likely a hung MCP server)",
+            pending,
+            _ASSEMBLY_WORKERS,
+        )
+
     loop = asyncio.get_running_loop()
     ctx = contextvars.copy_context()
     call = functools.partial(func, *args, **kwargs)
-    return await loop.run_in_executor(_ASSEMBLY_EXECUTOR, ctx.run, call)
+    future = loop.run_in_executor(_ASSEMBLY_EXECUTOR, ctx.run, call)
+
+    def _release(_done: object) -> None:
+        global _pending_assemblies
+        with _pending_lock:
+            _pending_assemblies -= 1
+
+    future.add_done_callback(_release)
+    return await future

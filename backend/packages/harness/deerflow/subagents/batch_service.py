@@ -205,6 +205,23 @@ class SubagentBatchService:
                 include_upload_tool=False,
                 app_config=app_config,
             )
+            # Revalidate durable state before launching: cancel_batch may have
+            # terminalized this item (or its lease may have been lost) while
+            # assembly blocked in the worker thread — the poll loop's checks
+            # only start after execute_async(), so launching without this
+            # check would run work the user already cancelled.
+            lease = await self._repository.renew_item_lease(
+                item_id,
+                lease_owner=self._lease_owner,
+                lease_seconds=self._config.lease_seconds,
+                now=datetime.now(UTC),
+            )
+            if not lease["valid"]:
+                logger.info(
+                    "Durable batch item %s cancelled or lease lost during tool assembly; skipping launch",
+                    item_id,
+                )
+                return
             executor = SubagentExecutor(
                 config=config,
                 tools=tools,
