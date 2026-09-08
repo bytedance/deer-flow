@@ -83,7 +83,12 @@ export async function fetch(
   });
 
   if (res.status === 401) {
-    window.location.href = buildLoginUrl(window.location.pathname);
+    // Include the search string: routes that carry their target in the query
+    // (e.g. the standalone artifact viewer) are otherwise unrecoverable after
+    // login, which lands on the default workspace instead.
+    window.location.href = buildLoginUrl(
+      `${window.location.pathname}${window.location.search}`,
+    );
     throw new UnauthorizedError();
   }
 

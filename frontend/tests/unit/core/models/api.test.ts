@@ -56,7 +56,9 @@ test("loadModels rejects unsuccessful gateway responses", async () => {
 });
 
 test("loadModels exposes the typed 401 redirect error", async () => {
-  const location = { href: "", pathname: "/workspace/chats" };
+  // `search` is always a string on a real Location; the redirect target is
+  // built from pathname + search so the stub has to carry both.
+  const location = { href: "", pathname: "/workspace/chats", search: "" };
   rs.stubGlobal("window", { location });
   rs.stubGlobal(
     "fetch",

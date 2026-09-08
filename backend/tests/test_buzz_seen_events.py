@@ -130,7 +130,7 @@ def test_redelivered_event_is_dropped_across_restart(tmp_path):
     ch1, captured1 = _started_with_store(store1)
     _dispatch(ch1, ev)
     assert len(captured1) == 1
-    store1.flush()  # what BuzzChannel.stop() does on a clean shutdown
+    store1.flush()  # synchronous test equivalent of BuzzChannel.stop()'s aflush()
 
     # Simulated restart: a fresh channel instance, fresh store object, same file.
     ch2, captured2 = _started_with_store(BuzzSeenEventStore(path))
@@ -217,13 +217,13 @@ def test_saves_are_coalesced_under_a_running_loop(tmp_path):
     path = tmp_path / "seen.json"
     store = BuzzSeenEventStore(path)
     saves = []
-    original_save = store._save
+    original_write_snapshot = store._write_snapshot
 
-    def counting_save():
+    def counting_write_snapshot(payload):
         saves.append(1)
-        original_save()
+        return original_write_snapshot(payload)
 
-    store._save = counting_save
+    store._write_snapshot = counting_write_snapshot
 
     async def burst():
         for i in range(50):

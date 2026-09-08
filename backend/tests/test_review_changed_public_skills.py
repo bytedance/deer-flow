@@ -3,7 +3,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path, PurePosixPath
 
+import pytest
 import review_changed_public_skills as runner
+from skill_review_waivers import EMPTY_MANIFEST, WaiverManifest
 
 
 def _completed(command: list[str], *, stdout: bytes = b"", returncode: int = 0) -> subprocess.CompletedProcess[bytes]:
@@ -15,6 +17,11 @@ def _write_skill(repo_root: Path, package: str) -> Path:
     skill_md.parent.mkdir(parents=True, exist_ok=True)
     skill_md.write_text("---\nname: demo\ndescription: Demo skill.\n---\n", encoding="utf-8")
     return skill_md
+
+
+@pytest.fixture(autouse=True)
+def _empty_waiver_manifests(monkeypatch) -> None:
+    monkeypatch.setattr(runner, "load_waiver_manifests", lambda args, repo_root: (EMPTY_MANIFEST, EMPTY_MANIFEST))
 
 
 def test_main_skips_successfully_when_no_public_skill_changed(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -83,7 +90,7 @@ def test_main_reviews_changed_public_skill_and_skips_deleted_skill_md(
         assert command[:3] == ["git", "diff", "--name-status"]
         return _completed(command, stdout=diff_output)
 
-    def fake_review(package: Path, repo_root: Path, python_executable: str) -> int:
+    def fake_review(package: Path, repo_root: Path, python_executable: str, manifest: WaiverManifest) -> int:
         assert repo_root == tmp_path
         assert python_executable
         reviewed.append(package.relative_to(repo_root).as_posix())
@@ -178,7 +185,7 @@ def test_main_reviews_package_when_skill_md_deleted_but_sibling_file_remains(
     def fake_git_diff(command, **kwargs):
         return _completed(command, stdout=diff_output)
 
-    def fake_review(package: Path, repo_root: Path, python_executable: str) -> int:
+    def fake_review(package: Path, repo_root: Path, python_executable: str, manifest: WaiverManifest) -> int:
         reviewed.append(package.relative_to(repo_root).as_posix())
         return 1
 
@@ -216,7 +223,7 @@ def test_main_reviews_package_when_only_support_file_changed(
         assert command[-1] == runner.PUBLIC_SKILL_PACKAGE_PATHSPEC
         return _completed(command, stdout=diff_output)
 
-    def fake_review(package: Path, repo_root: Path, python_executable: str) -> int:
+    def fake_review(package: Path, repo_root: Path, python_executable: str, manifest: WaiverManifest) -> int:
         reviewed.append(package.relative_to(repo_root).as_posix())
         return 0
 
@@ -252,7 +259,7 @@ def test_main_maps_eval_fixture_changes_to_owner_package(
     def fake_git_diff(command, **kwargs):
         return _completed(command, stdout=diff_output)
 
-    def fake_review(package: Path, repo_root: Path, python_executable: str) -> int:
+    def fake_review(package: Path, repo_root: Path, python_executable: str, manifest: WaiverManifest) -> int:
         reviewed.append(package.relative_to(repo_root).as_posix())
         return 0
 
@@ -290,15 +297,16 @@ def test_main_exits_nonzero_when_review_cli_reports_error(tmp_path: Path, monkey
             "deerflow.skills.review.cli",
             "skills/public/bad",
             "--format",
-            "text",
+            "json",
             "--fail-on",
-            "error",
-            "--fail-on-incomplete",
+            "never",
         ]
         assert kwargs["cwd"] == tmp_path
         assert "backend/packages/harness" in kwargs["env"]["PYTHONPATH"]
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
         assert kwargs["check"] is False
-        return _completed(command, returncode=1)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="analyzer error\n")
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
 
@@ -315,11 +323,12 @@ def test_main_exits_nonzero_when_review_cli_reports_error(tmp_path: Path, monkey
         ]
     )
 
-    output = capsys.readouterr().out
+    captured = capsys.readouterr()
     assert exit_code == 1
     assert [call[0] for call in calls] == ["git", "test-python"]
-    assert "Failed: skills/public/bad (exit 1)" in output
-    assert "One or more skill reviews failed." in output
+    assert "Failed: skills/public/bad" in captured.out
+    assert "One or more skill reviews failed." in captured.out
+    assert "Analyzer failed for skills/public/bad (exit 1)." in captured.err
 
 
 def test_main_falls_back_to_empty_tree_when_push_before_is_missing(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -334,7 +343,7 @@ def test_main_falls_back_to_empty_tree_when_push_before_is_missing(tmp_path: Pat
             return subprocess.CompletedProcess(command, 128, stdout=b"", stderr=b"fatal: bad object before")
         return _completed(command, stdout=diff_output)
 
-    def fake_review(package: Path, repo_root: Path, python_executable: str) -> int:
+    def fake_review(package: Path, repo_root: Path, python_executable: str, manifest: WaiverManifest) -> int:
         reviewed.append(package.relative_to(repo_root).as_posix())
         return 0
 

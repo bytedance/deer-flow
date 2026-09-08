@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,10 @@ _TRACKED_GLOBALS = (
     "_config_path",
     "_config_signature",
     "_config_mtime",
-    "_initialization_lock",
+    "_init_lock",
+    "_init_condition",
+    "_initializing_generation",
+    "_cache_generation",
 )
 
 
@@ -64,9 +68,12 @@ def cache_globals():
     for name in ("_config_path", "_config_signature", "_config_mtime"):
         if hasattr(cache_module, name):
             setattr(cache_module, name, None)
-    # asyncio.Lock binds to the first event loop it is awaited on, so each test
-    # (which drives initialize_mcp_tools via a fresh asyncio.run) needs its own.
-    cache_module._initialization_lock = asyncio.Lock()
+    # threading.Lock is safe across threads and does not bind to event loops,
+    # so each test gets fresh coordination state for isolation.
+    cache_module._init_lock = threading.RLock()
+    cache_module._init_condition = threading.Condition(cache_module._init_lock)
+    cache_module._initializing_generation = None
+    cache_module._cache_generation = 0
 
     try:
         yield
@@ -286,3 +293,400 @@ def test_config_deleted_after_init_via_real_env_resolution_does_not_raise(cache_
     # last-known-good MCP tools), matching the deliberate contract in
     # test_config_deleted_after_init_is_not_stale above.
     assert cache_module._is_cache_stale() is False
+
+
+class TestCrossLoopReinitialization:
+    """Regression for #5060: cache initialization must be cross-loop safe."""
+
+    def test_cross_loop_reinit_does_not_raise(self, monkeypatch, tmp_path):
+        """Two successive ``asyncio.run()`` calls (each with its own loop) must not crash."""
+        saved = {name: getattr(cache_module, name, _MISSING) for name in _TRACKED_GLOBALS}
+        try:
+            cache_module._mcp_tools_cache = None
+            cache_module._cache_initialized = False
+            for name in ("_config_path", "_config_signature", "_config_mtime"):
+                if hasattr(cache_module, name):
+                    setattr(cache_module, name, None)
+            cache_module._init_lock = threading.RLock()
+            cache_module._init_condition = threading.Condition(cache_module._init_lock)
+            cache_module._initializing_generation = None
+            cache_module._cache_generation = 0
+
+            cfg = tmp_path / "extensions_config.json"
+            _write_extensions_config(cfg, {"srv1": _server()})
+            monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+            async def _fake_tools():
+                return []
+
+            monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+            asyncio.run(cache_module.initialize_mcp_tools())
+            assert cache_module._cache_initialized is True
+
+            cache_module.reset_mcp_tools_cache()
+            assert cache_module._cache_initialized is False
+
+            asyncio.run(cache_module.initialize_mcp_tools())
+            assert cache_module._cache_initialized is True
+        finally:
+            for name, value in saved.items():
+                if value is _MISSING:
+                    if hasattr(cache_module, name):
+                        delattr(cache_module, name)
+                else:
+                    setattr(cache_module, name, value)
+
+    def test_contended_cross_loop_reinit_does_not_raise(self, monkeypatch, tmp_path):
+        """Contended initializers in two event loops must not reuse a loop-bound lock."""
+        saved = {name: getattr(cache_module, name, _MISSING) for name in _TRACKED_GLOBALS}
+        try:
+            cache_module._mcp_tools_cache = None
+            cache_module._cache_initialized = False
+            for name in ("_config_path", "_config_signature", "_config_mtime"):
+                if hasattr(cache_module, name):
+                    setattr(cache_module, name, None)
+            cache_module._init_lock = threading.RLock()
+            cache_module._init_condition = threading.Condition(cache_module._init_lock)
+            cache_module._initializing_generation = None
+            cache_module._cache_generation = 0
+
+            cfg = tmp_path / "extensions_config.json"
+            _write_extensions_config(cfg, {"srv1": _server()})
+            monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+            calls = 0
+
+            async def _fake_tools():
+                nonlocal calls
+                calls += 1
+                await asyncio.sleep(0.01)
+                return []
+
+            monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+            async def _contended_init():
+                await asyncio.gather(cache_module.initialize_mcp_tools(), cache_module.initialize_mcp_tools())
+
+            asyncio.run(_contended_init())
+            assert cache_module._cache_initialized is True
+            assert calls == 1
+
+            cache_module.reset_mcp_tools_cache()
+            assert cache_module._cache_initialized is False
+
+            asyncio.run(_contended_init())
+            assert cache_module._cache_initialized is True
+            assert calls == 2
+        finally:
+            for name, value in saved.items():
+                if value is _MISSING:
+                    if hasattr(cache_module, name):
+                        delattr(cache_module, name)
+                else:
+                    setattr(cache_module, name, value)
+
+    def test_get_cached_mcp_tools_reinit_after_invalidation(self, monkeypatch, tmp_path):
+        """Gateway path without ``cache_globals`` resetting coordination state — production scenario."""
+        saved = {name: getattr(cache_module, name, _MISSING) for name in _TRACKED_GLOBALS}
+        try:
+            cache_module._mcp_tools_cache = None
+            cache_module._cache_initialized = False
+            for name in ("_config_path", "_config_signature", "_config_mtime"):
+                if hasattr(cache_module, name):
+                    setattr(cache_module, name, None)
+            cache_module._init_lock = threading.RLock()
+            cache_module._init_condition = threading.Condition(cache_module._init_lock)
+            cache_module._initializing_generation = None
+            cache_module._cache_generation = 0
+
+            cfg = tmp_path / "extensions_config.json"
+            _write_extensions_config(cfg, {"srv1": _server()})
+            monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+            async def _fake_tools():
+                return []
+
+            monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+            result1 = cache_module.get_cached_mcp_tools()
+            assert result1 == []
+            assert cache_module._cache_initialized is True
+
+            _write_extensions_config(cfg, {"srv1": _server(), "srv2": _server("uvx")})
+            cache_module.reset_mcp_tools_cache()
+
+            result2 = cache_module.get_cached_mcp_tools()
+            assert result2 == []
+            assert cache_module._cache_initialized is True
+        finally:
+            for name, value in saved.items():
+                if value is _MISSING:
+                    if hasattr(cache_module, name):
+                        delattr(cache_module, name)
+                else:
+                    setattr(cache_module, name, value)
+
+
+def test_config_change_during_initialization_discards_stale_tools(cache_globals, monkeypatch, tmp_path):
+    """A config rewrite during load must not publish tools loaded from the old config."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"old": _server()})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    calls = 0
+
+    async def _fake_tools():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            _write_extensions_config(cfg, {"new": _server("uvx")})
+            return ["old-tools"]
+        return ["new-tools"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    first = asyncio.run(cache_module.initialize_mcp_tools())
+    assert first == []
+    assert cache_module._cache_initialized is False
+    assert cache_module._mcp_tools_cache is None
+
+    second = cache_module.get_cached_mcp_tools()
+    assert second == ["new-tools"]
+    assert cache_module._cache_initialized is True
+    assert cache_module._mcp_tools_cache == ["new-tools"]
+    assert cache_module._is_cache_stale() is False
+    assert calls == 2
+
+
+def test_config_change_during_initialization_retires_pool_for_same_server_connection_change(cache_globals, monkeypatch, tmp_path):
+    """Discarding a mid-load config change must also retire pooled sessions.
+
+    A stale load can create a pooled session before ``initialize_mcp_tools``
+    notices that the config changed and discards the loaded tools. If the server
+    name and scope stay the same while the connection changes, the next load can
+    otherwise reuse that old session because ``MCPSessionPool`` keys only by
+    ``(server_name, scope_key)``.
+    """
+    from deerflow.mcp import session_pool as session_pool_module
+
+    class FakeSession:
+        def __init__(self, command: str) -> None:
+            self.command = command
+
+    class FakeSessionPool:
+        def __init__(self) -> None:
+            self.closed = False
+            self.sessions = {}
+
+        async def get_session(self, server_name, scope_key, connection):
+            key = (server_name, scope_key)
+            if key not in self.sessions:
+                self.sessions[key] = FakeSession(connection["command"])
+            return self.sessions[key]
+
+        def close_all_sync(self) -> None:
+            self.closed = True
+
+    real_reset_session_pool = session_pool_module.reset_session_pool
+    monkeypatch.setattr(session_pool_module, "MCPSessionPool", FakeSessionPool)
+    real_reset_session_pool()
+    old_pool = session_pool_module.get_session_pool()
+
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"same": _server("npx")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    calls = 0
+    loaded_pools = []
+    loaded_sessions = []
+
+    async def _fake_tools():
+        nonlocal calls
+        calls += 1
+        server = json.loads(cfg.read_text())["mcpServers"]["same"]
+        pool = session_pool_module.get_session_pool()
+        session = await pool.get_session("same", "thread-1", server)
+        loaded_pools.append(pool)
+        loaded_sessions.append(session)
+        if calls == 1:
+            _write_extensions_config(cfg, {"same": _server("uvx")})
+        return [f"session-{session.command}"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    try:
+        first = asyncio.run(cache_module.initialize_mcp_tools())
+        assert first == []
+        assert cache_module._cache_initialized is False
+
+        second = cache_module.get_cached_mcp_tools()
+
+        assert second == ["session-uvx"]
+        assert loaded_pools[0] is old_pool
+        assert loaded_pools[1] is not old_pool
+        assert loaded_sessions[0] is not loaded_sessions[1]
+        assert old_pool.closed is True
+        assert cache_module._cache_initialized is True
+    finally:
+        real_reset_session_pool()
+
+
+def test_reset_mcp_tools_cache_does_not_wait_for_in_flight_initialization(cache_globals, monkeypatch, tmp_path):
+    """Event-loop callers can reset cache state without waiting for a slow tool load."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    async def _fake_tools():
+        started.set()
+        await asyncio.to_thread(finish.wait)
+        return []
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    worker = threading.Thread(target=lambda: asyncio.run(cache_module.initialize_mcp_tools()))
+    worker.start()
+    assert started.wait(timeout=1)
+
+    reset_done = threading.Event()
+
+    def _reset():
+        cache_module.reset_mcp_tools_cache()
+        reset_done.set()
+
+    reset_thread = threading.Thread(target=_reset)
+    reset_thread.start()
+    assert reset_done.wait(timeout=1)
+
+    finish.set()
+    worker.join(timeout=1)
+    reset_thread.join(timeout=1)
+    assert not worker.is_alive()
+    assert not reset_thread.is_alive()
+
+
+def test_automatic_stale_invalidation_retires_session_pool_before_reinitializing(cache_globals, monkeypatch, tmp_path):
+    """Automatic config-signature invalidation must retire the old session pool.
+
+    ``get_cached_mcp_tools()`` detects runtime edits through ``_is_cache_stale``
+    without going through the explicit admin reset endpoint. That automatic path
+    must still swap the session-pool singleton before rebuilding tool wrappers;
+    otherwise the fresh wrappers can keep reusing sessions created from the old
+    connection config.
+    """
+    from deerflow.mcp import session_pool as session_pool_module
+
+    real_reset_session_pool = session_pool_module.reset_session_pool
+    real_reset_session_pool()
+    old_pool = session_pool_module.get_session_pool()
+
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"old": _server()})
+    _initialize_against(monkeypatch, cfg)
+    assert cache_module._cache_initialized is True
+    assert session_pool_module.get_session_pool() is old_pool
+
+    _write_extensions_config(cfg, {"new": _server("uvx")})
+    loaded_pools = []
+
+    async def _fake_tools():
+        loaded_pools.append(session_pool_module.get_session_pool())
+        return ["new-tools"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    try:
+        result = cache_module.get_cached_mcp_tools()
+
+        assert result == ["new-tools"]
+        assert loaded_pools == [session_pool_module.get_session_pool()]
+        assert loaded_pools[0] is not old_pool
+        assert cache_module._cache_initialized is True
+    finally:
+        real_reset_session_pool()
+
+
+def test_reset_mcp_tools_cache_retires_session_pool_before_releasing_initializers(cache_globals, monkeypatch):
+    """A reset must not let fresh tool wrappers publish with the retiring pool."""
+    from deerflow.mcp import session_pool as session_pool_module
+
+    real_reset_session_pool = session_pool_module.reset_session_pool
+    real_reset_session_pool()
+    old_pool = session_pool_module.get_session_pool()
+
+    cache_module._mcp_tools_cache = ["cached-tools"]
+    cache_module._cache_initialized = True
+    race_results = []
+    loaded_pools = []
+
+    async def _fake_tools():
+        loaded_pools.append(session_pool_module.get_session_pool())
+        return ["race-tools"]
+
+    def _reset_with_concurrent_initializer():
+        # This simulates the old interleaving: a cache waiter starts exactly
+        # while reset_mcp_tools_cache() is retiring the session-pool singleton.
+        race_results.append(asyncio.run(cache_module.initialize_mcp_tools()))
+        return real_reset_session_pool()
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+    monkeypatch.setattr(session_pool_module, "reset_session_pool", _reset_with_concurrent_initializer)
+
+    try:
+        cache_module.reset_mcp_tools_cache()
+
+        # The racing initializer should see the still-valid old cache and avoid
+        # rebuilding tools until the pool has been swapped. Pre-fix, cache state
+        # was cleared first, so this race loaded and published wrappers against
+        # ``old_pool`` just before the singleton was replaced.
+        assert race_results == [["cached-tools"]]
+        assert loaded_pools == []
+        assert cache_module._cache_initialized is False
+        assert cache_module._mcp_tools_cache is None
+        assert session_pool_module.get_session_pool() is not old_pool
+    finally:
+        real_reset_session_pool()
+
+
+def test_cancelled_initializer_releases_generation_claim(cache_globals, monkeypatch, tmp_path):
+    """Cancelling the owner task must not strand waiters on its generation claim."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def _fake_tools():
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return []
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    async def _cancel_and_retry():
+        owner = asyncio.create_task(cache_module.initialize_mcp_tools())
+        await asyncio.wait_for(started.wait(), timeout=1)
+        owner.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert cache_module._initializing_generation is None
+        assert cache_module._cache_initialized is False
+
+        release.set()
+        result = await asyncio.wait_for(cache_module.initialize_mcp_tools(), timeout=1)
+        assert result == []
+
+    asyncio.run(_cancel_and_retry())
+    assert cache_module._cache_initialized is True
+    assert cache_module._initializing_generation is None
+    assert calls == 2

@@ -16,6 +16,7 @@ from starlette.responses import FileResponse
 import app.gateway.routers.artifacts as artifacts_router
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 from deerflow.config.paths import make_safe_user_id
+from deerflow.sandbox.lease import get_sandbox_lease_manager
 
 ACTIVE_ARTIFACT_CASES = [
     ("poc.html", "<html><body><script>alert('xss')</script></body></html>"),
@@ -66,12 +67,16 @@ class _RemoteSandbox:
     def __init__(self, *, fail_next_update: bool = False) -> None:
         self.updates: list[tuple[str, bytes]] = []
         self.fail_next_update = fail_next_update
+        self.released_scopes: list[str] = []
 
     def update_file(self, path: str, content: bytes) -> None:
         if self.fail_next_update:
             self.fail_next_update = False
             raise RuntimeError("sandbox sync failed")
         self.updates.append((path, content))
+
+    def release_command_scope(self, scope_id: str) -> None:
+        self.released_scopes.append(scope_id)
 
 
 class _RemoteSandboxProvider:
@@ -226,6 +231,37 @@ def test_update_artifact_syncs_non_mounted_sandbox(tmp_path, monkeypatch) -> Non
     assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"after")]
     assert provider.released == ["sandbox-1"]
     assert artifact_path.read_text(encoding="utf-8") == "after"
+
+
+def test_update_artifact_does_not_release_under_active_execution_lease(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    provider = _RemoteSandboxProvider()
+    manager = get_sandbox_lease_manager(provider)
+    manager.retain(
+        "active-agent",
+        "sandbox-1",
+        thread_id="thread-1",
+        user_id="default",
+    )
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path, provider)
+
+    asyncio.run(
+        call_unwrapped(
+            artifacts_router.update_artifact,
+            "thread-1",
+            "mnt/user-data/outputs/note.txt",
+            artifacts_router.ArtifactUpdateRequest(content="after", expected_sha256=_artifact_sha256("before")),
+            _make_request(),
+        )
+    )
+
+    assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"after")]
+    assert manager.binding_for("active-agent") == "sandbox-1"
+    assert provider.released == []
+
+    manager.release("active-agent")
+    assert provider.released == ["sandbox-1"]
 
 
 def test_update_artifact_releases_sandbox_when_initial_sync_fails(tmp_path, monkeypatch) -> None:

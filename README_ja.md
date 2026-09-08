@@ -488,7 +488,7 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 - `user_id` = `get_effective_user_id()`から取得した有効なユーザー（認証なしモードでは`default`にフォールバック）
 - `trace_name` = assistant id（デフォルトは`lead-agent`）
 - `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]`（未設定の場合は省略）
-- `metadata.deerflow_trace_id` = DeerFlowのリクエスト関連付けid。リクエストトレース関連付けが有効な場合は`X-Trace-Id`と一致します
+- `metadata.deerflow_trace_id` = DeerFlowのリクエスト関連付けid。常に同じリクエストが返す`X-Trace-Id`レスポンスヘッダーと一致します（`logging.enhance.enabled`はこのidをログに出力するかどうかのみを制御します）
 
 これらは、gatewayパス（`runtime/runs/worker.py::run_agent`）と埋め込みパス（`client.py::DeerFlowClient.stream`）の両方で、グラフ呼び出しのルートで`RunnableConfig.metadata`に注入されるため、LangChain互換の任意のcallbackから読み取れます。`DEER_FLOW_ENV`（または`ENVIRONMENT`）を設定すると、デプロイ環境ごとにトレースにタグを付けられます。
 

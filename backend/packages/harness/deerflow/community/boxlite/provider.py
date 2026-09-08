@@ -15,17 +15,19 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import hashlib
 import logging
 import threading
 import time
 import uuid
 from collections.abc import Awaitable
+from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -185,7 +187,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         until the normal orphan cleanup removes them; they are never reused
         under a new 16-character identity.
         """
-        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
+        return derive_sandbox_scope_token(user_id=user_id, thread_id=thread_id)
 
     # ── Provider ────────────────────────────────────────────────────────
 
@@ -197,7 +199,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         self._active_box_identity: dict[str, tuple[str, str] | None] = {}
         self._warm_pool_identity: dict[str, tuple[str, str] | None] = {}
         self._skip_health_check_warm_ids: set[str] = set()
-        self._acquire_locks: dict[str, threading.Lock] = {}
+        self._acquire_serializer: AcquireSerializer[str] = AcquireSerializer(thread_name_prefix="boxlite-acquire-wait")
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
         self._shutdown_called = False
@@ -242,15 +244,6 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             return None
         sandbox_id = name[len(_BOX_NAME_PREFIX) :]
         return sandbox_id or None
-
-    def _lock_for_sandbox(self, sandbox_id: str) -> threading.Lock:
-        """Return the per-sandbox acquire lock for a deterministic sandbox id."""
-        with self._lock:
-            lock = self._acquire_locks.get(sandbox_id)
-            if lock is None:
-                lock = threading.Lock()
-                self._acquire_locks[sandbox_id] = lock
-            return lock
 
     def _start_idle_checker(self) -> None:
         """Start idle cleanup when enabled; idle_timeout=0 keeps it disabled."""
@@ -378,49 +371,63 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
         key = self._thread_key(thread_id, user_id)
         sandbox_id = self._sandbox_id(thread_id, user_id)
-        acquire_lock = self._lock_for_sandbox(sandbox_id)
-        with acquire_lock:
-            with self._lock:
-                existing = self._thread_boxes.get(key)
-                if existing is not None and existing in self._boxes:
-                    return existing
-                if sandbox_id in self._boxes:
-                    owner = self._active_box_identity.get(sandbox_id)
-                    if owner != key:
-                        raise SandboxIdentityCollisionError(
-                            sandbox_id,
-                            owner,
-                            key,
-                        )
-                    self._thread_boxes[key] = sandbox_id
-                    return sandbox_id
+        with self._acquire_serializer.hold(sandbox_id):
+            return self._acquire_scope_locked(key, sandbox_id)
 
-            reclaimed = self._reclaim_warm_pool(sandbox_id, key)
-            if reclaimed is not None:
-                with self._lock:
-                    self._thread_boxes[key] = reclaimed
-                return reclaimed
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        """Acquire without blocking the event loop.
 
-            box = self._create_box(sandbox_id)
-            conflict: tuple[str, str] | None | object = _NO_ACTIVE_IDENTITY
-            with self._lock:
-                if box.id in self._boxes:
-                    conflict = self._active_box_identity.get(box.id)
-                    if conflict == key:
-                        self._thread_boxes[key] = box.id
-                else:
-                    self._boxes[box.id] = box
-                    self._active_box_identity[box.id] = key
-                    self._thread_boxes[key] = box.id
-            if conflict is not _NO_ACTIVE_IDENTITY:
-                box.close()
-                if conflict != key:
+        The entire synchronous acquire (serializer wait + body) runs on the
+        serializer's dedicated executor — never the default executor. A
+        cancelled awaiter abandons the worker thread, which runs to
+        completion and releases the hold itself, so a retry serializes
+        behind it instead of overlapping the abandoned body.
+        """
+        acquire = partial(self.acquire, thread_id, user_id=user_id)
+        return await self._acquire_serializer.run_on_executor(acquire)
+
+    def _acquire_scope_locked(self, key: tuple[str, str], sandbox_id: str) -> str:
+        with self._lock:
+            existing = self._thread_boxes.get(key)
+            if existing is not None and existing in self._boxes:
+                return existing
+            if sandbox_id in self._boxes:
+                owner = self._active_box_identity.get(sandbox_id)
+                if owner != key:
                     raise SandboxIdentityCollisionError(
                         sandbox_id,
-                        conflict,
+                        owner,
                         key,
                     )
-            return box.id
+                self._thread_boxes[key] = sandbox_id
+                return sandbox_id
+
+        reclaimed = self._reclaim_warm_pool(sandbox_id, key)
+        if reclaimed is not None:
+            with self._lock:
+                self._thread_boxes[key] = reclaimed
+            return reclaimed
+
+        box = self._create_box(sandbox_id)
+        conflict: tuple[str, str] | None | object = _NO_ACTIVE_IDENTITY
+        with self._lock:
+            if box.id in self._boxes:
+                conflict = self._active_box_identity.get(box.id)
+                if conflict == key:
+                    self._thread_boxes[key] = box.id
+            else:
+                self._boxes[box.id] = box
+                self._active_box_identity[box.id] = key
+                self._thread_boxes[key] = box.id
+        if conflict is not _NO_ACTIVE_IDENTITY:
+            box.close()
+            if conflict != key:
+                raise SandboxIdentityCollisionError(
+                    sandbox_id,
+                    conflict,
+                    key,
+                )
+        return box.id
 
     def _create_box(self, sandbox_id: str) -> BoxliteBox:
         # Enforce replica limit: evict oldest warm-pool box if active + warm boxes are at capacity.
@@ -627,7 +634,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             self._boxes.clear()
             self._active_box_identity.clear()
             self._thread_boxes.clear()
-            self._acquire_locks.clear()
+            self._acquire_serializer.close()
 
     def shutdown(self) -> None:
         with self._lock:
@@ -645,7 +652,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             self._active_box_identity.clear()
             self._warm_pool_identity.clear()
             self._thread_boxes.clear()
-            self._acquire_locks.clear()
+            self._acquire_serializer.close()
             self._skip_health_check_warm_ids.clear()
 
         for box in active + warm:

@@ -472,3 +472,55 @@ def test_numeric_keyword_word_boundary(content: str, expected_error_type: str):
     m = _meta(result)
     assert m["status"] == "error"
     assert m["error_type"] == expected_error_type, f"{content!r} → expected {expected_error_type!r}, got {m['error_type']!r}"
+
+
+# ---------------------------------------------------------------------------
+# Structured subagent_status failures (delegated task Command results)
+#
+
+
+@pytest.mark.parametrize(
+    "subagent_status",
+    ["failed", "cancelled", "timed_out", "polling_timed_out"],
+)
+def test_subagent_failure_statuses_stamp_error(subagent_status: str):
+    """Task failures leave ToolMessage.status=success and no Error: prefix."""
+    msg = _make_msg(
+        f"Task {subagent_status.replace('_', ' ')}. Result: boom",
+        status="success",
+        kwargs={"subagent_status": subagent_status, "subagent_error": "connection timeout"},
+    )
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "error"
+    assert m["source"] == "tool_return"
+    assert m["error_type"] == "transient"
+    assert result.additional_kwargs["subagent_status"] == subagent_status
+
+
+def test_subagent_completed_still_content_analyzed():
+    msg = _make_msg(
+        "Task Succeeded. Result: ok",
+        status="success",
+        kwargs={"subagent_status": "completed"},
+    )
+    result = normalize_tool_message(msg)
+    m = _meta(result)
+    assert m["status"] == "success"
+
+
+@pytest.mark.parametrize(
+    "subagent_status",
+    ["failed", "cancelled", "timed_out", "polling_timed_out"],
+)
+def test_normalize_tool_result_command_task_failures(subagent_status: str):
+    msg = _make_msg(
+        f"Task {subagent_status}. detail",
+        status="success",
+        kwargs={"subagent_status": subagent_status, "subagent_error": "Task failed"},
+    )
+    cmd = Command(update={"messages": [msg]})
+    result = normalize_tool_result(cmd, tool_call_id="tc-1")
+    assert isinstance(result, Command)
+    stamped = result.update["messages"][0]
+    assert _meta(stamped)["status"] == "error"

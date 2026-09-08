@@ -3,6 +3,8 @@ from typing import Any
 
 import httpx
 
+from deerflow.community.search_time_range import SearchTimeRange
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,6 +19,7 @@ class SearxngClient:
         query: str,
         max_results: int = 5,
         categories: list[str] | None = None,
+        time_range: SearchTimeRange | None = None,
     ) -> list[dict[str, Any]]:
         """Search the web using SearXNG.
 
@@ -24,6 +27,7 @@ class SearxngClient:
             query: The search query.
             max_results: Maximum number of results to return.
             categories: Search categories to use.
+            time_range: Optional relative publication/update window.
 
         Returns:
             List of search result dictionaries.
@@ -38,6 +42,8 @@ class SearxngClient:
             params["limit"] = max_results
         if categories:
             params["categories"] = ",".join(categories)
+        if time_range is not None:
+            params["time_range"] = time_range
 
         logger.debug(f"Searching SearXNG at {self.base_url} with query: {query}")
         try:

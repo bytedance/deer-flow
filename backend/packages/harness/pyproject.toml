@@ -50,6 +50,10 @@ dependencies = [
     "alembic>=1.13",
     "cryptography>=50.0.0",
     "e2b-code-interpreter>=2.8.0",
+    # zoneinfo fallback: ZoneInfo reads the OS zone database first and this
+    # wheel when the image has none (stripped containers, Windows without
+    # tzdata), keeping the DEER_FLOW_DATE_TIMEZONE knob portable.
+    "tzdata>=2025.1",
 ]
 
 [project.scripts]
@@ -78,7 +82,9 @@ pymupdf = ["pymupdf4llm>=0.0.17"]
 boxlite = ["boxlite>=0.9.7"]
 # Tenki cloud sandbox provider (deerflow.community.tenki). Optional so a default
 # install stays free of the Tenki SDK; only pulled in when the provider is used.
-tenki = ["tenki-sandbox>=0.4.0"]
+# The distribution is ``tenki``; it still ships the ``tenki_sandbox`` module that
+# provider.py and sandbox.py import.
+tenki = ["tenki>=1.0.0"]
 # OpenSandbox remote sandbox provider (deerflow.community.opensandbox). The
 # sync SDK is loaded only when this provider is selected.
 opensandbox = ["opensandbox>=0.1.15,<0.2.0"]

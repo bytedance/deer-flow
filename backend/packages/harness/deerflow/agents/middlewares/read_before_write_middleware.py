@@ -39,8 +39,13 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result
-from deerflow.sandbox.tools import read_current_file_content
+from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result, stamp_exception_meta
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
+from deerflow.sandbox.tools import (
+    read_current_file_content,
+    sandbox_authorization_scope,
+    sandbox_authorization_scope_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,21 +110,29 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             path = self._requested_path(request)
             if path is None:
                 return handler(request)
-            with self._lock_for(request, path):
-                blocked = self._check_write_gate(request)
-                if blocked is not None:
-                    # Stamp deerflow_tool_meta so ToolProgressMiddleware can classify
-                    # the blocked write even though it bypasses ToolErrorHandlingMiddleware.
-                    return normalize_tool_result(blocked)
-                return handler(request)
+            try:
+                with sandbox_authorization_scope(request.runtime):
+                    with self._lock_for(request, path):
+                        blocked = self._check_write_gate(request)
+                        if blocked is not None:
+                            # Stamp deerflow_tool_meta so ToolProgressMiddleware can classify
+                            # the blocked write even though it bypasses ToolErrorHandlingMiddleware.
+                            return normalize_tool_result(blocked)
+                        return handler(request)
+            except SandboxAuthorizationError as exc:
+                return self._authorization_error_result(request, exc)
         if name in _READ_TOOLS:
             path = self._requested_path(request)
             if path is None:
                 return handler(request)
-            with self._lock_for(request, path):
-                result = handler(request)
-                self._attach_read_mark(request, result)
-                return result
+            try:
+                with sandbox_authorization_scope(request.runtime):
+                    with self._lock_for(request, path):
+                        result = handler(request)
+                        self._attach_read_mark(request, result)
+                        return result
+            except SandboxAuthorizationError as exc:
+                return self._authorization_error_result(request, exc)
         return handler(request)
 
     @override
@@ -133,31 +146,53 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             path = self._requested_path(request)
             if path is None:
                 return await handler(request)
-            # threading.Lock may be released from a different thread than the
-            # acquiring one, so acquiring in a worker thread and releasing on
-            # the event-loop thread is safe.
-            lock = self._lock_for(request, path)
-            await asyncio.to_thread(lock.acquire)
             try:
-                blocked = await asyncio.to_thread(self._check_write_gate, request)
-                if blocked is not None:
-                    return normalize_tool_result(blocked)
-                return await handler(request)
-            finally:
-                lock.release()
+                async with sandbox_authorization_scope_async(request.runtime):
+                    # threading.Lock may be released from a different thread than the
+                    # acquiring one, so acquiring in a worker thread and releasing on
+                    # the event-loop thread is safe.
+                    lock = self._lock_for(request, path)
+                    await asyncio.to_thread(lock.acquire)
+                    try:
+                        blocked = await asyncio.to_thread(self._check_write_gate, request)
+                        if blocked is not None:
+                            return normalize_tool_result(blocked)
+                        return await handler(request)
+                    finally:
+                        lock.release()
+            except SandboxAuthorizationError as exc:
+                return self._authorization_error_result(request, exc)
         if name in _READ_TOOLS:
             path = self._requested_path(request)
             if path is None:
                 return await handler(request)
-            lock = self._lock_for(request, path)
-            await asyncio.to_thread(lock.acquire)
             try:
-                result = await handler(request)
-                await asyncio.to_thread(self._attach_read_mark, request, result)
-                return result
-            finally:
-                lock.release()
+                async with sandbox_authorization_scope_async(request.runtime):
+                    lock = self._lock_for(request, path)
+                    await asyncio.to_thread(lock.acquire)
+                    try:
+                        result = await handler(request)
+                        await asyncio.to_thread(self._attach_read_mark, request, result)
+                        return result
+                    finally:
+                        lock.release()
+            except SandboxAuthorizationError as exc:
+                return self._authorization_error_result(request, exc)
         return await handler(request)
+
+    @staticmethod
+    def _authorization_error_result(request: ToolCallRequest, exc: SandboxAuthorizationError) -> ToolMessage:
+        """Return the normal tool-level denial instead of failing open or the run."""
+        tool_name = str(request.tool_call.get("name") or "unknown_tool")
+        tool_call_id = str(request.tool_call.get("id") or "missing-tool-call-id")
+        detail = str(exc).strip() or exc.__class__.__name__
+        message = ToolMessage(
+            content=f"Error: {detail}",
+            tool_call_id=tool_call_id,
+            name=tool_name,
+            status="error",
+        )
+        return stamp_exception_meta(message, f"{exc.__class__.__name__}: {detail}")
 
     # -- locking ---------------------------------------------------------
 
@@ -193,6 +228,8 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         except FileNotFoundError:
             # write_file creates the file; str_replace surfaces its own error.
             return None
+        except SandboxAuthorizationError:
+            raise
         except Exception:
             logger.warning("read-before-write gate could not inspect %r; allowing the write (fail-open)", path, exc_info=True)
             return None
@@ -246,6 +283,8 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             return
         try:
             content = self._content_reader(request.runtime, path)
+        except SandboxAuthorizationError:
+            raise
         except Exception:
             logger.debug("read-before-write mark skipped for %r: file not hashable", path, exc_info=True)
             return
