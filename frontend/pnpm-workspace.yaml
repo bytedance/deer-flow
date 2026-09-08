@@ -1,5 +1,4 @@
 packages: []
 ignoredBuiltDependencies:
-  - esbuild
   - sharp
   - unrs-resolver
