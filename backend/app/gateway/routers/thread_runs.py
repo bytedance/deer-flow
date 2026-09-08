@@ -18,7 +18,7 @@ import re
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -67,9 +67,19 @@ _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint bef
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
 
 
+IdempotencyKeyHeader = Annotated[
+    str | None,
+    Header(
+        alias="Idempotency-Key",
+        max_length=255,
+        description="Retry key for idempotent run admission within this thread",
+    ),
+]
+
+
 def _scope_http_run_idempotency_key(request: Request, thread_id: str, key: str | None) -> str | None:
     """Namespace a caller key for the process-wide run idempotency index."""
-    if key is None:
+    if not isinstance(key, str):
         return None
     key = key.strip()
     if not key:
@@ -882,12 +892,7 @@ async def create_run(
     thread_id: ThreadId,
     body: RunCreateRequest,
     request: Request,
-    idempotency_key: str | None = Header(
-        default=None,
-        alias="Idempotency-Key",
-        max_length=255,
-        description="Retry key for idempotent run admission within this thread",
-    ),
+    idempotency_key: IdempotencyKeyHeader = None,
 ) -> RunResponse:
     """Create a background run (returns immediately)."""
     record = await start_run(
@@ -905,12 +910,7 @@ async def stream_run(
     thread_id: ThreadId,
     body: RunCreateRequest,
     request: Request,
-    idempotency_key: str | None = Header(
-        default=None,
-        alias="Idempotency-Key",
-        max_length=255,
-        description="Retry key for idempotent run admission within this thread",
-    ),
+    idempotency_key: IdempotencyKeyHeader = None,
 ) -> StreamingResponse:
     """Create a run and stream events via SSE.
 
@@ -965,17 +965,13 @@ async def wait_run(
     thread_id: ThreadId,
     body: RunCreateRequest,
     request: Request,
-    idempotency_key: str | None = Header(
-        default=None,
-        alias="Idempotency-Key",
-        max_length=255,
-        description="Retry key for idempotent run admission within this thread",
-    ),
+    idempotency_key: IdempotencyKeyHeader = None,
 ) -> dict:
     """Create a run and block until it completes, returning the final state.
 
     A reused in-flight run that this worker cannot observe returns the durable
-    status without blocking.
+    status without blocking. A reused completed run also returns durable
+    status: the latest thread checkpoint may belong to a later run.
     """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
@@ -989,12 +985,17 @@ async def wait_run(
     # Reused/hydrated records have no local task. Wait on the bridge when this
     # worker can observe it; otherwise return durable status rather than
     # serializing whatever checkpoint happens to exist.
-    if record.store_only and not bridge.supports_cross_process:
+    if getattr(record, "store_only", False) and not getattr(bridge, "supports_cross_process", False):
         return {"status": record.status.value, "error": record.error}
 
-    completed = await wait_for_run_completion(bridge, record, request, run_mgr)
+    if record.task is not None or getattr(record, "store_only", False):
+        completed = await wait_for_run_completion(bridge, record, request, run_mgr)
+    else:
+        completed = True
 
-    if completed:
+    # Idempotent reuse is not bound to a run-specific checkpoint id. The latest
+    # thread head may be a later run, so do not claim it as this run's result.
+    if completed and not getattr(record, "idempotency_reused", False):
         try:
             accessor, config = build_checkpoint_state_accessor(
                 request,

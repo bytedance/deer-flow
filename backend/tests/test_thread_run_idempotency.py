@@ -237,6 +237,62 @@ def test_wait_reused_store_only_run_does_not_return_stale_checkpoint(monkeypatch
     assert "PREVIOUS_TURN" not in response.text
 
 
+def test_wait_reused_completed_run_does_not_return_later_checkpoint(monkeypatch):
+    """A locally cached completed reuse must not serialize a later thread head."""
+
+    async def fake_start_run(body, thread_id, request, *, idempotency_key=None, require_existing_thread=False):
+        del body, request, idempotency_key, require_existing_thread
+        return RunRecord(
+            run_id="run-a",
+            thread_id=thread_id,
+            assistant_id=None,
+            status=RunStatus.success,
+            on_disconnect=DisconnectMode.continue_,
+            store_only=False,
+            idempotency_reused=True,
+        )
+
+    async def fake_aget(config):
+        del config
+        return SimpleNamespace(
+            config={"configurable": {"checkpoint_id": "cp-later"}},
+            values={"messages": [{"type": "ai", "content": "LATER_RUN_RESULT"}]},
+        )
+
+    monkeypatch.setattr(thread_runs, "start_run", fake_start_run)
+    monkeypatch.setattr(
+        thread_runs,
+        "build_checkpoint_state_accessor",
+        lambda *args, **kwargs: (SimpleNamespace(aget=fake_aget), {}),
+    )
+    monkeypatch.setattr(thread_runs, "serialize_channel_values_for_api", lambda values: values)
+
+    app = make_authed_test_app(user_factory=lambda: _user("alice@example.com"))
+    app.include_router(thread_runs.router)
+    app.state.stream_bridge = _LocalBridge()
+    app.state.run_manager = MagicMock()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/threads/thread-1/runs/wait",
+            json={"input": {"messages": []}},
+            headers={"Idempotency-Key": "send-message-1"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "success", "error": None}
+    assert "LATER_RUN_RESULT" not in response.text
+
+
+def test_scope_http_run_idempotency_key_ignores_header_default():
+    """Direct handler calls pass FastAPI's Header() object, not None."""
+    from fastapi.params import Header as HeaderParam
+
+    request = SimpleNamespace(state=SimpleNamespace(user=None))
+    assert thread_runs._scope_http_run_idempotency_key(request, "thread-1", HeaderParam(default=None)) is None
+    assert thread_runs._scope_http_run_idempotency_key(request, "thread-1", None) is None
+
+
 def test_stream_reused_store_only_running_run_returns_409(monkeypatch):
     """A reused running record on a process-local bridge must not hang on an empty stream."""
 
@@ -542,3 +598,71 @@ async def test_start_run_rejects_reused_key_with_different_input(_stub_app_confi
 
     assert excinfo.value.status_code == 409
     assert "different request" in str(excinfo.value.detail)
+
+
+@pytest.mark.anyio
+async def test_wait_retry_after_later_run_does_not_return_later_checkpoint(monkeypatch):
+    """Complete two runs, then retry the first key: /wait must not return run B."""
+    first_input = {"messages": [{"role": "user", "content": "one"}]}
+    later_input = {"messages": [{"role": "user", "content": "two"}]}
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    first = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:first",
+        kwargs={"input": first_input, "config": None},
+    )
+    await manager.set_status(first.run_id, RunStatus.success)
+    later = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:later",
+        kwargs={"input": later_input, "config": None},
+    )
+    await manager.set_status(later.run_id, RunStatus.success)
+    reused = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:first",
+        kwargs={"input": first_input, "config": None},
+    )
+    assert reused.run_id == first.run_id
+    assert reused.idempotency_reused is True
+    assert reused.store_only is False
+    assert reused.status == RunStatus.success
+
+    async def fake_start_run(body, thread_id, request, *, idempotency_key=None, require_existing_thread=False):
+        del body, thread_id, request, idempotency_key, require_existing_thread
+        return reused
+
+    async def fake_aget(config):
+        del config
+        return SimpleNamespace(
+            config={"configurable": {"checkpoint_id": "cp-later"}},
+            values={"messages": [{"type": "ai", "content": "LATER_RUN_RESULT"}]},
+        )
+
+    monkeypatch.setattr(thread_runs, "start_run", fake_start_run)
+    monkeypatch.setattr(
+        thread_runs,
+        "build_checkpoint_state_accessor",
+        lambda *args, **kwargs: (SimpleNamespace(aget=fake_aget), {}),
+    )
+    monkeypatch.setattr(thread_runs, "serialize_channel_values_for_api", lambda values: values)
+
+    app = make_authed_test_app(user_factory=lambda: _user("alice@example.com"))
+    app.include_router(thread_runs.router)
+    app.state.stream_bridge = _LocalBridge()
+    app.state.run_manager = manager
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/threads/thread-1/runs/wait",
+            json={"input": first_input},
+            headers={"Idempotency-Key": "first"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "success", "error": None}
+    assert "LATER_RUN_RESULT" not in response.text
