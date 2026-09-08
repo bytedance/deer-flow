@@ -2769,3 +2769,161 @@ test("a checkpoint message earlier than the loaded window is placed by its seq e
     "…new step 2",
   ]);
 });
+
+test("local turn order anchors on the exact submitted human identity (X__user normalized)", () => {
+  // The anchor recorded at submit time names one identity; the server's
+  // visible copy arrives as `<id>__user` and normalizes onto it.
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research the robot sector",
+  } as Message;
+  const previousAnswer = {
+    id: "previous-answer",
+    type: "ai",
+    content: "Done",
+  } as Message;
+  const earlyStep = {
+    id: "early-step",
+    type: "ai",
+    content: "Searching for catalysts",
+    run_id: "run-new",
+  } as Message;
+  const serverHumanCopy = {
+    id: "new-human__user",
+    type: "human",
+    content: "Continue tracking",
+    run_id: "run-new",
+  } as Message;
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [previousHuman, previousAnswer, earlyStep, serverHumanCopy],
+      new Set(["message:previous-human", "message:previous-answer"]),
+      new Set(["message:previous-human", "message:previous-answer"]),
+      new Set(["run-new"]),
+      "message:new-human",
+    ),
+  ).toEqual([previousHuman, previousAnswer, serverHumanCopy, earlyStep]);
+});
+
+test("local turn order keeps established history while the anchored human is absent", () => {
+  // R2: the checkpoint baseline covers only the latest turn while canonical
+  // history holds an older one. Until the submitted human reaches the render
+  // snapshot, no reordering may happen — a history-only human outside the
+  // baseline is not proof of the current turn.
+  const earlierAnswer = {
+    id: "earlier-answer",
+    type: "ai",
+    content: "Earlier answer",
+  } as Message;
+  const oldHuman = {
+    id: "old-human",
+    type: "human",
+    content: "An older request",
+  } as Message;
+  const recentHuman = {
+    id: "recent-human",
+    type: "human",
+    content: "The recent request",
+  } as Message;
+  const recentAnswer = {
+    id: "recent-answer",
+    type: "ai",
+    content: "The recent answer",
+  } as Message;
+  const newStep = {
+    id: "new-step",
+    type: "ai",
+    content: "Working on the follow-up",
+    run_id: "run-new",
+  } as Message;
+  const display = [earlierAnswer, oldHuman, recentHuman, recentAnswer, newStep];
+  const baseline = new Set(["message:recent-human", "message:recent-answer"]);
+  const confirmed = new Set([
+    "message:earlier-answer",
+    "message:old-human",
+    "message:recent-human",
+    "message:recent-answer",
+  ]);
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      display,
+      baseline,
+      confirmed,
+      new Set(["run-new"]),
+      "message:new-human",
+    ),
+  ).toEqual(display);
+});
+
+test("local turn order with a null anchor never borrows a history-only human", () => {
+  // Hidden human-input replies and regenerate replays submit no visible
+  // human, so no human identity may anchor the repair at all.
+  const earlierAnswer = {
+    id: "earlier-answer",
+    type: "ai",
+    content: "Earlier answer",
+  } as Message;
+  const oldHuman = {
+    id: "old-human",
+    type: "human",
+    content: "An older request",
+  } as Message;
+  const recentHuman = {
+    id: "recent-human",
+    type: "human",
+    content: "The recent request",
+  } as Message;
+  const replyStep = {
+    id: "reply-step",
+    type: "ai",
+    content: "Applying the answer",
+    run_id: "run-reply",
+  } as Message;
+  const display = [earlierAnswer, oldHuman, recentHuman, replyStep];
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      display,
+      new Set(["message:recent-human"]),
+      new Set(["message:earlier-answer", "message:old-human"]),
+      new Set(["run-reply"]),
+      null,
+    ),
+  ).toEqual(display);
+});
+
+test("local turn order repair is idempotent across repeated deliveries", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research the robot sector",
+  } as Message;
+  const earlyStep = {
+    id: "early-step",
+    type: "ai",
+    content: "Searching for catalysts",
+    run_id: "run-new",
+  } as Message;
+  const submittedHuman = {
+    id: "local-human-1",
+    type: "human",
+    content: "Continue tracking",
+  } as Message;
+  const displaced = [previousHuman, earlyStep, submittedHuman];
+  const baseline = new Set(["message:previous-human"]);
+  const args = [
+    baseline,
+    new Set(["message:previous-human"]),
+    new Set(["run-new"]),
+    "message:local-human-1",
+  ] as const;
+
+  const once = restoreLocalTurnMessageOrder(displaced, ...args);
+  expect(once).toEqual([previousHuman, submittedHuman, earlyStep]);
+  // Re-merging the same repaired snapshot converges to the identical order.
+  expect(restoreLocalTurnMessageOrder(once, ...args)).toEqual(once);
+  expect(restoreLocalTurnMessageOrder(displaced, ...args)).toEqual(once);
+});
