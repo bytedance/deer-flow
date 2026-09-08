@@ -265,8 +265,15 @@ def _normalize_symlink_target(target: str) -> str:
     ``os.readlink`` on Windows reports absolute targets in extended-length
     form (``\\\\?\\C:\\...`` or ``\\\\?\\UNC\\server\\share``). Recorded targets
     are surfaced in workspace-change events and compared against ordinary
-    paths, so keep the plain spelling; on POSIX this is a no-op.
+    paths, so keep the plain spelling.
+
+    On POSIX this is a provable identity: the strip only applies on Windows
+    hosts. ``readlink(2)`` returns the literal string the link was created
+    with, and backslash is a valid filename byte on Linux — a target string
+    that merely starts with ``\\\\?\\`` there must be recorded verbatim.
     """
+    if os.name != "nt":
+        return target
     if target.startswith("\\\\?\\UNC\\"):
         return "\\\\" + target[len("\\\\?\\UNC\\") :]
     if target.startswith("\\\\?\\"):

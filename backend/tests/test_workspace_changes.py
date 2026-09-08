@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,11 @@ from deerflow.workspace_changes import (
     scan_workspace_roots,
 )
 from deerflow.workspace_changes.api import get_workspace_changes_response
-from deerflow.workspace_changes.scanner import SAMPLE_BYTES, is_sensitive_workspace_path
+from deerflow.workspace_changes.scanner import (
+    SAMPLE_BYTES,
+    _normalize_symlink_target,
+    is_sensitive_workspace_path,
+)
 
 
 def _roots(tmp_path):
@@ -741,3 +746,31 @@ async def test_workspace_changes_route_forwards_include_files_flag():
     assert response["available"] is True
     assert response["files"] == []
     assert calls["event_types"] == ["workspace_changes"]
+
+
+def test_normalize_symlink_target_strips_extended_length_drive_prefix():
+    assert _normalize_symlink_target(r"\\?\C:\Users\u1\target.txt") == r"C:\Users\u1\target.txt"
+
+
+def test_normalize_symlink_target_strips_extended_length_unc_prefix():
+    assert _normalize_symlink_target(r"\\?\UNC\server\share\a.txt") == r"\\server\share\a.txt"
+
+
+def test_normalize_symlink_target_leaves_relative_and_plain_posix_targets_verbatim():
+    assert _normalize_symlink_target("relative/target.txt") == "relative/target.txt"
+    assert _normalize_symlink_target("/tmp/target.txt") == "/tmp/target.txt"
+
+
+def test_normalize_symlink_target_leaves_mid_string_prefix_verbatim():
+    # Backslash is a legal filename byte on POSIX, so only a *leading*
+    # extended-length prefix may ever be stripped.
+    for target in (r"/data/\\?\weird-target.txt", r"C:\data\\?\nested.txt"):
+        assert _normalize_symlink_target(target) == target
+
+
+def test_normalize_symlink_target_is_identity_off_windows(monkeypatch):
+    # The strip is gated on Windows hosts: readlink(2) on POSIX returns the
+    # literal string the link was created with, so a target that starts with
+    # "\\?\" there must be recorded verbatim.
+    monkeypatch.setattr(os, "name", "posix")
+    assert _normalize_symlink_target(r"\\?\C:\Users\u1\target.txt") == r"\\?\C:\Users\u1\target.txt"
