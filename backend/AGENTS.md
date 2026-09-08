@@ -331,6 +331,7 @@ Multi-file upload with automatic document conversion:
 - Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
 - Mounted upload paths skip both sandbox acquisition and per-file synchronization. For AIO remote/provisioner deployments this requires an explicit, accurate `sandbox.thread_data_mounts: true`; omission preserves backend auto-detection.
 - Agent receives uploaded file list via `UploadsMiddleware`; title generation continues to use the original user request rather than the injected upload-context wrapper, with attachment-only messages falling back to `New Conversation`
+- Shared Markdown outline extraction skips backtick/tilde fenced code blocks with up to three leading spaces. Code examples do not consume the heading budget; physical line numbers and PDF-derived bold headings are preserved. Keep fence regression coverage in `tests/test_file_outline.py`.
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 
