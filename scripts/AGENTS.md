@@ -15,6 +15,11 @@ likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
 
+Host-side pnpm calls must go through `scripts/pnpm.py`. On Windows it prefers
+the `.cmd` wrappers for both pnpm and Corepack before extensionless shims; Git
+Bash can resolve an extensionless npm shim that exits without starting a
+long-running redirected process. POSIX keeps the extensionless command first.
+
 ## Public Skill Review Waivers
 
 `review_changed_public_skills.py` keeps the analyzer strict and applies narrow
