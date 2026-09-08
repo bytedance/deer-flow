@@ -479,6 +479,10 @@ _WINDOWS_SHORT_NAME_COMPONENT_RE = re.compile(r"^[A-Za-z0-9$%_'@~`!(){}^#&-]{1,6
 #: ``FileSystem::C:/tmp`` or ``External:/tmp``). Those forms are absolute in
 #: PowerShell but look relative to POSIX path normalization.
 _POWERSHELL_DRIVE_QUALIFIED_RE = re.compile(r"^[^/\\:]+:")
+#: A provider-qualified filesystem path carries a second drive designator
+#: after PowerShell's ``Provider::`` prefix. Keep that delimiter distinct from
+#: pytest's later ``::nodeid`` separator.
+_POWERSHELL_PROVIDER_DRIVE_QUALIFIED_RE = re.compile(r"^[^/\\:]+::(?P<drive>[^/\\:]+):")
 #: ``cmd.exe`` expands paired-percent environment references before running
 #: the command. Without shell provenance, a token such as ``%TEMP%`` cannot
 #: be treated as the literal relative path seen by the POSIX parser.
@@ -705,8 +709,20 @@ def _thread_uses_windows_paths(thread_data: Mapping[str, Any] | None) -> bool:
 
 def _selection_path_parts(value: str) -> tuple[str, str | None]:
     """Split a runner selection into its filesystem path and pytest nodeid."""
-    path, marker, nodeid = value.partition("::")
-    return path, nodeid if marker else None
+    provider_match = _POWERSHELL_PROVIDER_DRIVE_QUALIFIED_RE.match(value)
+    nodeid_start = provider_match.end() if provider_match is not None else 0
+    marker_index = value.find("::", nodeid_start)
+    if marker_index < 0:
+        return value, None
+    return value[:marker_index], value[marker_index + 2 :]
+
+
+def _without_powershell_provider(path: str) -> str:
+    """Return the drive-qualified portion of a provider-qualified path."""
+    provider_match = _POWERSHELL_PROVIDER_DRIVE_QUALIFIED_RE.match(path)
+    if provider_match is None:
+        return path
+    return path[provider_match.start("drive") :]
 
 
 def _has_parent_path_component(value: str) -> bool:
@@ -716,31 +732,36 @@ def _has_parent_path_component(value: str) -> bool:
 
 def _uses_windows_selection_semantics(value: str, *, windows_path_context: bool) -> bool:
     path, _nodeid = _selection_path_parts(value)
-    slash_path = path.replace("\\", "/")
-    return bool(windows_path_context or _WINDOWS_DRIVE_QUALIFIED_RE.match(slash_path) or _WINDOWS_UNC_ABSOLUTE_RE.match(slash_path))
+    slash_path = _without_powershell_provider(path).replace("\\", "/")
+    return bool(windows_path_context or _POWERSHELL_DRIVE_QUALIFIED_RE.match(slash_path) or _WINDOWS_UNC_ABSOLUTE_RE.match(slash_path))
 
 
 def _selection_path_kind(value: str) -> str:
     path, _nodeid = _selection_path_parts(value)
-    slash_path = path.replace("\\", "/")
+    slash_path = _without_powershell_provider(path).replace("\\", "/")
     if _WINDOWS_DRIVE_ABSOLUTE_RE.match(slash_path):
         return "windows_drive_absolute"
     if _WINDOWS_UNC_ABSOLUTE_RE.match(slash_path):
         return "windows_unc_absolute"
     if slash_path.startswith("/"):
         return "posix_absolute"
+    if _POWERSHELL_DRIVE_QUALIFIED_RE.match(slash_path) and not _WINDOWS_DRIVE_QUALIFIED_RE.match(slash_path):
+        return "powershell_drive_qualified"
     return "relative"
 
 
 def _windows_volume_identifier(value: str) -> tuple[str, str] | None:
-    """Return a comparable drive or UNC-root identifier when one is present."""
+    """Return a comparable drive, PSDrive, or UNC-root identifier."""
     path, _nodeid = _selection_path_parts(value)
-    slash_path = path.replace("\\", "/")
+    slash_path = _without_powershell_provider(path).replace("\\", "/")
     if _WINDOWS_DRIVE_QUALIFIED_RE.match(slash_path):
         return "drive", ntpath.normcase(slash_path[:2])
     if _WINDOWS_UNC_ABSOLUTE_RE.match(slash_path):
         server, share, *_rest = slash_path[2:].split("/")
         return "unc", ntpath.normcase(f"//{server}/{share}")
+    if _POWERSHELL_DRIVE_QUALIFIED_RE.match(slash_path):
+        drive, _separator, _rest = slash_path.partition(":")
+        return "psdrive", ntpath.normcase(drive)
     return None
 
 
@@ -756,6 +777,7 @@ def _has_ambiguous_windows_component(value: str, *, windows_path_context: bool) 
     if not _uses_windows_selection_semantics(value, windows_path_context=windows_path_context):
         return False
     path, _nodeid = _selection_path_parts(value)
+    path = _without_powershell_provider(path)
     return any(component not in {"", ".", ".."} and (component.endswith((" ", ".")) or _WINDOWS_SHORT_NAME_COMPONENT_RE.fullmatch(component)) for component in path.replace("\\", "/").split("/"))
 
 
@@ -769,7 +791,7 @@ def _normalize_selection_path(value: str, *, windows_path_context: bool) -> tupl
     does, including drive-rooted ``/tests`` and mapped virtual paths.
     """
     path, nodeid = _selection_path_parts(value)
-    slash_path = path.replace("\\", "/")
+    slash_path = _without_powershell_provider(path).replace("\\", "/")
     is_windows_path = _uses_windows_selection_semantics(value, windows_path_context=windows_path_context)
     if is_windows_path:
         normalized = ntpath.normcase(ntpath.normpath(slash_path))

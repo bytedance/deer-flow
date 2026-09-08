@@ -1866,6 +1866,55 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["holds"] is True
 
+    def test_different_psdrive_exclusion_fails_closed_without_thread_context(self):
+        target = "Data:/tests/security"
+        executions = [_bash_execution(f"pytest {target} Data:/tests/unit --ignore Mirror:/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_provider_qualified_psdrive_exclusion_fails_closed_without_thread_context(self):
+        target = "Data:/tests/security"
+        executions = [_bash_execution(f"pytest {target} Data:/tests/unit --ignore FileSystem::Mirror:/tests/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_unrelated_exclusion_on_same_psdrive_keeps_matching(self):
+        target = "Data:/tests/security"
+        executions = [_bash_execution(f"pytest {target} Data:/tests/unit --ignore data:/tests/slow", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_same_psdrive_case_alias_exclusion_is_unprovable(self):
+        target = "Data:/tests/security"
+        executions = [_bash_execution(f"pytest {target} Data:/tests/unit --ignore data:/TESTS/security", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_provider_qualified_path_on_same_psdrive_compares_lexically(self):
+        target = "Data:/tests/security"
+        executions = [_bash_execution(f"pytest {target} Data:/tests/unit --ignore FileSystem::data:/tests/slow", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_provider_qualified_psdrive_preserves_pytest_nodeid_boundary(self):
+        target = "Data:/tests/x.py::TestA"
+        executions = [_bash_execution(f"pytest {target} Data:/tests/y.py --deselect FileSystem::data:/tests/x.py::TestA", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_provider_qualified_psdrive_keeps_pytest_nodeid_case_sensitive(self):
+        target = "Data:/tests/x.py::TestA"
+        executions = [_bash_execution(f"pytest {target} Data:/tests/y.py --deselect FileSystem::data:/tests/X.PY::testa", output_tail="12 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:pytest {target}"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
     def test_windows_drive_root_exclusion_overlap_is_unprovable(self):
         executions = [_bash_execution("pytest D:/ D:/WS/tests/unit --ignore d:/ws/tests/security", output_tail="12 passed")]
         verdict = check_acceptance_criteria(["tests_passed:pytest D:/"], bash_executions=executions)
