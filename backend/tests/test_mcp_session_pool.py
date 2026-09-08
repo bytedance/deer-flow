@@ -185,6 +185,151 @@ async def test_concurrent_distinct_sessions_respect_capacity():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("close_mode", ["current", "disconnect", "all"])
+async def test_promoted_session_closes_while_evicted_owner_is_blocked(close_mode):
+    """An eviction victim must not hold the replacement's shutdown hostage."""
+    pool = MCPSessionPool()
+    pool.MAX_SESSIONS = 1
+    started = [asyncio.Event(), asyncio.Event()]
+    initialize = [asyncio.Event(), asyncio.Event()]
+    exiting = [asyncio.Event(), asyncio.Event()]
+    release_victim = asyncio.Event()
+    owners = []
+
+    class Session:
+        def __init__(self, index):
+            self.index = index
+
+        async def __aenter__(self):
+            self.owner = asyncio.current_task()
+            owners.append(self.owner)
+            return self
+
+        async def initialize(self):
+            started[self.index].set()
+            await initialize[self.index].wait()
+
+        async def call_tool(self, *args, **kwargs):
+            raise anyio.EndOfStream
+
+        async def __aexit__(self, *args):
+            assert asyncio.current_task() is self.owner
+            exiting[self.index].set()
+            if self.index == 0:
+                await release_victim.wait()
+
+    sessions = [Session(0), Session(1)]
+    close_task = None
+    connection = {"transport": "stdio", "command": "unused", "args": []}
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=sessions):
+        first = asyncio.create_task(pool.get_session("s", "a", connection))
+        second = asyncio.create_task(pool.get_session("s", "b", connection))
+        try:
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started)), 2)
+            initialize[0].set()
+            await asyncio.wait_for(asyncio.shield(first), 2)
+            initialize[1].set()
+            replacement = await asyncio.wait_for(asyncio.shield(second), 2)
+            await asyncio.wait_for(exiting[0].wait(), 2)
+            assert len(pool._entries) == 1
+            if close_mode == "current":
+                close_task = asyncio.create_task(pool.close_session_if_current("s", "b", replacement))
+            elif close_mode == "disconnect":
+                close_task = asyncio.create_task(call_pooled_session_tool(replacement, pool, server_name="s", scope_key="b", tool_name="test", arguments={}, call_kwargs={}))
+            else:
+                close_task = asyncio.create_task(pool.close_all())
+            await asyncio.wait_for(exiting[1].wait(), 2)
+            if close_mode == "disconnect":
+                with pytest.raises(anyio.EndOfStream):
+                    await asyncio.wait_for(asyncio.shield(close_task), 2)
+            else:
+                await asyncio.wait_for(asyncio.shield(close_task), 2)
+            assert not owners[0].done()
+            assert pool._teardown_tasks
+        finally:
+            release_victim.set()
+            for event in initialize:
+                event.set()
+            await asyncio.gather(first, second, return_exceptions=True)
+            await pool.close_all()
+            if close_task is not None:
+                await asyncio.gather(close_task, return_exceptions=True)
+            await asyncio.gather(*owners, return_exceptions=True)
+            await asyncio.gather(*list(pool._teardown_tasks), return_exceptions=True)
+        assert not pool._teardown_tasks
+
+
+@pytest.mark.asyncio
+async def test_real_stdio_replacement_closes_while_evicted_exit_is_blocked():
+    """Real MCP transports retain independent owner-task cleanup after eviction."""
+    from langchain_mcp_adapters.sessions import create_session
+
+    pool = MCPSessionPool()
+    pool.MAX_SESSIONS = 1
+    entered = [asyncio.Event(), asyncio.Event()]
+    proceed = [asyncio.Event(), asyncio.Event()]
+    victim_exiting = asyncio.Event()
+    release_victim = asyncio.Event()
+    owners = []
+    index = 0
+    connection = {
+        "transport": "stdio",
+        "command": sys.executable,
+        "args": ["-c", "from mcp.server.fastmcp import FastMCP; FastMCP('shutdown-test').run(transport='stdio')"],
+    }
+
+    class ControlledExit:
+        def __init__(self, connection):
+            nonlocal index
+            self.index = index
+            index += 1
+            self.cm = create_session(connection)
+
+        async def __aenter__(self):
+            self.owner = asyncio.current_task()
+            owners.append(self.owner)
+            session = await self.cm.__aenter__()
+            entered[self.index].set()
+            await proceed[self.index].wait()
+            return session
+
+        async def __aexit__(self, *args):
+            assert asyncio.current_task() is self.owner
+            if self.index == 0:
+                victim_exiting.set()
+                await release_victim.wait()
+            return await self.cm.__aexit__(*args)
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=ControlledExit):
+        first = asyncio.create_task(pool.get_session("s", "a", connection))
+        second = asyncio.create_task(pool.get_session("s", "b", connection))
+        closing = None
+        try:
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 20)
+            proceed[0].set()
+            await asyncio.wait_for(asyncio.shield(first), 10)
+            proceed[1].set()
+            replacement = await asyncio.wait_for(asyncio.shield(second), 10)
+            await asyncio.wait_for(victim_exiting.wait(), 10)
+            await asyncio.wait_for(replacement.send_ping(), 10)
+            closing = asyncio.create_task(pool.close_session_if_current("s", "b", replacement))
+            assert await asyncio.wait_for(asyncio.shield(closing), 10)
+            assert owners[1].done()
+            assert not owners[0].done()
+        finally:
+            release_victim.set()
+            for event in proceed:
+                event.set()
+            await asyncio.gather(first, second, return_exceptions=True)
+            await pool.close_all()
+            if closing is not None:
+                await asyncio.gather(closing, return_exceptions=True)
+            await asyncio.gather(*owners, return_exceptions=True)
+            await asyncio.gather(*list(pool._teardown_tasks), return_exceptions=True)
+    assert not pool._teardown_tasks
+
+
+@pytest.mark.asyncio
 async def test_close_scope():
     """close_scope shuts down sessions for a specific scope key."""
     pool = MCPSessionPool()

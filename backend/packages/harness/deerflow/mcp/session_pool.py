@@ -228,13 +228,18 @@ class MCPSessionPool:
                     if not ready.done():
                         ready.set_result(session)
             if still_ours:
-                # Signal every victim before awaiting any teardown so this
-                # owner cannot strand a removed session if it is cancelled.
+                # Drain victims independently: a blocked victim's __aexit__
+                # must not prevent this owner from handling its own close.
                 for ent_loop, _ent_task, ent_close in promoted_evicted:
                     self._signal_close(ent_loop, ent_close)
                 for ent_loop, ent_task, ent_close in promoted_evicted:
-                    if ent_loop is loop and not ent_loop.is_closed():
-                        await self._shutdown(ent_close, ent_task)
+                    if ent_loop is loop:
+                        self._track_owner_teardown(ent_task)
+                    elif not ent_loop.is_closed():
+                        try:
+                            ent_loop.call_soon_threadsafe(self._track_owner_teardown, ent_task)
+                        except RuntimeError:
+                            pass  # The owning loop closed before scheduling.
                 logger.info("Created persistent MCP session for %s/%s", key[0], key[1])
             elif not ready.done():
                 ready.set_exception(asyncio.CancelledError("MCP session pool was closed while the session was being created"))
@@ -494,7 +499,7 @@ class MCPSessionPool:
             pass
 
     def _track_owner_teardown(self, task: asyncio.Task[Any]) -> None:
-        """Keep an owner's teardown observable after its awaiter was cancelled.
+        """Keep detached eviction or cancelled-caller teardown observable.
 
         The awaiter unwinds, but the owner still has to finish ``__aexit__`` in
         its own task; the reaper awaits that completion so exceptions are
@@ -509,7 +514,7 @@ class MCPSessionPool:
             try:
                 await task
             except BaseException:
-                logger.debug("Owner task ended after caller cancellation", exc_info=True)
+                logger.debug("Owner task ended during detached teardown", exc_info=True)
 
         try:
             reaper = asyncio.get_running_loop().create_task(_reap(), name=f"mcp-session-owner-reap:{task.get_name()}")
