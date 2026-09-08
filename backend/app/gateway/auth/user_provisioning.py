@@ -14,6 +14,7 @@ from fastapi import HTTPException, status
 
 from app.gateway.auth.local_provider import LocalAuthProvider
 from app.gateway.auth.oidc import OIDCIdentity
+from app.gateway.auth.repositories.base import AdminRoleTakenError
 from deerflow.config.auth_config import OIDCProviderConfig
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,22 @@ async def get_or_provision_oidc_user(
             oauth_id=identity.subject,
             system_role=role,
         )
+    except AdminRoleTakenError:
+        # The single admin slot is already held by another account (partial
+        # unique index uq_users_admin_role). Fall back to a regular user so
+        # this OIDC sign-in still succeeds; the operator's admin_emails list
+        # is inconsistent with the one-admin invariant, so surface it in the
+        # logs rather than locking the user out with a misleading 409.
+        logger.warning(
+            "OIDC user %s is listed in admin_emails but the admin role is already taken — creating as regular user",
+            email,
+        )
+        user = await local_provider.create_oauth_user(
+            email=email,
+            oauth_provider=provider_id,
+            oauth_id=identity.subject,
+            system_role="user",
+        )
     except ValueError:
         # Lost a race: a concurrent callback (double-click, replayed code) already
         # inserted a row that collides on the unique index. Re-resolve instead of
@@ -102,7 +119,7 @@ async def get_or_provision_oidc_user(
             status_code=status.HTTP_409_CONFLICT,
             detail=("An account with this email already exists. Contact your administrator to link it to your SSO account."),
         ) from None
-    logger.info("Auto-created OIDC user %s (provider=%s, role=%s)", email, provider_id, role)
+    logger.info("Auto-created OIDC user %s (provider=%s, role=%s)", email, provider_id, user.system_role)
     return {"user": user, "created": True}
 
 
