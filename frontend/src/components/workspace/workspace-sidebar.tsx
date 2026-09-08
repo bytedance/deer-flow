@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/sidebar";
 
 import { WorkspaceChannelsList } from "./channels/workspace-channels-list";
+import { ProjectsSection } from "./projects-section";
 import { RecentChatList } from "./recent-chat-list";
 import { WorkspaceHeader } from "./workspace-header";
 import { WorkspaceNavChatList } from "./workspace-nav-chat-list";
@@ -28,7 +29,12 @@ export function WorkspaceSidebar({
         <SidebarContent>
           <WorkspaceNavChatList />
           <WorkspaceChannelsList />
-          {isSidebarOpen && <RecentChatList />}
+          {isSidebarOpen && (
+            <>
+              <ProjectsSection />
+              <RecentChatList />
+            </>
+          )}
         </SidebarContent>
         <SidebarFooter>
           <WorkspaceNavMenu />

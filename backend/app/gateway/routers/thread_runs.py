@@ -12,14 +12,15 @@ works without modification.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
@@ -64,6 +65,60 @@ _artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
+
+
+IdempotencyKeyHeader = Annotated[
+    str | None,
+    Header(
+        alias="Idempotency-Key",
+        max_length=255,
+        description="Retry key for idempotent run admission within this thread",
+    ),
+]
+
+
+def _scope_http_run_idempotency_key(request: Request, thread_id: str, key: str | None) -> str | None:
+    """Namespace a caller key for the process-wide run idempotency index."""
+    if not isinstance(key, str):
+        return None
+    key = key.strip()
+    if not key:
+        raise HTTPException(status_code=422, detail="Idempotency-Key must not be blank")
+    owner_id = get_trusted_internal_owner_user_id(request)
+    if owner_id is None:
+        user = getattr(request.state, "user", None)
+        user_id = getattr(user, "id", None)
+        owner_id = str(user_id) if user_id is not None else get_effective_user_id()
+    digest = hashlib.sha256(f"{owner_id}\0{thread_id}\0{key}".encode()).hexdigest()
+    return f"http-run:{digest}"
+
+
+async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
+    """Overlay durable status/error onto a hydrated store-only record."""
+    if not getattr(record, "store_only", False):
+        return record
+    store = getattr(run_mgr, "_store", None)
+    get = getattr(store, "get", None)
+    if get is None:
+        return record
+    try:
+        row = get(record.run_id)
+        if hasattr(row, "__await__"):
+            row = await row
+    except Exception:
+        logger.exception("Failed to refresh store-backed run %s", getattr(record, "run_id", None))
+        return record
+    if not isinstance(row, dict):
+        return record
+    raw_status = row.get("status")
+    if raw_status:
+        try:
+            record.status = RunStatus(raw_status)
+        except ValueError:
+            pass
+    if "error" in row:
+        record.error = row.get("error")
+    return record
 
 
 def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
@@ -861,15 +916,30 @@ async def prepare_edit_regenerate_run(
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def create_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> RunResponse:
+async def create_run(
+    thread_id: ThreadId,
+    body: RunCreateRequest,
+    request: Request,
+    idempotency_key: IdempotencyKeyHeader = None,
+) -> RunResponse:
     """Create a background run (returns immediately)."""
-    record = await start_run(body, thread_id, request)
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+    )
     return _record_to_response(record)
 
 
 @router.post("/{thread_id}/runs/stream")
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def stream_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> StreamingResponse:
+async def stream_run(
+    thread_id: ThreadId,
+    body: RunCreateRequest,
+    request: Request,
+    idempotency_key: IdempotencyKeyHeader = None,
+) -> StreamingResponse:
     """Create a run and stream events via SSE.
 
     The response includes a ``Content-Location`` header with the run's
@@ -878,10 +948,32 @@ async def stream_run(thread_id: ThreadId, body: RunCreateRequest, request: Reque
     """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(body, thread_id, request)
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+    )
+
+    # Same shape join already rejects: a reused store-only handle on a
+    # process-local bridge has no owner stream. Subscribing would create an
+    # empty log and wait forever. Terminal reuse still goes through
+    # sse_consumer with emit_gap_on_missing_stream so a missing stream emits
+    # gap rather than a bare end. First-time creates keep the default `end`.
+    if record.store_only and not bridge.supports_cross_process and record.status in (RunStatus.pending, RunStatus.running):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run {record.run_id} is not active on this worker and cannot be streamed",
+        )
 
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        sse_consumer(
+            bridge,
+            record,
+            request,
+            run_mgr,
+            emit_gap_on_missing_stream=record.idempotency_reused,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -897,17 +989,46 @@ async def stream_run(thread_id: ThreadId, body: RunCreateRequest, request: Reque
 
 @router.post("/{thread_id}/runs/wait", response_model=dict)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def wait_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> dict:
-    """Create a run and block until it completes, returning the final state."""
+async def wait_run(
+    thread_id: ThreadId,
+    body: RunCreateRequest,
+    request: Request,
+    idempotency_key: IdempotencyKeyHeader = None,
+) -> dict:
+    """Create a run and block until it completes, returning the final state.
+
+    A reused in-flight run that this worker cannot observe returns the durable
+    status without blocking. A reused completed run also returns durable
+    status: the latest thread checkpoint may belong to a later run.
+    """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(body, thread_id, request)
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+    )
+    # Capture before waiting: create_or_reject mutates the shared cached
+    # record's idempotency_reused flag, so an overlapping retry must not
+    # change this request's checkpoint-vs-status decision.
+    reused = bool(getattr(record, "idempotency_reused", False))
 
-    completed = True
-    if record.task is not None:
+    # Reused/hydrated records have no local task. Wait on the bridge when this
+    # worker can observe it; otherwise return durable status rather than
+    # serializing whatever checkpoint happens to exist.
+    if getattr(record, "store_only", False) and not getattr(bridge, "supports_cross_process", False):
+        record = await _refresh_store_backed_run(run_mgr, record)
+        return {"status": record.status.value, "error": record.error}
+
+    if record.task is not None or getattr(record, "store_only", False):
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
+    else:
+        completed = True
 
-    if completed:
+    # Idempotent reuse is not bound to a run-specific checkpoint id. The latest
+    # thread head may be a later run, so do not claim it as this run's result.
+    if completed and not reused:
         try:
             accessor, config = build_checkpoint_state_accessor(
                 request,
@@ -921,6 +1042,8 @@ async def wait_run(thread_id: ThreadId, body: RunCreateRequest, request: Request
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
+    if completed:
+        record = await _refresh_store_backed_run(run_mgr, record)
     return {"status": record.status.value, "error": record.error}
 
 
