@@ -247,7 +247,7 @@ class TestConfigQueries:
 # ---------------------------------------------------------------------------
 
 
-def _make_agent_mock(chunks: list[dict]):
+def _make_agent_mock(chunks: list[dict | tuple[str, dict]]):
     """Create a mock agent whose .stream() yields the given chunks."""
     agent = MagicMock()
     agent.stream.return_value = iter(chunks)
@@ -495,6 +495,33 @@ class TestStream:
         assert len(values_events) >= 1
         assert values_events[-1].data["title"] == "Greeting"
         assert "messages" in values_events[-1].data
+
+    @pytest.mark.parametrize("mode_tagged", [False, True], ids=["bare-dict", "mode-tuple"])
+    def test_values_events_preserve_summary_text_updates(self, client, mode_tagged):
+        messages = [HumanMessage(content="hi", id="h-1"), AIMessage(content="ok", id="ai-1")]
+        summaries = [None, "first summary", "first summary", "revised summary", "", None]
+        chunks = [{"messages": messages, "summary_text": summary} for summary in summaries]
+        agent = _make_agent_mock([("values", chunk) for chunk in chunks] if mode_tagged else chunks)
+
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="summary-stream"))
+
+        values_events = [event for event in events if event.type == "values"]
+        assert [event.data["summary_text"] for event in values_events] == summaries
+        assert all(len(event.data["messages"]) == 2 for event in values_events)
+        assert len(_ai_events(events)) == 1
+        assert events[-1].type == "end"
+
+    @pytest.mark.parametrize("mode_tagged", [False, True], ids=["bare-dict", "mode-tuple"])
+    def test_values_events_without_summary_expose_none(self, client, mode_tagged):
+        chunk = {"messages": [HumanMessage(content="hi", id="h-1")]}
+        agent = _make_agent_mock([("values", chunk) if mode_tagged else chunk])
+
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="no-summary"))
+
+        values_events = [event for event in events if event.type == "values"]
+        assert values_events[0].data["summary_text"] is None
 
     def test_deduplication(self, client):
         """Messages with the same id are not emitted twice."""
@@ -902,6 +929,7 @@ class TestStream:
                 "values",
                 {
                     "title": None,
+                    "summary_text": None,
                     "messages": [
                         {"type": "human", "content": "hi", "id": "h-1"},
                         {"type": "ai", "content": "Hello", "id": "ai-1", "usage_metadata": usage},
