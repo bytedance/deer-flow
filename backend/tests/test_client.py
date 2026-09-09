@@ -1129,6 +1129,32 @@ class TestEnsureAgent:
         assert config["configurable"]["subagent_enabled"] is True
         assert config["configurable"]["max_concurrent_subagents"] == 2
 
+    def test_stream_forwards_explicit_concurrency_over_custom_agent_default(self, client):
+        client._agent_name = "researcher"
+        agent = _make_agent_mock([])
+        agent_config = SimpleNamespace(
+            subagent_enabled=True,
+            max_concurrent_subagents=2,
+            allowed_subagents=["researcher"],
+        )
+        with (
+            patch("deerflow.client.load_agent_config", return_value=agent_config),
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=agent),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            list(client.stream("delegate", thread_id="t1", max_concurrent_subagents=1))
+
+        assert mock_apply_prompt.call_args.kwargs["max_concurrent_subagents"] == 1
+        assert mock_apply_prompt.call_args.kwargs["allowed_subagents"] == ["researcher"]
+        runtime_config = agent.stream.call_args.kwargs["config"]
+        assert runtime_config["configurable"]["max_concurrent_subagents"] == 1
+        assert runtime_config["metadata"]["allowed_subagents"] == ["researcher"]
+
     def test_explicit_subagent_disable_overrides_custom_agent_default(self, client):
         client._agent_name = "researcher"
         config = client._get_runnable_config("t1", subagent_enabled=False)
@@ -1450,6 +1476,43 @@ class TestEnsureAgent:
             client._ensure_agent(config2)
 
         assert mock_create_agent.call_count == 2
+
+    def test_recreates_agent_when_allowed_subagents_change(self, client):
+        """A changed allowlist must refresh both the prompt and execution metadata."""
+        config = client._get_runnable_config("t1")
+        agent_configs = [
+            SimpleNamespace(
+                subagent_enabled=True,
+                max_concurrent_subagents=2,
+                allowed_subagents=["researcher"],
+            ),
+            SimpleNamespace(
+                subagent_enabled=True,
+                max_concurrent_subagents=2,
+                allowed_subagents=["coder"],
+            ),
+        ]
+
+        with (
+            patch("deerflow.client.load_agent_config", side_effect=agent_configs),
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._agent_name = "lead"
+            client._ensure_agent(config)
+            client._ensure_agent(config)
+
+        assert mock_create_agent.call_count == 2
+        assert [call.kwargs["allowed_subagents"] for call in mock_apply_prompt.call_args_list] == [
+            ["researcher"],
+            ["coder"],
+        ]
+        assert config["metadata"]["allowed_subagents"] == ["coder"]
 
     def test_deferred_skill_discovery_wired_when_enabled(self, client, mock_app_config):
         """When skills.deferred_discovery=True, skill_names reaches apply_prompt_template

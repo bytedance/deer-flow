@@ -273,6 +273,9 @@ class DeerFlowClient:
         subagent_enabled = overrides.get("subagent_enabled", self._subagent_enabled)
         if subagent_enabled is not None:
             configurable["subagent_enabled"] = subagent_enabled
+        max_concurrent_subagents = overrides.get("max_concurrent_subagents")
+        if max_concurrent_subagents is not None:
+            configurable["max_concurrent_subagents"] = max_concurrent_subagents
         return RunnableConfig(
             configurable=configurable,
             recursion_limit=overrides.get("recursion_limit", 100),
@@ -314,6 +317,8 @@ class DeerFlowClient:
         cfg["max_concurrent_subagents"] = max_concurrent_subagents
         _inject_resolved_runtime_option(config, "subagent_enabled", subagent_enabled)
         _inject_resolved_runtime_option(config, "max_concurrent_subagents", max_concurrent_subagents)
+        metadata = config.setdefault("metadata", {})
+        metadata["allowed_subagents"] = list(allowed_subagents) if allowed_subagents is not None else None
 
         authorization_identity = None
         if self._app_config.authorization.enabled:
@@ -337,6 +342,7 @@ class DeerFlowClient:
             cfg.get("subagent_enabled"),
             cfg.get("max_concurrent_subagents"),
             cfg.get("max_total_subagents"),
+            tuple(allowed_subagents) if allowed_subagents is not None else None,
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
@@ -433,6 +439,7 @@ class DeerFlowClient:
                 mcp_routing_hints_section=mcp_routing_hints_section,
                 user_id=effective_user_id,
                 skill_names=skill_setup.skill_names or None,
+                allowed_subagents=allowed_subagents,
                 subagent_execution_capacity=subagent_execution_capacity,
             ),
             "state_schema": get_thread_state_schema(self._checkpoint_channel_mode, self._checkpoint_snapshot_frequency),
@@ -858,7 +865,8 @@ class DeerFlowClient:
             message: User message text.
             thread_id: Thread ID for conversation context. Auto-generated if None.
             **kwargs: Override client defaults (model_name, thinking_enabled,
-                plan_mode, subagent_enabled, recursion_limit). Trusted embedded
+                plan_mode, subagent_enabled, max_concurrent_subagents,
+                recursion_limit). Trusted embedded
                 callers may also provide user_id, user_role, oauth_provider,
                 oauth_id, channel_user_id, is_internal, and authz_attributes.
 
