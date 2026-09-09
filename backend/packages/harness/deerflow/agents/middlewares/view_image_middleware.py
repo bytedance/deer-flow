@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Mirror the tool-side size cap as a defense-in-depth check. The tool
 # enforces this at write time; the middleware re-checks at read time in
-# case the file grew on disk between view and injection.
+# case the file grew between view and injection.
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _IMAGE_CONTEXT_MESSAGE_ID_PREFIX = "view-image-context:"
 _IMAGE_CONTEXT_MESSAGE_MARKER_KEY = "deerflow_view_image_context"
@@ -117,39 +117,80 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         return tool_call_ids.issubset(completed_tool_ids)
 
     @staticmethod
-    def _read_image_as_data_url(actual_path: str, mime_type: str, expected_size: int) -> str | None:
-        """Read image file and return a `data:` URL, or None on failure.
+    def _encode_image_bytes(image_bytes: bytes, mime_type: str, expected_size: int) -> str | None:
+        """Validate image bytes against recorded metadata and return a data URL."""
+        current_size = len(image_bytes)
+        if current_size != expected_size or current_size > _MAX_IMAGE_BYTES:
+            return None
+        base64_data = base64.b64encode(image_bytes).decode("utf-8")
+        return f"data:{mime_type};base64,{base64_data}"
 
-        Trust assumption: ``actual_path`` is set by ``view_image_tool``
-        (server-side, validated against the allowed virtual roots at write
-        time) and held in LangGraph-controlled state. Client input cannot
-        reach this field, so the read scope is trusted. We still re-check
-        size at read time to defend against TOCTOU growth and skip files
-        exceeding ``_MAX_IMAGE_BYTES``.
+    @classmethod
+    def _read_host_image_as_data_url(cls, actual_path: str, mime_type: str, expected_size: int) -> str | None:
+        """Read a validated host mirror and return a data URL, or None on failure.
+
+        ``actual_path`` is server-set by ``view_image_tool`` and held in
+        LangGraph-controlled state. The host path remains the compatibility path
+        for local execution and older checkpoints. When a live sandbox is
+        available, ``_read_image_as_data_url`` reads that sandbox instead so a
+        remote provider never loses to a missing or stale gateway mirror.
         """
         try:
             file_path = Path(actual_path)
             if not file_path.exists() or not file_path.is_file():
                 return None
             current_size = file_path.stat().st_size
-            if current_size != expected_size:
-                # File changed between view and inject - skip.
-                return None
-            if current_size > _MAX_IMAGE_BYTES:
+            if current_size != expected_size or current_size > _MAX_IMAGE_BYTES:
                 return None
             with open(file_path, "rb") as f:
                 image_bytes = f.read()
-            base64_data = base64.b64encode(image_bytes).decode("utf-8")
-            return f"data:{mime_type};base64,{base64_data}"
+            return cls._encode_image_bytes(image_bytes, mime_type, expected_size)
         except OSError:
             return None
+
+    @classmethod
+    def _read_image_as_data_url(
+        cls,
+        state: ViewImageMiddlewareState,
+        image_path: str,
+        actual_path: str,
+        mime_type: str,
+        expected_size: int,
+    ) -> str | None:
+        """Read image bytes from the active sandbox, falling back to the host mirror.
+
+        A remote sandbox is the source of truth while it is live: generated or
+        modified files can exist there before release-time synchronization, and
+        the gateway mirror may be missing or stale. If the provider still has the
+        sandbox instance, read through ``Sandbox.download_file`` and do not fall
+        back on download failure. Host fallback is only for runs without a live
+        sandbox client (local/legacy checkpoints).
+        """
+        from deerflow.sandbox.overwrite import unwrap_sandbox
+        from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+
+        sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
+        sandbox_id = sandbox_state.get("sandbox_id") if isinstance(sandbox_state, dict) else None
+        if sandbox_id:
+            sandbox = get_sandbox_provider().get(sandbox_id)
+            if sandbox is not None:
+                try:
+                    image_bytes = sandbox.download_file(image_path)
+                except Exception:
+                    logger.warning("Failed to read viewed image %s from sandbox %s", image_path, sandbox_id, exc_info=True)
+                    return None
+                return cls._encode_image_bytes(image_bytes, mime_type, expected_size)
+
+        if not actual_path:
+            return None
+        return cls._read_host_image_as_data_url(actual_path, mime_type, expected_size)
 
     def _create_image_details_message(self, state: ViewImageMiddlewareState) -> list[str | dict]:
         """Create a formatted message with all viewed image details.
 
-        Reads image files from disk on-demand and encodes them as base64
-        for the model. The base64 data is NOT persisted in state -- only
-        lightweight metadata (path, mime_type, size) is stored in
+        Reads image files on-demand from the active sandbox when available and
+        encodes them as base64 for the model. The base64 data is NOT persisted in
+        state -- only lightweight metadata (path, mime_type, size) is stored in
         ``viewed_images``, avoiding large duplicate payloads across every
         checkpoint (see #4138).
 
@@ -176,17 +217,16 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             content_blocks.append({"type": "text", "text": f"\n- **{image_path}** ({mime_type})"})
 
             # Read the image file on-demand and encode as base64 for the model
-            if actual_path:
-                data_url = self._read_image_as_data_url(actual_path, mime_type, expected_size)
-                if data_url:
-                    content_blocks.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": data_url},
-                        }
-                    )
-                else:
-                    content_blocks.append({"type": "text", "text": f"  (file unavailable or changed on disk: {actual_path})"})
+            data_url = self._read_image_as_data_url(state, image_path, actual_path, mime_type, expected_size)
+            if data_url:
+                content_blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_url},
+                    }
+                )
+            else:
+                content_blocks.append({"type": "text", "text": f"  (file unavailable or changed: {image_path})"})
 
         return content_blocks
 

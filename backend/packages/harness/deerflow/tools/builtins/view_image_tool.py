@@ -48,6 +48,14 @@ def _sanitize_image_error(error: Exception, thread_data: ThreadDataState | None)
     return mask_local_paths_in_output(f"{type(error).__name__}: {error}", thread_data)
 
 
+def _runtime_has_sandbox(runtime: Runtime) -> bool:
+    from deerflow.sandbox.overwrite import unwrap_sandbox
+
+    state = runtime.state or {}
+    sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
+    return isinstance(sandbox_state, dict) and bool(sandbox_state.get("sandbox_id"))
+
+
 @tool("view_image", parse_docstring=True)
 def view_image_tool(
     runtime: Runtime,
@@ -70,6 +78,7 @@ def view_image_tool(
     """
     from deerflow.sandbox.exceptions import SandboxRuntimeError
     from deerflow.sandbox.tools import (
+        ensure_sandbox_initialized,
         get_thread_data,
         resolve_and_validate_user_data_path,
         validate_local_tool_path,
@@ -97,56 +106,72 @@ def view_image_tool(
             update={"messages": [ToolMessage(f"Error: {str(e)}", tool_call_id=tool_call_id)]},
         )
 
-    path = Path(actual_path)
-
-    # Validate that the file exists
-    if not path.exists():
-        return Command(
-            update={"messages": [ToolMessage(f"Error: Image file not found: {image_path}", tool_call_id=tool_call_id)]},
-        )
-
-    # Validate that it's a file (not a directory)
-    if not path.is_file():
-        return Command(
-            update={"messages": [ToolMessage(f"Error: Path is not a file: {image_path}", tool_call_id=tool_call_id)]},
-        )
-
-    # Validate image extension
-    expected_mime_type = _EXTENSION_TO_MIME.get(path.suffix.lower())
+    image_suffix = Path(image_path).suffix.lower()
+    expected_mime_type = _EXTENSION_TO_MIME.get(image_suffix)
     if expected_mime_type is None:
         return Command(
-            update={"messages": [ToolMessage(f"Error: Unsupported image format: {path.suffix}. Supported formats: {', '.join(_EXTENSION_TO_MIME)}", tool_call_id=tool_call_id)]},
+            update={"messages": [ToolMessage(f"Error: Unsupported image format: {image_suffix}. Supported formats: {', '.join(_EXTENSION_TO_MIME)}", tool_call_id=tool_call_id)]},
         )
 
-    # Detect MIME type from file extension
-    mime_type, _ = mimetypes.guess_type(actual_path)
+    mime_type, _ = mimetypes.guess_type(image_path)
     if mime_type is None:
         mime_type = expected_mime_type
 
-    try:
-        image_size = path.stat().st_size
-    except OSError as e:
-        return Command(
-            update={"messages": [ToolMessage(f"Error reading image metadata: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
-        )
+    if _runtime_has_sandbox(runtime):
+        try:
+            sandbox = ensure_sandbox_initialized(runtime)
+            image_data = sandbox.download_file(image_path)
+        except FileNotFoundError:
+            return Command(
+                update={"messages": [ToolMessage(f"Error: Image file not found: {image_path}", tool_call_id=tool_call_id)]},
+            )
+        except IsADirectoryError:
+            return Command(
+                update={"messages": [ToolMessage(f"Error: Path is not a file: {image_path}", tool_call_id=tool_call_id)]},
+            )
+        except Exception as e:
+            return Command(
+                update={"messages": [ToolMessage(f"Error reading image file: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
+            )
+        image_size = len(image_data)
+    else:
+        path = Path(actual_path)
+        if not path.exists():
+            return Command(
+                update={"messages": [ToolMessage(f"Error: Image file not found: {image_path}", tool_call_id=tool_call_id)]},
+            )
+        if not path.is_file():
+            return Command(
+                update={"messages": [ToolMessage(f"Error: Path is not a file: {image_path}", tool_call_id=tool_call_id)]},
+            )
+
+        try:
+            image_size = path.stat().st_size
+        except OSError as e:
+            return Command(
+                update={"messages": [ToolMessage(f"Error reading image metadata: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
+            )
+        if image_size > _MAX_IMAGE_BYTES:
+            return Command(
+                update={"messages": [ToolMessage(f"Error: Image file is too large: {image_size} bytes. Maximum supported size is {_MAX_IMAGE_BYTES} bytes", tool_call_id=tool_call_id)]},
+            )
+
+        try:
+            with open(actual_path, "rb") as f:
+                image_data = f.read()
+        except Exception as e:
+            return Command(
+                update={"messages": [ToolMessage(f"Error reading image file: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
+            )
+
+        if len(image_data) != image_size:
+            return Command(
+                update={"messages": [ToolMessage("Error: Image file changed during read", tool_call_id=tool_call_id)]},
+            )
+
     if image_size > _MAX_IMAGE_BYTES:
         return Command(
             update={"messages": [ToolMessage(f"Error: Image file is too large: {image_size} bytes. Maximum supported size is {_MAX_IMAGE_BYTES} bytes", tool_call_id=tool_call_id)]},
-        )
-
-    # Read image file to validate contents (magic bytes + size)
-    try:
-        with open(actual_path, "rb") as f:
-            image_data = f.read()
-    except Exception as e:
-        return Command(
-            update={"messages": [ToolMessage(f"Error reading image file: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
-        )
-
-    if len(image_data) != image_size:
-        # File changed between stat() and read() - reject for safety.
-        return Command(
-            update={"messages": [ToolMessage("Error: Image file changed during read", tool_call_id=tool_call_id)]},
         )
 
     detected_mime_type = _detect_image_mime(image_data)
@@ -160,9 +185,6 @@ def view_image_tool(
         )
     mime_type = detected_mime_type
 
-    # Store only lightweight metadata in state (not base64) to avoid
-    # duplicating large payloads across every checkpoint (see #4138).
-    # The middleware reads the file on-demand when the model needs it.
     new_viewed_images = {
         image_path: {
             "mime_type": mime_type,
