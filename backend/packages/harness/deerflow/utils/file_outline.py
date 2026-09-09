@@ -42,6 +42,11 @@ _OUTLINE_PREVIEW_LINES = 5
 # the line is an info string when opening, or whitespace only when closing.
 _CODE_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
+# ATX headings require 1-6 hashes and a space/tab separator (or end of line).
+# Match the original indentation so indented code cannot become a heading.
+_ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*))?$")
+_ATX_CLOSING_RE = re.compile(r"(?:^|[ \t]+)#+[ \t]*$")
+
 
 def _clean_bold_title(raw: str) -> str:
     """Normalise a title string that may contain pymupdf4llm bold artefacts.
@@ -69,7 +74,8 @@ def extract_outline(md_path: Path) -> list[dict]:
 
     Recognises three heading styles produced by pymupdf4llm:
 
-    1. Standard Markdown headings: lines starting with one or more '#'.
+    1. Standard ATX headings: up to three spaces, then 1-6 '#' characters
+       followed by a space/tab or end of line. Optional closing hashes are removed.
        Inline ``**...**`` wrappers and adjacent bold spans (``** **``) are
        cleaned so the title is plain text.
 
@@ -118,8 +124,8 @@ def extract_outline(md_path: Path) -> list[dict]:
                     continue
 
                 # Style 1: standard Markdown heading
-                if stripped.startswith("#"):
-                    title = _clean_bold_title(stripped.lstrip("#").strip())
+                if m := _ATX_HEADING_RE.fullmatch(line.rstrip("\r\n")):
+                    title = _clean_bold_title(_ATX_CLOSING_RE.sub("", m.group(1) or "").strip())
                     if title:
                         outline.append({"title": title, "line": lineno})
 
