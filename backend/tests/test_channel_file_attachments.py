@@ -849,6 +849,86 @@ class TestWecomMediaUrlGate:
         assert _inbound_file_label({}, idx=3) == "#3"
         assert _inbound_file_label({}) == "<unnamed>"
 
+    def test_wecom_reader_success_does_not_leak_url_at_info(self, caplog):
+        """Successful signed-media downloads must not leak credentials at the Gateway's INFO level.
+
+        httpx emits ``HTTP Request: GET <full URL>`` at INFO before the reader
+        sees the response; the filter installed by ``configure_logging``
+        rewrites those records down to scheme + host. Real transport logging
+        path via MockTransport, success included — not just failure branches.
+        """
+        import logging as _logging
+
+        import httpx
+
+        from app.channels import manager
+        from deerflow.logging_config import HttpxUrlQueryRedactionFilter, install_httpx_log_redaction
+
+        class _AsyncBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"ok"
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=_AsyncBody())
+
+        install_httpx_log_redaction()
+        url = "https://ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com/private/BearerSecret?token=QuerySecret"
+
+        async def go():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            try:
+                return await manager._read_wecom_inbound_file({"url": url, "aeskey": None}, client)
+            finally:
+                await client.aclose()
+
+        with caplog.at_level(_logging.INFO):
+            result = _run(go())
+
+        assert result == b"ok"
+        formatted = "\n".join(record.getMessage() for record in caplog.records)
+        request_lines = [line for line in formatted.splitlines() if "HTTP Request" in line]
+        assert request_lines, "the request record itself must survive redaction (not suppression)"
+        assert any(isinstance(f, HttpxUrlQueryRedactionFilter) for f in _logging.getLogger("httpx").filters)
+        assert "BearerSecret" not in formatted
+        assert "QuerySecret" not in formatted
+        assert "/private/" not in formatted
+        assert any("ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com/<redacted>" in line for line in request_lines)
+
+    def test_wechat_download_success_does_not_leak_url_at_info(self, caplog):
+        """WechatChannel._download_cdn_bytes hits the same httpx INFO path on success."""
+        import logging as _logging
+
+        import httpx
+
+        from app.channels.wechat import WechatChannel
+        from deerflow.logging_config import install_httpx_log_redaction
+
+        class _AsyncBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"ok"
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=_AsyncBody())
+
+        install_httpx_log_redaction()
+        channel = WechatChannel(MessageBus(), config={"bot_token": "test-token"})
+        channel._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[assignment]
+
+        async def go():
+            try:
+                return await channel._download_cdn_bytes("https://cdn.weixin.qq.com/private/BearerSecret?token=QuerySecret")
+            finally:
+                await channel._client.aclose()
+
+        with caplog.at_level(_logging.INFO):
+            result = _run(go())
+
+        assert result == b"ok"
+        formatted = "\n".join(record.getMessage() for record in caplog.records)
+        assert "BearerSecret" not in formatted
+        assert "QuerySecret" not in formatted
+        assert "cdn.weixin.qq.com/<redacted>" in formatted
+
     def test_outer_warning_branches_do_not_log_url_credentials(self, tmp_path, caplog):
         """The _ingest_inbound_files reader-exception and no-data branches use host-only labels.
 

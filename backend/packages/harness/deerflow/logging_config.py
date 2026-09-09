@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -14,6 +15,39 @@ DEFAULT_LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 DEFAULT_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 TRACE_TEXT_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - [trace_id=%(trace_id)s] - %(message)s"
 _TRACE_FILTER_NAME = "deerflow_trace_context_filter"
+
+# httpx logs ``HTTP Request: GET <full URL> HTTP/x.x <status> <duration>`` at
+# INFO before any response handling runs. Inbound-media URLs are signed — the
+# credentials live in the query string, and the repo-wide inbound-media rule
+# is that no part of a media URL beyond its host may reach the logs — so even
+# successful downloads would leak unless the record itself is rewritten.
+_URL_REDACT_RE = re.compile(r"(?P<base>[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#\s]+)(?P<rest>[/?#]\S*)")
+
+
+class HttpxUrlQueryRedactionFilter(logging.Filter):
+    """Redact inbound URLs in httpx request log records down to scheme + host.
+
+    The record is rewritten in place (``msg`` set to the redacted formatted
+    message, ``args`` cleared) so every downstream handler and formatter —
+    text or JSON — sees the same redacted line, while the method/status/
+    duration observability is preserved. Records whose message carries no
+    ``scheme://host/<anything>`` URL pass through untouched.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = _URL_REDACT_RE.sub(lambda match: match.group("base") + "/<redacted>", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = None
+        return True
+
+
+def install_httpx_log_redaction() -> None:
+    """Idempotently attach URL-query redaction to the ``httpx`` logger."""
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(item, HttpxUrlQueryRedactionFilter) for item in httpx_logger.filters):
+        httpx_logger.addFilter(HttpxUrlQueryRedactionFilter())
 
 
 class TraceContextFilter(logging.Filter):
@@ -92,6 +126,7 @@ def configure_logging(config: object) -> None:
     only the additional ``trace_id`` field.
     """
     _ensure_root_handler()
+    install_httpx_log_redaction()
 
     logging_config = getattr(config, "logging", None)
     enhance = getattr(logging_config, "enhance", None)
