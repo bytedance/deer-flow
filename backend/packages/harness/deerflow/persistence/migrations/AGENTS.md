@@ -19,15 +19,15 @@ The legacy branch handles pre-alembic databases that already have at least one D
 
 The empty-DB path keeps using `create_all` because `Base.metadata` is the only authoritative schema source — `create_all` renders both SQLite (JSON, type affinity) and Postgres (JSONB, partial indexes) correctly without anyone having to keep a hand-written baseline in lockstep. `0001_baseline.upgrade()` is therefore almost never executed in practice; it exists as a stamp target + chain root.
 
-**Rolling forward compatibility**: the local chain head is `0020_threads_meta_project_id`
-(`0018_oauth_identity_pg_partial` → `0019_projects` → `0020_threads_meta_project_id`).
+**Rolling forward compatibility**: the local chain head is `0021_batch_acceptance`
+(`0018_oauth_identity_pg_partial` → `0019_projects` → `0020_threads_meta_project_id` → `0021_batch_acceptance`).
 Bootstrap reads `alembic_version` while holding its backend lock and accepts
 exactly one row. A locally known revision follows the normal upgrade path. The
 one unknown revision `0019_thread_incarnations` is conditionally allowlisted:
 bootstrap first requires every current ORM table and column, then logs a
 warning and leaves the schema untouched. The original rollout shape (0018 plus
 the two incarnation columns) is now rejected: it lacks `projects` and
-`threads_meta.project_id`. Seeding current head is only a positive compatibility
+`threads_meta.project_id`, and the batch acceptance columns. Seeding current head is only a positive compatibility
 fixture; tests must also construct the original 0018-based schema and assert
 rejection on both the direct startup and SQLite race-recovery paths. The check
 uses `conn.run_sync` reflection and derives its local floor from `Base.metadata`
@@ -137,7 +137,9 @@ on installs that never enabled it. The convention is:
 - `migrations/versions/0017_personal_access_tokens.py` — creates the personal access token table for programmatic API access
 - `migrations/versions/0018_oauth_identity_pg_partial.py` — converts `idx_users_oauth_identity` to a partial index on Postgres (`postgresql_where`), matching what `UserRow.__table_args__` already builds via `create_all`; `0001_baseline` never applied the predicate on Postgres, so every `alembic upgrade head`-provisioned deployment carried a full index until this revision. Postgres-only, idempotent (checks `pg_index.indpred` directly), no-op on SQLite (already partial via `sqlite_where`) and on a DB where the index doesn't exist yet. Originally generated as 0017 and renumbered to 0018 after 0017_personal_access_tokens merged first and kept that slot
 - `migrations/versions/0019_projects.py` — creates the `projects` table (id/user_id/name/instructions/presentation/status + timestamps) for the Projects Phase-1 organization feature; chains after `0018_oauth_identity_pg_partial`
-- `migrations/versions/0020_threads_meta_project_id.py` — adds nullable `threads_meta.project_id` plus `ix_threads_meta_project_id` (no FK by design: project delete clears membership first, and the reserved `deerflow_project_id` metadata key stays in sync); chains after `0019_projects` and is the current head. The `0019_` numeric prefix is reused by the reserved out-of-tree `0019_thread_incarnations` — see the rolling-forward section above
+- `migrations/versions/0020_threads_meta_project_id.py` — adds nullable `threads_meta.project_id` plus `ix_threads_meta_project_id` (no FK by design: project delete clears membership first, and the reserved `deerflow_project_id` metadata key stays in sync); chains after `0019_projects`. The `0019_` numeric prefix is reused by the reserved out-of-tree `0019_thread_incarnations` — see the rolling-forward section above
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch provisioning decision, locked revision validation, and the narrow 0019 forward-compatibility exception
 - `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps)
+
+- `migrations/versions/0021_batch_acceptance.py` — adds nullable per-item acceptance criteria and verdict JSON columns after `0020_threads_meta_project_id`; legacy rows remain unchecked.
