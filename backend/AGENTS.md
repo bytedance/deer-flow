@@ -256,8 +256,9 @@ Direct pytest collection or execution of `tests/test_client_live.py` remains
 skipped unless `DEER_FLOW_RUN_LIVE_TESTS=1` is set. Do not add that opt-in to
 default CI workflows.
 
-Jina logging tests use dummy keys to isolate missing-key warnings (`tests/test_jina_client.py`).
-Jina/Browserless pass page URLs to off-thread extraction for relative links and images.
+Jina logging tests use dummy keys (`tests/test_jina_client.py`).
+Jina/Browserless pass page URLs to off-thread extraction.
+InfoQuest connect/read timeout is 30s, separate from crawl timeouts (`tests/test_infoquest_http_timeout.py`).
 
 ### Running the Full Application
 
