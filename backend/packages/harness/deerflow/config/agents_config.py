@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -22,7 +22,17 @@ logger = logging.getLogger(__name__)
 SOUL_FILENAME = "SOUL.md"
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 MAX_AGENT_OUTPUT_TOKENS = 200_000
-AgentDisplayName = Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)]
+
+
+def _validate_display_name(value: object) -> object:
+    # Check before trimming so leading/trailing controls cannot disappear.
+    # Keep ordinary RTL text and emoji joiners; only reject control ranges.
+    if isinstance(value, str) and re.search(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", value):
+        raise ValueError("Display name must not contain control characters or bidirectional formatting controls")
+    return value
+
+
+AgentDisplayName = Annotated[str, StringConstraints(strip_whitespace=True, max_length=100), BeforeValidator(_validate_display_name)]
 
 
 def _blank_to_none(value: str | None) -> str | None:

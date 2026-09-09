@@ -1238,7 +1238,9 @@ The chat header also shows a context-window gauge when the selected model has a 
 
 Custom Agents support an optional Unicode display name, including Chinese and
 emoji. Open an agent's **Agent settings → Display name** to set it (up to 100
-characters), or leave it blank to show the existing identifier. The gallery,
+Unicode code points), or leave it blank to show the existing identifier. Control
+characters and bidirectional formatting controls are rejected; ordinary multilingual
+text and emoji are supported. Re-bootstrapping preserves the display name. The gallery,
 chat header, and welcome page use this label; URLs and API calls continue to use
 the stable English `name`. API callers can pass `display_name` to agent creation
 or update requests; an omitted update preserves it and `null` clears it. The

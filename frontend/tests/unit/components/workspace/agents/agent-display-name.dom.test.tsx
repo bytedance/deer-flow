@@ -6,6 +6,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { toast } from "sonner";
 
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { AgentSettingsDialog } from "@/components/workspace/agents/agent-settings-dialog";
@@ -39,6 +40,31 @@ afterEach(() => {
 });
 
 describe("custom agent display names", () => {
+  it("accepts 100 astral code points without an HTML code-unit limit", async () => {
+    render(<AgentSettingsDialog agent={agent} open onOpenChange={rs.fn()} />);
+    const input = screen.getByLabelText("Display name");
+    expect(input.hasAttribute("maxlength")).toBe(false);
+    fireEvent.change(input, { target: { value: "🦌".repeat(100) } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          request: expect.objectContaining({ display_name: "🦌".repeat(100) }),
+        }),
+      ),
+    );
+  });
+
+  it("rejects 101 code points before saving", () => {
+    render(<AgentSettingsDialog agent={agent} open onOpenChange={rs.fn()} />);
+    fireEvent.change(screen.getByLabelText("Display name"), {
+      target: { value: "🦌".repeat(101) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(mutateAsync).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalled();
+  });
+
   it("shows Unicode names and falls back for legacy or cleared names", () => {
     const { rerender } = render(
       <AgentWelcome agent={agent} agentName="reviewer" />,

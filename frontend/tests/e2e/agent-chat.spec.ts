@@ -21,6 +21,34 @@ const MOCK_AGENTS = [
 ];
 
 test.describe("Agent chat", () => {
+  test("display name length counts emoji as code points", async ({ page }) => {
+    mockLangGraphAPI(page, { agents: [MOCK_AGENTS[0]!] });
+    let savedName: string | undefined;
+    await page.route("**/api/agents/test-agent", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      const request = route.request().postDataJSON() as {
+        display_name: string;
+      };
+      savedName = request.display_name;
+      await route.fulfill({ json: { ...MOCK_AGENTS[0], ...request } });
+    });
+    await page.goto("/workspace/agents");
+    await page.getByTitle("Agent settings", { exact: true }).click();
+    const input = page.getByLabel("Display name", { exact: true });
+    await input.fill("🦌".repeat(101));
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(
+      page.getByText("Display name must be at most 100 Unicode code points."),
+    ).toBeVisible();
+    expect(savedName).toBeUndefined();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await input.fill("🦌".repeat(100));
+    await expect(input).toHaveValue("🦌".repeat(100));
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => savedName).toBe("🦌".repeat(100));
+    await expect(page.getByRole("dialog")).toBeHidden();
+  });
+
   test("Unicode display names keep the stable agent route and run context", async ({
     page,
   }, testInfo) => {

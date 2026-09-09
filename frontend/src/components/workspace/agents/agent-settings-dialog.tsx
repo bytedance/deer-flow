@@ -118,6 +118,10 @@ export function AgentSettingsDialog({
   }, [selectableSubagents, selectedSubagents]);
 
   async function handleSave() {
+    if ([...displayName.trim()].length > 100) {
+      toast.error(t.agents.settingsDisplayNameTooLong);
+      return;
+    }
     const parsedSettings = parseAgentModelSettingsDraft({
       temperature,
       maxTokens,
@@ -175,7 +179,6 @@ export function AgentSettingsDialog({
               id="agent-display-name"
               value={displayName}
               onChange={(event) => setDisplayName(event.target.value)}
-              maxLength={100}
               placeholder={agent.name}
               aria-describedby="agent-display-name-hint"
             />
@@ -183,7 +186,8 @@ export function AgentSettingsDialog({
               id="agent-display-name-hint"
               className="text-muted-foreground text-xs"
             >
-              {t.agents.settingsDisplayNameHint} ({agent.name})
+              {t.agents.settingsDisplayNameHint} ({agent.name}){" · "}
+              {[...displayName.trim()].length}/100
             </p>
           </div>
           {/* Default model */}

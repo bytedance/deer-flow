@@ -606,6 +606,7 @@ export const zhCN: Translations = {
     settings: "智能体设置",
     settingsTitle: "智能体设置",
     settingsDisplayName: "显示名称",
+    settingsDisplayNameTooLong: "显示名称不能超过 100 个 Unicode 码点。",
     settingsDisplayNameHint: "支持中文等 Unicode 字符，留空时使用智能体标识",
     settingsDescription:
       "为该智能体设置显示名称和默认模型，模型修改在下一条消息生效。",

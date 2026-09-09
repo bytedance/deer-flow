@@ -581,6 +581,14 @@ def disabled_agent_client(tmp_path):
 
 
 class TestAgentsAPI:
+    @pytest.mark.parametrize("display_name", ["a\u202eb", "line1\nline2", "z\x00ero"])
+    def test_invalid_display_name_cannot_be_persisted(self, agent_client, display_name):
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": display_name}).status_code == 422
+        assert agent_client.get("/api/agents").json()["agents"] == []
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": "🦌" * 100}).status_code == 201
+        assert agent_client.put("/api/agents/reviewer", json={"display_name": display_name}).status_code == 422
+        assert agent_client.get("/api/agents/reviewer").json()["display_name"] == "🦌" * 100
+
     def test_display_name_round_trip_keeps_stable_identity(self, agent_client):
         response = agent_client.post("/api/agents", json={"name": "code-reviewer", "display_name": "  代码审查助手  "})
         assert response.status_code == 201

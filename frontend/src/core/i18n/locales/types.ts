@@ -521,6 +521,7 @@ export interface Translations {
     settings: string;
     settingsTitle: string;
     settingsDisplayName: string;
+    settingsDisplayNameTooLong: string;
     settingsDisplayNameHint: string;
     settingsDescription: string;
     settingsModel: string;

@@ -639,6 +639,8 @@ export const enUS: Translations = {
     settings: "Agent settings",
     settingsTitle: "Agent settings",
     settingsDisplayName: "Display name",
+    settingsDisplayNameTooLong:
+      "Display name must be at most 100 Unicode code points.",
     settingsDisplayNameHint:
       "Supports Unicode. Leave blank to use the agent identifier",
     settingsDescription:

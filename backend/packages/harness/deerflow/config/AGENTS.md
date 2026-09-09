@@ -1,10 +1,13 @@
 ### Configuration System
 
 Custom Agent `AgentConfig.display_name` is an optional, whitespace-trimmed Unicode
-label of at most 100 characters. It is stored in the existing config document by
+label of at most 100 Unicode code points. C0/C1 controls and bidirectional
+formatting controls (U+202A–U+202E, U+2066–U+2069) are rejected before trimming.
+It is stored in the existing config document by
 both agent stores; it never participates in paths, routing, or authorization.
 Gateway create/update/response models share its validation. It remains outside
-`MANAGED_AGENT_CONFIG_FIELDS` so harness tools that do not edit it preserve it;
+`MANAGED_AGENT_CONFIG_FIELDS` so `update_agent` preserves it. `setup_agent`
+explicitly carries forward the existing owner's display name when re-bootstrapping;
 the Gateway explicitly overrides it when supplied, including null to clear.
 
 **Main Configuration** (`config.yaml`):
