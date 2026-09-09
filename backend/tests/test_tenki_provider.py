@@ -12,6 +12,7 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import re
 import shlex
 import sys
 import threading
@@ -154,10 +155,15 @@ class _FakeSandbox:
             return _FakeResult(exit_code=1, stdout=b"5 passed, 1 error\n")
         if "BOOTSTRAP_OK" in script:  # provider create-time bootstrap script
             return _FakeResult(stdout=b"BOOTSTRAP_OK\n")
-        if script.startswith("find "):
-            root = shlex.split(script)[1]
+        if script.startswith("find ") or "find -H " in script:
+            match = re.search(r"(?:^|[\s;{])find(?:\s+-[HLP])*\s+(\S+)", script)
+            root = match.group(1).strip("'\"") if match else ""
             hits = [p for p in self.files if p == root or p.startswith(f"{root.rstrip('/')}/")]
-            return _FakeResult(stdout=("\n".join(hits) + "\n").encode() if hits else b"")
+            listing = ("\n".join(hits) + "\n") if hits else ""
+            if "__DF_FIND_STATUS__:" in script:
+                status = 0 if hits else 1
+                return _FakeResult(stdout=f"{listing}\n__DF_FIND_STATUS__:{status}\n".encode(), exit_code=status)
+            return _FakeResult(stdout=listing.encode())
         if script.startswith("grep "):
             # grep <flags> -e <pattern> <root> 2>/dev/null | head -N
             tokens = shlex.split(script)
@@ -628,8 +634,9 @@ def test_glob_include_dirs_adds_directory_type_to_find() -> None:
 def test_list_dir_forwards_max_depth() -> None:
     fake = _FakeSandbox()
     box = TenkiSandbox("sb", fake)
+    box.write_file("/mnt/user-data/workspace/a.txt", "x")
     box.list_dir("/mnt/user-data/workspace", max_depth=4)
-    find_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("find ")]
+    find_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and "find " in c["argv"][2]]
     assert find_scripts and "-maxdepth 4" in find_scripts[-1]
 
 
@@ -1015,6 +1022,22 @@ def test_sandbox_id_matches_shared_identity():
 
     assert TenkiSandboxProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
     assert TenkiSandboxProvider._sandbox_id("t-1", "") == derive_sandbox_scope_token(user_id="", thread_id="t-1")
+
+
+def test_list_dir_raises_when_find_returns_no_entries() -> None:
+    box = TenkiSandbox("sb", _FakeSandbox())
+
+    with pytest.raises(FileNotFoundError):
+        box.list_dir("/mnt/user-data/missing")
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
+    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box._sh = lambda *args, **kwargs: _FakeResult(exit_code=127)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        box.list_dir("/mnt/user-data/workspace")
 
 
 def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:

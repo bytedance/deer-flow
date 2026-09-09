@@ -36,7 +36,7 @@ Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` wi
 
 Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
 
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
 ## Architecture
 
@@ -85,6 +85,16 @@ NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:8001/api
 ```
 
 Leave these unset for the standard `make dev` / Docker flow, where nginx serves the public `/api/langgraph/*` prefix and rewrites it to Gateway's native `/api/*` routes.
+
+`make build-static` creates a standalone read-only demo and copies `.next/static`
+and `public` into the output. In static mode, `core/api/static-response.ts`
+resolves Gateway REST reads with empty capability/catalog responses or existing
+same-origin `/mock/api` fixtures; writes and unknown API routes fail locally.
+The homepage client counter calls `/github-stars`, outside the Gateway proxy.
+That dynamic route reads the server-only `GITHUB_OAUTH_TOKEN` at runtime, caches
+GitHub data for one hour, and returns 204 when the count is unavailable. Start
+the standalone server from `frontend/` with `node --env-file=.env
+.next/standalone/server.js` to load the current credentials.
 
 To reach a dev server on anything other than localhost — a LAN address, or a proxied hostname — list the host in `DEER_FLOW_DEV_ALLOWED_ORIGINS` (comma-separated; a full URL is reduced to its host). It feeds Next's `allowedDevOrigins`, which gates `/_next/*`, fonts, and HMR. Without it those requests get a 403 and the page renders server-side but never hydrates, so nothing on it — including the login form — responds. Development only; production builds ignore it.
 

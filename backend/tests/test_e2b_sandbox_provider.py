@@ -5198,11 +5198,58 @@ def test_list_dir_preserves_trailing_space_in_filename():
     # "notes.txt " (trailing space) is a legal Linux filename; find prints it
     # verbatim, one entry per line, so a per-line strip() corrupts the name and
     # every follow-up file API call on the listed path misses the real file.
-    listing = SimpleNamespace(stdout="/home/user/notes.txt \n/home/user/sub\n", stderr="", exit_code=0)
+    listing = SimpleNamespace(stdout="/home/user/notes.txt \n/home/user/sub\n\n__DF_FIND_STATUS__:0\n", stderr="", exit_code=0)
     client = FakeClient(commands=FakeCommandsAPI([listing]))
     sb = _make_sandbox(client)
 
     assert sb.list_dir("/home/user") == ["/home/user/notes.txt ", "/home/user/sub"]
+
+
+def test_list_dir_raises_when_command_fails():
+    client = FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(OSError, match="Failed to list_dir"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_raises_when_client_closed():
+    sb = _make_sandbox(FakeClient())
+    sb.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_raises_when_find_returns_no_entries():
+    # `find ... 2>/dev/null` on a missing path yields empty stdout; that is not
+    # a real empty directory (`find -type d` still prints the directory itself).
+    listing = SimpleNamespace(stdout="\n__DF_FIND_STATUS__:1\n", stderr="", exit_code=1)
+    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(FileNotFoundError):
+        sb.list_dir("/home/user/missing")
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path():
+    listing = SimpleNamespace(stdout="", stderr="", exit_code=127)
+    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_uses_find_H_to_dereference_start_point():
+    # find defaults to -P, so a symlink start point (E2B /mnt/acp-workspace)
+    # would produce empty stdout and raise FileNotFoundError without -H.
+    listing = SimpleNamespace(stdout="/mnt/acp-workspace\n\n__DF_FIND_STATUS__:0\n", stderr="", exit_code=0)
+    commands = FakeCommandsAPI([listing])
+    sb = _make_sandbox(FakeClient(commands=commands))
+
+    assert sb.list_dir("/mnt/acp-workspace") == ["/mnt/acp-workspace"]
+    assert commands.calls and "find -H " in commands.calls[0]
 
 
 def test_glob_preserves_trailing_space_in_filename():
