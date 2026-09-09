@@ -67,24 +67,24 @@ def test_runner_prefers_direct_pnpm_and_forwards_arguments(tmp_path: Path):
 
 def test_runner_prefers_cmd_shim_on_windows(monkeypatch):
     paths = {
-        "pnpm": r"C:\tools\pnpm",
+        "pnpm": r"C:\tools\pnpm.exe",
         "pnpm.cmd": r"C:\tools\pnpm.cmd",
     }
     find_pnpm_command = PNPM_MODULE["find_pnpm_command"]
     monkeypatch.setitem(find_pnpm_command.__globals__, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(find_pnpm_command.__globals__["shutil"], "which", paths.get)
+    monkeypatch.setitem(find_pnpm_command.__globals__, "shutil", SimpleNamespace(which=paths.get))
 
     assert find_pnpm_command() == [paths["pnpm.cmd"]]
 
 
 def test_runner_prefers_corepack_cmd_shim_on_windows(monkeypatch):
     paths = {
-        "corepack": r"C:\tools\corepack",
+        "corepack": r"C:\tools\corepack.exe",
         "corepack.cmd": r"C:\tools\corepack.cmd",
     }
     find_pnpm_command = PNPM_MODULE["find_pnpm_command"]
     monkeypatch.setitem(find_pnpm_command.__globals__, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(find_pnpm_command.__globals__["shutil"], "which", paths.get)
+    monkeypatch.setitem(find_pnpm_command.__globals__, "shutil", SimpleNamespace(which=paths.get))
 
     assert find_pnpm_command() == [paths["corepack.cmd"], "pnpm"]
 
