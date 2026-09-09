@@ -581,6 +581,28 @@ def disabled_agent_client(tmp_path):
 
 
 class TestAgentsAPI:
+    def test_display_name_round_trip_keeps_stable_identity(self, agent_client):
+        response = agent_client.post("/api/agents", json={"name": "code-reviewer", "display_name": "  代码审查助手  "})
+        assert response.status_code == 201
+        assert response.json()["display_name"] == "代码审查助手"
+        assert response.json()["name"] == "code-reviewer"
+        assert agent_client.get("/api/agents").json()["agents"][0]["display_name"] == "代码审查助手"
+        response = agent_client.put("/api/agents/code-reviewer", json={"description": "Updated"})
+        assert response.json()["display_name"] == "代码审查助手"
+        response = agent_client.put("/api/agents/code-reviewer", json={"display_name": "审查员 🦌"})
+        assert response.json()["display_name"] == "审查员 🦌"
+        assert agent_client.get("/api/agents/code-reviewer").json()["display_name"] == "审查员 🦌"
+        response = agent_client.put("/api/agents/code-reviewer", json={"display_name": None})
+        assert response.json()["display_name"] is None
+        assert response.json()["name"] == "code-reviewer"
+
+    def test_display_name_validation_does_not_relax_agent_identifier(self, agent_client):
+        assert agent_client.post("/api/agents", json={"name": "中文"}).status_code == 422
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": "名" * 101}).status_code == 422
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": "名" * 100}).status_code == 201
+        assert agent_client.put("/api/agents/reviewer", json={"display_name": "名" * 101}).status_code == 422
+        assert agent_client.get("/api/agents/reviewer").json()["display_name"] == "名" * 100
+
     def test_list_agents_empty(self, agent_client):
         response = agent_client.get("/api/agents")
         assert response.status_code == 200

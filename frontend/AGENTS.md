@@ -69,6 +69,10 @@ More specific `AGENTS.md` files under `src/` contain the frontend sections split
 
 ## Code Style
 
+Custom Agent `display_name` is an optional Unicode UI label, edited in
+`AgentSettingsDialog`. Use it with a fallback to `name` for gallery/chat text;
+keep `name` for React identity, URLs, requests, and runtime `agent_name`.
+
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.
 - **Class names**: Use `cn()` from `@/lib/utils` for conditional Tailwind classes.

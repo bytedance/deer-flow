@@ -21,6 +21,51 @@ const MOCK_AGENTS = [
 ];
 
 test.describe("Agent chat", () => {
+  test("Unicode display names keep the stable agent route and run context", async ({
+    page,
+  }, testInfo) => {
+    let streamBody: Record<string, unknown> | undefined;
+    const agent = { ...MOCK_AGENTS[0]!, display_name: "" };
+    mockLangGraphAPI(page, {
+      agents: [agent],
+      runStreamHandler: async (route) => {
+        streamBody = route.request().postDataJSON() as Record<string, unknown>;
+        await handleRunStream(route);
+      },
+    });
+    await page.route("**/api/agents/test-agent", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      const request = route.request().postDataJSON() as {
+        display_name: string;
+      };
+      expect(request.display_name).toBe("代码审查助手");
+      agent.display_name = request.display_name;
+      await route.fulfill({ json: agent });
+    });
+    await page.goto("/workspace/agents");
+    await page.getByTitle("Agent settings", { exact: true }).click();
+    await page.getByLabel("Display name", { exact: true }).fill("代码审查助手");
+    await page.screenshot({
+      path: testInfo.outputPath("display-name-settings.png"),
+    });
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await expect(page.getByText("代码审查助手", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Chat", exact: true }).click();
+    await page.waitForURL("**/workspace/agents/test-agent/chats/**");
+    await expect(
+      page.getByText("代码审查助手", { exact: true }).first(),
+    ).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("display-name-gallery.png"),
+    });
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await textarea.fill("Review this code");
+    await textarea.press("Enter");
+    await expect.poll(() => streamBody).toBeDefined();
+    expect(streamBody).toMatchObject({ context: { agent_name: "test-agent" } });
+  });
+
   test("agent gallery page loads and shows agents", async ({ page }) => {
     mockLangGraphAPI(page, { agents: MOCK_AGENTS });
 

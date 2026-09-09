@@ -636,10 +636,13 @@ export const enUS: Translations = {
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",
-    settings: "Model settings",
-    settingsTitle: "Model settings",
+    settings: "Agent settings",
+    settingsTitle: "Agent settings",
+    settingsDisplayName: "Display name",
+    settingsDisplayNameHint:
+      "Supports Unicode. Leave blank to use the agent identifier",
     settingsDescription:
-      "Choose the default model and generation parameters for this agent. Changes take effect on the next message.",
+      "Choose a display name and model defaults for this agent. Model changes take effect on the next message.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
     settingsTemperature: "Temperature",
@@ -651,7 +654,7 @@ export const enUS: Translations = {
     settingsThinkingOff: "Off",
     settingsReasoningEffort: "Reasoning effort",
     settingsInherit: "Inherit",
-    settingsSaved: "Model settings saved",
+    settingsSaved: "Agent settings saved",
     settingsInvalidTemperature: "Temperature must be between 0 and 2",
     settingsInvalidMaxTokens:
       "Max output tokens must be a positive integer up to 200,000",

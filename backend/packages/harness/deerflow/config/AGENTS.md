@@ -1,5 +1,12 @@
 ### Configuration System
 
+Custom Agent `AgentConfig.display_name` is an optional, whitespace-trimmed Unicode
+label of at most 100 characters. It is stored in the existing config document by
+both agent stores; it never participates in paths, routing, or authorization.
+Gateway create/update/response models share its validation. It remains outside
+`MANAGED_AGENT_CONFIG_FIELDS` so harness tools that do not edit it preserve it;
+the Gateway explicitly overrides it when supplied, including null to clear.
+
 **Main Configuration** (`config.yaml`):
 
 Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** directory.
