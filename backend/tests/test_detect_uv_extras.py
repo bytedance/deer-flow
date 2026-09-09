@@ -208,6 +208,43 @@ def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
+def test_detect_from_config_ollama_via_model_use(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: qwen3-local\n    use: langchain_ollama:ChatOllama\n    model: qwen3:32b\n    base_url: http://localhost:11434\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ollama_when_use_is_the_first_key(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  - use: langchain_ollama:ChatOllama\n    name: qwen3-local\n")
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ignores_commented_ollama_block(tmp_path):
+    """config.example.yaml ships the Ollama models fully commented out."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  # - name: qwen3-local\n  #   use: langchain_ollama:ChatOllama\n  #   base_url: http://localhost:11434\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_non_ollama_model_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  - name: gpt\n    use: langchain_openai:ChatOpenAI\n    model: gpt-4o\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_combines_ollama_and_postgres(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "database:\n  backend: postgres\nmodels:\n  - name: qwen3-local\n    use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama", "postgres"]
+
+
 def test_detect_from_config_combines_postgres_and_redis(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("database:\n  backend: postgres\nstream_bridge:\n  type: redis\n")

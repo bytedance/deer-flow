@@ -14,6 +14,7 @@ Order of resolution:
    - tools[].name == browser_navigate    -> browser
    - sandbox.ownership.type == redis     -> redis
    - channels.buzz.enabled == true       -> buzz
+   - models[].use == langchain_ollama:*  -> ollama
 3. Runtime environment toggles that enable optional backends:
    - DEER_FLOW_STREAM_BRIDGE_REDIS_URL   -> redis
    - DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL -> redis
@@ -79,6 +80,13 @@ _SECTION_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*$")
 _INDENTED_SECTION_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*$")
 _KEY_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*(\S.*?)\s*$")
 _LIST_ITEM_NAME_RE = re.compile(r"^\s*-\s+name\s*:\s*(\S.*?)\s*$")
+# `use:` inside a models list item, whether it is the first key (`- use: X`)
+# or a later one (`    use: X`).
+_MODEL_USE_RE = re.compile(r"^\s+(?:-\s+)?use\s*:\s*(\S.*?)\s*$")
+
+# Provider module (the part before `:` in `models[].use`) -> uv extra that
+# ships it. Mirrors `[project.optional-dependencies]` in the harness package.
+_PROVIDER_EXTRAS = {"langchain_ollama": "ollama"}
 
 
 def _strip_comment(line: str) -> str:
@@ -251,6 +259,38 @@ def tools_include_name(lines: list[str], tool_name: str) -> bool:
     return False
 
 
+def models_use_providers(lines: list[str]) -> set[str]:
+    """Return provider modules referenced by `models[].use`.
+
+    `models:` has the same top-level list-of-mappings shape as `tools:`, so this
+    mirrors :func:`tools_include_name`. Commented-out example blocks are dropped
+    by ``_strip_comment`` before matching, which keeps the fully-commented
+    `models:` section shipped in config.example.yaml from enabling an extra.
+    """
+    inside = False
+    providers: set[str] = set()
+    for raw in lines:
+        line = _strip_comment(raw)
+        if not line.strip():
+            continue
+        sect_match = _SECTION_RE.match(line)
+        if sect_match:
+            inside = sect_match.group(1) == "models"
+            continue
+        if not inside:
+            continue
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if indent == 0:
+            inside = False
+            continue
+        use_match = _MODEL_USE_RE.match(line)
+        if use_match:
+            target = _unquote(use_match.group(1).strip())
+            providers.add(target.split(":", 1)[0].split(".", 1)[0])
+    return providers
+
+
 def detect_from_config(path: Path) -> list[str]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -272,6 +312,10 @@ def detect_from_config(path: Path) -> list[str]:
         extras.add("buzz")
     if tools_include_name(lines, "browser_navigate"):
         extras.add("browser")
+    for provider in models_use_providers(lines):
+        extra = _PROVIDER_EXTRAS.get(provider)
+        if extra is not None:
+            extras.add(extra)
     return sorted(extras)
 
 
