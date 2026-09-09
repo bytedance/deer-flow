@@ -39,7 +39,7 @@ from deerflow.sandbox.lease import (
     sandbox_lease_owner,
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
-from deerflow.sandbox.path_patterns import build_output_mask_pattern, replace_output_path_matches
+from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -867,7 +867,7 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
             matched_path = match.group(0)
             if matched_path == _base:
                 return _virtual
-            relative = matched_path[len(_base) :].lstrip("/\\")
+            relative = normalize_mask_tail(matched_path[len(_base) :])
             return f"{_virtual}/{relative}" if relative else _virtual
 
         result = pattern.sub(replace_match, result)
