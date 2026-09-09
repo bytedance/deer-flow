@@ -35,6 +35,10 @@ The landing-page case studies open as allowlisted, read-only showcases without r
 
 ## InfoQuest
 
+InfoQuest reader, web search, and image search use a 30-second HTTP connect/read
+inactivity timeout. The crawl `timeout` and `navigation_timeout` settings remain
+separate server-side options; they do not control the local HTTP timeout.
+
 DeerFlow has newly integrated the intelligent search and crawling toolset independently developed by BytePlus--[InfoQuest (supports free online experience)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
 
 <a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
