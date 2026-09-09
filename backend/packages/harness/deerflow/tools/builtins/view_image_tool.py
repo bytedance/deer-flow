@@ -48,14 +48,6 @@ def _sanitize_image_error(error: Exception, thread_data: ThreadDataState | None)
     return mask_local_paths_in_output(f"{type(error).__name__}: {error}", thread_data)
 
 
-def _runtime_has_sandbox(runtime: Runtime) -> bool:
-    from deerflow.sandbox.overwrite import unwrap_sandbox
-
-    state = runtime.state or {}
-    sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
-    return isinstance(sandbox_state, dict) and bool(sandbox_state.get("sandbox_id"))
-
-
 @tool("view_image", parse_docstring=True)
 def view_image_tool(
     runtime: Runtime,
@@ -77,8 +69,9 @@ def view_image_tool(
         image_path: Absolute /mnt/user-data virtual path to the image file. Common formats supported: jpg, jpeg, png, webp, gif.
     """
     from deerflow.sandbox.exceptions import SandboxRuntimeError
+    from deerflow.sandbox.overwrite import unwrap_sandbox
+    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
     from deerflow.sandbox.tools import (
-        ensure_sandbox_initialized,
         get_thread_data,
         resolve_and_validate_user_data_path,
         validate_local_tool_path,
@@ -117,9 +110,13 @@ def view_image_tool(
     if mime_type is None:
         mime_type = expected_mime_type
 
-    if _runtime_has_sandbox(runtime):
+    state = runtime.state or {}
+    sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
+    sandbox_id = sandbox_state.get("sandbox_id") if isinstance(sandbox_state, dict) else None
+    sandbox = get_sandbox_provider().get(sandbox_id) if sandbox_id else None
+
+    if sandbox is not None:
         try:
-            sandbox = ensure_sandbox_initialized(runtime)
             image_data = sandbox.download_file(image_path)
         except FileNotFoundError:
             return Command(

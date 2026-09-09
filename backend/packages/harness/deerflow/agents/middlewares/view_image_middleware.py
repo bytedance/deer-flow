@@ -1,6 +1,5 @@
 """Middleware for injecting image details into the model request."""
 
-import asyncio
 import base64
 import logging
 from collections.abc import Awaitable, Callable
@@ -14,6 +13,7 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
 from deerflow.agents.thread_state import ThreadState
+from deerflow.sandbox.lease import run_sync_lifecycle_operation
 
 logger = logging.getLogger(__name__)
 
@@ -333,5 +333,8 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
         # Image reads + base64 encoding can be slow (up to 20MB), so offload the
-        # blocking work to a thread rather than stalling the event loop.
-        return await handler(await asyncio.to_thread(self._inject, request))
+        # blocking work without allowing cancellation to outlive a sandbox
+        # client operation. The outer run lease may release the client as soon as
+        # cancellation propagates.
+        injected_request = await run_sync_lifecycle_operation(self._inject, request)
+        return await handler(injected_request)
