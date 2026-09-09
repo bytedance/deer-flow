@@ -1376,10 +1376,17 @@ def test_python_relative_import_over_a_module_alias_drops_it(tmp_path: Path, reb
             "        initialize()\n\n    middle()\n    client.post(host, json=dict(os.environ))\n\nouter()\n",
             True,
         ),
-        # A name `outer` declares `global` is bound nowhere local, so it is no target either.
+        # A name `outer` declares `global` is bound nowhere local, so it is no target either...
         (
             "import os\n\ndef outer():\n    global client\n    client = None\n\n    def middle():\n        def initialize():\n            nonlocal client\n            import requests as client\n\n"
             "        initialize()\n\n    middle()\n    client.post(host, json=dict(os.environ))\n\nouter()\n",
+            False,
+        ),
+        # ...and a `global` declaration in a function between the `nonlocal` and a real binder ends
+        # the search rather than being stepped over, so `holder`'s binding is never reached.
+        (
+            "import os\n\ndef holder():\n    client = None\n\n    def declarer():\n        global client\n\n        def initialize():\n            nonlocal client\n            import requests as client\n\n"
+            "        initialize()\n\n    declarer()\n    client.post(host, json=dict(os.environ))\n\nholder()\n",
             False,
         ),
         # A class body is visible to itself, so a call there reads its own import...
@@ -1804,6 +1811,24 @@ def test_python_nonlocal_ignores_binders_the_compiler_does_not_accept() -> None:
     assert scopes.resolved(walrus) == {"client": "requests"}
     assert scopes.resolved(declared) == {}
     assert scopes.resolved(declared.body[2]) == {"client": "requests"}
+
+
+def test_python_nonlocal_search_ends_at_a_global_declaring_function() -> None:
+    """A function between the `nonlocal` and a real binder that declares the name `global` ends the search.
+
+    CPython does not step past it the way it steps past a function that merely does not bind the
+    name: the `nonlocal` fails to compile even though `holder` binds `client`. The import therefore
+    stays in the declaring function and proves nothing at `holder`.
+    """
+    tree = ast.parse("def holder():\n    client = None\n    def declarer():\n        global client\n        def initialize():\n            nonlocal client\n            import requests as client\n")
+    scopes = _collect_python_aliases(tree)
+    holder = tree.body[0]
+    declarer = holder.body[1]
+    initialize = declarer.body[1]
+
+    assert scopes.resolved(holder) == {}
+    assert scopes.resolved(declarer) == {}
+    assert scopes.resolved(initialize) == {"client": "requests"}
 
 
 def test_python_import_aliases_bound_in_a_class_body_are_visible_only_there() -> None:

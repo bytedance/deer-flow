@@ -791,10 +791,13 @@ class _PythonImportScopes:
         while current is not None:
             if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 declared = self._declared.get(current, {})
-                # A function that declares the name `global` binds it nowhere local, so it is not a
-                # target for `nonlocal` either; one that declares it `nonlocal` is returned so the
-                # caller keeps following the chain from there.
-                if declared.get(name) is False or (name in self._bound.get(current, ()) and name not in declared):
+                if declared.get(name) is True:
+                    # A function that declares the name `global` ends the compiler's search: the
+                    # `nonlocal` does not compile even if an outer function binds the name.
+                    return None
+                # One that declares it `nonlocal` is returned so the caller keeps following the
+                # chain from there.
+                if declared.get(name) is False or name in self._bound.get(current, ()):
                     return current
             current = self._parents.get(current)
         return None
