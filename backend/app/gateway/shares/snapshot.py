@@ -1378,6 +1378,118 @@ class _IdentitySpans:
         return (index, index)
 
 
+class _SparseSpans:
+    """Compact offset map: identity positions plus decoded-byte-group spans.
+
+    ``spans[i]`` returns ``(i, i)`` for every position that maps to itself
+    and the recorded ``(first, last)`` span for each decoded entity/percent
+    triple. Positions after a decode shift by that decode's shrink, so the
+    map stores sorted decode records plus prefix shrinks and answers any
+    index in O(log #decodes) — O(decoded entities) memory instead of the
+    per-character tuple list a near-limit entity-bearing token would
+    otherwise materialize.
+    """
+
+    __slots__ = ("_length", "_indexes", "_firsts", "_lasts", "_prefix_shrinks")
+
+    def __init__(self, length: int, decodes: list[tuple[int, int, int]] | tuple[tuple[int, int, int], ...]) -> None:
+        decodes = sorted(decodes)
+        self._length = length
+        self._indexes = [record[0] for record in decodes]
+        self._firsts = [record[1] for record in decodes]
+        self._lasts = [record[2] for record in decodes]
+        prefix: list[int] = []
+        running = 0
+        for _, first, last in decodes:
+            running += last - first
+            prefix.append(running)
+        self._prefix_shrinks = prefix
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __getitem__(self, index: int) -> tuple[int, int]:
+        position = bisect_left(self._indexes, index)
+        if position < len(self._indexes) and self._indexes[position] == index:
+            return (self._firsts[position], self._lasts[position])
+        shrink = self._prefix_shrinks[position - 1] if position > 0 else 0
+        return (index + shrink, index + shrink)
+
+
+def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _SparseSpans]:
+    """Decode entities (and optionally percent) to a fixpoint, sparsely.
+
+    Mirrors ``_collapse_separators_once``'s entity/percent branches without
+    materializing a per-character span list: each decoded byte group becomes
+    one exception record, every other output position maps to itself, and
+    composition across passes projects each new decode through the prior
+    exceptions. Backslash and slash-run handling stay out — callers gate on
+    ``\\`` and foldable ``//`` before entering and fall back to the
+    materialized path when the decoded shadow re-introduces them.
+    """
+    current = text
+    spans = _SparseSpans(len(text), ())
+    for _ in range(_COLLAPSE_MAX_PASSES):
+        if _HTML_ENTITY_RE.search(current) is None and not (decode_percent and "%" in current):
+            break
+        out: list[str] = []
+        decodes: list[tuple[int, int, int]] = []
+        cursor = 0
+        out_index = 0
+        changed = False
+        i = 0
+        n = len(current)
+        while i < n:
+            char = current[i]
+            decoded: str | None = None
+            end: int | None = None
+            if decode_percent and char == "%" and i + 2 < n:
+                try:
+                    byte = int(current[i + 1 : i + 3], 16)
+                except ValueError:
+                    byte = 0x100
+                if byte < 0x80:
+                    decoded = chr(byte)
+                    end = i + 3
+            if decoded is None and char == "&":
+                entity = _decode_entity(current, i)
+                if entity is not None:
+                    decoded, end = entity
+            if decoded is not None and end is not None:
+                out.append(current[cursor:i])
+                out_index += i - cursor
+                first = spans[i][0]
+                last = spans[end - 1][1]
+                decodes.append((out_index, first, last))
+                out.append(decoded)
+                out_index += 1
+                i = end
+                cursor = i
+                changed = True
+                continue
+            i += 1
+        if not changed:
+            break
+        out.append(current[cursor:])
+        new_length = out_index + (n - cursor)
+        current = "".join(out)
+        spans = _SparseSpans(new_length, decodes)
+    return current, spans
+
+
+def _needs_materialized_collapse(shadow: str, *, resolve_dots: bool) -> bool:
+    """Whether ``shadow`` still needs backslash/slash-run/dot processing.
+
+    The sparse decode resolves entities and percent to a fixpoint but leaves
+    backslash separators, slash-run folding, and dot-segment removal to the
+    materialized path. Any of those still reachable in ``shadow`` makes the
+    sparse result incomplete.
+    """
+    if "\\" in shadow or _FOLDABLE_SLASH_RUN_RE.search(shadow) is not None:
+        return True
+    return resolve_dots and ("/." in shadow or "/%2e" in shadow.lower())
+
+
 def _collapse_separators_with_offsets(text: str, *, resolve_dots: bool = True) -> tuple[str, list[tuple[int, int]]]:
     """Normalize escape and backslash separators for classification.
 
@@ -1413,6 +1525,16 @@ def _collapse_separators_with_offsets(text: str, *, resolve_dots: bool = True) -
             return text, _IdentitySpans(len(text))
         normalized, spans = _remove_dot_segments_once(text, _IdentitySpans(len(text)))
         return normalized, spans
+    if "&" in text and _HTML_ENTITY_RE.search(text) is not None and "\\" not in text and _FOLDABLE_SLASH_RUN_RE.search(text) is None:
+        # Entity-only token: the sparse decoder resolves every valid character
+        # reference to a fixpoint without a per-character span list (round-16:
+        # one trailing ``&amp;`` on a 500 kB message still peaked ~206 MiB
+        # through two materialized maps). Fall back to the materialized path
+        # only when the decoded shadow still needs backslash, slash-run, or
+        # dot processing.
+        normalized, sparse = _decode_escapes_sparse(text, decode_percent=False)
+        if not _needs_materialized_collapse(normalized, resolve_dots=resolve_dots):
+            return normalized, sparse
     if resolve_dots:
         normalized, spans = _remove_dot_segments_once(text, [(index, index) for index in range(len(text))])
     else:
@@ -1454,6 +1576,13 @@ def _normalize_workspace_path_with_offsets(text: str, *, resolve_dots: bool) -> 
         spans = [(index, index) for index in range(len(text))]
         normalized, spans = _remove_dot_segments_once(text, spans, encoded_dots=False)
         return normalized, spans
+    if "\\" not in text and _FOLDABLE_SLASH_RUN_RE.search(text) is None and ("%" in text or ("&" in text and _HTML_ENTITY_RE.search(text) is not None)):
+        # Entity/percent-only path: decode to a fixpoint with a sparse offset
+        # map (round-16), falling back when the decoded shadow still needs
+        # backslash, slash-run, or dot processing.
+        normalized, sparse = _decode_escapes_sparse(text, decode_percent=True)
+        if not _needs_materialized_collapse(normalized, resolve_dots=resolve_dots):
+            return normalized, sparse
     normalized = text
     spans = [(index, index) for index in range(len(text))]
     for _ in range(_COLLAPSE_MAX_PASSES):
@@ -2521,11 +2650,16 @@ def _neutralize_private_references_once(text: str) -> str:
     view already cut precisely."""
     edits: list[tuple[int, int, str]] = []
     _collect_workspace_edits(text, edits)
-    for normalized, spans, conservative_gaps in (
-        (*_collapse_separators_with_offsets(text), True),
-        (*_collapse_separators_with_offsets(text, resolve_dots=False), False),
-    ):
-        _collect_edits(text, normalized, spans, edits, conservative_gaps=conservative_gaps)
+    # Build and consume each shadow one at a time: the previous tuple form
+    # materialized both full per-character offset maps before processing
+    # either, so a near-limit message with one valid entity (``&amp;``)
+    # peaked ~206 MiB RSS through the two maps alone (round-16).
+    normalized, spans = _collapse_separators_with_offsets(text)
+    _collect_edits(text, normalized, spans, edits, conservative_gaps=True)
+    del normalized, spans
+    normalized, spans = _collapse_separators_with_offsets(text, resolve_dots=False)
+    _collect_edits(text, normalized, spans, edits, conservative_gaps=False)
+    del normalized, spans
 
     # Markdown links take precedence over raw references overlapping them,
     # matching the sequential regex passes this replaced.

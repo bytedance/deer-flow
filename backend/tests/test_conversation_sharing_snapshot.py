@@ -2481,10 +2481,130 @@ def test_entity_free_ampersand_keeps_identity_spans():
     assert view == text
     assert spans is None
 
-    # A valid entity still decodes (and therefore materializes a real map).
+    # A valid entity decodes through the compact sparse map (round-16): it is
+    # neither the identity fast path nor a materialized per-character list.
     view, spans = _collapse_separators_with_offsets("a&amp;b", resolve_dots=False)
     assert view == "a&b"
-    assert type(spans).__name__ != "_IdentitySpans"
+    assert type(spans).__name__ == "_SparseSpans"
+    assert spans[0] == (0, 0)  # "a"
+    assert spans[1] == (1, 5)  # "&amp;" -> "&"
+    assert spans[2] == (6, 6)  # "b"
+
+
+def test_entity_bearing_shadow_keeps_compact_span_map():
+    """One trailing ``&amp;`` on an otherwise plain near-limit message must
+    not materialize per-character span tuples (round-16: 500 kB peaked
+    ~206 MiB RSS through two materialized maps)."""
+    from app.gateway.shares.snapshot import (
+        _collapse_separators_with_offsets,
+        _normalize_workspace_path_with_offsets,
+    )
+
+    text = "a" * 10_000 + "&amp;"
+    view, spans = _collapse_separators_with_offsets(text, resolve_dots=False)
+    assert view == "a" * 10_000 + "&"
+    assert type(spans).__name__ == "_SparseSpans"
+    assert spans[10_000] == (10_000, 10_004)  # the decoded entity
+
+    view, spans = _normalize_workspace_path_with_offsets(text, resolve_dots=False)
+    assert view == "a" * 10_000 + "&"
+    assert type(spans).__name__ == "_SparseSpans"
+    assert spans[10_000] == (10_000, 10_004)
+
+
+def test_entity_decode_that_needs_collapse_falls_back_to_materialized():
+    """A decoded backslash, slash run, or dot segment must go through the
+    materialized path — the sparse decoder deliberately leaves those to the
+    full collapse."""
+    from app.gateway.shares.snapshot import (
+        _collapse_separators_with_offsets,
+        _normalize_workspace_path_with_offsets,
+    )
+
+    # `&#92;` is separator-normalized straight to `/` by the entity table, so
+    # it stays on the sparse path rather than falling back.
+    view, spans = _collapse_separators_with_offsets("a&#92;b", resolve_dots=False)
+    assert view == "a/b"
+    assert type(spans).__name__ == "_SparseSpans"
+
+    # `&sol;&sol;` decodes to a foldable slash run that must fold to one `/`.
+    view, spans = _collapse_separators_with_offsets("&sol;&sol;workspace", resolve_dots=False)
+    assert view == "/workspace"
+    assert isinstance(spans, list)
+
+    # `&#46;&#46;` decodes to `..` under a slash: dot resolution required.
+    view, spans = _collapse_separators_with_offsets("a/b/&#46;&#46;/workspace/chats/id", resolve_dots=True)
+    assert view == "a/workspace/chats/id"
+    assert isinstance(spans, list)
+
+    # Workspace percent path: `%255C` -> `\\` -> `/` (decoded backslash).
+    view, spans = _normalize_workspace_path_with_offsets("a%255Cb", resolve_dots=False)
+    assert view == "a/b"
+    assert isinstance(spans, list)
+
+
+def test_sparse_escape_decode_matches_materialized_collapse():
+    """The sparse decoder must be byte-identical to the materialized collapse
+    loop everywhere it is actually used (no backslash/slash-run/dot in the
+    decoded shadow), including composed and semicolon-less encodings."""
+    from app.gateway.shares import snapshot as snapshot_module
+
+    corpus = [
+        "plain text",
+        "a&amp;b",
+        "&amp;#47;api/threads/x",
+        "&sol;&sol;example.com",
+        "x&period;y",
+        "&#46;&#46;/workspace/chats/id",
+        "a&amp;amp;b",
+        "%252Fworkspace/chats/id",
+        "&UnderBar;_/workspace/chats/id",
+        "&#x2F;api&#x2F;threads&#x2F;id",
+        "&#47api&#47threads&#47id",
+        "fish &amp; chips &#65; ok",
+        "&Tab;/workspace/chats/id",
+        "&NewLine;/workspace/chats/id",
+        "&period;&period;/mnt/user-data",
+        "a&b&c",
+        "&#0;invalid",
+        "&#xD800;surrogate",
+        "&#x110000;beyond",
+        "&amp;&amp;x",
+        "a%2Fb",
+        "%2f%2fworkspace/chats/id",
+        "&sol;workspace&sol;chats&sol;id",
+        "&#37;2Fworkspace/chats/id",
+    ]
+
+    def reference(text, decode_percent):
+        normalized = text
+        spans = [(i, i) for i in range(len(text))]
+        for _ in range(snapshot_module._COLLAPSE_MAX_PASSES):
+            collapsed, collapsed_spans = snapshot_module._collapse_separators_once(
+                normalized,
+                decode_percent=decode_percent,
+            )
+            if collapsed == normalized:
+                break
+            normalized = collapsed
+            spans = [(spans[first][0], spans[last][1]) for first, last in collapsed_spans]
+        return normalized, spans
+
+    for text in corpus:
+        for decode_percent in (False, True):
+            shadow, sparse = snapshot_module._decode_escapes_sparse(
+                text,
+                decode_percent=decode_percent,
+            )
+            ref_shadow, ref_spans = reference(text, decode_percent)
+            if snapshot_module._needs_materialized_collapse(shadow, resolve_dots=False):
+                # The caller falls back to the materialized path; the sparse
+                # result is incomplete by design here.
+                continue
+            assert shadow == ref_shadow, (text, decode_percent, shadow, ref_shadow)
+            assert len(sparse) == len(ref_spans), (text, decode_percent)
+            for i in range(len(ref_spans)):
+                assert sparse[i] == ref_spans[i], (text, decode_percent, i, sparse[i], ref_spans[i])
 
 
 def test_strip_gfm_table_cells_never_pair_backticks_across_rows():
