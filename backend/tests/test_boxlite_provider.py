@@ -1309,7 +1309,7 @@ def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     # verbatim, one entry per line, so a per-line strip() corrupts the name.
     class _FindBox:
         async def exec(self, *argv, env=None, timeout=None):
-            return types.SimpleNamespace(stdout="/mnt/user-data/workspace/notes.txt \n", stderr="", exit_code=0)
+            return types.SimpleNamespace(stdout="/mnt/user-data/workspace/notes.txt \n\n__DF_FIND_STATUS__:0\n", stderr="", exit_code=0)
 
     box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
 
@@ -1318,3 +1318,40 @@ def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
     assert found == ["/mnt/user-data/workspace/notes.txt "]
     assert truncated is False
+
+
+def test_list_dir_raises_when_find_returns_no_entries() -> None:
+    class _EmptyBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout="\n__DF_FIND_STATUS__:1\n", stderr="", exit_code=1)
+
+    box = BoxliteBox("box-id", box=_EmptyBox(), run=_fake_run)
+
+    with pytest.raises(FileNotFoundError):
+        box.list_dir("/mnt/user-data/workspace")
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
+    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    class _MissingBinaryBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout="", stderr="", exit_code=127)
+
+    box = BoxliteBox("box-id", box=_MissingBinaryBox(), run=_fake_run)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        box.list_dir("/mnt/user-data/workspace")
+
+
+def test_list_dir_uses_find_H_to_dereference_start_point() -> None:
+    captured: list[tuple] = []
+
+    class _FindBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            captured.append(argv)
+            return types.SimpleNamespace(stdout="/mnt/user-data/workspace\n\n__DF_FIND_STATUS__:0\n", stderr="", exit_code=0)
+
+    box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace"]
+    assert any(len(argv) >= 3 and "find -H " in str(argv[2]) for argv in captured)

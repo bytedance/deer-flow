@@ -275,6 +275,24 @@ class TestCheckWebSearch:
         assert result.status == "ok"
         assert "DuckDuckGo" in result.detail
 
+    def test_commented_out_tools_block_warns_without_traceback(self, tmp_path):
+        # config.example.yaml ships a `tools:` key whose entries can all be
+        # commented out, so it parses as None rather than an empty list.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  # - name: web_search\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "no web_search tool in config"
+
+    def test_scalar_tools_entry_warns_without_traceback(self, tmp_path):
+        # A bare string entry is not a mapping; `t.get("name")` used to raise
+        # AttributeError, which the broad handler rendered as the check result.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - web_search\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "no web_search tool in config"
+
     def test_tavily_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
         cfg = tmp_path / "config.yaml"
@@ -658,6 +676,17 @@ class TestCheckSandbox:
         cfg.write_text("config_version: 5\n")
         results = doctor.check_sandbox(cfg)
         assert results[0].status == "fail"
+
+    def test_commented_out_tools_block_reports_no_traceback(self, tmp_path):
+        # Regression: iterating a null `tools:` raised TypeError, which the
+        # broad handler rendered as "('NoneType' object is not iterable)".
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nsandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\ntools:\n  # - name: bash\n")
+        results = doctor.check_sandbox(cfg)
+        # Empty `tools:` means no bash tool, so the path is deterministic.
+        assert len(results) == 1
+        assert results[0].status == "ok"
+        assert results[0].detail == "Local sandbox"
 
     def test_local_sandbox_with_disabled_host_bash_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
