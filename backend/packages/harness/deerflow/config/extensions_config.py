@@ -3,12 +3,14 @@
 import errno
 import json
 import logging
+import math
 import os
 import stat
 import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,6 +25,7 @@ from deerflow.constants import (
 
 logger = logging.getLogger(__name__)
 
+_JSON_KWARGS_ERROR = "middleware kwargs values must be JSON types (object, array, string, number, boolean, or null)"
 _non_atomic_fallback_targets: set[Path] = set()
 _non_atomic_fallback_targets_lock = threading.Lock()
 
@@ -307,6 +310,29 @@ class SkillStateConfig(BaseModel):
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
 
 
+def _coerce_json_kwargs_value(value: Any) -> Any:
+    """Keep JSON types; stringify YAML timestamps so they match JSON strings."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(_JSON_KWARGS_ERROR)
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.isoformat()
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) and key.strip() for key in value):
+            raise ValueError("middleware kwargs keys must be non-empty strings")
+        return {key: _coerce_json_kwargs_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_coerce_json_kwargs_value(item) for item in value]
+    raise ValueError(_JSON_KWARGS_ERROR)
+
+
 class ConfiguredMiddlewareSpec(BaseModel):
     """One config-declared AgentMiddleware with optional constructor arguments."""
 
@@ -318,7 +344,11 @@ class ConfiguredMiddlewareSpec(BaseModel):
     )
     kwargs: dict[str, Any] = Field(
         default_factory=dict,
-        description="Keyword arguments passed to the middleware constructor.",
+        description=(
+            "Keyword arguments passed to the middleware constructor. Values must be JSON types "
+            "(object, array, string, number, boolean, or null); YAML dates and timestamps are "
+            "coerced to ISO strings so they match JSON."
+        ),
     )
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -337,10 +367,10 @@ class ConfiguredMiddlewareSpec(BaseModel):
 
     @field_validator("kwargs")
     @classmethod
-    def _kwargs_keys_are_strings(cls, value: dict[str, Any]) -> dict[str, Any]:
-        if not all(isinstance(key, str) and key.strip() for key in value):
-            raise ValueError("middleware kwargs keys must be non-empty strings")
-        return value
+    def _kwargs_are_json_object(cls, value: dict[str, Any]) -> dict[str, Any]:
+        coerced = _coerce_json_kwargs_value(value)
+        json.dumps(coerced)
+        return coerced
 
 
 class ExtensionsConfig(BaseModel):
@@ -348,7 +378,7 @@ class ExtensionsConfig(BaseModel):
 
     middlewares: list[str | ConfiguredMiddlewareSpec] = Field(
         default_factory=list,
-        description="AgentMiddleware entries loaded into the lead-agent and subagent middleware chains. Each entry is a 'module.path:ClassName' string or an object with 'class' and optional 'kwargs'.",
+        description="AgentMiddleware entries loaded into the lead-agent and subagent middleware chains. Each entry is a 'module.path:ClassName' string or an object with 'class' and optional 'kwargs'. kwargs values must be JSON types; YAML dates and timestamps are coerced to ISO strings.",
     )
     mcp_servers: dict[str, McpServerConfig] = Field(
         default_factory=dict,

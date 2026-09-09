@@ -300,7 +300,9 @@ Lifecycle hooks can return a dictionary of state updates, which LangChain merges
 into the agent state, or `None` when they only observe state.
 
 2. Register the middleware class in `config.yaml`. A class path uses the
-   zero-argument constructor; `{class, kwargs}` passes constructor arguments:
+   zero-argument constructor; `{class, kwargs}` passes constructor arguments.
+   `kwargs` values must be JSON types (object, array, string, number, boolean,
+   or null); YAML dates and timestamps are coerced to ISO strings so they match JSON:
 
 ```yaml
 extensions:

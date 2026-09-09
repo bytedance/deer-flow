@@ -257,7 +257,7 @@ class MyMiddleware(AgentMiddleware[AgentState]):
 Lifecycle hooks can return a dictionary of state updates, which LangChain merges
 into the agent state, or `None` when they only observe state.
 
-For operator-managed deployments, register a class by import path. A string uses the zero-argument constructor; `{class, kwargs}` passes constructor arguments:
+For operator-managed deployments, register a class by import path. A string uses the zero-argument constructor; `{class, kwargs}` passes constructor arguments. `kwargs` values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON:
 
 ```yaml
 extensions:

@@ -1,5 +1,7 @@
 """Config-declared extension middleware loading, including constructor kwargs."""
 
+import json
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -42,6 +44,23 @@ def test_dict_entry_passes_constructor_kwargs():
     assert len(loaded) == 1
     assert isinstance(loaded[0], RecordingMiddleware)
     assert loaded[0].max_tool_calls == 3
+
+
+def test_raw_dict_entry_passes_constructor_kwargs():
+    loaded = load_configured_extension_middlewares(
+        _config({"class": f"{__name__}:RecordingMiddleware", "kwargs": {"max_tool_calls": 2}})
+    )
+
+    assert len(loaded) == 1
+    assert isinstance(loaded[0], RecordingMiddleware)
+    assert loaded[0].max_tool_calls == 2
+
+
+def test_malformed_raw_dict_fails_at_load():
+    with pytest.raises(ValidationError):
+        load_configured_extension_middlewares(
+            _config({"class": f"{__name__}:RecordingMiddleware", "apply_to": "lead"})
+        )
 
 
 def test_empty_kwargs_matches_zero_arg_constructor():
@@ -101,6 +120,31 @@ def test_extensions_config_strips_string_entries():
     config = ExtensionsConfig.model_validate({"middlewares": [" pkg:Plain "]})
 
     assert config.middlewares == ["pkg:Plain"]
+
+
+def test_kwargs_yaml_date_normalizes_to_iso_string():
+    spec = ConfiguredMiddlewareSpec.model_validate({"class": "pkg:Mw", "kwargs": {"cutoff": date(2026, 1, 1)}})
+
+    assert spec.kwargs == {"cutoff": "2026-01-01"}
+    json.dumps(ExtensionsConfig(middlewares=[spec]).to_file_dict())
+
+
+def test_kwargs_yaml_datetime_normalizes_to_iso_string():
+    spec = ConfiguredMiddlewareSpec.model_validate(
+        {"class": "pkg:Mw", "kwargs": {"cutoff": datetime(2026, 1, 1, 12, 0, 0)}}
+    )
+
+    assert spec.kwargs == {"cutoff": "2026-01-01T12:00:00"}
+
+
+def test_kwargs_reject_non_json_values():
+    with pytest.raises(ValidationError, match="JSON types"):
+        ConfiguredMiddlewareSpec.model_validate({"class": "pkg:Mw", "kwargs": {"hook": object()}})
+
+
+def test_kwargs_reject_nan():
+    with pytest.raises(ValidationError, match="JSON types"):
+        ConfiguredMiddlewareSpec.model_validate({"class": "pkg:Mw", "kwargs": {"n": float("nan")}})
 
 
 def test_to_file_dict_round_trips_kwargs_entries():

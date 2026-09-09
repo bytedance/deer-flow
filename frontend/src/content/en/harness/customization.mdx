@@ -44,7 +44,7 @@ class AuditMiddleware(AgentMiddleware[AgentState]):
 Lifecycle hooks can return a dictionary of state updates, which LangChain merges
 into the agent state; return `None` when observing only.
 
-For an operator-managed deployment, the class must be importable by the Gateway process. A string entry uses the zero-argument constructor; `{class, kwargs}` passes constructor arguments:
+For an operator-managed deployment, the class must be importable by the Gateway process. A string entry uses the zero-argument constructor; `{class, kwargs}` passes constructor arguments. `kwargs` values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON:
 
 ```yaml
 extensions:
