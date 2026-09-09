@@ -53,7 +53,7 @@ owner-scoped assistant version selection remains enabled.
 |--------|-----------|
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
 | **Features** (`/api/features`) | `GET /` - UI capabilities: hot-reloaded agents, guarded browser, startup MCP tasks, and separate batch repository/worker states so history stays readable without a worker |
-| **Knowledge** (`/api/knowledge/retrieval-catalog`) | Authenticated, allowlist-safe, read-only dataset/document catalog used only by custom-agent chat scope selection; knowledge management remains in RAGFlow |
+| **Knowledge** (`/api/knowledge/retrieval-catalog`) | Allowlisted, read-only custom-agent retrieval catalog |
 | **Console** (`/api/console`) | Read-only cross-thread observability for the current user (the data layer for an operations dashboard or external monitoring): `GET /stats` - headline counters (runs/threads/agents/tokens/cost); `GET /runs` - paginated run history joined with thread titles (per-run cost); `GET /usage` - zero-filled daily token series + per-model breakdown with spend. Queries `runs`/`threads_meta` directly as a reporting layer (no new `RunStore` methods); requires a SQL database backend — returns 503 on `database.backend: memory`. Real-cost estimation reads optional `models[*].pricing` (`currency`, `input_per_million`, `output_per_million`, `input_cache_hit_per_million`; `ModelConfig` is `extra="allow"`, so no schema change) and prices each run from its `token_usage_by_model` input/output split. Pricing is **cache-aware**: `RunJournal` accumulates prompt-cache hits from `usage_metadata.input_token_details.cache_read` into a sparse `cache_read_tokens` bucket key (also threaded through `SubagentTokenCollector` → `record_external_llm_usage_records`), and cache-hit input tokens are billed at `input_cache_hit_per_million` (omitted → billed at the miss price, a conservative upper bound). All priced models must use one currency; mixed currencies disable cost reporting and leave cost/currency fields null instead of producing invalid aggregates. Legacy rows fall back to run-level totals at `model_name`; unpriced models yield `cost: null` and cost fields are null when no pricing is configured |
 | **MCP** (`/api/mcp`) | GET /config - raw/masked; PUT /config - bulk; PATCH /config - toggle; POST /config/servers - add; PUT /config/server - replace; DELETE /config/servers/{server_name:path} - bodyless. Validate expanded, save raw; reload/reset; invalid -> 400. |
 | **MCP Tasks** (`/api/threads/{id}/mcp-tasks`) | `GET /` - current user's durable tasks for one owned thread; `GET /{task_id}` - bounded result/input/status-error/cancellation-error detail, including cancellation attempt count, without remote task IDs or driver configuration |
@@ -72,18 +72,11 @@ owner-scoped assistant version selection remains enabled.
 | **GitHub Webhooks** (`/api/webhooks/github`) | `POST /` - receive GitHub App / repo webhook deliveries. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`; exempt from auth + CSRF because authenticity is enforced by HMAC. The route is fail-closed: mounted only when `GITHUB_WEBHOOK_SECRET` is set, or when explicit dev opt-in `DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1` is set. Recognized events include `ping`, `issues`, `issue_comment`, `pull_request`, `pull_request_review`, and `pull_request_review_comment`; unknown events return 200 with `handled=false`. Fan-out runtime failures return 503, keeping the delivery recorded as failed for manual/API/scripted redelivery (GitHub does not automatically retry any failed delivery, 5xx included); permanent/non-retryable conditions such as `channels.github.enabled: false`, unknown events, malformed payloads, or unavailable channel service return 200 with a skipped/handled response. |
 | **GitHub Event-Driven Agents** | Custom agents can declare a `github:` block in their `config.yaml` to bind to repos and event triggers. Webhook fan-out publishes one `InboundMessage` per matching binding to the channel bus; `GitHubChannel` routes those messages through `ChannelManager`. The response `dispatch` summarizes matched/fired/skipped agents. |
 
-Custom-agent chat knowledge scopes are admitted at run creation, before run
-input persistence or worker attachment. `knowledge_scope_admission.py` accepts
-the canonical v1 snapshot only on the current normal `HumanMessage`, verifies
-the thread/assistant binding, exact built-in RAGFlow provider, and the agent's
-`knowledge` tool group, and strips client attempts to inject the execution key
-through free-form runtime config. Ordinary regenerate/resume paths recover the
-already accepted source/checkpoint scope; edit-regenerate may replace it with a
-new canonical snapshot. A clarification reply carrying the current selector
-snapshot validates and admits that new scope; when the reply omits a scope it
-inherits the prior turn's checkpoint scope. The safe retrieval-catalog routes under
-`/api/knowledge/retrieval-catalog` are read-only, custom-agent-scoped, and must
-apply the same operator dataset allowlist without exposing provider credentials.
+`knowledge_scope_admission.py` admits custom-agent v1 scope before
+persistence, only from the current normal `HumanMessage`; it validates bindings,
+access, and blocks execution-key injection. Replay inherits checkpoint scope
+unless edit/clarification supplies valid scope. The read-only catalog is
+allowlisted and hides credentials.
 
 Thread identifiers use the shared `deerflow.utils.thread_id` contract
 `^[A-Za-z0-9_-]{1,64}$`. Caller-provided opaque IDs remain supported; UUIDs

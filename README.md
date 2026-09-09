@@ -1048,7 +1048,8 @@ operator's dataset allowlist, propagates the execution-only scope to native and
 durable subagents, and removes it from model inputs and external traces.
 When answering a pending clarification, an explicitly submitted current
 selector snapshot wins; clients that omit it inherit the prior turn's accepted
-scope.
+scope. Edit-and-regenerate follows the same fallback, and the file catalog is
+loaded only after a dataset is switched from all files to selected files.
 This release does not add an independent Knowledge item to the workspace
 sidebar or a DeerFlow knowledge-management page; create, upload, parse, and
 delete datasets and documents directly in RAGFlow.

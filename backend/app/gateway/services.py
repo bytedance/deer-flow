@@ -1624,13 +1624,15 @@ async def start_run(
         target_message_id = run_metadata.get("regenerate_from_message_id")
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
         candidate_has_scope = any(isinstance(message, BaseMessage) and KNOWLEDGE_SCOPE_KEY in message.additional_kwargs for message in scope_graph_input.get("messages", []))
-        replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and replay_kind != "edit")
+        current_message_has_scope = _current_human_message_has_knowledge_scope(graph_input)
+        replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
         is_human_input_response = _graph_input_is_human_input_response(graph_input)
-        # A clarification reply is a new HumanMessage. If the UI sends its
-        # current selector snapshot, validate and admit that snapshot normally;
-        # only omission inherits the source turn's authoritative scope. Replay
-        # and regenerate paths remain server-authoritative regardless of input.
-        is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not _current_human_message_has_knowledge_scope(graph_input))
+        # Clarification and edit-replay messages may intentionally replace the
+        # source scope. If either client omits its current selector snapshot,
+        # inherit the source turn's authoritative scope instead of widening the
+        # run to every operator-approved dataset. Other replay paths always use
+        # server recovery regardless of client input.
+        is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
         recovery_scope = (
             await _recover_run_knowledge_scope(
                 request,

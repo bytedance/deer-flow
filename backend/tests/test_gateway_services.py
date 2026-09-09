@@ -2102,6 +2102,114 @@ async def test_clarification_reply_scope_uses_current_selection_or_recovers_when
     assert recover_scope.await_count == recovery_calls
 
 
+@pytest.mark.parametrize(
+    ("include_current_scope", "expected_scope", "recovery_calls"),
+    [
+        (
+            True,
+            {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": ["dataset-current"],
+            },
+            0,
+        ),
+        (
+            False,
+            {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": ["dataset-source"],
+            },
+            1,
+        ),
+    ],
+    ids=["current-selection-wins", "omitted-selection-recovers"],
+)
+@pytest.mark.asyncio
+async def test_edit_replay_scope_uses_current_selection_or_recovers_when_omitted(
+    _stub_app_config,
+    include_current_scope,
+    expected_scope,
+    recovery_calls,
+):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True, "scope_selection_enabled": True},
+                "tools": [
+                    {
+                        "name": "knowledge_search",
+                        "group": "knowledge",
+                        "use": "deerflow.community.ragflow.tools:knowledge_search_tool",
+                    }
+                ],
+            }
+        )
+    )
+    additional_kwargs = {}
+    if include_current_scope:
+        additional_kwargs["knowledge_scope"] = {
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": ["dataset-current"],
+        }
+    body = RunCreateRequest(
+        assistant_id="researcher",
+        input={
+            "messages": [
+                {
+                    "type": "human",
+                    "content": "Edited question",
+                    "additional_kwargs": additional_kwargs,
+                }
+            ]
+        },
+        metadata={
+            "replay_kind": "edit",
+            "regenerate_from_message_id": "assistant-source",
+        },
+    )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured: dict[str, object] = {}
+    recover_scope = AsyncMock(
+        return_value={
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": ["dataset-source"],
+        }
+    )
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["graph_input"] = kwargs["graph_input"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services._recover_run_knowledge_scope", new=recover_scope),
+        patch(
+            "app.gateway.services._load_scope_agent_config",
+            new=AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"])),
+        ),
+    ):
+        record = await start_run(body, "thread-edit-scope", request)
+        await record.task
+
+    graph_input = captured["graph_input"]
+    assert isinstance(graph_input, dict)
+    message = graph_input["messages"][0]
+    assert message.additional_kwargs["knowledge_scope"] == expected_scope
+    assert recover_scope.await_count == recovery_calls
+
+
 def _make_start_run_persistence_context():
     from types import SimpleNamespace
 
