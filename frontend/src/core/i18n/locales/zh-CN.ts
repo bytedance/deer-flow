@@ -756,6 +756,15 @@ export const zhCN: Translations = {
 
   // Tool calls
   toolCalls: {
+    details: "工具详情",
+    toolName: "工具名称",
+    callId: "调用 ID",
+    input: "输入",
+    result: "结果",
+    error: "错误",
+    noResult: "尚未收到结果",
+    emptyResult: "空结果",
+    truncated: "预览已截断；复制仅包含当前显示的内容。",
     moreSteps: (count: number) => `查看其他 ${count} 个步骤`,
     lessSteps: "隐藏步骤",
     executeCommand: "执行命令",

@@ -101,6 +101,8 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
 
 `MessageGroup` builds its tool-result and browser-preview lookups once per processing group before converting messages to steps. The lookup preserves the first non-empty result and first screenshot-bearing browser view for each tool-call ID, matching the streamed-message display semantics without repeatedly scanning the full group for every tool call.
 
+Generic tool details receive the explicit Debug flag from `MessageGroup`, independent of token statistics. `tool-call-details.tsx` mounts payload previews only while expanded; `core/messages/tool-detail-preview.ts` caps text output at 12,000 characters, visits at most 200 values, and limits nesting to six levels before serialization. Generic calls keep the original ToolMessage content/status and defer JSON parsing until expansion; specialized renderers retain their existing result conversion. An empty received payload is distinct from a missing message, and neither implies a running/completed state. Copy actions use the displayed preview and report truncation and clipboard failure.
+
 ### Key Patterns
 
 - **Server Components by default**, `"use client"` only for interactive components

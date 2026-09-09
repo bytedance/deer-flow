@@ -496,6 +496,12 @@ See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to 
 
 #### MCP Server
 
+In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
+Each **Tool details** panel starts collapsed and shows the tool name, call ID,
+input, and received result or explicit error. Large previews are truncated;
+copy actions copy only the displayed preview. This is a frontend view of data
+already received by the browser, without an additional secret-redaction layer.
+
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.

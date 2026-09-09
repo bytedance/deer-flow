@@ -791,6 +791,16 @@ export const enUS: Translations = {
 
   // Tool calls
   toolCalls: {
+    details: "Tool details",
+    toolName: "Tool name",
+    callId: "Call ID",
+    input: "Input",
+    result: "Result",
+    error: "Error",
+    noResult: "No result received",
+    emptyResult: "Empty result",
+    truncated:
+      "Preview truncated; copying includes only the displayed preview.",
     moreSteps: (count: number) => `${count} more step${count === 1 ? "" : "s"}`,
     lessSteps: "Less steps",
     executeCommand: "Execute command",

@@ -48,6 +48,7 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
+import { ToolCallDetails } from "./tool-call-details";
 
 interface MessageGroupProps {
   className?: string;
@@ -264,6 +265,7 @@ function MessageGroupComponent({
         isLast={options?.isLast}
         isLoading={isLoading}
         deferBrowserPreview={deferBrowserPreviews}
+        showDetails={showTokenDebugSummaries}
         tokenDebugStep={
           debugStep && !debugStep.sharedAttribution ? debugStep : undefined
         }
@@ -581,6 +583,8 @@ function ToolCall({
   isLoading = false,
   deferBrowserPreview = false,
   tokenDebugStep,
+  showDetails = false,
+  resultMessage,
   browserView,
   threadId,
 }: {
@@ -593,6 +597,8 @@ function ToolCall({
   isLoading?: boolean;
   deferBrowserPreview?: boolean;
   tokenDebugStep?: TokenDebugStep;
+  showDetails?: boolean;
+  resultMessage?: Extract<Message, { type: "tool" }>;
   browserView?: BrowserViewMeta;
   threadId?: string;
 }) {
@@ -913,7 +919,16 @@ function ToolCall({
         key={id}
         label={resolveLabel(description ?? t.toolCalls.useTool(name))}
         icon={WrenchIcon}
-      ></ChainOfThoughtStep>
+      >
+        {showDetails && (
+          <ToolCallDetails
+            name={name}
+            callId={id}
+            args={args}
+            resultMessage={resultMessage}
+          />
+        )}
+      </ChainOfThoughtStep>
     );
   }
 }
@@ -932,6 +947,7 @@ interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
   result?: string;
+  resultMessage?: Extract<Message, { type: "tool" }>;
   browserView?: BrowserViewMeta;
 }
 
@@ -950,6 +966,7 @@ interface BrowserViewMeta {
 function indexToolCallData(messages: Message[]) {
   const toolCallResults = new Map<string, string>();
   const browserViews = new Map<string, BrowserViewMeta>();
+  const resultMessages = new Map<string, Extract<Message, { type: "tool" }>>();
 
   for (const message of messages) {
     if (message.type !== "tool" || !message.tool_call_id) {
@@ -957,10 +974,13 @@ function indexToolCallData(messages: Message[]) {
     }
 
     const toolCallId = message.tool_call_id;
+    if (!resultMessages.has(toolCallId))
+      resultMessages.set(toolCallId, message);
     if (!toolCallResults.has(toolCallId)) {
       const result = extractTextFromMessage(message);
       if (result) {
         toolCallResults.set(toolCallId, result);
+        resultMessages.set(toolCallId, message);
       }
     }
 
@@ -976,12 +996,13 @@ function indexToolCallData(messages: Message[]) {
     }
   }
 
-  return { browserViews, toolCallResults };
+  return { browserViews, toolCallResults, resultMessages };
 }
 
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
-  const { browserViews, toolCallResults } = indexToolCallData(messages);
+  const { browserViews, toolCallResults, resultMessages } =
+    indexToolCallData(messages);
   for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
       // Reasoning precedes the answer text it produced, so it is pushed first:
@@ -1020,7 +1041,23 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         const toolCallId = tool_call.id;
         if (toolCallId) {
           const toolCallResult = toolCallResults.get(toolCallId);
-          if (toolCallResult) {
+          step.resultMessage = resultMessages.get(toolCallId);
+          // 通用详情在展开后处理原始结果；专用工具保留原来的解析行为。
+          const specialized =
+            tool_call.name.startsWith("browser_") ||
+            [
+              "web_search",
+              "image_search",
+              "web_fetch",
+              "ls",
+              "read_file",
+              "write_file",
+              "str_replace",
+              "bash",
+              "ask_clarification",
+              "write_todos",
+            ].includes(tool_call.name);
+          if (toolCallResult && specialized) {
             try {
               const json = JSON.parse(toolCallResult);
               step.result = json;
