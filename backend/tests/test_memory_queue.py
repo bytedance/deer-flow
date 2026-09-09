@@ -535,27 +535,25 @@ def test_queue_refuses_older_generation_overwrite_of_newer_fenced_work() -> None
     )
 
 
-def test_queue_downgrades_fence_when_older_incoming_consume_fails() -> None:
+def test_queue_keeps_newer_fence_when_older_incoming_consume_fails() -> None:
     mock_updater = MagicMock()
-    mock_updater.peek_clear_generation.return_value = (2, 0)
+    mock_updater.peek_clear_generation.side_effect = [(1, 0), (0, 0)]
     mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
     queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
     with patch.object(queue, "_schedule_timer"):
-        queue.add(thread_id="thread-1", messages=["after clear"], agent_name="researcher", user_id="alice")
-        with queue._lock:
-            queue._enqueue_locked(
-                thread_id="thread-1",
-                messages=["between clears"],
-                agent_name="researcher",
-                user_id="alice",
-                trace_id=None,
-                signals=frozenset(),
-                bypass_watermark=False,
-                captured_clear_generation=(1, 0),
-            )
+        queue.add(thread_id="thread-1", messages=["POST-CLEAR turn"], agent_name="researcher", user_id="alice")
+        queue.add(
+            thread_id="thread-1",
+            messages=["PRE-CLEAR turn"],
+            agent_name="researcher",
+            user_id="alice",
+            signals=frozenset({"correction"}),
+        )
 
-    assert queue._items[0].messages == ["after clear"]
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["POST-CLEAR turn"]
     assert queue._items[0].clear_generation == (1, 0)
+    assert queue._items[0].signals == frozenset({"correction"})
 
 
 def test_queue_out_of_order_lock_does_not_let_older_snapshot_inherit_newer_fence() -> None:

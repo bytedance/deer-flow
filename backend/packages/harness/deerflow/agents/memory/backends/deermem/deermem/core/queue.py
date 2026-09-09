@@ -76,8 +76,9 @@ class ConversationContext:
     # visible; then the queue consumes the pre-clear snapshot and starts a
     # fresh fence. An incoming peek older than the queued context is refused
     # so that snapshot cannot inherit the newer fence, but its signals still
-    # union onto the queued item. A missing token and emergency (bypass)
-    # snapshots are never refreshed.
+    # union onto the queued item. A failed consume of that refused snapshot
+    # must not rewrite the queued fence. A missing token and emergency
+    # (bypass) snapshots are never refreshed.
     clear_generation: tuple[int, int] | None = None
 
 
@@ -217,7 +218,9 @@ class MemoryUpdateQueue:
         # the pre-clear snapshot and starts a fresh fence so post-clear turns
         # are extracted on this flush. A late add whose peek is older than the
         # queued context must not replace messages: that would inherit the
-        # newer fence and restore the pre-clear snapshot.
+        # newer fence and restore the pre-clear snapshot. Consume of that
+        # refused snapshot is best-effort; failure must leave the queued
+        # fence untouched so the post-clear job still commits.
         if existing is None:
             enqueued_clear_generation = captured_clear_generation
         elif existing.clear_generation is not None and is_stale_clear_generation(captured_clear_generation, existing.clear_generation):
@@ -231,8 +234,7 @@ class MemoryUpdateQueue:
                 bypass_watermark=bypass_watermark,
                 clear_generation=captured_clear_generation,
             )
-            if not self._consume_pre_clear_feed(incoming):
-                existing.clear_generation = captured_clear_generation
+            self._consume_pre_clear_feed(incoming)
             # Keep the queued snapshot and fence, but do not drop signals from
             # the refused add: a signal seen on any update for this key stays.
             existing.signals = merged_signals
@@ -283,8 +285,9 @@ class MemoryUpdateQueue:
     def _consume_pre_clear_feed(self, existing: ConversationContext) -> bool:
         """Mark the stale job's snapshot consumed so it cannot restore after a clear.
 
-        Returns False when the updater cannot advance the watermark. The caller
-        must then keep the earlier fence rather than refresh the token.
+        Returns False when the updater cannot advance the watermark. A merge
+        that would refresh the queued token must keep the earlier fence on
+        failure; a refused older add must leave the queued fence unchanged.
         """
         mark = getattr(self._updater, "mark_feed_consumed", None)
         if not callable(mark):
@@ -298,7 +301,7 @@ class MemoryUpdateQueue:
                 bypass_watermark=existing.bypass_watermark,
             )
         except Exception:
-            logger.warning("Failed to consume the pre-clear snapshot after a newer clear; keeping the stale fence", exc_info=True)
+            logger.warning("Failed to consume the pre-clear snapshot after a newer clear; leaving the queued fence unchanged", exc_info=True)
             return False
         return True
 

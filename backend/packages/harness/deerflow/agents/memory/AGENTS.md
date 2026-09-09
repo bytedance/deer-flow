@@ -76,6 +76,7 @@ Same-key merges keep the earlier token unless a newer clear is already visible.
 A visible newer clear consumes the pre-clear snapshot and starts a fresh fence.
 An incoming peek older than the queued context cannot inherit the newer token.
 That refused add still unions its signals onto the queued snapshot.
+If consuming the refused snapshot fails, the queued fence stays as-is.
 
 `memory.mode: tool` registers the four memory tools.
 The model chooses when to search or change facts.
