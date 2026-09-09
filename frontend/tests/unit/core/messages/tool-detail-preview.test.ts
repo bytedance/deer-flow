@@ -6,6 +6,22 @@ import {
 } from "@/core/messages/tool-detail-preview";
 
 describe("formatToolDetail", () => {
+  it("keeps short numeric lists complete beyond the old node budget", () => {
+    for (const length of [200, 1000]) {
+      const values = Array.from({ length }, (_, i) => i);
+      const preview = formatToolDetail(values);
+      expect(preview.truncated).toBe(false);
+      expect(JSON.parse(preview.text)).toEqual(values);
+    }
+  });
+  it("visibly marks truncated lists and objects", () => {
+    for (const value of [Array(20000).fill(0), { text: "x".repeat(20000) }]) {
+      const preview = formatToolDetail(value);
+      expect(preview.truncated).toBe(true);
+      expect(preview.text).toContain("…");
+      expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+    }
+  });
   it("formats JSON and preserves falsy results and plain text", () => {
     for (const text of ["null", "false", "0", "", "plain text"]) {
       expect(formatToolDetail(text)).toEqual({ text, truncated: false });

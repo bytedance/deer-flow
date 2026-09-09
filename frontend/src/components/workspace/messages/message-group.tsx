@@ -573,6 +573,26 @@ function browserToolLabel(
   }
 }
 
+// Shared routing for result conversion and specialized rendering.
+function getToolCallKind(name: string) {
+  if (name.startsWith("browser_")) return "browser";
+  switch (name) {
+    case "web_search":
+    case "image_search":
+    case "web_fetch":
+    case "ls":
+    case "read_file":
+    case "write_file":
+    case "str_replace":
+    case "bash":
+    case "ask_clarification":
+    case "write_todos":
+      return name;
+    default:
+      return "generic";
+  }
+}
+
 function ToolCall({
   id,
   messageId,
@@ -603,6 +623,7 @@ function ToolCall({
   threadId?: string;
 }) {
   const { t } = useI18n();
+  const kind = getToolCallKind(name);
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
   const browserViewPanel = useMaybeBrowserView();
@@ -616,7 +637,7 @@ function ToolCall({
       fallback
     );
   const writeFilePath =
-    (name === "write_file" || name === "str_replace") &&
+    (kind === "write_file" || kind === "str_replace") &&
     typeof args.path === "string"
       ? args.path
       : undefined;
@@ -650,7 +671,7 @@ function ToolCall({
     return () => window.clearTimeout(timeout);
   }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
 
-  if (name.startsWith("browser_")) {
+  if (kind === "browser") {
     const shot = browserView?.screenshot;
     const previewUrl =
       shot && threadId ? resolveArtifactURL(shot, threadId) : undefined;
@@ -697,7 +718,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "web_search") {
+  } else if (kind === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchOnWebFor(args.query);
@@ -721,7 +742,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "image_search") {
+  } else if (kind === "image_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedImages;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchForRelatedImagesFor(args.query);
@@ -769,7 +790,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "web_fetch") {
+  } else if (kind === "web_fetch") {
     const url = (args as { url: string })?.url;
     let title = url;
     if (typeof result === "string") {
@@ -798,7 +819,7 @@ function ToolCall({
         </ChainOfThoughtSearchResult>
       </ChainOfThoughtStep>
     );
-  } else if (name === "ls") {
+  } else if (kind === "ls") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -818,7 +839,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "read_file") {
+  } else if (kind === "read_file") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -838,7 +859,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "write_file" || name === "str_replace") {
+  } else if (kind === "write_file" || kind === "str_replace") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -866,7 +887,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "bash") {
+  } else if (kind === "bash") {
     const description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -895,7 +916,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "ask_clarification") {
+  } else if (kind === "ask_clarification") {
     return (
       <ChainOfThoughtStep
         key={id}
@@ -903,7 +924,7 @@ function ToolCall({
         icon={MessageCircleQuestionMarkIcon}
       ></ChainOfThoughtStep>
     );
-  } else if (name === "write_todos") {
+  } else if (kind === "write_todos") {
     return (
       <ChainOfThoughtStep
         key={id}
@@ -1043,21 +1064,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           const toolCallResult = toolCallResults.get(toolCallId);
           step.resultMessage = resultMessages.get(toolCallId);
           // 通用详情在展开后处理原始结果；专用工具保留原来的解析行为。
-          const specialized =
-            tool_call.name.startsWith("browser_") ||
-            [
-              "web_search",
-              "image_search",
-              "web_fetch",
-              "ls",
-              "read_file",
-              "write_file",
-              "str_replace",
-              "bash",
-              "ask_clarification",
-              "write_todos",
-            ].includes(tool_call.name);
-          if (toolCallResult && specialized) {
+          if (toolCallResult && getToolCallKind(tool_call.name) !== "generic") {
             try {
               const json = JSON.parse(toolCallResult);
               step.result = json;

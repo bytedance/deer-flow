@@ -51,10 +51,66 @@ function group(messages: Message[], debug = true) {
   );
 }
 function expand() {
-  fireEvent.click(screen.getByRole("button", { name: "Tool details" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Tool details: mcp_lookup (call-1)" }),
+  );
 }
 
 describe("generic tool details", () => {
+  it("distinguishes multiple calls even when they use the same tool", () => {
+    render(
+      group([
+        {
+          ...call,
+          tool_calls: [
+            { id: "call-1", name: "mcp_lookup", args: {} },
+            { id: "call-2", name: "mcp_lookup", args: {} },
+          ],
+        } as Message,
+      ]),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "1 more step" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Tool details: mcp_lookup (call-2)" }),
+    );
+    expect(
+      screen.getByRole("region", { name: "Call ID" }).textContent,
+    ).toContain("call-2");
+    expect(
+      screen
+        .getByRole("button", { name: "Tool details: mcp_lookup (call-1)" })
+        .getAttribute("aria-expanded"),
+    ).toBe("false");
+  });
+  it("copies through the DOM fallback without navigator.clipboard and resets feedback", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+    const execCommand = rs.fn().mockImplementation(() => {
+      expect(document.querySelector("textarea")?.value).toBe("fallback result");
+      return true;
+    });
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+    render(group([call, tool("fallback result")]));
+    expand();
+    const result = screen.getByRole("region", { name: "Result" });
+    fireEvent.click(within(result).getByRole("button"));
+    await waitFor(() =>
+      expect(within(result).getByRole("status").textContent).toBe(
+        enUS.clipboard.copiedToClipboard,
+      ),
+    );
+    expect(execCommand).toHaveBeenCalledWith("copy");
+    await waitFor(
+      () => expect(within(result).getByRole("status").textContent).toBe(""),
+      { timeout: 3000 },
+    );
+    Reflect.deleteProperty(document, "execCommand");
+  });
   it("uses Debug without token statistics and does no payload work while collapsed", () => {
     const args = {
       get query() {
@@ -68,11 +124,15 @@ describe("generic tool details", () => {
       } as Message,
     ];
     const { rerender } = render(group(messages, false));
-    expect(screen.queryByRole("button", { name: "Tool details" })).toBeNull();
+    expect(
+      screen.queryByRole("button", {
+        name: "Tool details: mcp_lookup (call-1)",
+      }),
+    ).toBeNull();
     rerender(group(messages));
     expect(
       screen
-        .getByRole("button", { name: "Tool details" })
+        .getByRole("button", { name: "Tool details: mcp_lookup (call-1)" })
         .getAttribute("aria-expanded"),
     ).toBe("false");
     expect(screen.queryByRole("region", { name: "Input" })).toBeNull();
@@ -141,7 +201,7 @@ describe("generic tool details", () => {
     rerender(group([call]));
     expect(
       screen
-        .getByRole("button", { name: "Tool details" })
+        .getByRole("button", { name: "Tool details: mcp_lookup (call-1)" })
         .getAttribute("aria-expanded"),
     ).toBe("false");
     rerender(
@@ -154,6 +214,10 @@ describe("generic tool details", () => {
         } as Message,
       ]),
     );
-    expect(screen.queryByRole("button", { name: "Tool details" })).toBeNull();
+    expect(
+      screen.queryByRole("button", {
+        name: "Tool details: mcp_lookup (call-1)",
+      }),
+    ).toBeNull();
   });
 });

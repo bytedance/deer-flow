@@ -1,9 +1,10 @@
 "use client";
 
 import type { Message } from "@langchain/langgraph-sdk";
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatToolDetail } from "@/core/messages/tool-detail-preview";
 
@@ -27,6 +28,7 @@ export function ToolCallDetails({
         type="button"
         variant="ghost"
         size="sm"
+        aria-label={`${t.toolCalls.details}: ${name}${callId ? ` (${callId})` : ""}`}
         aria-expanded={open}
         aria-controls={panelId}
         onClick={() => setOpen(!open)}
@@ -64,9 +66,16 @@ function Payload({ label, value }: { label: string; value: unknown }) {
     message: string;
   }>();
   const visibleText = preview.text === "" ? '""' : preview.text;
+  useEffect(() => {
+    if (!copyStatus) return;
+    const timer = setTimeout(() => setCopyStatus(undefined), 2000);
+    return () => clearTimeout(timer);
+  }, [copyStatus]);
   async function copy() {
     try {
-      await navigator.clipboard.writeText(visibleText);
+      if (!(await writeTextToClipboard(visibleText))) {
+        throw new Error("Clipboard write failed");
+      }
       setCopyStatus({
         text: visibleText,
         message: t.clipboard.copiedToClipboard,

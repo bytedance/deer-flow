@@ -59,7 +59,7 @@ for (const debug of [false, true]) {
       page.getByText("The lookup failed.", { exact: true }),
     ).toBeVisible();
     const trigger = page.getByRole("button", {
-      name: "Tool details",
+      name: "Tool details: mcp_lookup (call-4389)",
       exact: true,
     });
     if (!debug) {

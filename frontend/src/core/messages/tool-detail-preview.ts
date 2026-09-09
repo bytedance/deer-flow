@@ -1,5 +1,5 @@
 export const TOOL_PREVIEW_LIMIT = 12_000;
-const MAX_NODES = 200;
+const MAX_NODES = TOOL_PREVIEW_LIMIT;
 const MAX_DEPTH = 6;
 
 /** 先限制遍历和字符串长度，再序列化；不对完整载荷执行 stringify。 */
@@ -14,7 +14,10 @@ export function formatToolDetail(value: unknown): {
   const cutString = (text: string) => {
     const cut = text.slice(0, Math.max(0, remaining));
     remaining -= cut.length;
-    if (cut.length < text.length) truncated = true;
+    if (cut.length < text.length) {
+      truncated = true;
+      return cut.length > 0 ? cut.slice(0, -1) + "…" : "…";
+    }
     return cut;
   };
   const visit = (item: unknown, depth: number): unknown => {
@@ -40,9 +43,11 @@ export function formatToolDetail(value: unknown): {
       if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
       if (nodes >= MAX_NODES || remaining <= 0) {
         truncated = true;
+        if (Array.isArray(output)) output.push("…");
+        else output["…"] = "…";
         break;
       }
-      const boundedKey = cutString(key);
+      const boundedKey = Array.isArray(output) ? key : cutString(key);
       const descriptor = Object.getOwnPropertyDescriptor(item, key);
       const child =
         descriptor && "value" in descriptor
@@ -72,5 +77,11 @@ export function formatToolDetail(value: unknown): {
   const serialized =
     typeof bounded === "string" ? bounded : JSON.stringify(bounded, null, 2);
   if (serialized.length > TOOL_PREVIEW_LIMIT) truncated = true;
-  return { text: serialized.slice(0, TOOL_PREVIEW_LIMIT), truncated };
+  return {
+    text:
+      serialized.length > TOOL_PREVIEW_LIMIT
+        ? serialized.slice(0, TOOL_PREVIEW_LIMIT - 1) + "…"
+        : serialized,
+    truncated,
+  };
 }
