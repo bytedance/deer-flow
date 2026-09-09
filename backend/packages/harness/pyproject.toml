@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "agent-client-protocol>=0.4.0",
     "agent-sandbox>=0.0.30",
+    "beautifulsoup4>=4.12",
     "croniter>=6.0.0",
     # Exact pin by design (extension-system version contract): the host pins
     # the contract version it implements, extensions declare ranges. A range

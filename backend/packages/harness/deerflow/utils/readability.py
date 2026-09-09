@@ -1,7 +1,7 @@
 import logging
 import re
 import subprocess
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, uses_relative
 
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
@@ -64,7 +64,9 @@ def _resolve_html_urls(html: str, url: str) -> str:
     if base is not None:
         try:
             candidate = urljoin(url, str(base["href"]).strip())
-            if urlparse(candidate).scheme not in {"data", "javascript"}:
+            # Keep only bases urljoin can resolve relative paths against.
+            # Opaque bases fall back to the fetched URL; hierarchical FTP remains valid.
+            if urlparse(candidate).scheme in uses_relative:
                 base_url = candidate
         except ValueError:
             pass  # An invalid base must not prevent extraction of the page.

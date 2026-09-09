@@ -18,7 +18,7 @@ def _article(links: str, *, head: str = "") -> str:
     return f"<html><head><title>Guide</title>{head}</head><body><article>{paragraph * 5}<p>{links}</p></article></body></html>"
 
 
-@pytest.mark.parametrize("provider", ["jina_ai", "browserless"])
+@pytest.mark.parametrize("provider", ["jina_ai", "browserless", "infoquest"])
 @pytest.mark.anyio
 async def test_web_fetch_resolves_relative_links_through_real_extraction(monkeypatch, provider):
     module = importlib.import_module(f"deerflow.community.{provider}.tools")
@@ -26,6 +26,8 @@ async def test_web_fetch_resolves_relative_links_through_real_extraction(monkeyp
     monkeypatch.setattr(module, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: None))
     if provider == "jina_ai":
         monkeypatch.setattr(module.JinaClient, "crawl", AsyncMock(return_value=html))
+    elif provider == "infoquest":
+        monkeypatch.setattr(module, "_get_infoquest_client", lambda: SimpleNamespace(fetch=lambda url: html))
     else:
         client = SimpleNamespace(fetch_html_with_status=AsyncMock(return_value=BrowserlessFetchResult(html, "200", "OK")))
         monkeypatch.setattr(module, "_get_browserless_client", lambda name: client)
@@ -102,7 +104,7 @@ def test_python_extraction_fallback_preserves_article_text(monkeypatch):
     assert "This article explains the documentation" in article.to_markdown()
 
 
-@pytest.mark.parametrize("base", ["http://[broken", "data:text/plain,invalid"])
+@pytest.mark.parametrize("base", ["http://[broken", "data:text/plain,invalid", "javascript:void(0)", "about:blank", "mailto:help@example.com", "blob:https://example.com/id"])
 def test_invalid_document_base_does_not_lose_valid_relative_links(base):
     article = ReadabilityExtractor().extract_article(
         _article('<a href="../next">Next</a>', head=f'<base href="{base}">'),
