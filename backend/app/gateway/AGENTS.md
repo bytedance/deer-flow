@@ -92,18 +92,11 @@ owner-scoped assistant version selection remains enabled.
 | **GitHub Webhooks** (`/api/webhooks/github`) | `POST /` - receive GitHub App / repo webhook deliveries. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`; exempt from auth + CSRF because authenticity is enforced by HMAC. The route is fail-closed: mounted only when `GITHUB_WEBHOOK_SECRET` is set, or when explicit dev opt-in `DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1` is set. Recognized events include `ping`, `issues`, `issue_comment`, `pull_request`, `pull_request_review`, and `pull_request_review_comment`; unknown events return 200 with `handled=false`. Fan-out runtime failures return 503, keeping the delivery recorded as failed for manual/API/scripted redelivery (GitHub does not automatically retry any failed delivery, 5xx included); permanent/non-retryable conditions such as `channels.github.enabled: false`, unknown events, malformed payloads, or unavailable channel service return 200 with a skipped/handled response. |
 | **GitHub Event-Driven Agents** | Custom agents can declare a `github:` block in their `config.yaml` to bind to repos and event triggers. Webhook fan-out publishes one `InboundMessage` per matching binding to the channel bus; `GitHubChannel` routes those messages through `ChannelManager`. The response `dispatch` summarizes matched/fired/skipped agents. |
 
-Custom-agent chat knowledge scopes are admitted at run creation, before run
-input persistence or worker attachment. `knowledge_scope_admission.py` accepts
-the canonical v1 snapshot only on the current normal `HumanMessage`, verifies
-the thread/assistant binding, exact built-in RAGFlow provider, and the agent's
-`knowledge` tool group, and strips client attempts to inject the execution key
-through free-form runtime config. Ordinary regenerate/resume paths recover the
-already accepted source/checkpoint scope; edit-regenerate may replace it with a
-new canonical snapshot. A clarification reply carrying the current selector
-snapshot validates and admits that new scope; when the reply omits a scope it
-inherits the prior turn's checkpoint scope. The safe retrieval-catalog routes under
-`/api/knowledge/retrieval-catalog` are read-only, custom-agent-scoped, and must
-apply the same operator dataset allowlist without exposing provider credentials.
+`knowledge_scope_admission.py` admits custom-agent v1 scope before
+persistence, only from the current normal `HumanMessage`; it validates bindings,
+access, and blocks execution-key injection. Replay inherits checkpoint scope
+unless edit/clarification supplies valid scope. The read-only catalog is
+allowlisted and hides credentials.
 
 Thread identifiers use the shared `deerflow.utils.thread_id` contract
 `^[A-Za-z0-9_-]{1,64}$`. Caller-provided opaque IDs remain supported; UUIDs

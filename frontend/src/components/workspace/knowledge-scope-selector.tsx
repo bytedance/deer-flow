@@ -82,6 +82,7 @@ function DocumentSelector({
         pageSize: PAGE_SIZE,
         search,
       }),
+    enabled: dataset.documents.mode === "selected",
     retry: false,
   });
   const selectedIds = new Set(

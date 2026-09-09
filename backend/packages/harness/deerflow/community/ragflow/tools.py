@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.tools import StructuredTool
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 _warned: set[str] = set()
 _RAGFLOW_UUID_PATTERN = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})(?![0-9A-Fa-f])")
-_MAX_PARALLEL_RETRIEVAL_GROUPS = 4
+_MAX_PARALLEL_RAGFLOW_REQUESTS = 4
 _NO_RELEVANT_CONTENT = "No relevant content found."
 
 
@@ -239,6 +239,39 @@ def _log_missing_dataset(*, position: int, dataset_id: str, code: object = None)
     )
 
 
+async def _bounded_gather[InputT, ResultT](
+    items: list[InputT],
+    operation: Callable[[InputT], Awaitable[ResultT]],
+) -> list[ResultT]:
+    """Run provider requests concurrently while preserving input order."""
+    semaphore = asyncio.Semaphore(_MAX_PARALLEL_RAGFLOW_REQUESTS)
+
+    async def run(item: InputT) -> ResultT:
+        async with semaphore:
+            return await operation(item)
+
+    raw_results = await asyncio.gather(
+        *(run(item) for item in items),
+        return_exceptions=True,
+    )
+    results: list[ResultT] = []
+    for result in raw_results:
+        if isinstance(result, BaseException):
+            raise result
+        results.append(cast(ResultT, result))
+    return results
+
+
+async def _list_datasets_by_id(
+    client: RAGFlowClient,
+    dataset_ids: list[str],
+) -> list[list[dict]]:
+    async def list_dataset(dataset_id: str) -> list[dict]:
+        return await client.list_datasets(dataset_id=dataset_id)
+
+    return await _bounded_gather(dataset_ids, list_dataset)
+
+
 async def _resolve_datasets(
     client: RAGFlowClient,
     settings: _RAGFlowRetrievalSettings,
@@ -253,9 +286,9 @@ async def _resolve_datasets(
                     None,
                     "Error: The selected knowledge scope is no longer available; choose the knowledge bases again.",
                 )
+        dataset_results = await _list_datasets_by_id(client, requested_dataset_ids)
         resolved_datasets: list[_ResolvedDataset] = []
-        for dataset_id in requested_dataset_ids:
-            datasets = await client.list_datasets(dataset_id=dataset_id)
+        for dataset_id, datasets in zip(requested_dataset_ids, dataset_results, strict=True):
             resolved = _current_dataset(datasets, dataset_id)
             if resolved is None:
                 logger.warning("Selected RAGFlow dataset is missing or inaccessible (dataset_id=%s)", dataset_id)
@@ -282,9 +315,12 @@ async def _resolve_datasets(
             )
         return list(resolved_by_id.values()), None
 
+    dataset_results = await _list_datasets_by_id(client, settings.datasets)
     resolved_datasets: list[_ResolvedDataset] = []
-    for position, bound_id in enumerate(settings.datasets, start=1):
-        datasets = await client.list_datasets(dataset_id=bound_id)
+    for position, (bound_id, datasets) in enumerate(
+        zip(settings.datasets, dataset_results, strict=True),
+        start=1,
+    ):
         resolved = _current_dataset(datasets, bound_id)
         if resolved is None:
             _log_missing_dataset(position=position, dataset_id=bound_id)
@@ -329,8 +365,7 @@ async def _validate_document_filters(
     client: RAGFlowClient,
     document_filters: list[dict[str, Any]],
 ) -> tuple[dict[str, list[str]] | None, str | None]:
-    validated: dict[str, list[str]] = {}
-    for item in document_filters:
+    async def list_documents(item: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Mapping[str, object]]]:
         dataset_id = item["dataset_id"]
         document_ids = list(item["document_ids"])
         params = [
@@ -344,6 +379,13 @@ async def _validate_document_filters(
         if not isinstance(documents, list):
             raise RAGFlowProtocolError("RAGFlow returned an invalid document list.")
         by_id = {str(document.get("id")): document for document in documents if isinstance(document, Mapping) and document.get("id") is not None}
+        return item, by_id
+
+    document_results = await _bounded_gather(document_filters, list_documents)
+    validated: dict[str, list[str]] = {}
+    for item, by_id in document_results:
+        dataset_id = item["dataset_id"]
+        document_ids = list(item["document_ids"])
         for document_id in document_ids:
             document = by_id.get(document_id)
             chunk_count = document.get("chunk_count") if document is not None else None
@@ -455,7 +497,7 @@ async def _retrieve_dataset_groups(
     query: str,
     groups: list[_RetrievalGroup],
 ) -> dict[str, Any]:
-    semaphore = asyncio.Semaphore(_MAX_PARALLEL_RETRIEVAL_GROUPS)
+    semaphore = asyncio.Semaphore(_MAX_PARALLEL_RAGFLOW_REQUESTS)
 
     async def retrieve_group(group: _RetrievalGroup) -> dict[str, Any]:
         async with semaphore:
