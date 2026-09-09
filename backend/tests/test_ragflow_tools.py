@@ -429,6 +429,114 @@ async def test_grouped_retrieval_limits_concurrency_to_four(monkeypatch: pytest.
 
 
 @pytest.mark.anyio
+async def test_selected_scope_dataset_validation_is_bounded_and_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset_ids = [f"dataset-{index}" for index in range(5)]
+
+    class ConcurrencyTrackingClient(FakeRAGFlowClient):
+        def __init__(self) -> None:
+            super().__init__(datasets_by_id={dataset_id: [_dataset(dataset_id, f"Dataset {index}")] for index, dataset_id in enumerate(dataset_ids)})
+            self.active_dataset_lists = 0
+            self.max_active_dataset_lists = 0
+
+        async def list_datasets(self, *, dataset_id: str | None = None) -> list[dict]:
+            self.list_calls.append(dataset_id)
+            self.active_dataset_lists += 1
+            self.max_active_dataset_lists = max(
+                self.max_active_dataset_lists,
+                self.active_dataset_lists,
+            )
+            try:
+                await asyncio.sleep(0.05)
+                return self.datasets_by_id.get(dataset_id or "", [])
+            finally:
+                self.active_dataset_lists -= 1
+
+    fake = ConcurrencyTrackingClient()
+    _install(monkeypatch, fake, config=_config(datasets=dataset_ids))
+
+    result = await ragflow_tools.knowledge_search(
+        "anything",
+        knowledge_scope={
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": dataset_ids,
+        },
+    )
+
+    assert result == "No relevant content found."
+    assert fake.max_active_dataset_lists == 4
+
+
+@pytest.mark.anyio
+async def test_selected_scope_document_validation_is_bounded_and_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
+    dataset_ids = [f"dataset-{index}" for index in range(5)]
+    document_ids = [f"document-{index}" for index in range(5)]
+
+    class ConcurrencyTrackingClient(FakeRAGFlowClient):
+        def __init__(self) -> None:
+            super().__init__(
+                datasets_by_id={dataset_id: [_dataset(dataset_id, f"Dataset {index}")] for index, dataset_id in enumerate(dataset_ids)},
+                documents_by_dataset_id={
+                    dataset_id: [
+                        {
+                            "id": document_ids[index],
+                            "name": f"Document {index}",
+                            "run": "DONE",
+                            "chunk_count": 1,
+                        }
+                    ]
+                    for index, dataset_id in enumerate(dataset_ids)
+                },
+            )
+            self.active_document_lists = 0
+            self.max_active_document_lists = 0
+
+        async def list_documents(
+            self,
+            dataset_id: str,
+            *,
+            params: list[tuple[str, str]],
+        ) -> dict:
+            self.document_list_calls.append((dataset_id, params))
+            self.active_document_lists += 1
+            self.max_active_document_lists = max(
+                self.max_active_document_lists,
+                self.active_document_lists,
+            )
+            try:
+                await asyncio.sleep(0.05)
+                documents = self.documents_by_dataset_id[dataset_id]
+                return {
+                    "code": 0,
+                    "data": {"docs": documents, "total": len(documents)},
+                }
+            finally:
+                self.active_document_lists -= 1
+
+    fake = ConcurrencyTrackingClient()
+    _install(monkeypatch, fake, config=_config(datasets=dataset_ids))
+
+    result = await ragflow_tools.knowledge_search(
+        "anything",
+        knowledge_scope={
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": dataset_ids,
+            "document_filters": [
+                {
+                    "dataset_id": dataset_id,
+                    "document_ids": [document_ids[index]],
+                }
+                for index, dataset_id in enumerate(dataset_ids)
+            ],
+        },
+    )
+
+    assert result == "No relevant content found."
+    assert fake.max_active_document_lists == 4
+
+
+@pytest.mark.anyio
 async def test_dataset_without_embedding_metadata_returns_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(all_datasets=[{"id": DATASET_ID_1, "name": "Broken", "chunk_count": 1}])
     _install(monkeypatch, fake, config=_config(datasets=None))
