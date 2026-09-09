@@ -47,9 +47,7 @@ def test_dict_entry_passes_constructor_kwargs():
 
 
 def test_raw_dict_entry_passes_constructor_kwargs():
-    loaded = load_configured_extension_middlewares(
-        _config({"class": f"{__name__}:RecordingMiddleware", "kwargs": {"max_tool_calls": 2}})
-    )
+    loaded = load_configured_extension_middlewares(_config({"class": f"{__name__}:RecordingMiddleware", "kwargs": {"max_tool_calls": 2}}))
 
     assert len(loaded) == 1
     assert isinstance(loaded[0], RecordingMiddleware)
@@ -58,9 +56,7 @@ def test_raw_dict_entry_passes_constructor_kwargs():
 
 def test_malformed_raw_dict_fails_at_load():
     with pytest.raises(ValidationError):
-        load_configured_extension_middlewares(
-            _config({"class": f"{__name__}:RecordingMiddleware", "apply_to": "lead"})
-        )
+        load_configured_extension_middlewares(_config({"class": f"{__name__}:RecordingMiddleware", "apply_to": "lead"}))
 
 
 def test_empty_kwargs_matches_zero_arg_constructor():
@@ -130,9 +126,7 @@ def test_kwargs_yaml_date_normalizes_to_iso_string():
 
 
 def test_kwargs_yaml_datetime_normalizes_to_iso_string():
-    spec = ConfiguredMiddlewareSpec.model_validate(
-        {"class": "pkg:Mw", "kwargs": {"cutoff": datetime(2026, 1, 1, 12, 0, 0)}}
-    )
+    spec = ConfiguredMiddlewareSpec.model_validate({"class": "pkg:Mw", "kwargs": {"cutoff": datetime(2026, 1, 1, 12, 0, 0)}})
 
     assert spec.kwargs == {"cutoff": "2026-01-01T12:00:00"}
 

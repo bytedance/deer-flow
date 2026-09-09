@@ -344,11 +344,7 @@ class ConfiguredMiddlewareSpec(BaseModel):
     )
     kwargs: dict[str, Any] = Field(
         default_factory=dict,
-        description=(
-            "Keyword arguments passed to the middleware constructor. Values must be JSON types "
-            "(object, array, string, number, boolean, or null); YAML dates and timestamps are "
-            "coerced to ISO strings so they match JSON."
-        ),
+        description=("Keyword arguments passed to the middleware constructor. Values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON."),
     )
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -378,7 +374,12 @@ class ExtensionsConfig(BaseModel):
 
     middlewares: list[str | ConfiguredMiddlewareSpec] = Field(
         default_factory=list,
-        description="AgentMiddleware entries loaded into the lead-agent and subagent middleware chains. Each entry is a 'module.path:ClassName' string or an object with 'class' and optional 'kwargs'. kwargs values must be JSON types; YAML dates and timestamps are coerced to ISO strings.",
+        description=(
+            "AgentMiddleware entries loaded into the lead-agent and subagent middleware chains. "
+            "Each entry is a 'module.path:ClassName' string or an object with 'class' and optional "
+            "'kwargs'. kwargs values must be JSON types; YAML dates and timestamps are coerced to "
+            "ISO strings."
+        ),
     )
     mcp_servers: dict[str, McpServerConfig] = Field(
         default_factory=dict,
