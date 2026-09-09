@@ -22,13 +22,15 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 **Rolling forward compatibility**: the local chain is
 `0018_oauth_identity_pg_partial` → `0019_projects` →
 `0020_threads_meta_project_id` → `0021_batch_acceptance` →
-`0019_thread_incarnations`. The final revision deliberately retains the exact
-id audited by the rollback-floor binary; Alembic orders revisions by
-`down_revision`, not by the numeric prefix.
+`0019_thread_incarnations` → `0022_scheduled_occurrence_seq` (current head).
+The incarnation revision deliberately retains the exact id audited by the
+rollback-floor binary; Alembic orders revisions by `down_revision`, not by the
+numeric prefix.
 
-The deployed `0020_threads_meta_project_id` rollback-floor binary knows neither
-`0021_batch_acceptance` nor `0019_thread_incarnations`. It treats only the final
-incarnation revision as forward-compatible, after reflection confirms every
+The deployed `0020_threads_meta_project_id` rollback-floor binary knows none of
+`0021_batch_acceptance`, `0019_thread_incarnations`, or
+`0022_scheduled_occurrence_seq`. It treats only the incarnation revision as
+forward-compatible, after reflection confirms every
 table and column in its own ORM schema. The intervening acceptance columns and
 the incarnation columns are nullable and have no server default, so old
 repositories may omit them. Tests must prove old reads and writes across both
