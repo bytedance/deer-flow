@@ -50,26 +50,30 @@ def _sanitize_image_error(error: Exception, thread_data: ThreadDataState | None)
 
 
 def _is_file_not_found_error(error: BaseException) -> bool:
-    """Recognize an explicit missing-file error through provider wrappers.
+    """Recognize an explicit missing-file signal through provider wrappers.
 
-    ``Sandbox.download_file`` promises ``OSError`` for read failures. Some
-    optional SDKs expose a more precise missing-file subtype before their
-    adapter wraps it; E2B's ``FileNotFoundException`` is one such case. Keep
-    the core tool independent of optional provider imports while preserving
-    that cause-chain signal. Generic 404-looking strings are deliberately not
-    accepted: only an explicit exception type may enable host recovery.
+    ``Sandbox.download_file`` promises ``OSError`` for read failures, while
+    remote SDKs expose missing paths in different explicit forms: builtin or
+    provider-defined ``FileNotFoundError`` types, E2B's
+    ``FileNotFoundException``, and HTTP-style exceptions carrying
+    ``status_code == 404``. Walk only explicit ``raise ... from`` causes so an
+    unrelated exception being handled when a transport failure is raised cannot
+    accidentally authorize historical host recovery. Error-message strings are
+    deliberately never parsed.
     """
 
     current: BaseException | None = error
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, FileNotFoundError):
-            return True
         error_type = type(current)
+        if isinstance(current, FileNotFoundError) or error_type.__name__ == "FileNotFoundError":
+            return True
         if error_type.__name__ == "FileNotFoundException" and error_type.__module__.split(".", 1)[0] == "e2b":
             return True
-        current = current.__cause__ or current.__context__
+        if getattr(current, "status_code", None) == 404:
+            return True
+        current = current.__cause__
     return False
 
 
