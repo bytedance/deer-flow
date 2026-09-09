@@ -109,6 +109,21 @@ class TestTitleMiddlewareCoreLogic:
 
         assert result == {"title": "report.pdf"}
 
+    def test_interrupted_attachment_only_title_uses_filename(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="",
+                    additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""},
+                ),
+            ],
+            "uploaded_files": [{"filename": "report.pdf", "path": "/mnt/user-data/uploads/report.pdf"}],
+        }
+
+        assert middleware._generate_title_result(state, allow_partial_exchange=True) == {"title": "report.pdf"}
+
     @pytest.mark.parametrize("original_user_content", ["", " \t\n"], ids=["empty", "whitespace-only"])
     def test_attachment_only_title_skips_configured_title_model(self, monkeypatch, original_user_content):
         _set_test_title_config(enabled=True, model_name="title-model")
@@ -153,6 +168,58 @@ class TestTitleMiddlewareCoreLogic:
 
         assert middleware._generate_title_result(state) == {"title": "2 files uploaded"}
 
+    @pytest.mark.parametrize("generate_async", [False, True], ids=["sync", "async"])
+    def test_attachment_only_multiple_files_respects_title_max_chars(self, generate_async):
+        config = _set_test_title_config(enabled=True, model_name=None, max_chars=10)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(content="", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""}),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [
+                {"filename": "report.pdf", "path": "/mnt/user-data/uploads/report.pdf"},
+                {"filename": "data.csv", "path": "/mnt/user-data/uploads/data.csv"},
+            ],
+        }
+
+        result = asyncio.run(middleware._agenerate_title_result(state)) if generate_async else middleware._generate_title_result(state)
+
+        assert result == {"title": "2 files"}
+        assert len(result["title"]) <= config.max_chars
+
+    def test_attachment_only_duplicate_paths_are_counted_once_before_name_cleanup(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(content="", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""}),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [
+                {"filename": "report.pdf", "path": "/mnt/user-data/uploads/report.pdf"},
+                {"filename": "report.pdf", "path": "/mnt/user-data/uploads/report.pdf"},
+            ],
+        }
+
+        assert middleware._generate_title_result(state) == {"title": "report.pdf"}
+
+    def test_attachment_only_distinct_paths_with_same_cleaned_name_are_not_deduplicated(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(content="", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""}),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [
+                {"filename": "a\tb.pdf", "path": "/mnt/user-data/uploads/a\tb.pdf"},
+                {"filename": "a b.pdf", "path": "/mnt/user-data/uploads/a b.pdf"},
+            ],
+        }
+
+        assert middleware._generate_title_result(state) == {"title": "2 files uploaded"}
+
     def test_attachment_only_without_valid_filename_falls_back_to_new_conversation(self):
         _set_test_title_config(enabled=True, model_name=None)
         middleware = TitleMiddleware()
@@ -191,6 +258,22 @@ class TestTitleMiddlewareCoreLogic:
 
         assert middleware._generate_title_result(state) == {"title": "quarterly rep...xlsx"}
         assert len(middleware._attachment_only_title(state) or "") <= config.max_chars
+
+    def test_attachment_filename_without_suffix_respects_configured_max_chars(self):
+        config = _set_test_title_config(enabled=True, model_name=None, max_chars=60)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(content="", additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""}),
+                AIMessage(content="好的"),
+            ],
+            "uploaded_files": [{"filename": "x" * 70}],
+        }
+
+        result = middleware._generate_title_result(state)
+
+        assert result == {"title": "x" * 57 + "..."}
+        assert len(result["title"]) == config.max_chars
 
     def test_attachment_filename_title_preserves_percent_and_unicode(self):
         _set_test_title_config(enabled=True, model_name=None)

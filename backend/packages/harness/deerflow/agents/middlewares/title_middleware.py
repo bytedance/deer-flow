@@ -148,16 +148,30 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             return None
 
         filenames = []
+        seen_attachment_ids: set[str] = set()
         for file in files:
             if not isinstance(file, Mapping):
                 continue
-            cleaned = self._clean_attachment_filename(file.get("filename"))
-            if cleaned is not None:
-                filenames.append(cleaned)
+            filename = file.get("filename")
+            if not isinstance(filename, str):
+                continue
+            cleaned = self._clean_attachment_filename(filename)
+            if cleaned is None:
+                continue
+            # UploadsMiddleware builds the path from a verified basename.
+            # Deduplicate that stable attachment identity before display-name
+            # cleanup: distinct names can intentionally normalize alike.
+            attachment_id = file.get("path")
+            if not isinstance(attachment_id, str) or not attachment_id:
+                attachment_id = filename
+            if attachment_id in seen_attachment_ids:
+                continue
+            seen_attachment_ids.add(attachment_id)
+            filenames.append(cleaned)
         if len(filenames) == 1:
             return self._truncate_attachment_filename(filenames[0])
         if len(filenames) > 1:
-            return f"{len(filenames)} files uploaded"
+            return self._attachment_count_title(len(filenames))
         return None
 
     def _should_generate_title(self, state: TitleMiddlewareState, *, allow_partial_exchange: bool = False) -> bool:
@@ -237,7 +251,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
     def _truncate_attachment_filename(self, filename: str) -> str:
         """Truncate a file-name title while retaining its extension when possible."""
         config = self._get_title_config()
-        max_chars = min(config.max_chars, 50)
+        max_chars = config.max_chars
         if len(filename) <= max_chars:
             return filename
 
@@ -246,7 +260,23 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         remaining = max_chars - len(ellipsis) - len(extension)
         if extension and remaining > 0:
             return filename[:remaining].rstrip() + ellipsis + extension
-        return self._fallback_title(filename)
+        return self._truncate_title(filename)
+
+    def _attachment_count_title(self, count: int) -> str:
+        """Return a bounded, readable title for multiple validated uploads."""
+        config = self._get_title_config()
+        for title in (f"{count} files uploaded", f"{count} files"):
+            if len(title) <= config.max_chars:
+                return title
+        return self._truncate_title(str(count))
+
+    def _truncate_title(self, title: str) -> str:
+        """Bound a local attachment title without overriding title.max_chars."""
+        max_chars = self._get_title_config().max_chars
+        if len(title) <= max_chars:
+            return title
+        ellipsis = "..."
+        return title[: max_chars - len(ellipsis)].rstrip() + ellipsis
 
     def _get_runnable_config(self) -> dict[str, Any]:
         """Inherit the parent RunnableConfig and add middleware tag.
