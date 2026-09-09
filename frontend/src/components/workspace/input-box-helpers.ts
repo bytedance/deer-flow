@@ -172,18 +172,44 @@ export function getLeadingSlashSkillQuery(value: string): string | null {
 // (a skill literally named `compact` would submit as the compact command, not
 // the skill), so both sets are excluded.
 
+export function shouldReseedPickDraft(
+  draft: string | null | undefined,
+): boolean {
+  // A pick supersedes a draft that was itself the user starting an
+  // activation: reseeding a bare `/query` would land it in the chip editor
+  // as literal text, reopen the suggestion catalog over the composer, and
+  // submit `/skill-name /query` with the stale partial as the message body.
+  // The slash path keeps the same invariant — it only seeds chip mode from
+  // an entire slash query and then clears it.
+  return (
+    Boolean(draft) && getLeadingSlashSkillQuery(draft!) === null
+  );
+}
+
 export function getSelectableSkills(
   skills: Skill[],
   builtinCommandNames: ReadonlySet<string> = new Set(
     COMPOSER_BUILTIN_COMMAND_NAMES,
   ),
 ): Skill[] {
-  return skills.filter(
-    (skill) =>
-      skill.enabled &&
-      !RESERVED_SLASH_SKILL_NAMES.has(skill.name) &&
-      !builtinCommandNames.has(skill.name),
+  // Fold once, mirroring getMatchingSkillSuggestions: the slash path
+  // lowercases the name before the reserved lookup, so a custom skill named
+  // `Compact` or `HELP` is unreachable there — the picker must not offer an
+  // activation the composer can never perform. Custom and archive-installed
+  // skills can carry uppercase (the grammar check only guards skills/public).
+  const foldedBuiltins = new Set(
+    [...builtinCommandNames].map((name) => name.toLowerCase()),
   );
+  const foldedReserved = new Set(
+    [...RESERVED_SLASH_SKILL_NAMES].map((name) => name.toLowerCase()),
+  );
+  return skills.filter((skill) => {
+    if (!skill.enabled) {
+      return false;
+    }
+    const name = skill.name.toLowerCase();
+    return !foldedReserved.has(name) && !foldedBuiltins.has(name);
+  });
 }
 
 export function getMatchingSkillSuggestions(

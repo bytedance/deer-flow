@@ -12,6 +12,7 @@ import {
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
   getSelectableSkills,
+  shouldReseedPickDraft,
   GOAL_OBJECTIVE_COUNTER_VISIBLE_AT,
   isAbortError,
   isCurrentGoalRequest,
@@ -491,5 +492,67 @@ describe("getSelectableSkills", () => {
     expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
       "data-analysis",
     ]);
+  });
+});
+
+describe("getSelectableSkills case folding", () => {
+  it("excludes case-variant reserved and builtin names like the slash path", () => {
+    // The slash suggestions fold the name once before the reserved lookup,
+    // so a custom skill named `Compact` or `HELP` is unreachable there; the
+    // picker must not offer an activation the composer can never perform.
+    const skills = [
+      makeSkill("Compact"),
+      makeSkill("HELP"),
+      makeSkill("New"),
+      makeSkill("compact"),
+      makeSkill("data-analysis"),
+    ];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "data-analysis",
+    ]);
+  });
+
+  it("keeps a distinct skill whose name only contains a shadowed word", () => {
+    const skills = [makeSkill("compact-plans"), makeSkill("goalie")];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "compact-plans",
+      "goalie",
+    ]);
+  });
+
+  it("agrees with the slash suggestion catalog on case variants", () => {
+    // Both entry points must apply one rule: offered ⇒ activatable.
+    const skills = [makeSkill("Memory"), makeSkill("data-analysis")];
+    const builtinCommands: SlashSuggestion[] = [
+      { name: "goal", kind: "builtin", description: "Set a goal" },
+    ];
+    const selectable = getSelectableSkills(skills).map((skill) => skill.name);
+    const slashOffered = getMatchingSkillSuggestions(skills, "", builtinCommands)
+      .filter((s) => s.kind === "skill")
+      .map((s) => (s as { name: string }).name);
+    expect(selectable).toEqual(["data-analysis"]);
+    expect(slashOffered).toEqual(selectable);
+  });
+});
+
+describe("shouldReseedPickDraft", () => {
+  it("keeps prose and mixed drafts", () => {
+    expect(shouldReseedPickDraft("run the quarterly report")).toBe(true);
+    expect(shouldReseedPickDraft("/data-analysis analyze foo.csv")).toBe(true);
+    expect(shouldReseedPickDraft("  ")).toBe(true);
+  });
+
+  it("supersedes a draft that is itself a bare slash query", () => {
+    // Picking with a `/data-an` draft must not carry the partial into the
+    // chip editor: it would land as literal text after the chip, reopen the
+    // suggestion catalog, and submit `/skill-name /data-an`.
+    expect(shouldReseedPickDraft("/data-an")).toBe(false);
+    expect(shouldReseedPickDraft("/")).toBe(false);
+  });
+
+  it("drops empty drafts", () => {
+    expect(shouldReseedPickDraft("")).toBe(false);
+    expect(shouldReseedPickDraft(null)).toBe(false);
+    expect(shouldReseedPickDraft(undefined)).toBe(false);
   });
 });

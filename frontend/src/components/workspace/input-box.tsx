@@ -146,6 +146,7 @@ import {
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
+  shouldReseedPickDraft,
   type GoalCommand,
   isAbortError,
   isCurrentGoalRequest,
@@ -2319,7 +2320,7 @@ export function InputBox({
                   description: skill.description,
                   kind: "skill",
                 });
-                if (draft) {
+                if (shouldReseedPickDraft(draft)) {
                   textInput.setInput(draft);
                 }
               }}
