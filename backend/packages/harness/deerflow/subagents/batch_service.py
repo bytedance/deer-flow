@@ -63,10 +63,15 @@ class SubagentBatchService:
         self._poller: asyncio.Task[None] | None = None
         self._executions: dict[str, asyncio.Task[None]] = {}
         self._claim_recoveries: set[asyncio.Task[None]] = set()
+        self._admission_recoveries: set[asyncio.Task[None]] = set()
         self._execution_ids: dict[str, str] = {}
         self._item_batches: dict[str, str] = {}
         self._shutdown_execution_ids: set[str] = set()
         self._first_fatal: BaseException | None = None
+
+    def _lease_renew_interval_seconds(self) -> float:
+        """Return the shared lease heartbeat and admission deadline."""
+        return max(1.0, self._config.lease_seconds / 3)
 
     def _record_fatal(self, exc: BaseException | None) -> None:
         """Retain the first non-cancellation fatal from any service task."""
@@ -96,6 +101,13 @@ class SubagentBatchService:
     def _claim_recovery_done(self, task: asyncio.Task[None]) -> None:
         """Observe and forget a reclaimed-item fencing task."""
         self._claim_recoveries.discard(task)
+        if task.cancelled():
+            return
+        self._record_fatal(task.exception())
+
+    def _admission_recovery_done(self, task: asyncio.Task[None]) -> None:
+        """Observe and forget a timed-out admission recovery."""
+        self._admission_recoveries.discard(task)
         if task.cancelled():
             return
         self._record_fatal(task.exception())
@@ -259,6 +271,23 @@ class SubagentBatchService:
             for task_result in task_results:
                 if isinstance(task_result, BaseException):
                     self._record_fatal(task_result)
+        # Cancelling an item execution can interrupt its owner-loop admission
+        # hook after the final producer snapshot above. Drain every recovery
+        # created by that cancellation before shutdown releases the database.
+        while self._admission_recoveries:
+            recoveries = tuple(self._admission_recoveries)
+            recovery_results = await asyncio.gather(
+                *recoveries,
+                return_exceptions=True,
+            )
+            for recovery, recovery_result in zip(
+                recoveries,
+                recovery_results,
+                strict=True,
+            ):
+                self._admission_recoveries.discard(recovery)
+                if isinstance(recovery_result, BaseException):
+                    self._record_fatal(recovery_result)
         pending_execution_ids = set(self._shutdown_execution_ids)
         while pending_execution_ids:
             for execution_id in tuple(pending_execution_ids):
@@ -351,7 +380,7 @@ class SubagentBatchService:
         if execution_id is not None:
             request_cancel_background_task(execution_id)
         task.cancel()
-        renew_every = max(1.0, self._config.lease_seconds / 3)
+        renew_every = self._lease_renew_interval_seconds()
         while not task.done():
             done, _pending = await asyncio.wait(
                 {task},
@@ -398,6 +427,82 @@ class SubagentBatchService:
                 lease_owner=lease_owner,
                 error="Worker drained a stale local execution before readmission",
             )
+
+    async def _settle_timed_out_admission(
+        self,
+        *,
+        item_id: str,
+        lease_owner: str,
+        mark_task: asyncio.Task[bool],
+    ) -> None:
+        """Observe an uncertain DB mark and release its claim when it settles."""
+        deferred_cancellation: asyncio.CancelledError | None = None
+        try:
+            await asyncio.shield(mark_task)
+        except asyncio.CancelledError as exc:
+            deferred_cancellation = exc
+            mark_task.cancel()
+            while not mark_task.done():
+                try:
+                    await asyncio.shield(mark_task)
+                except asyncio.CancelledError:
+                    continue
+            mark_outcome = (await asyncio.gather(mark_task, return_exceptions=True))[0]
+            if isinstance(mark_outcome, BaseException) and not isinstance(
+                mark_outcome,
+                (asyncio.CancelledError, Exception),
+            ):
+                raise mark_outcome
+            if isinstance(mark_outcome, Exception):
+                logger.warning(
+                    "Cancelled durable subagent admission completed with an error (item_id=%s)",
+                    item_id,
+                    exc_info=(
+                        type(mark_outcome),
+                        mark_outcome,
+                        mark_outcome.__traceback__,
+                    ),
+                )
+        except Exception:
+            logger.warning(
+                "Timed-out durable subagent admission completed with an error (item_id=%s)",
+                item_id,
+                exc_info=True,
+            )
+        compensation = asyncio.create_task(
+            self._compensate_claims(
+                [{"id": item_id}],
+                lease_owner=lease_owner,
+                error="Durable subagent admission timed out before execution",
+            ),
+            name=f"subagent-batch-admission-compensation-{item_id}",
+        )
+        while not compensation.done():
+            try:
+                await asyncio.shield(compensation)
+            except asyncio.CancelledError as exc:
+                deferred_cancellation = deferred_cancellation or exc
+        await compensation
+        if deferred_cancellation is not None:
+            raise deferred_cancellation
+
+    def _track_timed_out_admission(
+        self,
+        *,
+        item_id: str,
+        lease_owner: str,
+        mark_task: asyncio.Task[bool],
+    ) -> None:
+        recovery = asyncio.create_task(
+            self._settle_timed_out_admission(
+                item_id=item_id,
+                lease_owner=lease_owner,
+                mark_task=mark_task,
+            ),
+            name=f"subagent-batch-admission-recovery-{item_id}",
+        )
+        self._admission_recoveries.add(recovery)
+        recovery.add_done_callback(self._admission_recovery_done)
 
     async def run_once(self, *, now: datetime) -> None:
         available = max(
@@ -458,7 +563,7 @@ class SubagentBatchService:
         lease_owner: str,
     ) -> None:
         """Keep the durable lease while waiting for local execution teardown."""
-        renew_every = max(1.0, self._config.lease_seconds / 3)
+        renew_every = self._lease_renew_interval_seconds()
         loop = asyncio.get_running_loop()
         # Renew immediately before entering the teardown wait. A terminal
         # business result or supervisor failure may arrive near the previous
@@ -576,6 +681,7 @@ class SubagentBatchService:
         item_id = item["id"]
         lease_owner = item.get("_lease_owner", self._lease_owner)
         execution_id: str | None = None
+        admission_recovery_started = False
         try:
             batch = item["batch"]
             self._item_batches[item_id] = batch["id"]
@@ -599,10 +705,40 @@ class SubagentBatchService:
             admission_loop = asyncio.get_running_loop()
 
             async def mark_running_after_admission() -> bool:
-                return await self._repository.mark_item_running(
-                    item_id,
+                nonlocal admission_recovery_started
+                timeout = self._lease_renew_interval_seconds()
+                mark_task = asyncio.create_task(
+                    self._repository.mark_item_running(
+                        item_id,
+                        lease_owner=lease_owner,
+                        lease_seconds=self._config.lease_seconds,
+                        now=datetime.now(UTC),
+                    ),
+                    name=f"subagent-batch-mark-running-{item_id}",
+                )
+                try:
+                    done, _pending = await asyncio.wait(
+                        {mark_task},
+                        timeout=timeout,
+                    )
+                except BaseException:
+                    admission_recovery_started = True
+                    self._track_timed_out_admission(
+                        item_id=item_id,
+                        lease_owner=lease_owner,
+                        mark_task=mark_task,
+                    )
+                    raise
+                if done:
+                    return mark_task.result()
+                admission_recovery_started = True
+                self._track_timed_out_admission(
+                    item_id=item_id,
                     lease_owner=lease_owner,
-                    now=datetime.now(UTC),
+                    mark_task=mark_task,
+                )
+                raise TimeoutError(
+                    f"Durable subagent admission timed out after {timeout:g}s",
                 )
 
             executor = SubagentExecutor(
@@ -627,7 +763,7 @@ class SubagentBatchService:
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
             execution_id = executor.execute_async(prompt, task_id=item_id)
             self._execution_ids[item_id] = execution_id
-            renew_every = max(1.0, self._config.lease_seconds / 3)
+            renew_every = self._lease_renew_interval_seconds()
             status_poll_every = min(
                 self._config.poll_interval_seconds,
                 renew_every,
@@ -678,12 +814,13 @@ class SubagentBatchService:
 
             raw_result = result.result or ""
             if getattr(result, "admission_failure", False):
-                await self._repository.requeue_item_after_admission_failure(
-                    item_id,
-                    lease_owner=lease_owner,
-                    error=result.error,
-                    now=datetime.now(UTC),
-                )
+                if not admission_recovery_started:
+                    await self._repository.requeue_item_after_admission_failure(
+                        item_id,
+                        lease_owner=lease_owner,
+                        error=result.error,
+                        now=datetime.now(UTC),
+                    )
                 return
             truncated = len(raw_result) > self._config.max_result_chars
             stored_result = raw_result[: self._config.max_result_chars] if raw_result else None
@@ -692,11 +829,11 @@ class SubagentBatchService:
             if result.status is SubagentStatus.COMPLETED and item.get("acceptance_criteria"):
                 try:
                     valid, acceptance_verdict = await self._check_acceptance_with_lease(
-                            item,
-                            result,
-                            app_config,
-                            lease_owner=lease_owner,
-                        )
+                        item,
+                        result,
+                        app_config,
+                        lease_owner=lease_owner,
+                    )
                     if not valid:
                         return
                 except Exception:
@@ -793,7 +930,10 @@ class SubagentBatchService:
         )
         try:
             while True:
-                done, _ = await asyncio.wait({check}, timeout=max(1.0, self._config.lease_seconds / 3))
+                done, _ = await asyncio.wait(
+                    {check},
+                    timeout=self._lease_renew_interval_seconds(),
+                )
                 if done:
                     return True, check.result()
                 if not await renew():

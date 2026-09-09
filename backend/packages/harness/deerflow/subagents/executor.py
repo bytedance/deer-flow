@@ -1002,11 +1002,11 @@ class SubagentExecutor:
         deerflow_trace_id: str | None = None,
         extensions: Any | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
-        admission_hook: Callable[[], Awaitable[bool | None]] | None = None,
-        admission_hook_loop: asyncio.AbstractEventLoop | None = None,
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
         tool_promotion_recorder: Any | None = None,
+        admission_hook: Callable[[], Awaitable[bool | None]] | None = None,
+        admission_hook_loop: asyncio.AbstractEventLoop | None = None,
     ):
         """Initialize the executor.
 

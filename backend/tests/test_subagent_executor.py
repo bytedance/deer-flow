@@ -1472,6 +1472,46 @@ class TestAsyncExecutionPath:
         assert events == ["admission", "execution"]
 
     @pytest.mark.anyio
+    async def test_aexecute_releases_capacity_when_admission_hook_times_out(
+        self,
+        classes,
+        base_config,
+    ):
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        capacity = SubagentExecutionCapacity(
+            SubagentRuntimeConfig(max_running=1),
+        )
+
+        async def admission_hook() -> bool:
+            assert capacity.snapshot().running == 1
+            raise TimeoutError("Durable subagent admission timed out after 1s")
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=capacity,
+            admission_hook=admission_hook,
+            admission_hook_loop=asyncio.get_running_loop(),
+        )
+
+        with patch.object(
+            executor,
+            "_aexecute_admitted",
+            side_effect=AssertionError("execution must not start"),
+        ):
+            result = await executor._aexecute("Do something")
+
+        assert result.status is SubagentStatus.FAILED
+        assert result.admission_failure is True
+        assert "admission timed out after 1s" in result.error
+        assert capacity.snapshot().running == 0
+
+    @pytest.mark.anyio
     async def test_aexecute_marks_structured_llm_error_fallback_as_failed(self, classes, base_config, mock_agent, msg):
         """A handled provider error is still a failed delegated task.
 
@@ -5991,6 +6031,22 @@ def test_utcnow_helper_returns_utc_aware_datetime(classes):
     assert now.tzinfo is not None
     assert now.utcoffset() is not None
     assert now.utcoffset().total_seconds() == 0.0
+
+
+def test_admission_hook_parameters_preserve_existing_positional_order(classes):
+    parameters = list(
+        inspect.signature(classes["SubagentExecutor"].__init__).parameters,
+    )
+
+    assert parameters.index("acceptance_criteria") < parameters.index(
+        "admission_hook",
+    )
+    assert parameters.index("loop_detection_recorder") < parameters.index(
+        "admission_hook",
+    )
+    assert parameters.index("tool_promotion_recorder") < parameters.index(
+        "admission_hook",
+    )
 
 
 @pytest.mark.anyio

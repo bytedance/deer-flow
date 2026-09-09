@@ -84,7 +84,12 @@ async def test_claim_separates_total_live_leased_and_running(tmp_path) -> None:
         "failed": 0,
         "cancelled": 0,
     }
-    assert await repo.mark_item_running(claimed[0]["id"], lease_owner="worker-1", now=now)
+    assert await repo.mark_item_running(
+        claimed[0]["id"],
+        lease_owner="worker-1",
+        lease_seconds=60,
+        now=now,
+    )
 
     while_full = await repo.claim_items(
         now=now + timedelta(seconds=1),
@@ -178,7 +183,12 @@ async def test_expired_running_lease_keeps_attempt_and_honors_max_attempts(tmp_p
     await _create(repo, count=1, max_live=1, max_running=1, max_attempts=1)
     now = datetime.now(UTC)
     first = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=30, limit=1))[0]
-    assert await repo.mark_item_running(first["id"], lease_owner="worker-1", now=now)
+    assert await repo.mark_item_running(
+        first["id"],
+        lease_owner="worker-1",
+        lease_seconds=1,
+        now=now,
+    )
 
     reclaimed = await repo.claim_items(
         now=now + timedelta(seconds=31),
@@ -257,7 +267,12 @@ async def test_cancel_terminalizes_in_flight_items_and_fences_stale_completion(t
     await _create(repo, count=1, max_live=1, max_running=1)
     now = datetime.now(UTC)
     claimed = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
-    assert await repo.mark_item_running(claimed["id"], lease_owner="worker-1", now=now)
+    assert await repo.mark_item_running(
+        claimed["id"],
+        lease_owner="worker-1",
+        lease_seconds=60,
+        now=now,
+    )
 
     cancelled = await repo.cancel_batch("batch-1", user_id="user-1")
 
@@ -297,12 +312,69 @@ async def test_expired_claim_cannot_be_marked_running(tmp_path) -> None:
     assert not await repo.mark_item_running(
         claimed["id"],
         lease_owner="worker-1",
+        lease_seconds=30,
         now=now + timedelta(seconds=31),
     )
     item = (await repo.list_items("batch-1", user_id="user-1"))[0]
     assert item["status"] == "leased"
     assert item["started_at"] is None
     assert item["attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_mark_running_rechecks_expiry_after_lock_time(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=1, max_live=1, max_running=1)
+    stale_now = datetime.now(UTC) - timedelta(seconds=31)
+    claimed = (
+        await repo.claim_items(
+            now=stale_now,
+            lease_owner="worker-1",
+            lease_seconds=30,
+            limit=1,
+        )
+    )[0]
+
+    assert not await repo.mark_item_running(
+        claimed["id"],
+        lease_owner="worker-1",
+        lease_seconds=30,
+        now=stale_now,
+    )
+    item = (await repo.list_items("batch-1", user_id="user-1"))[0]
+    assert item["status"] == "leased"
+    assert item["started_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_mark_running_refreshes_a_full_lease(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=1, max_live=1, max_running=1)
+    now = datetime.now(UTC)
+    claimed = (
+        await repo.claim_items(
+            now=now,
+            lease_owner="worker-1",
+            lease_seconds=10,
+            limit=1,
+        )
+    )[0]
+
+    assert await repo.mark_item_running(
+        claimed["id"],
+        lease_owner="worker-1",
+        lease_seconds=60,
+        now=now,
+    )
+    assert (
+        await repo.claim_items(
+            now=now + timedelta(seconds=11),
+            lease_owner="worker-2",
+            lease_seconds=60,
+            limit=1,
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio

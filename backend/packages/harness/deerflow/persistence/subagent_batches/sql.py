@@ -208,7 +208,6 @@ class SubagentBatchRepository:
         *,
         lease_owner: str,
         statuses: tuple[str, ...],
-        lease_valid_at: datetime | None = None,
     ) -> tuple[SubagentBatchRow | None, SubagentBatchItemRow | None]:
         """Lock an item's batch before locking the leased item itself."""
         batch_id = select(SubagentBatchItemRow.batch_id).where(SubagentBatchItemRow.id == item_id).scalar_subquery()
@@ -221,8 +220,6 @@ class SubagentBatchRepository:
             SubagentBatchItemRow.status.in_(statuses),
             SubagentBatchItemRow.lease_owner == lease_owner,
         )
-        if lease_valid_at is not None:
-            item_stmt = item_stmt.where(SubagentBatchItemRow.lease_expires_at >= lease_valid_at)
         item = (await session.execute(item_stmt.with_for_update())).scalar_one_or_none()
         return batch, item
 
@@ -419,20 +416,35 @@ class SubagentBatchRepository:
                 await session.commit()
             return {"valid": not cancel_requested, "cancel_requested": cancel_requested}
 
-    async def mark_item_running(self, item_id: str, *, lease_owner: str, now: datetime) -> bool:
+    async def mark_item_running(
+        self,
+        item_id: str,
+        *,
+        lease_owner: str,
+        lease_seconds: int,
+        now: datetime,
+    ) -> bool:
         async with self._sf() as session:
             batch, item = await self._lock_batch_and_owned_item(
                 session,
                 item_id,
                 lease_owner=lease_owner,
                 statuses=("leased",),
-                lease_valid_at=now,
             )
             if item is None or item.cancel_requested_at is not None or batch is None or batch.status == "cancelled":
                 return False
+            locked_at = max(now, datetime.now(UTC))
+            lease_expires_at = item.lease_expires_at
+            if lease_expires_at is None:
+                return False
+            if lease_expires_at.tzinfo is None:
+                lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
+            if lease_expires_at < locked_at:
+                return False
             item.status = "running"
-            item.started_at = now
-            item.updated_at = now
+            item.lease_expires_at = locked_at + timedelta(seconds=lease_seconds)
+            item.started_at = locked_at
+            item.updated_at = locked_at
             await session.commit()
             return True
 

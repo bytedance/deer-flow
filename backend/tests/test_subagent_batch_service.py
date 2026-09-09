@@ -685,6 +685,239 @@ async def test_executor_admission_failure_requeues_instead_of_finalizing(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_admission_timeout_requeues_without_starting_execution(
+    monkeypatch,
+) -> None:
+    mark_started = asyncio.Event()
+    release_mark = asyncio.Event()
+    result = SimpleNamespace(
+        status=FakeStatus.PENDING,
+        result=None,
+        error=None,
+        stop_reason=None,
+        token_usage_records=None,
+        admission_failure=False,
+        execution_done_event=asyncio.Event(),
+        get_fatal_error=lambda: None,
+    )
+
+    class Repository:
+        def __init__(self) -> None:
+            self.claim_calls = 0
+            self.requeue_calls = []
+            self.finalized = False
+
+        async def claim_items(self, **_kwargs):
+            self.claim_calls += 1
+            return []
+
+        async def mark_item_running(self, *_args, **_kwargs):
+            mark_started.set()
+            await release_mark.wait()
+            return True
+
+        async def renew_item_lease(self, *_args, **_kwargs):
+            return {"valid": True, "cancel_requested": False}
+
+        async def requeue_item_after_admission_failure(self, item_id, **kwargs):
+            self.requeue_calls.append((item_id, kwargs))
+            return True
+
+        async def finalize_item(self, *_args, **_kwargs):
+            self.finalized = True
+            return True
+
+    execution_started = False
+
+    class Executor:
+        def __init__(self, **kwargs) -> None:
+            self._admission_hook = kwargs["admission_hook"]
+
+        def execute_async(self, _prompt, task_id=None):
+            assert task_id == "item-1"
+
+            async def run() -> None:
+                nonlocal execution_started
+                try:
+                    admitted = await self._admission_hook()
+                except Exception as exc:
+                    result.status = FakeStatus.FAILED
+                    result.error = str(exc)
+                    result.admission_failure = True
+                else:
+                    execution_started = admitted is not False
+                finally:
+                    result.execution_done_event.set()
+
+            asyncio.create_task(run())
+            return "execution-1"
+
+    repository = Repository()
+    monkeypatch.setattr(service_module, "get_app_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(
+        service_module,
+        "resolve_subagent_model_name",
+        lambda *_args, **_kwargs: "model-a",
+    )
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(
+        service_module,
+        "get_background_task_result",
+        lambda _execution_id: result,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "cleanup_background_task",
+        lambda _execution_id: None,
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1, lease_seconds=10),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+    )
+    monkeypatch.setattr(service, "_lease_renew_interval_seconds", lambda: 0.01)
+    item = {
+        "id": "item-1",
+        "_lease_owner": "worker:generation",
+        "item_key": "record-1",
+        "prompt": "Process record 1",
+        "batch": {
+            "id": "batch-1",
+            "thread_id": "thread-1",
+            "user_id": "user-1",
+            "run_id": "run-1",
+            "execution_spec": _request().execution_spec,
+        },
+    }
+
+    await asyncio.wait_for(service._execute_item(item), timeout=1)
+
+    assert mark_started.is_set()
+    assert execution_started is False
+    assert service._admission_recoveries
+    assert repository.requeue_calls == []
+    assert repository.finalized is False
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    assert repository.claim_calls == 1
+
+    release_mark.set()
+    await asyncio.wait_for(
+        asyncio.gather(*tuple(service._admission_recoveries)),
+        timeout=1,
+    )
+    await asyncio.sleep(0)
+    assert service._admission_recoveries == set()
+    assert len(repository.requeue_calls) == 1
+    assert repository.requeue_calls[0][0] == "item-1"
+    assert repository.requeue_calls[0][1]["lease_owner"] == "worker:generation"
+    assert repository.requeue_calls[0][1]["error"] == ("Durable subagent admission timed out before execution")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_admission_recovery_compensates_before_propagating() -> None:
+    release_mark = asyncio.Event()
+    requeued = asyncio.Event()
+    requeue_kwargs = None
+
+    async def cancellation_resistant_mark() -> bool:
+        while not release_mark.is_set():
+            try:
+                await release_mark.wait()
+            except asyncio.CancelledError:
+                pass
+        return True
+
+    class Repository:
+        async def requeue_item_after_admission_failure(self, _item_id, **kwargs):
+            nonlocal requeue_kwargs
+            requeue_kwargs = kwargs
+            requeued.set()
+            return True
+
+    service = SubagentBatchService(
+        repository=Repository(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+    )
+    mark_task = asyncio.create_task(cancellation_resistant_mark())
+    recovery = asyncio.create_task(
+        service._settle_timed_out_admission(
+            item_id="item-1",
+            lease_owner="worker:generation",
+            mark_task=mark_task,
+        ),
+    )
+    await asyncio.sleep(0)
+    recovery.cancel("shutdown")
+    await asyncio.sleep(0)
+
+    assert not recovery.done()
+    release_mark.set()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await asyncio.wait_for(recovery, timeout=1)
+
+    assert raised.value.args == ("shutdown",)
+    assert requeued.is_set()
+    assert requeue_kwargs is not None
+    assert requeue_kwargs["lease_owner"] == "worker:generation"
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_admission_recovery_created_after_execution_snapshot() -> None:
+    release_mark = asyncio.Event()
+    execution_started = asyncio.Event()
+    requeued = asyncio.Event()
+
+    async def pending_mark() -> bool:
+        await release_mark.wait()
+        return True
+
+    class Repository:
+        async def requeue_item_after_admission_failure(self, _item_id, **kwargs):
+            assert kwargs["lease_owner"] == "worker:generation"
+            requeued.set()
+            return True
+
+    service = SubagentBatchService(
+        repository=Repository(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+    )
+    mark_task = asyncio.create_task(pending_mark())
+
+    async def execution() -> None:
+        execution_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            service._track_timed_out_admission(
+                item_id="item-1",
+                lease_owner="worker:generation",
+                mark_task=mark_task,
+            )
+            raise
+
+    execution_task = asyncio.create_task(execution())
+    service._executions["item-1"] = execution_task
+    await asyncio.wait_for(execution_started.wait(), timeout=1)
+
+    stop_task = asyncio.create_task(service.stop())
+    while not service._admission_recoveries:
+        await asyncio.sleep(0)
+
+    assert not stop_task.done()
+    release_mark.set()
+    await asyncio.wait_for(stop_task, timeout=1)
+
+    assert requeued.is_set()
+    assert mark_task.done()
+    assert execution_task.cancelled()
+    assert service._admission_recoveries == set()
+
+
+@pytest.mark.asyncio
 async def test_mark_running_failure_does_not_start_native_execution(
     monkeypatch,
 ) -> None:
@@ -779,6 +1012,7 @@ async def test_terminal_result_keeps_lease_until_execution_teardown_finishes(
     )
     finalized = asyncio.Event()
     lease_renewed = asyncio.Event()
+    acceptance_started = asyncio.Event()
     lease_owners: list[str] = []
 
     class Repository:
@@ -811,6 +1045,16 @@ async def test_terminal_result_keeps_lease_until_execution_teardown_finishes(
     monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
     monkeypatch.setattr(service_module, "get_background_task_result", lambda _execution_id: result)
     monkeypatch.setattr(service_module, "cleanup_background_task", lambda _execution_id: None)
+    monkeypatch.setattr(
+        service_module,
+        "check_batch_acceptance",
+        AsyncMock(
+            side_effect=lambda *_args, **_kwargs: (
+                acceptance_started.set(),
+                {"schema_version": 1, "leaves": []},
+            )[1],
+        ),
+    )
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
     service = SubagentBatchService(
         repository=Repository(),
@@ -825,6 +1069,7 @@ async def test_terminal_result_keeps_lease_until_execution_teardown_finishes(
         "_lease_owner": "worker:generation",
         "item_key": "record-1",
         "prompt": "Process record 1",
+        "acceptance_criteria": ["quality"],
         "batch": {
             "id": "batch-1",
             "thread_id": "thread-1",
@@ -838,12 +1083,14 @@ async def test_terminal_result_keeps_lease_until_execution_teardown_finishes(
     await asyncio.wait_for(lease_renewed.wait(), timeout=2)
 
     assert not finalized.is_set()
+    assert not acceptance_started.is_set()
     assert not execution.done()
 
     result.execution_done_event.set()
     await asyncio.wait_for(execution, timeout=1)
 
     assert finalized.is_set()
+    assert acceptance_started.is_set()
     assert lease_owners
     assert set(lease_owners) == {"worker:generation"}
 
@@ -974,6 +1221,7 @@ async def test_batch_stop_propagates_original_execution_fatal_without_future_rea
                     "id": "item-1",
                     "item_key": "record-1",
                     "prompt": "Process record 1",
+                    "acceptance_criteria": ["quality"],
                     "batch": {
                         "id": "batch-1",
                         "thread_id": "thread-1",
@@ -1020,6 +1268,8 @@ async def test_batch_stop_propagates_original_execution_fatal_without_future_rea
         "request_cancel_background_task",
         lambda _execution_id: None,
     )
+    checker = AsyncMock(side_effect=AssertionError("fatal teardown must skip acceptance"))
+    monkeypatch.setattr(service_module, "check_batch_acceptance", checker)
     monkeypatch.setattr(service_module, "cleanup_background_task", cleaned.append)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
     service = SubagentBatchService(
@@ -1042,6 +1292,7 @@ async def test_batch_stop_propagates_original_execution_fatal_without_future_rea
 
     assert raised.value is fatal
     assert repository.finalized is False
+    checker.assert_not_awaited()
     assert cleaned == ["execution-1"]
 
 
