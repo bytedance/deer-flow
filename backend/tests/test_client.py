@@ -247,7 +247,7 @@ class TestConfigQueries:
 # ---------------------------------------------------------------------------
 
 
-def _make_agent_mock(chunks: list[dict]):
+def _make_agent_mock(chunks: list[dict | tuple[str, dict]]):
     """Create a mock agent whose .stream() yields the given chunks."""
     agent = MagicMock()
     agent.stream.return_value = iter(chunks)
@@ -495,6 +495,33 @@ class TestStream:
         assert len(values_events) >= 1
         assert values_events[-1].data["title"] == "Greeting"
         assert "messages" in values_events[-1].data
+
+    @pytest.mark.parametrize("mode_tagged", [False, True], ids=["bare-dict", "mode-tuple"])
+    def test_values_events_preserve_summary_text_updates(self, client, mode_tagged):
+        messages = [HumanMessage(content="hi", id="h-1"), AIMessage(content="ok", id="ai-1")]
+        summaries = [None, "first summary", "first summary", "revised summary", "", None]
+        chunks = [{"messages": messages, "summary_text": summary} for summary in summaries]
+        agent = _make_agent_mock([("values", chunk) for chunk in chunks] if mode_tagged else chunks)
+
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="summary-stream"))
+
+        values_events = [event for event in events if event.type == "values"]
+        assert [event.data["summary_text"] for event in values_events] == summaries
+        assert all(len(event.data["messages"]) == 2 for event in values_events)
+        assert len(_ai_events(events)) == 1
+        assert events[-1].type == "end"
+
+    @pytest.mark.parametrize("mode_tagged", [False, True], ids=["bare-dict", "mode-tuple"])
+    def test_values_events_without_summary_expose_none(self, client, mode_tagged):
+        chunk = {"messages": [HumanMessage(content="hi", id="h-1")]}
+        agent = _make_agent_mock([("values", chunk) if mode_tagged else chunk])
+
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="no-summary"))
+
+        values_events = [event for event in events if event.type == "values"]
+        assert values_events[0].data["summary_text"] is None
 
     def test_deduplication(self, client):
         """Messages with the same id are not emitted twice."""
@@ -902,6 +929,7 @@ class TestStream:
                 "values",
                 {
                     "title": None,
+                    "summary_text": None,
                     "messages": [
                         {"type": "human", "content": "hi", "id": "h-1"},
                         {"type": "ai", "content": "Hello", "id": "ai-1", "usage_metadata": usage},
@@ -1248,6 +1276,28 @@ class TestEnsureAgent:
             client._ensure_agent(config, context={"user_id": "u2", "user_role": "user", "authz_attributes": {"department": "eng"}})
 
         assert mock_create_agent.call_count == 2
+
+    def test_disabled_authorization_cache_key_still_isolates_effective_users(self, client, mock_app_config):
+        """User-bound prompts/middleware must never be reused across embedded callers."""
+        mock_app_config.authorization = AuthorizationConfig(enabled=False)
+        client._app_config = mock_app_config
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            config = client._get_runnable_config("t1")
+            client._ensure_agent(config, context={"user_id": "alice"})
+            client._ensure_agent(config, context={"user_id": "bob"})
+
+        assert mock_create_agent.call_count == 2
+        assert [call.kwargs["user_id"] for call in mock_build_middlewares.call_args_list] == ["alice", "bob"]
+        assert [call.kwargs["user_id"] for call in mock_apply_prompt.call_args_list] == ["alice", "bob"]
 
     def test_authorization_cache_key_snapshots_nested_attributes(self, client, mock_app_config):
         mock_app_config.authorization = AuthorizationConfig(
@@ -2938,6 +2988,22 @@ class TestScenarioAgentRecreation:
             enabled=True,
             provider=AuthorizationProviderConfig(use="unused:Provider"),
         )
+        client._app_config = mock_app_config
+        agent = _make_agent_mock([{"messages": [AIMessage(content="ok", id="ai-1")]}])
+        captured: dict = {}
+
+        def fake_ensure(config, *, context):
+            captured.update(context)
+            client._agent = agent
+
+        with patch.object(client, "_ensure_agent", side_effect=fake_ensure):
+            list(client.stream("hi", thread_id="t1"))
+
+        assert captured["user_id"] == "test-user-autouse"
+        assert agent.stream.call_args.kwargs["context"]["user_id"] == "test-user-autouse"
+
+    def test_stream_uses_effective_user_context_when_authorization_is_disabled(self, client, mock_app_config):
+        mock_app_config.authorization = AuthorizationConfig(enabled=False)
         client._app_config = mock_app_config
         agent = _make_agent_mock([{"messages": [AIMessage(content="ok", id="ai-1")]}])
         captured: dict = {}

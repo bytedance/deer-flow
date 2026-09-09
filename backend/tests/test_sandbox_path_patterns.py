@@ -110,6 +110,31 @@ def test_direct_replacer_matches_the_shared_boundary_and_tail_contract() -> None
     assert replacer("root /host/skills, done", "/host/skills", "/mnt/skills", separator_agnostic=True) == "root /mnt/skills, done"
 
 
+def test_direct_replacer_normalizes_nested_tail_to_virtual_posix_style() -> None:
+    # The tail is sliced from the original output, so a Windows-spelled nested
+    # path kept its backslashes and was spliced into the POSIX-style virtual
+    # path as e.g. /mnt/skills/pkg\\a.md. Virtual paths are always POSIX, so
+    # nested tails must be normalized the same way depth-1 tails already are.
+    assert (
+        path_patterns_module.replace_output_path_matches(
+            "see \\host\\skills\\pkg\\a.md",
+            "/host/skills",
+            "/mnt/skills",
+            separator_agnostic=True,
+        )
+        == "see /mnt/skills/pkg/a.md"
+    )
+    assert (
+        path_patterns_module.replace_output_path_matches(
+            "see C:\\host\\skills\\pkg\\a.md",
+            "C:\\host\\skills",
+            "/mnt/skills",
+            separator_agnostic=True,
+        )
+        == "see /mnt/skills/pkg/a.md"
+    )
+
+
 def test_separator_agnostic_replacer_avoids_normalization_without_backslashes() -> None:
     class ReplaceTrackingString(str):
         def __init__(self, value: str) -> None:

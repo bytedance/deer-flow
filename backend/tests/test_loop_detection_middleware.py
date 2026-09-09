@@ -1418,6 +1418,194 @@ class TestToolFrequencyDetection:
         assert _HARD_STOP_MSG in msg.content
 
 
+class TestToolCallBatchDecisions:
+    """A soft warning must not skip accounting or mask a hard stop in a batch."""
+
+    @staticmethod
+    def _call(name, value):
+        if name == "read_file":
+            args = {"path": f"/{value}.py"}
+        elif name == "bash":
+            args = {"command": f"echo {value}"}
+        else:
+            args = {"value": value}
+        return {"name": name, "id": f"call_{name}_{value}", "args": args}
+
+    def test_single_batch_crossing_both_thresholds_hard_stops(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        journal = MagicMock()
+        runtime.context["__run_journal"] = journal
+        calls = [self._call("read_file", i) for i in range(3)]
+
+        result = mw.after_model(_make_state(tool_calls=calls), runtime)
+
+        assert result is not None
+        assert result["messages"][0].tool_calls == []
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+        assert not mw._pending_warnings
+        assert not mw._tool_freq_warned.get("test-thread")
+        journal.record_middleware.assert_called_once()
+        recorded = journal.record_middleware.call_args.kwargs
+        assert recorded["action"] == "hard_stop"
+        assert recorded["changes"]["detection_layer"] == "tool_frequency"
+        assert recorded["changes"]["count"] == 3
+
+    @pytest.mark.parametrize("hard_stop_first", [False, True])
+    def test_one_tools_warning_cannot_mask_another_tools_hard_stop(self, hard_stop_first):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        mw._apply(_make_state(tool_calls=[self._call("bash", 0)]), runtime)
+        mw._apply(_make_state(tool_calls=[self._call("read_file", 0), self._call("bash", 1)]), runtime)
+        calls = [self._call("read_file", 1), self._call("bash", 2)]
+        if hard_stop_first:
+            calls.reverse()
+
+        decision = mw._track_and_check(_make_state(tool_calls=calls), runtime)
+
+        assert decision is not None and decision.hard_stop
+        assert decision.tool_names == ("bash",)
+        assert decision.count == 3
+        assert "read_file" not in mw._tool_freq_warned["test-thread"]
+
+    def test_identical_call_warning_cannot_mask_frequency_hard_stop(self):
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=5, tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        calls = [self._call("read_file", 0), self._call("read_file", 1)]
+        mw._apply(_make_state(tool_calls=calls), runtime)
+
+        decision = mw._track_and_check(_make_state(tool_calls=calls), runtime)
+
+        assert decision is not None and decision.hard_stop
+        assert decision.detection_layer == "tool_frequency"
+        assert decision.count == 3
+        assert not mw._warned.get("test-thread")
+
+    def test_warning_batch_counts_all_calls_and_only_marks_selected_warning(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=10)
+        runtime = _make_runtime()
+        calls = [self._call("read_file", i) for i in range(3)] + [self._call("bash", i) for i in range(2)]
+
+        first = mw._track_and_check(_make_state(tool_calls=calls), runtime)
+
+        assert first is not None and first.action == "warn"
+        assert first.tool_names == ("read_file",)
+        assert list(mw._tool_name_history["test-thread"]) == ["read_file"] * 3 + ["bash"] * 2
+        assert dict(mw._tool_name_counter["test-thread"]) == {"read_file": 3, "bash": 2}
+        assert mw._tool_freq_warned["test-thread"] == {"read_file"}
+
+        second = mw._track_and_check(_make_state(tool_calls=[self._call("bash", 2)]), runtime)
+        assert second is not None and second.action == "warn"
+        assert second.tool_names == ("bash",)
+        assert second.count == 3
+
+    def test_hash_warning_preserves_frequency_accounting_and_pending_warning(self):
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=10, tool_freq_warn=2, tool_freq_hard_limit=5)
+        runtime = _make_runtime()
+        calls = [self._call("read_file", 0)]
+        assert mw._track_and_check(_make_state(tool_calls=calls), runtime) is None
+
+        hash_warning = mw._track_and_check(_make_state(tool_calls=calls), runtime)
+
+        assert hash_warning is not None and hash_warning.detection_layer == "identical_call_set"
+        assert mw._tool_name_counter["test-thread"]["read_file"] == 2
+        assert not mw._tool_freq_warned.get("test-thread")
+
+        freq_warning = mw._track_and_check(_make_state(tool_calls=[self._call("read_file", 1)]), runtime)
+        assert freq_warning is not None and freq_warning.detection_layer == "tool_frequency"
+        assert freq_warning.count == 3
+
+    def test_warning_that_decays_within_batch_can_warn_on_next_burst(self):
+        mw = LoopDetectionMiddleware(window_size=4, tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        calls = [self._call(name, i) for i, name in enumerate(["a", "b", "a", "c", "d"])]
+
+        first = mw._track_and_check(_make_state(tool_calls=calls), runtime)
+
+        assert first is not None and first.tool_names == ("a",)
+        assert mw._tool_name_counter["test-thread"]["a"] == 1
+        assert "a" not in mw._tool_freq_warned["test-thread"]
+        second = mw._track_and_check(_make_state(tool_calls=[self._call("a", 5)]), runtime)
+        assert second is not None and second.action == "warn"
+        assert second.tool_names == ("a",)
+
+    def test_other_tool_eviction_rearms_frequency_warning(self):
+        mw = LoopDetectionMiddleware(window_size=3, tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+
+        first = mw._track_and_check(
+            _make_state(tool_calls=[self._call(name, i) for i, name in enumerate(["a", "b", "a"])]),
+            runtime,
+        )
+        assert first is not None and first.tool_names == ("a",)
+
+        second = mw._track_and_check(_make_state(tool_calls=[self._call("b", 3)]), runtime)
+        assert second is not None and second.tool_names == ("b",)
+        assert mw._tool_name_counter["test-thread"]["a"] == 1
+        assert "a" not in mw._tool_freq_warned["test-thread"]
+
+        third = mw._track_and_check(_make_state(tool_calls=[self._call("a", 4)]), runtime)
+        assert third is not None and third.tool_names == ("a",)
+
+    def test_cross_tool_eviction_rearms_at_evicted_tools_override_threshold(self):
+        mw = LoopDetectionMiddleware(
+            window_size=3,
+            tool_freq_warn=2,
+            tool_freq_hard_limit=5,
+            tool_freq_overrides={"bash": (3, 4)},
+        )
+        runtime = _make_runtime()
+
+        first = mw._track_and_check(
+            _make_state(tool_calls=[self._call("bash", i) for i in range(3)]),
+            runtime,
+        )
+        assert first is not None and first.tool_names == ("bash",)
+        assert mw._tool_freq_warned["test-thread"] == {"bash"}
+
+        second = mw._track_and_check(
+            _make_state(tool_calls=[self._call("read_file", i) for i in range(3)]),
+            runtime,
+        )
+        assert second is not None and second.tool_names == ("read_file",)
+        assert mw._tool_name_counter["test-thread"]["bash"] == 2
+        assert "bash" not in mw._tool_freq_warned["test-thread"]
+
+        third = mw._track_and_check(
+            _make_state(tool_calls=[self._call("bash", i) for i in range(3, 6)]),
+            runtime,
+        )
+        assert third is not None and third.tool_names == ("bash",)
+        assert third.count == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_batch_hard_stop_prevents_tool_execution_in_real_agent_graph(self, use_async):
+        executed = []
+
+        @as_tool
+        def read_file(path: str) -> str:
+            """Read a fake file without touching the filesystem."""
+            executed.append(path)
+            return path
+
+        calls = [{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/{i}.py"}} for i in range(3)]
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=calls), AIMessage(content="done")])
+        graph = create_agent(model=model, tools=[read_file], middleware=[mw])
+        inputs = {"messages": [("user", "inspect these files")]}
+        kwargs = {"context": {"thread_id": "batch-thread", "run_id": "batch-run"}, "config": {"recursion_limit": 10}}
+
+        result = await graph.ainvoke(inputs, **kwargs) if use_async else graph.invoke(inputs, **kwargs)
+
+        assert executed == []
+        assert len(model.seen_messages) == 1
+        assert result["messages"][-1].tool_calls == []
+        assert "FORCED STOP" in result["messages"][-1].content
+        assert mw.consume_stop_reason("batch-run") == "loop_capped"
+        assert not mw._pending_warnings
+
+
 class TestFromConfig:
     """Tests for LoopDetectionMiddleware.from_config — the sole validated construction path."""
 

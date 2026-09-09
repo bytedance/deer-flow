@@ -849,6 +849,8 @@ def test_compiled_skill_policy_chain_filters_schema_and_blocks_execution(monkeyp
 def test_build_middlewares_places_mcp_routing_before_deferred_filter(monkeypatch):
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
     from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)], loop_detection=LoopDetectionConfig(enabled=False))
@@ -870,6 +872,9 @@ def test_build_middlewares_places_mcp_routing_before_deferred_filter(monkeypatch
 
     routing_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, McpRoutingMiddleware))
     filter_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DeferredToolFilterMiddleware))
+    audit_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, DeferredToolPromotionAuditMiddleware))
+    policy_idx = next(i for i, middleware in enumerate(middlewares) if isinstance(middleware, SkillToolPolicyMiddleware))
+    assert audit_idx < policy_idx
     assert routing_idx < filter_idx
 
 

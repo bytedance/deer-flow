@@ -14,7 +14,7 @@ from deerflow.skills.types import Skill
 #: (``tests/test_slash_skill_contract.py`` here, ``slash-contract.test.ts`` on
 #: the frontend), so a reserved command or grammar change in only one language
 #: fails CI.
-RESERVED_SLASH_SKILL_NAMES = frozenset({"bootstrap", "goal", "help", "memory", "models", "new", "status"})
+RESERVED_SLASH_SKILL_NAMES = frozenset({"agent", "bootstrap", "goal", "help", "memory", "models", "new", "status"})
 _SLASH_SKILL_RE = re.compile(r"^/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+|$)")
 
 

@@ -18,6 +18,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from e2b import FileNotFoundException, TimeoutException
 from pydantic import ValidationError
 
 from deerflow.community.e2b_sandbox.capacity import (
@@ -5197,11 +5198,58 @@ def test_list_dir_preserves_trailing_space_in_filename():
     # "notes.txt " (trailing space) is a legal Linux filename; find prints it
     # verbatim, one entry per line, so a per-line strip() corrupts the name and
     # every follow-up file API call on the listed path misses the real file.
-    listing = SimpleNamespace(stdout="/home/user/notes.txt \n/home/user/sub\n", stderr="", exit_code=0)
+    listing = SimpleNamespace(stdout="/home/user/notes.txt \n/home/user/sub\n\n__DF_FIND_STATUS__:0\n", stderr="", exit_code=0)
     client = FakeClient(commands=FakeCommandsAPI([listing]))
     sb = _make_sandbox(client)
 
     assert sb.list_dir("/home/user") == ["/home/user/notes.txt ", "/home/user/sub"]
+
+
+def test_list_dir_raises_when_command_fails():
+    client = FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(OSError, match="Failed to list_dir"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_raises_when_client_closed():
+    sb = _make_sandbox(FakeClient())
+    sb.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_raises_when_find_returns_no_entries():
+    # `find ... 2>/dev/null` on a missing path yields empty stdout; that is not
+    # a real empty directory (`find -type d` still prints the directory itself).
+    listing = SimpleNamespace(stdout="\n__DF_FIND_STATUS__:1\n", stderr="", exit_code=1)
+    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(FileNotFoundError):
+        sb.list_dir("/home/user/missing")
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path():
+    listing = SimpleNamespace(stdout="", stderr="", exit_code=127)
+    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_uses_find_H_to_dereference_start_point():
+    # find defaults to -P, so a symlink start point (E2B /mnt/acp-workspace)
+    # would produce empty stdout and raise FileNotFoundError without -H.
+    listing = SimpleNamespace(stdout="/mnt/acp-workspace\n\n__DF_FIND_STATUS__:0\n", stderr="", exit_code=0)
+    commands = FakeCommandsAPI([listing])
+    sb = _make_sandbox(FakeClient(commands=commands))
+
+    assert sb.list_dir("/mnt/acp-workspace") == ["/mnt/acp-workspace"]
+    assert commands.calls and "find -H " in commands.calls[0]
 
 
 def test_glob_preserves_trailing_space_in_filename():
@@ -5213,3 +5261,72 @@ def test_glob_preserves_trailing_space_in_filename():
 
     assert matches == ["/home/user/notes.txt "]
     assert truncated is False
+
+
+@pytest.mark.parametrize("missing_exc", [FileNotFoundError, FileNotFoundException])
+def test_append_creates_file_when_file_does_not_exist(missing_exc):
+    # Append has no native write mode, so a missing file must still create one
+    # containing only the new fragment. Both the e2b SDK exception and the
+    # stdlib one used by FakeFilesAPI / compatible clients count as not-found.
+    class MissingFilesAPI(FakeFilesAPI):
+        def read(self, path: str, *, format: str | None = None):
+            self.read_calls.append((path, format))
+            raise missing_exc(path)
+
+    files = MissingFilesAPI()
+    sb = _make_sandbox(FakeClient(files=files))
+
+    sb.write_file("/mnt/user-data/outputs/report.txt", "conclusion", append=True)
+
+    assert files.write_calls == [("/home/user/outputs/report.txt", "conclusion")]
+
+
+def test_append_does_not_overwrite_when_read_fails(caplog):
+    # If the pre-read fails for any reason other than not-found, we cannot
+    # confirm the existing contents. Continuing would write only the tail and
+    # destroy the original file. Fail closed: raise, and never call write.
+    existing = b"important report body"
+
+    class TimeoutFilesAPI(FakeFilesAPI):
+        def read(self, path: str, *, format: str | None = None):
+            self.read_calls.append((path, format))
+            raise TimeoutException("read timed out")
+
+    files = TimeoutFilesAPI(store={"/home/user/outputs/report.txt": existing})
+    sb = _make_sandbox(FakeClient(files=files))
+
+    with caplog.at_level("ERROR"), pytest.raises(TimeoutException, match="read timed out"):
+        sb.write_file("/mnt/user-data/outputs/report.txt", "conclusion", append=True)
+
+    assert files.write_calls == []
+    assert files.store["/home/user/outputs/report.txt"] == existing
+    assert "refusing to overwrite" in caplog.text
+    assert "Failed to write file" not in caplog.text
+
+
+def test_append_accumulates_existing_content():
+    # The rewrite exists to keep read-modify-write. If someone later drops
+    # `existing` and writes only the tail, the not-found / fail-closed tests
+    # would still pass.
+    files = FakeFilesAPI(store={"/home/user/outputs/report.txt": b"hello"})
+    sb = _make_sandbox(FakeClient(files=files))
+
+    sb.write_file("/mnt/user-data/outputs/report.txt", " world", append=True)
+
+    assert files.write_calls == [("/home/user/outputs/report.txt", "hello world")]
+
+
+def test_append_decodes_bytes_preimage():
+    # FakeFilesAPI.read() returns str for valid utf-8. A bytes pre-image is
+    # what hits the decode branch before concatenation.
+    class BytesFilesAPI(FakeFilesAPI):
+        def read(self, path: str, *, format: str | None = None):
+            self.read_calls.append((path, format))
+            return self.store[path]
+
+    files = BytesFilesAPI(store={"/home/user/outputs/report.txt": b"hello"})
+    sb = _make_sandbox(FakeClient(files=files))
+
+    sb.write_file("/mnt/user-data/outputs/report.txt", " world", append=True)
+
+    assert files.write_calls == [("/home/user/outputs/report.txt", "hello world")]
