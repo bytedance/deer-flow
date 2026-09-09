@@ -548,6 +548,15 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **artifacts:** Keep `PUT /api/threads/{id}/artifacts/{path}` confined to
+  `/mnt/user-data/outputs`. The outputs-only guard was a string-prefix check on
+  the raw path, so a percent-encoded `..` (`outputs/%2e%2e/uploads/x.txt`) —
+  which nginx forwards untouched and Starlette decodes — passed it, and the
+  resolver only confines to `user-data/`, letting a caller overwrite a sibling
+  upload or workspace file in their own thread. Dot segments are now collapsed
+  before the prefix check, and the resolved host path is re-checked against the
+  resolved outputs root so a symlink planted inside `outputs/` cannot redirect
+  the write either. ([#5321])
 - **gateway:** Stop persisting a caller-supplied `deerflow_trace_id` on the run
   record. `body.metadata` reaches both the live run config, which the run
   worker restamps, and the run record echoed verbatim by the runs API; only the
@@ -2678,3 +2687,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5282]: https://github.com/bytedance/deer-flow/pull/5282
 [#5284]: https://github.com/bytedance/deer-flow/pull/5284
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
+[#5321]: https://github.com/bytedance/deer-flow/pull/5321

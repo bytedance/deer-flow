@@ -561,7 +561,11 @@ def test_artifact_sandbox_sync_skipped_when_denied(monkeypatch, tmp_path):
     sandbox_provider.uses_thread_data_mounts = False
     sandbox_provider.acquire_async = AsyncMock(side_effect=AssertionError("must not acquire"))
     monkeypatch.setattr(artifacts_router, "get_sandbox_provider", lambda: sandbox_provider)
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _t, _p, user_id=None: tmp_path / "note.txt")
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        lambda _t, path, user_id=None: tmp_path if path == artifacts_router._EDITABLE_OUTPUTS_ROOT else tmp_path / "note.txt",
+    )
 
     from contextlib import asynccontextmanager
 
