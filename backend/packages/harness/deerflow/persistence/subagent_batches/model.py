@@ -47,6 +47,8 @@ class SubagentBatchItemRow(Base):
     item_key: Mapped[str] = mapped_column(String(128))
     position: Mapped[int] = mapped_column(Integer)
     prompt: Mapped[str] = mapped_column(Text)
+    acceptance_criteria: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    acceptance_verdict: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(24), index=True)
     attempt: Mapped[int] = mapped_column(Integer, default=0)
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
