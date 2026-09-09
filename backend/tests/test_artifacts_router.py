@@ -101,19 +101,8 @@ def _artifact_sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def _stub_editable_artifact_resolver(artifact_path: Path):
-    """Resolve the outputs root to the artifact's parent so the confinement check passes."""
-
-    def resolve(_thread_id, path, user_id=None):
-        if path == artifacts_router._EDITABLE_OUTPUTS_ROOT:
-            return artifact_path.parent
-        return artifact_path
-
-    return resolve
-
-
 def _patch_artifact_update_dependencies(monkeypatch, artifact_path: Path, provider=None) -> None:
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", _stub_editable_artifact_resolver(artifact_path))
+    monkeypatch.setattr(artifacts_router, "resolve_outputs_confined_path", lambda _thread_id, _path, user_id=None: artifact_path)
     monkeypatch.setattr(artifacts_router, "reserve_artifact_write", _allow_artifact_write)
     monkeypatch.setattr(artifacts_router, "get_sandbox_provider", lambda: provider or _MountedSandboxProvider())
 
@@ -211,14 +200,12 @@ _REAL_PATHS_USER_ID = "user-1"
 def _patch_real_thread_paths(monkeypatch, tmp_path: Path, provider=None) -> tuple[Path, Path]:
     """Route ``update_artifact`` through the real virtual-path resolver rooted at *tmp_path*.
 
-    The other update tests stub ``resolve_thread_virtual_path`` so they never
+    The other update tests stub ``resolve_outputs_confined_path`` so they never
     exercise the outputs confinement; these tests need the real thread layout.
     Returns the thread's ``outputs`` and ``uploads`` host directories.
     """
-    import app.gateway.path_utils as path_utils
-
     paths = Paths(tmp_path)
-    monkeypatch.setattr(path_utils, "get_paths", lambda: paths)
+    monkeypatch.setattr("app.gateway.path_utils.get_paths", lambda: paths)
     monkeypatch.setattr(artifacts_router, "get_effective_user_id", lambda: _REAL_PATHS_USER_ID)
     monkeypatch.setattr(artifacts_router, "get_trusted_internal_owner_user_id", lambda _request: None)
     monkeypatch.setattr(artifacts_router, "reserve_artifact_write", _allow_artifact_write)

@@ -42,7 +42,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 - `FeishuChannel._receive_single_file(...)` / `DingTalkChannel._receive_single_file(...)` — normalize provider filenames, claim a collision-free basename and write it through `write_upload_file_no_symlink` under the same channel lock; the returned basename drives both the agent-visible virtual path and non-local sandbox sync
 - `sandbox_files.py` — non-mounted Feishu/DingTalk syncs acquire unique non-releasing execution holders, drain blocking `update_file` workers across repeated cancellation, and release only after the last sandbox operation, so a parallel run cannot close the shared client mid-upload
 - `_ingest_inbound_files(...)` and the underlying `ensure_uploads_dir` / `get_uploads_dir` — owner-scoped via the same kwarg
-- `_resolve_attachments` / `_prepare_artifact_delivery` — resolve output artifacts from the bound owner's bucket
+- `_resolve_attachments` / `_prepare_artifact_delivery` — resolve output artifacts from the bound owner's bucket through `app.gateway.path_utils.resolve_outputs_confined_path`, the same outputs-only rule the artifact editor uses, so a sibling `uploads/`/`workspace/` path or a symlink planted in `outputs/` is skipped with a warning
 The cached value is reused for both the blocking (`runs.wait`) and streaming (`_handle_streaming_chat`) paths, so uploads and artifact delivery always target the same bucket even if a channel returns a rewritten `InboundMessage` from `receive_file`. The bucket id matches the memory bucket resolved by `_resolve_memory_user_id` (both normalize through `make_safe_user_id`).
 
 **Configuration** (`config.yaml` -> `channels`):

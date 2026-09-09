@@ -556,7 +556,8 @@ This section accumulates work toward the **2.1.0** milestone
   upload or workspace file in their own thread. Dot segments are now collapsed
   before the prefix check, and the resolved host path is re-checked against the
   resolved outputs root so a symlink planted inside `outputs/` cannot redirect
-  the write either. ([#5321])
+  the write either. The rule now lives in one shared helper that IM-channel
+  attachment delivery uses as well, so the two copies cannot drift. ([#5321])
 - **gateway:** Stop persisting a caller-supplied `deerflow_trace_id` on the run
   record. `body.metadata` reaches both the live run config, which the run
   worker restamps, and the run record echoed verbatim by the runs API; only the

@@ -5707,6 +5707,9 @@ class TestHandleChatWithArtifacts:
 
         paths = Paths(tmp_path)
         monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+        # Attachment resolution goes through the shared outputs-confinement
+        # helper, which binds ``get_paths`` at import like the other consumers.
+        monkeypatch.setattr("app.gateway.path_utils.get_paths", lambda: paths)
         outputs_dir = paths.sandbox_outputs_dir("test-thread-123", user_id="owner-1")
         outputs_dir.mkdir(parents=True)
         (outputs_dir / "report.md").write_text("owner report", encoding="utf-8")
