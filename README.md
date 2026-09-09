@@ -411,6 +411,14 @@ is opt-in: it fails fast when `frontend/.next` has no completed build.
 
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
+For a read-only demo without the Gateway, run `make build-static` from `frontend/`,
+then `HOSTNAME=127.0.0.1 PORT=3000 node --env-file=.env .next/standalone/server.js`
+from the same directory. The build includes public demo assets and resolves
+supported demo API reads locally; writes are unavailable. To display the homepage
+GitHub star count, set `GITHUB_OAUTH_TOKEN` in `frontend/.env` before starting Node.
+The token stays on the server; missing credentials or GitHub failures hide the
+count. Restart Node after changing the token; no rebuild is needed.
+
 #### LangGraph Studio (Optional)
 
 The default `make dev` topology uses DeerFlow's Gateway-embedded runtime and
