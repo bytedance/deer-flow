@@ -12,14 +12,15 @@ works without modification.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
@@ -47,6 +48,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import strip_injecte
 from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
+from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
@@ -64,6 +66,60 @@ _artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
+
+
+IdempotencyKeyHeader = Annotated[
+    str | None,
+    Header(
+        alias="Idempotency-Key",
+        max_length=255,
+        description="Retry key for idempotent run admission within this thread",
+    ),
+]
+
+
+def _scope_http_run_idempotency_key(request: Request, thread_id: str, key: str | None) -> str | None:
+    """Namespace a caller key for the process-wide run idempotency index."""
+    if not isinstance(key, str):
+        return None
+    key = key.strip()
+    if not key:
+        raise HTTPException(status_code=422, detail="Idempotency-Key must not be blank")
+    owner_id = get_trusted_internal_owner_user_id(request)
+    if owner_id is None:
+        user = getattr(request.state, "user", None)
+        user_id = getattr(user, "id", None)
+        owner_id = str(user_id) if user_id is not None else get_effective_user_id()
+    digest = hashlib.sha256(f"{owner_id}\0{thread_id}\0{key}".encode()).hexdigest()
+    return f"http-run:{digest}"
+
+
+async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
+    """Overlay durable status/error onto a hydrated store-only record."""
+    if not getattr(record, "store_only", False):
+        return record
+    store = getattr(run_mgr, "_store", None)
+    get = getattr(store, "get", None)
+    if get is None:
+        return record
+    try:
+        row = get(record.run_id)
+        if hasattr(row, "__await__"):
+            row = await row
+    except Exception:
+        logger.exception("Failed to refresh store-backed run %s", getattr(record, "run_id", None))
+        return record
+    if not isinstance(row, dict):
+        return record
+    raw_status = row.get("status")
+    if raw_status:
+        try:
+            record.status = RunStatus(raw_status)
+        except ValueError:
+            pass
+    if "error" in row:
+        record.error = row.get("error")
+    return record
 
 
 def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
@@ -174,6 +230,13 @@ class RunResponse(BaseModel):
     middleware_tokens: int = 0
     message_count: int = 0
     stop_reason: str | None = None
+
+
+class ThreadRunsPageResponse(BaseModel):
+    data: list[RunResponse]
+    has_more: bool
+    next_before_created_at: str | None = None
+    next_before_run_id: str | None = None
 
 
 class ArtifactArchiveManifestResponse(BaseModel):
@@ -861,15 +924,30 @@ async def prepare_edit_regenerate_run(
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def create_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> RunResponse:
+async def create_run(
+    thread_id: ThreadId,
+    body: RunCreateRequest,
+    request: Request,
+    idempotency_key: IdempotencyKeyHeader = None,
+) -> RunResponse:
     """Create a background run (returns immediately)."""
-    record = await start_run(body, thread_id, request)
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+    )
     return _record_to_response(record)
 
 
 @router.post("/{thread_id}/runs/stream")
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def stream_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> StreamingResponse:
+async def stream_run(
+    thread_id: ThreadId,
+    body: RunCreateRequest,
+    request: Request,
+    idempotency_key: IdempotencyKeyHeader = None,
+) -> StreamingResponse:
     """Create a run and stream events via SSE.
 
     The response includes a ``Content-Location`` header with the run's
@@ -878,10 +956,32 @@ async def stream_run(thread_id: ThreadId, body: RunCreateRequest, request: Reque
     """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(body, thread_id, request)
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+    )
+
+    # Same shape join already rejects: a reused store-only handle on a
+    # process-local bridge has no owner stream. Subscribing would create an
+    # empty log and wait forever. Terminal reuse still goes through
+    # sse_consumer with emit_gap_on_missing_stream so a missing stream emits
+    # gap rather than a bare end. First-time creates keep the default `end`.
+    if record.store_only and not bridge.supports_cross_process and record.status in (RunStatus.pending, RunStatus.running):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run {record.run_id} is not active on this worker and cannot be streamed",
+        )
 
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        sse_consumer(
+            bridge,
+            record,
+            request,
+            run_mgr,
+            emit_gap_on_missing_stream=record.idempotency_reused,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -897,17 +997,46 @@ async def stream_run(thread_id: ThreadId, body: RunCreateRequest, request: Reque
 
 @router.post("/{thread_id}/runs/wait", response_model=dict)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def wait_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> dict:
-    """Create a run and block until it completes, returning the final state."""
+async def wait_run(
+    thread_id: ThreadId,
+    body: RunCreateRequest,
+    request: Request,
+    idempotency_key: IdempotencyKeyHeader = None,
+) -> dict:
+    """Create a run and block until it completes, returning the final state.
+
+    A reused in-flight run that this worker cannot observe returns the durable
+    status without blocking. A reused completed run also returns durable
+    status: the latest thread checkpoint may belong to a later run.
+    """
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(body, thread_id, request)
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        idempotency_key=_scope_http_run_idempotency_key(request, thread_id, idempotency_key),
+    )
+    # Capture before waiting: create_or_reject mutates the shared cached
+    # record's idempotency_reused flag, so an overlapping retry must not
+    # change this request's checkpoint-vs-status decision.
+    reused = bool(getattr(record, "idempotency_reused", False))
 
-    completed = True
-    if record.task is not None:
+    # Reused/hydrated records have no local task. Wait on the bridge when this
+    # worker can observe it; otherwise return durable status rather than
+    # serializing whatever checkpoint happens to exist.
+    if getattr(record, "store_only", False) and not getattr(bridge, "supports_cross_process", False):
+        record = await _refresh_store_backed_run(run_mgr, record)
+        return {"status": record.status.value, "error": record.error}
+
+    if record.task is not None or getattr(record, "store_only", False):
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
+    else:
+        completed = True
 
-    if completed:
+    # Idempotent reuse is not bound to a run-specific checkpoint id. The latest
+    # thread head may be a later run, so do not claim it as this run's result.
+    if completed and not reused:
         try:
             accessor, config = await abuild_checkpoint_state_accessor(
                 request,
@@ -921,17 +1050,70 @@ async def wait_run(thread_id: ThreadId, body: RunCreateRequest, request: Request
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
+    if completed:
+        record = await _refresh_store_backed_run(run_mgr, record)
     return {"status": record.status.value, "error": record.error}
+
+
+def _parse_run_page_created_at(value: str) -> str:
+    try:
+        normalized = normalize_run_created_at_iso(value)
+        datetime.fromisoformat(normalized)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="before_created_at must be an ISO-8601 timestamp") from None
+    return normalized
 
 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
 @require_permission("runs", "read", owner_check=True)
 async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
-    """List all runs for a thread."""
+    """List the newest runs for a thread (default 100, as a bare array)."""
     run_mgr = get_run_manager(request)
     user_id = await get_current_user(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     return [_record_to_response(r) for r in records]
+
+
+@router.get("/{thread_id}/runs/page", response_model=ThreadRunsPageResponse)
+@require_permission("runs", "read", owner_check=True)
+async def list_runs_page(
+    thread_id: ThreadId,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    before_created_at: str | None = Query(default=None),
+    before_run_id: str | None = Query(default=None, min_length=1),
+) -> ThreadRunsPageResponse:
+    """Return a newest-first keyset page of runs for a thread.
+
+    Response: { data: [...], has_more: bool, next_before_created_at, next_before_run_id }
+    Pass both cursor fields from the previous page's last row to continue.
+    """
+    if (before_created_at is None) != (before_run_id is None):
+        raise HTTPException(
+            status_code=422,
+            detail="before_created_at and before_run_id must be provided together",
+        )
+    if before_created_at is not None:
+        before_created_at = _parse_run_page_created_at(before_created_at)
+
+    run_mgr = get_run_manager(request)
+    user_id = await get_current_user(request)
+    records = await run_mgr.list_by_thread(
+        thread_id,
+        user_id=user_id,
+        limit=limit + 1,
+        before_created_at=before_created_at,
+        before_run_id=before_run_id,
+    )
+    has_more = len(records) > limit
+    page = records[:limit]
+    last = page[-1] if page and has_more else None
+    return ThreadRunsPageResponse(
+        data=[_record_to_response(record) for record in page],
+        has_more=has_more,
+        next_before_created_at=format_run_cursor_created_at(last.created_at) if last else None,
+        next_before_run_id=last.run_id if last else None,
+    )
 
 
 @router.get("/{thread_id}/runs/{run_id}", response_model=RunResponse)

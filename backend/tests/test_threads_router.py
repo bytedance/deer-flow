@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import anyio
 import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI, HTTPException
@@ -17,10 +18,20 @@ from langgraph.types import Overwrite
 from app.gateway import services as gateway_services
 from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
-from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError
+from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+from deerflow.persistence.projects import ProjectRepository
+from deerflow.persistence.thread_meta import (
+    PROJECT_FILTER_UNSET,
+    THREAD_PINNED_METADATA_KEY,
+    THREAD_PROJECT_METADATA_KEY,
+    InvalidMetadataFilterError,
+    ThreadMetaRepository,
+    ThreadOwnershipConflictError,
+)
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -47,11 +58,11 @@ class _PermissiveThreadMetaStore(MemoryThreadMetaStore):
             return not require_existing
         return True
 
-    async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
-        return await super().create(thread_id, assistant_id=assistant_id, user_id=None, display_name=display_name, metadata=metadata)
+    async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
+        return await super().create(thread_id, assistant_id=assistant_id, user_id=None, display_name=display_name, metadata=metadata, project_id=project_id)
 
-    async def search(self, *, metadata=None, status=None, limit=100, offset=0, user_id=None, archived=None):  # type: ignore[override]
-        return await super().search(metadata=metadata, status=status, limit=limit, offset=offset, user_id=None, archived=archived)
+    async def search(self, *, metadata=None, status=None, limit=100, offset=0, user_id=None, archived=None, project_id=PROJECT_FILTER_UNSET):  # type: ignore[override]
+        return await super().search(metadata=metadata, status=status, limit=limit, offset=offset, user_id=None, archived=archived, project_id=project_id)
 
 
 class _ThreadTestRunManager:
@@ -85,6 +96,17 @@ def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
     app.state.thread_store = _PermissiveThreadMetaStore(store)
     app.include_router(threads.router)
     return app, store, checkpointer
+
+
+def test_thread_response_excludes_internal_incarnation() -> None:
+    response = threads.ThreadResponse.model_validate(
+        {
+            "thread_id": "thread-with-incarnation",
+            "incarnation": "a" * 32,
+        }
+    )
+
+    assert "incarnation" not in response.model_dump()
 
 
 def test_compact_rejects_run_owned_by_another_worker(monkeypatch) -> None:
@@ -695,7 +717,7 @@ def test_create_thread_returns_existing_when_insert_loses_race() -> None:
             super().__init__(backing)
             self._raised = False
 
-        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
             if not self._raised:
                 self._raised = True
                 await super().create(
@@ -704,6 +726,7 @@ def test_create_thread_returns_existing_when_insert_loses_race() -> None:
                     user_id=user_id,
                     display_name=display_name,
                     metadata=metadata,
+                    project_id=project_id,
                 )
                 raise IntegrityError(
                     "INSERT INTO threads_meta",
@@ -716,6 +739,7 @@ def test_create_thread_returns_existing_when_insert_loses_race() -> None:
                 user_id=user_id,
                 display_name=display_name,
                 metadata=metadata,
+                project_id=project_id,
             )
 
     app.state.thread_store = _RacingThreadMetaStore(store)
@@ -755,10 +779,10 @@ def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
         """Our insert loses to a competing create that already wrote an
         unscoped row, exactly the interleaving the recovery path exists for."""
 
-        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
             # The competing request commits its (owner-less) row here, then our
             # insert loses the primary-key race.
-            await super().create(thread_id, user_id=None, metadata=metadata)
+            await super().create(thread_id, user_id=None, metadata=metadata, project_id=project_id)
             raise IntegrityError(
                 "INSERT INTO threads_meta",
                 {},
@@ -788,6 +812,125 @@ def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
     assert owner_row is not None
     assert owner_row["user_id"] == "owner-1"
     assert unscoped_lookup["user_id"] == "owner-1"
+
+
+def test_fast_path_concurrent_trusted_claims_have_one_winner() -> None:
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+
+    async def _scenario():
+        await thread_store.create("legacy-fast-race", user_id=None)
+        owners = ("owner-a", "owner-b")
+        outcomes = await asyncio.gather(
+            *(
+                threads._resolve_existing_thread(
+                    thread_store,
+                    "legacy-fast-race",
+                    owner,
+                    {"user_id": owner},
+                )
+                for owner in owners
+            )
+        )
+        return owners, outcomes, await thread_store.get("legacy-fast-race", user_id=None)
+
+    owners, outcomes, final_record = asyncio.run(_scenario())
+
+    winners = [owner for owner, outcome in zip(owners, outcomes, strict=True) if outcome is not None]
+    assert winners == [final_record["user_id"]]
+    assert final_record["user_id"] in owners
+
+
+def test_fast_path_trusted_claim_does_not_take_over_owned_row() -> None:
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+
+    async def _scenario():
+        await thread_store.create("already-owned", user_id="owner-a")
+        outcome = await threads._resolve_existing_thread(
+            thread_store,
+            "already-owned",
+            "owner-b",
+            {"user_id": "owner-b"},
+        )
+        return outcome, await thread_store.get("already-owned", user_id=None)
+
+    outcome, final_record = asyncio.run(_scenario())
+
+    assert outcome is None
+    assert final_record["user_id"] == "owner-a"
+
+
+def test_insert_race_concurrent_trusted_claims_have_one_winner() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    class _ConcurrentInsertRaceStore(MemoryThreadMetaStore):
+        def __init__(self):
+            super().__init__(InMemoryStore())
+            self._create_arrivals = 0
+            self._create_lock = asyncio.Lock()
+            self._legacy_row_committed = asyncio.Event()
+
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
+            async with self._create_lock:
+                self._create_arrivals += 1
+                if self._create_arrivals == 2:
+                    await super().create(thread_id, user_id=None, metadata=metadata)
+                    self._legacy_row_committed.set()
+            await self._legacy_row_committed.wait()
+            raise IntegrityError(
+                "INSERT INTO threads_meta",
+                {},
+                Exception("UNIQUE constraint failed: threads_meta.thread_id"),
+            )
+
+    thread_store = _ConcurrentInsertRaceStore()
+    checkpointer = InMemorySaver()
+
+    def _request(owner):
+        return SimpleNamespace(
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner},
+            state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+            app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+        )
+
+    async def _scenario():
+        owners = ("owner-a", "owner-b")
+        outcomes = await asyncio.gather(
+            *(
+                threads.create_thread(
+                    threads.ThreadCreateRequest(thread_id="legacy-insert-race"),
+                    _request(owner),
+                )
+                for owner in owners
+            ),
+            return_exceptions=True,
+        )
+        return owners, outcomes, await thread_store.get("legacy-insert-race", user_id=None)
+
+    owners, outcomes, final_record = asyncio.run(_scenario())
+
+    winners = [owner for owner, outcome in zip(owners, outcomes, strict=True) if isinstance(outcome, threads.ThreadResponse)]
+    failures = [outcome for outcome in outcomes if isinstance(outcome, HTTPException)]
+    assert winners == [final_record["user_id"]]
+    assert final_record["user_id"] in owners
+    assert len(failures) == 1
+    assert failures[0].status_code == 500
+
+
+def test_create_thread_maps_memory_owner_conflict_to_404() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    app.state.thread_store = SimpleNamespace(
+        get=AsyncMock(return_value=None),
+        create=AsyncMock(side_effect=ThreadOwnershipConflictError("foreign-thread")),
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "foreign-thread"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Thread not found"
 
 
 def test_create_thread_does_not_swallow_non_integrity_errors() -> None:
@@ -3936,3 +4079,328 @@ def test_archive_patch_cannot_modify_another_users_thread():
         response = client.patch("/api/threads/private", json={"metadata": {"deerflow_archived": True}})
         assert response.status_code == 404
     assert asyncio.run(store.aget(THREADS_NS, "private")).value["metadata"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Project membership surface (Phase 1): create/search/move + reserved key
+# ---------------------------------------------------------------------------
+#
+# The memory harness above cannot exercise project membership (the memory
+# store ignores it by design), so these tests build a stub-authed app on real
+# SQL repos — same harness shape as ``test_projects_router.py``.
+
+from test_projects_router import _StubAuthMiddleware  # noqa: E402
+
+
+async def _init_threads_db(tmp_path) -> None:
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'threads.db'}", sqlite_dir=str(tmp_path))
+
+
+def _build_project_threads_app(tmp_path) -> FastAPI:
+    """Stub-authed app with real SQL thread/project repos."""
+    anyio.run(_init_threads_db, tmp_path)
+    session_factory = get_session_factory()
+    app = FastAPI()
+    app.add_middleware(_StubAuthMiddleware)
+    app.state.thread_store = ThreadMetaRepository(session_factory)
+    app.state.project_repo = ProjectRepository(session_factory)
+    app.state.checkpointer = InMemorySaver()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+    return app
+
+
+def _create_project(app: FastAPI, *, user_id: str = "user-a", name: str = "Project") -> dict:
+    async def _run() -> dict:
+        token = set_current_user(SimpleNamespace(id=user_id))
+        try:
+            return await app.state.project_repo.create(name=name)
+        finally:
+            reset_current_user(token)
+
+    return anyio.run(_run)
+
+
+def _archive_project(app: FastAPI, project_id: str, *, user_id: str = "user-a") -> None:
+    async def _run() -> None:
+        token = set_current_user(SimpleNamespace(id=user_id))
+        try:
+            await app.state.project_repo.set_status(project_id, "archived")
+        finally:
+            reset_current_user(token)
+
+    anyio.run(_run)
+
+
+@pytest.fixture(autouse=True)
+def _close_sql_engine_after_test():
+    yield
+    anyio.run(close_engine)
+
+
+def test_create_thread_with_project_assigns(tmp_path):
+    app = _build_project_threads_app(tmp_path)
+    project = _create_project(app)
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"project_id": project["id"]})
+        assert created.status_code == 200, created.text
+        thread_id = created.json()["thread_id"]
+
+        fetched = client.get(f"/api/threads/{thread_id}")
+        assert fetched.json()["metadata"][THREAD_PROJECT_METADATA_KEY] == project["id"]
+
+        hits = client.post("/api/threads/search", json={"project_id": project["id"]}).json()
+        assert [h["thread_id"] for h in hits] == [thread_id]
+
+
+def test_create_thread_response_includes_persisted_project_membership(tmp_path):
+    """The create response must echo the persisted record, not body.metadata.
+
+    The store stamps ``metadata.deerflow_project_id`` from the assigned
+    ``project_id`` column; a response built from ``body.metadata`` omits it
+    and disagrees with the idempotent-retry response for the same thread.
+    """
+    app = _build_project_threads_app(tmp_path)
+    project = _create_project(app)
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"project_id": project["id"]})
+        assert created.status_code == 200, created.text
+        assert created.json()["metadata"][THREAD_PROJECT_METADATA_KEY] == project["id"]
+
+        retry = client.post("/api/threads", json={"thread_id": created.json()["thread_id"], "project_id": project["id"]})
+        assert retry.status_code == 200, retry.text
+        assert retry.json() == created.json()
+
+
+def test_create_thread_response_without_project_has_no_membership_key(tmp_path):
+    """Regression guard: no project_id → the key must not appear in the response."""
+    app = _build_project_threads_app(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"metadata": {"keep": "v"}})
+        assert created.status_code == 200, created.text
+        assert created.json()["metadata"] == {"keep": "v"}
+
+
+def test_create_thread_with_missing_or_foreign_project_404(tmp_path):
+    app = _build_project_threads_app(tmp_path)
+    foreign = _create_project(app, user_id="user-b", name="Foreign")
+    with TestClient(app) as client:
+        missing = client.post("/api/threads", json={"thread_id": "thread-missing-proj", "project_id": "no-such-project"})
+        assert missing.status_code == 404, missing.text
+        assert missing.json()["detail"] == "Project not found"
+
+        foreign_resp = client.post("/api/threads", json={"thread_id": "thread-foreign-proj", "project_id": foreign["id"]})
+        assert foreign_resp.status_code == 404, foreign_resp.text
+
+
+def test_create_thread_with_project_in_memory_mode_404():
+    """Memory mode has no projects backend: a project-scoped create must fail
+    closed with the same 404 the SQL store produces for a missing project —
+    not silently persist an unassigned thread whose run would then proceed
+    outside the selected project (``ensureProjectThread`` keeps the composer
+    text for a retry on this failure)."""
+    app, _, _ = _build_thread_app()
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "thread-mem-proj", "project_id": "p1"})
+        assert created.status_code == 404, created.text
+        assert created.json()["detail"] == "Project not found"
+
+        # The store's project filter fails closed too; no row was persisted.
+        hits = client.post("/api/threads/search", json={"project_id": "p1"}).json()
+        assert hits == []
+
+        # Unscoped creates still work in memory mode.
+        plain = client.post("/api/threads", json={"thread_id": "thread-mem-plain"})
+        assert plain.status_code == 200, plain.text
+
+
+def test_create_and_patch_strip_deerflow_project_id_metadata_key(tmp_path):
+    app = _build_project_threads_app(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"metadata": {THREAD_PROJECT_METADATA_KEY: "forged", "keep": "v"}})
+        assert created.status_code == 200, created.text
+        thread_id = created.json()["thread_id"]
+        assert created.json()["metadata"] == {"keep": "v"}
+
+        fetched = client.get(f"/api/threads/{thread_id}")
+        assert fetched.json()["metadata"] == {"keep": "v"}
+
+        patched = client.patch(f"/api/threads/{thread_id}", json={"metadata": {THREAD_PROJECT_METADATA_KEY: "forged-2"}})
+        assert patched.status_code == 200, patched.text
+        assert THREAD_PROJECT_METADATA_KEY not in patched.json()["metadata"]
+
+
+def test_search_threads_project_filter_absent_null_value(tmp_path):
+    app = _build_project_threads_app(tmp_path)
+    project = _create_project(app)
+    with TestClient(app) as client:
+        in_project = client.post("/api/threads", json={"project_id": project["id"]}).json()["thread_id"]
+        unassigned = client.post("/api/threads", json={}).json()["thread_id"]
+
+        all_hits = {t["thread_id"] for t in client.post("/api/threads/search", json={}).json()}
+        assert all_hits == {in_project, unassigned}
+
+        only_project = {t["thread_id"] for t in client.post("/api/threads/search", json={"project_id": project["id"]}).json()}
+        assert only_project == {in_project}
+
+        only_unassigned = {t["thread_id"] for t in client.post("/api/threads/search", json={"project_id": None}).json()}
+        assert only_unassigned == {unassigned}
+
+
+def test_move_thread_to_project_and_out(tmp_path):
+    app = _build_project_threads_app(tmp_path)
+    project = _create_project(app)
+    with TestClient(app) as client:
+        thread_id = client.post("/api/threads", json={}).json()["thread_id"]
+
+        moved = client.post(f"/api/threads/{thread_id}/move", json={"project_id": project["id"]})
+        assert moved.status_code == 200, moved.text
+        assert moved.json()["metadata"][THREAD_PROJECT_METADATA_KEY] == project["id"]
+
+        out = client.post(f"/api/threads/{thread_id}/move", json={"project_id": None})
+        assert out.status_code == 200, out.text
+        assert THREAD_PROJECT_METADATA_KEY not in out.json()["metadata"]
+
+        # The key is required-but-nullable: omitting it is a 422.
+        missing_key = client.post(f"/api/threads/{thread_id}/move", json={})
+        assert missing_key.status_code == 422, missing_key.text
+
+
+def test_move_thread_to_archived_or_foreign_project_404(tmp_path):
+    app = _build_project_threads_app(tmp_path)
+    archived = _create_project(app, name="Archived")
+    foreign = _create_project(app, user_id="user-b", name="Foreign")
+    _archive_project(app, archived["id"])
+    with TestClient(app) as client:
+        thread_id = client.post("/api/threads", json={}).json()["thread_id"]
+
+        to_archived = client.post(f"/api/threads/{thread_id}/move", json={"project_id": archived["id"]})
+        assert to_archived.status_code == 404, to_archived.text
+
+        to_foreign = client.post(f"/api/threads/{thread_id}/move", json={"project_id": foreign["id"]})
+        assert to_foreign.status_code == 404, to_foreign.text
+
+
+def test_move_thread_does_not_bump_updated_at(tmp_path):
+    app = _build_project_threads_app(tmp_path)
+    project = _create_project(app)
+    with TestClient(app) as client:
+        thread_id = client.post("/api/threads", json={}).json()["thread_id"]
+        before = client.get(f"/api/threads/{thread_id}").json()["updated_at"]
+
+        moved = client.post(f"/api/threads/{thread_id}/move", json={"project_id": project["id"]})
+        assert moved.status_code == 200, moved.text
+        assert moved.json()["updated_at"] == before
+
+        after = client.get(f"/api/threads/{thread_id}").json()["updated_at"]
+        assert after == before
+
+
+def _seed_branchable_thread(app: FastAPI, thread_id: str) -> None:
+    """Write a three-turn conversation so a middle AI turn can be branched."""
+    human_1 = HumanMessage(id="human-1", content="First question")
+    ai_1 = AIMessage(id="ai-1", content="First answer")
+    human_2 = HumanMessage(id="human-2", content="Second question")
+
+    async def _seed(parent_config: dict) -> None:
+        after_human_1 = await _write_checkpoint(
+            app.state.checkpointer,
+            thread_id,
+            str(uuid6()),
+            [human_1],
+            step=1,
+            parent_config=parent_config,
+        )
+        after_ai_1 = await _write_checkpoint(
+            app.state.checkpointer,
+            thread_id,
+            str(uuid6()),
+            [human_1, ai_1],
+            step=2,
+            parent_config=after_human_1,
+        )
+        await _write_checkpoint(
+            app.state.checkpointer,
+            thread_id,
+            str(uuid6()),
+            [human_1, ai_1, human_2],
+            step=3,
+            parent_config=after_ai_1,
+        )
+
+    initial = asyncio.run(app.state.checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert initial is not None
+    asyncio.run(_seed(initial.config))
+
+
+def test_branch_inherits_source_project_membership(tmp_path):
+    """A branch of a project thread stays in the source thread's project.
+
+    Branching writes a new thread_meta row; without inheritance it is
+    unassigned and the sidebar surfaces it under Recent chats instead of the
+    source thread's project group.
+    """
+    app = _build_project_threads_app(tmp_path)
+    project = _create_project(app)
+    source_thread_id = "source-project-branch"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "project_id": project["id"]},
+        )
+        assert created.status_code == 200, created.text
+        _seed_branchable_thread(app, source_thread_id)
+
+        branch = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-1", "message_ids": ["ai-1"]},
+        )
+        assert branch.status_code == 200, branch.text
+        branch_id = branch.json()["thread_id"]
+        assert branch.json()["parent_thread_id"] == source_thread_id
+
+        fetched = client.get(f"/api/threads/{branch_id}")
+        assert fetched.status_code == 200, fetched.text
+        assert fetched.json()["metadata"][THREAD_PROJECT_METADATA_KEY] == project["id"]
+
+        hits = client.post("/api/threads/search", json={"project_id": project["id"]}).json()
+        assert {h["thread_id"] for h in hits} == {source_thread_id, branch_id}
+
+        unassigned = client.post("/api/threads/search", json={"project_id": None}).json()
+        assert [h["thread_id"] for h in unassigned] == []
+
+
+def test_branch_from_archived_project_thread_degrades_to_unassigned(tmp_path):
+    """Branching stays available when the source project was archived meanwhile.
+
+    The branch inherits through the same validated create path as assignment;
+    an archived project is no longer assignable, so the branch row is created
+    unassigned (pre-inheritance behavior) instead of failing the request.
+    """
+    app = _build_project_threads_app(tmp_path)
+    project = _create_project(app)
+    source_thread_id = "source-archived-branch"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "project_id": project["id"]},
+        )
+        assert created.status_code == 200, created.text
+        _seed_branchable_thread(app, source_thread_id)
+        _archive_project(app, project["id"])
+
+        branch = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-1", "message_ids": ["ai-1"]},
+        )
+        assert branch.status_code == 200, branch.text
+        branch_id = branch.json()["thread_id"]
+
+        fetched = client.get(f"/api/threads/{branch_id}")
+        assert fetched.status_code == 200, fetched.text
+        assert THREAD_PROJECT_METADATA_KEY not in fetched.json()["metadata"]
+
+        unassigned = client.post("/api/threads/search", json={"project_id": None}).json()
+        assert {h["thread_id"] for h in unassigned} == {branch_id}

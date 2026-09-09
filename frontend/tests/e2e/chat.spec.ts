@@ -1,6 +1,137 @@
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
-import { handleRunStream, mockLangGraphAPI } from "./utils/mock-api";
+import {
+  handleRunStream,
+  MOCK_THREAD_ID,
+  mockLangGraphAPI,
+} from "./utils/mock-api";
+
+test.describe("Project-scoped submit staleness", () => {
+  test.beforeEach(async ({ page }) => {
+    // A settled conversation to switch to mid-submit. Seeded at setup (not
+    // created during the test): opening a session-created thread page in the
+    // mock races the empty-thread redirect, while a setup-seeded thread is
+    // the stable pattern other specs rely on.
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Settled chat",
+          updated_at: "2025-06-01T12:00:00Z",
+        },
+      ],
+    });
+  });
+
+  function holdThreadCreate(page: Page) {
+    let releaseCreate!: () => void;
+    let markIntercepted!: () => void;
+    const intercepted = new Promise<void>((resolve) => {
+      markIntercepted = resolve;
+    });
+    const createHeld = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    void page.route("**/api/threads", async (route) => {
+      if (route.request().method() === "POST") {
+        markIntercepted();
+        await createHeld;
+      }
+      return route.fallback();
+    });
+    return { intercepted, releaseCreate };
+  }
+
+  test("switching conversations during goal preparation drops the stale continuation", async ({
+    page,
+  }) => {
+    // Regression: the goal PUT registers its AbortController only after the
+    // project pre-create resolves, so the thread-change cleanup cannot abort
+    // an in-flight prepare. Navigating away while preparation is pending
+    // must drop the continuation — no goal save, composer clear, or
+    // abandoned run may touch the newly opened conversation.
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    const settledChat = page.getByRole("link", {
+      name: "Settled chat",
+      exact: true,
+    });
+
+    const goalPuts: string[] = [];
+    const runStreams: string[] = [];
+    page.on("request", (request) => {
+      const url = request.url();
+      if (
+        request.method() === "PUT" &&
+        /\/api\/threads\/[^/]+\/goal$/.test(url)
+      ) {
+        goalPuts.push(url);
+      }
+      if (request.method() === "POST" && url.includes("/runs/stream")) {
+        runStreams.push(url);
+      }
+    });
+    const { intercepted, releaseCreate } = holdThreadCreate(page);
+
+    await page.goto("/workspace/chats/new?project=proj-1");
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("/goal finish all tests");
+    await textarea.press("Enter");
+    // The project pre-create must actually be in flight before we navigate:
+    // releasing a request that was never intercepted would make the
+    // assertions pass without exercising the stale continuation at all.
+    await intercepted;
+
+    // Switch conversations while the project pre-create is held.
+    await settledChat.click();
+    await expect(page).toHaveURL(new RegExp(`/chats/${MOCK_THREAD_ID}$`));
+    releaseCreate();
+    // Let any stale continuation run to completion before asserting: a goal
+    // PUT that fires late must still be caught.
+    await page.waitForTimeout(1500);
+    await expect(page.getByText("finish all tests")).toBeHidden();
+    await expect.poll(() => goalPuts.length).toBe(0);
+    await expect.poll(() => runStreams.length).toBe(0);
+    await expect(page).toHaveURL(new RegExp(`/chats/${MOCK_THREAD_ID}$`));
+  });
+
+  test("dropping the project scope mid-submission resets the thread identity", async ({
+    page,
+  }) => {
+    // Regression: the sidebar "New chat" link leaves /new?project=… for
+    // plain /new without a pathname change, so the thread identity and the
+    // submission fences keyed on `threadId` survive the navigation. The
+    // abandoned submission must not start a run against the previous
+    // scope's pre-created thread or rewrite the URL to it.
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    const runStreams: string[] = [];
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        request.url().includes("/runs/stream")
+      ) {
+        runStreams.push(request.url());
+      }
+    });
+    const { intercepted, releaseCreate } = holdThreadCreate(page);
+
+    await page.goto("/workspace/chats/new?project=proj-1");
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("run inside the project");
+    await textarea.press("Enter");
+    // The project pre-create must be in flight before navigating away.
+    await intercepted;
+
+    await page.getByRole("link", { name: "New chat", exact: true }).click();
+    await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+    releaseCreate();
+
+    // The stale submission must not start a run for the previous scope's
+    // identity, nor rewrite the URL to it.
+    await page.waitForTimeout(1500);
+    await expect.poll(() => runStreams.length).toBe(0);
+    await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+  });
+});
 
 function textFromMessageContent(content: unknown) {
   if (typeof content === "string") {
@@ -685,6 +816,44 @@ test.describe("Chat workspace", () => {
     ).toBeVisible();
     await expect.poll(() => streamCalls).toBe(1);
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
+  });
+  test("goal command assigns the project before saving the goal", async ({
+    page,
+  }) => {
+    // Regression: the goal PUT endpoint materializes a missing thread row
+    // itself, so the project-scoped thread create must land first — an
+    // unassigned row would make the later idempotent createThread return it
+    // without assigning the requested project.
+    const events: string[] = [];
+    let createProjectId: string | null = null;
+    page.on("request", (request) => {
+      const url = request.url();
+      if (request.method() === "POST" && url.endsWith("/api/threads")) {
+        events.push("create-thread");
+        createProjectId =
+          (request.postDataJSON() as { project_id?: string } | null)
+            ?.project_id ?? null;
+      }
+      if (
+        request.method() === "PUT" &&
+        /\/api\/threads\/[^/]+\/goal$/.test(url)
+      ) {
+        events.push("save-goal");
+      }
+    });
+
+    await page.goto("/workspace/chats/new?project=proj-1");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("/goal finish all tests");
+    await textarea.press("Enter");
+
+    await expect(
+      page.locator("span.font-medium", { hasText: "finish all tests" }),
+    ).toBeVisible();
+    expect(createProjectId).toBe("proj-1");
+    expect(events.slice(0, 2)).toEqual(["create-thread", "save-goal"]);
   });
 
   test("goal command keeps the welcome header clear of the goal status", async ({
