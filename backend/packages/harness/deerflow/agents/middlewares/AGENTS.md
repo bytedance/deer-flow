@@ -11,6 +11,7 @@ entities. Pass `trim_tokens_to_summarize=None` explicitly through the factory;
 omission restores LangChain's 4000-token default.
 
 Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values.
+Completed is not accepted; retain useful work and address acceptance gaps.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares` appends lead-only entries. Optional entries require their config/runtime condition.
 
