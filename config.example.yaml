@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 40
+config_version: 41
 
 # ============================================================================
 # Logging
@@ -1288,7 +1288,8 @@ read_before_write:
   # every later model call. Replace it with a short placeholder in model-bound
   # requests; stored history, receipts, and the run journal keep the original.
   elide_blocked_payloads: true
-  # Only elide payload fields at least this many characters long.
+  # Only elide payload fields at least this many characters long (a character
+  # count, not tokens: CJK text costs ~3-4x more per character than ASCII).
   # 0 elides every non-empty payload.
   elide_min_chars: 2000
 

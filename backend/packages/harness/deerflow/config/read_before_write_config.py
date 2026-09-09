@@ -28,5 +28,10 @@ class ReadBeforeWriteConfig(BaseModel):
     elide_min_chars: int = Field(
         default=2000,
         ge=0,
-        description=("Elide only payload fields at least this many characters long; shorter payloads stay visible so the model can reuse them after re-reading. 0 elides every non-empty payload."),
+        description=(
+            "Elide only payload fields at least this many characters long; shorter payloads stay visible so the model "
+            "can reuse them after re-reading. 0 elides every non-empty payload. This is a Python character count, not a "
+            "token count: the same value spans roughly 3-4x in real context cost between ASCII and CJK text, and the "
+            "placeholder's elided-size figure is the same character count."
+        ),
     )

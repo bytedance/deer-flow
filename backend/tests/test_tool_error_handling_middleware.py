@@ -1257,4 +1257,5 @@ def test_build_lead_runtime_middlewares_passes_read_before_write_config():
 
     gates = [m for m in middlewares if isinstance(m, ReadBeforeWriteMiddleware)]
     assert len(gates) == 1
-    assert gates[0].release_policy_parameters()["config"] == {"enabled": True, "elide_blocked_payloads": True, "elide_min_chars": 321}
+    # Only the wired value is under test; the full policy identity is covered by the middleware's own tests.
+    assert gates[0].release_policy_parameters()["config"]["elide_min_chars"] == 321
