@@ -32,6 +32,35 @@ test.describe("Agent chat", () => {
     });
   });
 
+  for (const { label, toolGroups } of [
+    { label: "empty", toolGroups: [] },
+    { label: "unrestricted", toolGroups: null },
+  ]) {
+    test(`agent gallery shows skill badges with ${label} tool groups`, async ({
+      page,
+    }) => {
+      mockLangGraphAPI(page, {
+        agents: [
+          {
+            ...MOCK_AGENTS[0]!,
+            tool_groups: toolGroups,
+            skills: ["data-analysis"],
+          },
+        ],
+      });
+
+      await page.goto("/workspace/agents");
+
+      const card = page.locator('[data-slot="card"]').filter({
+        has: page.getByText("test-agent", { exact: true }),
+      });
+      await expect(card).toBeVisible({ timeout: 15_000 });
+      await expect(
+        card.getByText("data-analysis", { exact: true }),
+      ).toBeVisible();
+    });
+  }
+
   test("agent chat page loads with input box and AI disclaimer", async ({
     page,
   }) => {
