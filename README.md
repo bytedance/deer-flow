@@ -1318,6 +1318,9 @@ The built-in `grep` tool searches either one text file or all matching text file
 
 Uploaded Markdown outlines skip fenced code examples, so code comments do not
 crowd out real document sections from the agent's heading preview.
+Outline titles are limited to 200 characters and fallback previews to 2,000
+characters per file, with truncation markers. Full uploaded files remain available
+for targeted reads.
 
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 

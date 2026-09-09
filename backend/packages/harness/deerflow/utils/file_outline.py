@@ -37,6 +37,9 @@ _SPLIT_BOLD_HEADING_RE = re.compile(r"^\*\*[\dA-Z][\d\.]*\*\*\s+\*\*(?!\d[\d\s.,
 MAX_OUTLINE_ENTRIES = 50
 
 _OUTLINE_PREVIEW_LINES = 5
+_OUTLINE_TITLE_MAX_CHARS = 200
+_OUTLINE_PREVIEW_MAX_CHARS = 2000
+_TRUNCATION_MARKER = "… (truncated)"
 
 # Root-level Markdown fences allow up to three leading spaces. The rest of
 # the line is an info string when opening, or whitespace only when closing.
@@ -64,6 +67,15 @@ def _clean_bold_title(raw: str) -> str:
     return merged
 
 
+def _truncate_outline_text(text: str, max_chars: int) -> str:
+    """Keep the omission marker inside the summary's character budget."""
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= len(_TRUNCATION_MARKER):
+        return "…"[:max_chars]
+    return text[: max_chars - len(_TRUNCATION_MARKER)].rstrip() + _TRUNCATION_MARKER
+
+
 def extract_outline(md_path: Path) -> list[dict]:
     """Extract document outline (headings) from a Markdown file.
 
@@ -85,7 +97,7 @@ def extract_outline(md_path: Path) -> list[dict]:
         md_path: Path to the .md file.
 
     Returns:
-        List of dicts with keys: title (str), line (int, 1-based).
+        List of dicts with keys: title (str, at most 200 characters), line (int, 1-based).
         When the outline is truncated at MAX_OUTLINE_ENTRIES, a sentinel entry
         ``{"truncated": True}`` is appended as the last element so callers can
         render a "showing first N headings" hint without re-scanning the file.
@@ -121,20 +133,20 @@ def extract_outline(md_path: Path) -> list[dict]:
                 if stripped.startswith("#"):
                     title = _clean_bold_title(stripped.lstrip("#").strip())
                     if title:
-                        outline.append({"title": title, "line": lineno})
+                        outline.append({"title": _truncate_outline_text(title, _OUTLINE_TITLE_MAX_CHARS), "line": lineno})
 
                 # Style 2: single bold block with SEC structural keyword
                 elif m := _BOLD_HEADING_RE.match(stripped):
                     title = m.group(1).strip()
                     if title:
-                        outline.append({"title": title, "line": lineno})
+                        outline.append({"title": _truncate_outline_text(title, _OUTLINE_TITLE_MAX_CHARS), "line": lineno})
 
                 # Style 3: split-bold heading — **<num>** **<title>**
                 # Regex already enforces max 4 blocks and non-numeric second block.
                 elif _SPLIT_BOLD_HEADING_RE.match(stripped):
                     title = " ".join(re.findall(r"\*\*([^*]+)\*\*", stripped))
                     if title:
-                        outline.append({"title": title, "line": lineno})
+                        outline.append({"title": _truncate_outline_text(title, _OUTLINE_TITLE_MAX_CHARS), "line": lineno})
 
                 if len(outline) > MAX_OUTLINE_ENTRIES:
                     outline.pop()
@@ -157,7 +169,7 @@ def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
         - outline: list of ``{title, line}`` dicts (plus optional sentinel).
           Empty when no headings are found or no .md exists.
         - preview: first few non-empty lines of the .md, used as a content
-          anchor when outline is empty so the agent has some context.
+          anchor when outline is empty, capped at 2000 characters across all lines.
           Empty when outline is non-empty (no fallback needed).
     """
     md_path = file_path.with_suffix(".md")
@@ -171,13 +183,18 @@ def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
 
     # outline is empty — read the first few non-empty lines as a content preview
     preview: list[str] = []
+    remaining_chars = _OUTLINE_PREVIEW_MAX_CHARS
     try:
         with md_path.open(encoding="utf-8") as f:
             for line in f:
                 stripped = line.strip()
                 if stripped:
-                    preview.append(stripped)
-                if len(preview) >= _OUTLINE_PREVIEW_LINES:
+                    text = _truncate_outline_text(stripped, remaining_chars)
+                    preview.append(text)
+                    remaining_chars -= len(text)
+                    if len(stripped) > len(text):
+                        break
+                if len(preview) >= _OUTLINE_PREVIEW_LINES or remaining_chars == 0:
                     break
     except Exception:
         logger.debug("Failed to read preview lines from %s", md_path, exc_info=True)
