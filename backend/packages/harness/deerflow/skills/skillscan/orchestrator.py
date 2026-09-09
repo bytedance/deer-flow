@@ -17,7 +17,8 @@ import posixpath
 import re
 import stat
 import zipfile
-from collections.abc import Iterable
+from collections import deque
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -70,6 +71,12 @@ _SPECS = [
     RuleSpec("python-shell-exec", "CRITICAL", "Python shell execution primitive is used in a skill file.", "Use subprocess with a fixed argument list and shell=False, or remove shell execution."),
     RuleSpec("python-sensitive-exfil", "CRITICAL", "Python code reads a sensitive path and uses an outbound network sink in the same file.", "Remove the sensitive read or network sink, and keep credential access outside skills."),
     RuleSpec("python-env-dump-exfil", "CRITICAL", "Python code reads the process environment in bulk and uses an outbound network sink in the same file.", "Avoid bulk environment reads and never send environment data over the network."),
+    RuleSpec(
+        "python-client-exfil-heuristic",
+        "HIGH",
+        "Python code reads sensitive data and calls an HTTP client method that the blocking client-handle signal cannot attribute to a client.",
+        "Confirm the client call does not send sensitive data; provable instance-client exfiltration is blocked outright.",
+    ),
     RuleSpec("python-reverse-shell", "CRITICAL", "Python code matches a reverse-shell shape.", "Remove reverse-shell behavior from the skill."),
     RuleSpec("python-dynamic-import", "HIGH", "Python dynamically imports a non-literal module.", "Use explicit imports or a constrained allowlist."),
     RuleSpec("python-subprocess", "HIGH", "Python invokes subprocess without shell=True.", "Review subprocess usage and keep arguments fixed and minimal."),
@@ -350,7 +357,7 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
     except SyntaxError:
         return findings
 
-    aliases = _collect_python_aliases(tree)
+    scopes = _collect_python_aliases(tree)
     has_sensitive_read = False
     has_env_dump = False
     has_network_sink = False
@@ -360,7 +367,8 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
     reverse_shell_parts: set[str] = set()
     reverse_shell_node: ast.AST | None = None
 
-    for node in ast.walk(tree):
+    for node, scope in _walk_python_scopes(tree):
+        aliases = scopes.aliases(scope)
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if _SENSITIVE_PATH_RE.search(node.value):
                 has_sensitive_read = True
@@ -420,6 +428,11 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_for_node("python-sensitive-path-read", rel_path, sensitive_node, "sensitive path read"))
     if has_env_dump and has_network_sink:
         findings.append(_finding_for_node("python-env-dump-exfil", rel_path, env_node or network_node, "environment dump + network sink"))
+    if (has_sensitive_read or has_env_dump) and not has_network_sink:
+        # A cheap prefilter only: these flags come from the unrestricted walk above, so they are a
+        # superset of what the heuristic accepts. It recomputes both under its own lazy-node
+        # exclusion, because a payload the runtime never evaluates must not satisfy the rule.
+        findings.extend(_scan_python_client_heuristic(rel_path, tree, scopes))
     return findings
 
 
@@ -650,19 +663,225 @@ def _is_outbound_url(value: str) -> bool:
     return bool(value.startswith(("http://", "https://")) and (_http_host(value) or "") not in _LOCAL_HTTP_HOSTS)
 
 
-def _collect_python_aliases(tree: ast.AST) -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for node in ast.walk(tree):
+def _python_import_bindings(node: ast.Import | ast.ImportFrom) -> Iterator[tuple[str, str | None]]:
+    """Yield `(bound name, imported path)` for every name one import statement binds.
+
+    `import http.client` binds `http`, not `http.client`, and no identifier can spell a dotted key,
+    so the entry has to sit under the bound root or nothing ever looks it up. A relative import
+    (`from . import s`, `from .requests import Session`) still binds its name but names nothing
+    outside the current package -- `ImportFrom.module` drops the leading dots, so `.requests` would
+    otherwise read as the external `requests` -- and its path is `None`: consumers that map names to
+    paths skip it, while consumers that invalidate whatever a name held before must not. Every import
+    map in this module derives from this one rule so they cannot disagree on what a spelling binds.
+    """
+    for alias in node.names:
+        if alias.name == "*":
+            continue
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                aliases[alias.asname or alias.name] = alias.name
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            for alias in node.names:
-                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-    return aliases
+            name = alias.asname or alias.name.split(".")[0]
+            yield name, alias.name if alias.asname else name
+        else:
+            yield alias.asname or alias.name, f"{node.module}.{alias.name}" if node.module and not node.level else None
 
 
-def _python_name(node: ast.AST, aliases: dict[str, str]) -> str:
+def _python_parameter_names(args: ast.arguments) -> set[str]:
+    """Every name a function's parameter list binds in the function's own scope."""
+    names = {arg.arg for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
+    for extra in (args.vararg, args.kwarg):
+        if extra is not None:
+            names.add(extra.arg)
+    return names
+
+
+class _PythonImportScopes:
+    """Import bindings per scope, resolved outward from the use like the names they stand for.
+
+    A binding is the path an import gives a name, or `None` when the import binds the name to
+    something it cannot resolve (a relative import). An import binds its lexical scope unless that
+    scope declares the name `global` (the binding lands at module level) or `nonlocal` (it lands in
+    the nearest enclosing function, as it does at runtime). Lookup walks from the scope of the use
+    outward, honouring the same declarations, and stops at the first scope that binds the name, so
+    a nested import shadows a module-level alias inside its own function and nowhere else, an
+    unresolvable import there makes the name read as its bare spelling rather than as the
+    module-level alias, and an initializer that rebinds a `global` name is seen by every later use
+    of that name. A class body is visible only to itself: a method, or a nested class, skips it the
+    way the runtime does, so a name bound only by a class-body import cannot prove anything from a
+    method that could only raise on it. Within one scope the binding the walk met last wins, as
+    the flat map always did.
+    """
+
+    def __init__(self, module: ast.AST) -> None:
+        self._module = module
+        self._bindings: dict[ast.AST, dict[str, str | None]] = {}
+        self._parents: dict[ast.AST, ast.AST] = {}
+        # Names a scope declares `global` (True) or `nonlocal` (False).
+        self._declared: dict[ast.AST, dict[str, bool]] = {}
+        # Names a scope binds by any means -- parameter, assignment, import, definition -- which is
+        # what decides where a `nonlocal` declaration in a nested function lands.
+        self._bound: dict[ast.AST, set[str]] = {}
+        self._views: dict[ast.AST, _PythonScopeAliases] = {}
+
+    def enter(self, scope: ast.AST, parent: ast.AST) -> None:
+        self._parents[scope] = parent
+
+    def bound(self, scope: ast.AST, names: Iterable[str]) -> None:
+        self._bound.setdefault(scope, set()).update(names)
+
+    def declare(self, scope: ast.AST, declaration: ast.Global | ast.Nonlocal) -> None:
+        self._declared.setdefault(scope, {}).update(dict.fromkeys(declaration.names, isinstance(declaration, ast.Global)))
+
+    def bind(self, scope: ast.AST, name: str, path: str | None) -> None:
+        self._bindings.setdefault(self.binding_scope(scope, name), {})[name] = path
+
+    def resolve(self, scope: ast.AST, name: str) -> str | None:
+        """The import path `name` reads as at `scope`, or `None` when no import proves one."""
+        for visible in self.visible_scopes(scope, name):
+            bindings = self._bindings.get(visible)
+            if bindings is not None and name in bindings:
+                return bindings[name]
+        return None
+
+    def visible_scopes(self, scope: ast.AST, name: str) -> Iterator[ast.AST]:
+        """The scopes a use of `name` at `scope` reads, innermost first, as the runtime would.
+
+        Starts where a declaration says the name lives, skips every class body but the one the use
+        is in, and follows a `global` or `nonlocal` declaration met on the way outward.
+        """
+        current: ast.AST | None = self.binding_scope(scope, name)
+        while current is not None:
+            if current is scope or not isinstance(current, ast.ClassDef):
+                yield current
+            current = self._parents.get(current)
+            if current is not None and name in self._declared.get(current, {}):
+                # A scope that declares the name is not where it binds it: keep going to the scope
+                # the declaration points at.
+                current = self.binding_scope(current, name)
+
+    def resolved(self, scope: ast.AST) -> dict[str, str]:
+        """Every name an import proves at `scope`."""
+        names = {name for bindings in self._bindings.values() for name in bindings}
+        return {name: path for name in sorted(names) if (path := self.resolve(scope, name)) is not None}
+
+    def aliases(self, scope: ast.AST) -> _PythonScopeAliases:
+        if scope not in self._views:
+            self._views[scope] = _PythonScopeAliases(self, scope)
+        return self._views[scope]
+
+    def binding_scope(self, scope: ast.AST, name: str) -> ast.AST:
+        """Where a binding of `name` made at `scope` lands, following `global` and `nonlocal`."""
+        current = scope
+        while name in self._declared.get(current, {}):
+            if self._declared[current][name]:
+                return self._module
+            enclosing = self._enclosing_function_binding(current, name)
+            if enclosing is None:
+                # `nonlocal` with no enclosing function binding the name is a SyntaxError; leave it.
+                return scope
+            current = enclosing
+        return current
+
+    def _enclosing_function_binding(self, scope: ast.AST, name: str) -> ast.AST | None:
+        """The function a `nonlocal name` at `scope` refers to: the nearest enclosing one that binds it.
+
+        A function that merely sits between the two without binding the name is skipped, as the
+        runtime skips it; one that declares the name `nonlocal` itself is returned so the caller
+        keeps following the chain from there.
+        """
+        current = self._parents.get(scope)
+        while current is not None:
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                declared = self._declared.get(current, {})
+                if declared.get(name) is True:
+                    # A function that declares the name `global` ends the compiler's search: the
+                    # `nonlocal` does not compile even if an outer function binds the name.
+                    return None
+                # One that declares it `nonlocal` is returned so the caller keeps following the
+                # chain from there.
+                if declared.get(name) is False or name in self._bound.get(current, ()):
+                    return current
+            current = self._parents.get(current)
+        return None
+
+
+@dataclass(frozen=True)
+class _PythonScopeAliases:
+    """The `get`-shaped view of one scope that the name resolvers below read."""
+
+    scopes: _PythonImportScopes
+    scope: ast.AST
+
+    def get(self, name: str, default: str = "") -> str:
+        path = self.scopes.resolve(self.scope, name)
+        return default if path is None else path
+
+
+def _python_child_scopes(node: ast.AST, scope: ast.AST) -> Iterator[tuple[ast.AST, ast.AST]]:
+    """Pair each child of `node` with the scope it executes in, in `ast.iter_child_nodes` order.
+
+    A definition's body runs in the scope the definition creates; its decorators, defaults,
+    annotations, bases, and keywords run where the definition itself does, when it is defined. Only
+    the body enters the new scope, so a default that reads a class-body import is resolved in the
+    class body it really executes in.
+    """
+    if not isinstance(node, _PYTHON_SCOPE_NODES):
+        for child in ast.iter_child_nodes(node):
+            yield child, scope
+        return
+    for field, value in ast.iter_fields(node):
+        child_scope = node if field == "body" else scope
+        for child in value if isinstance(value, list) else [value]:
+            if isinstance(child, ast.AST):
+                yield child, child_scope
+
+
+def _walk_python_scopes(tree: ast.AST) -> Iterator[tuple[ast.AST, ast.AST]]:
+    """Yield every node with the scope it executes in, in the same breadth-first order as `ast.walk`."""
+    queue: deque[tuple[ast.AST, ast.AST]] = deque([(tree, tree)])
+    while queue:
+        node, scope = queue.popleft()
+        yield node, scope
+        queue.extend(_python_child_scopes(node, scope))
+
+
+def _collect_python_aliases(tree: ast.AST) -> _PythonImportScopes:
+    """Import bindings from every lexical scope, each recorded under the scope that made it.
+
+    Imports inside functions have to count, because a call inside that function resolves through
+    them; recording them under the scope they really bind is what stops a nested import --
+    resolvable or not -- from rebinding a module-level name it never touches at runtime, while
+    still shadowing that name for the calls inside its own function, and what lets an initializer
+    that declares the name `global` or `nonlocal` bind it for the scope it names.
+    """
+    scopes = _PythonImportScopes(tree)
+    # Declarations decide where a binding lands, so every import waits until the walk has seen them.
+    pending: list[tuple[ast.AST, str, str | None]] = []
+    # A comprehension's `for` target binds in the comprehension's own scope, never the enclosing
+    # function's, so it is not a binding a nested `nonlocal` can reach. A walrus inside the same
+    # comprehension does bind the enclosing function, so only the targets are excluded.
+    comprehension_targets: set[ast.AST] = set()
+    for node, scope in _walk_python_scopes(tree):
+        if isinstance(node, ast.comprehension):
+            comprehension_targets.update(ast.walk(node.target))
+        if isinstance(node, _PYTHON_SCOPE_NODES):
+            scopes.enter(node, scope)
+            if not isinstance(node, ast.ClassDef):
+                # Parameters bind inside the function, although their defaults and annotations are
+                # walked in the enclosing scope, so they are recorded here rather than as visited.
+                scopes.bound(node, _python_parameter_names(node.args))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            scopes.declare(scope, node)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bindings = list(_python_import_bindings(node))
+            pending.extend((scope, name, path) for name, path in bindings)
+            scopes.bound(scope, (name for name, _path in bindings))
+        if not isinstance(node, ast.arg) and node not in comprehension_targets:
+            scopes.bound(scope, _heuristic_bound_names(node))
+    for scope, name, path in pending:
+        scopes.bind(scope, name, path)
+    return scopes
+
+
+def _python_name(node: ast.AST, aliases: _PythonScopeAliases | dict[str, str]) -> str:
     if isinstance(node, ast.Name):
         return aliases.get(node.id, node.id)
     if isinstance(node, ast.Attribute):
@@ -671,7 +890,7 @@ def _python_name(node: ast.AST, aliases: dict[str, str]) -> str:
     return ""
 
 
-def _python_import_name(node: ast.AST, aliases: dict[str, str]) -> str:
+def _python_import_name(node: ast.AST, aliases: _PythonScopeAliases | dict[str, str]) -> str:
     """Resolve only names proven by the scope-local import map."""
     if isinstance(node, ast.Name):
         return aliases.get(node.id, "")
@@ -681,7 +900,7 @@ def _python_import_name(node: ast.AST, aliases: dict[str, str]) -> str:
     return ""
 
 
-def _python_call_name(node: ast.Call, aliases: dict[str, str]) -> str:
+def _python_call_name(node: ast.Call, aliases: _PythonScopeAliases | dict[str, str]) -> str:
     return _python_name(node.func, aliases)
 
 
@@ -778,14 +997,23 @@ _PYTHON_CLIENT_SPECS = {
     "aiohttp.ClientSession": _ClientSpec(frozenset({"request", "get", "post", "put", "patch", "delete", "head", "options"}), async_context=True),
 }
 _PYTHON_CLIENT_CONSTRUCTORS = frozenset(_PYTHON_CLIENT_SPECS)
+# Every dotted prefix of a constructor path (`http`, `http.client`, `requests`, ...): the only import
+# paths that can still lead to a constructor, so the only ones the heuristic ever retains.
+_PYTHON_CLIENT_IMPORT_PATHS = frozenset(constructor.rsplit(".", depth)[0] for constructor in _PYTHON_CLIENT_CONSTRUCTORS for depth in range(constructor.count(".") + 1))
 _PYTHON_CLIENT_SINK_METHODS = frozenset().union(*(spec.methods for spec in _PYTHON_CLIENT_SPECS.values()))
 _PYTHON_CLIENT_ANALYSIS_BUDGET = 100_000
+# The heuristic pass below copies no scope state, so its limit is a plain node cap rather than the
+# charge-per-copy budget above. Kept independent so tuning one signal cannot silently move the other.
+_PYTHON_CLIENT_HEURISTIC_BUDGET = 50_000
 _PYTHON_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 _PYTHON_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 _PYTHON_MATCH_CAPTURE_NODES = (ast.MatchAs, ast.MatchStar, ast.MatchMapping)
 # Statements whose parts do not all run, or run an unknown number of times. Their bodies are
 # analyzed from a copy and every name they bind is dropped afterwards.
 _PYTHON_BRANCHING_NODES = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.Match)
+# PEP 695 type syntax is evaluated lazily -- an alias value or a type-parameter bound never runs on
+# import -- so both client passes skip it rather than report egress that cannot happen.
+_PYTHON_LAZILY_EVALUATED_NODES = (ast.TypeAlias, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)
 
 
 @dataclass
@@ -1119,11 +1347,7 @@ def _client_unstable_aliases(body: list[ast.AST], analysis: _ClientAnalysis) -> 
 
 def _client_scope_bindings(node: ast.AST, analysis: _ClientAnalysis) -> set[str]:
     """Names that shadow inherited constructor aliases throughout a function scope."""
-    args = node.args
-    names = {arg.arg for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
-    for extra in (args.vararg, args.kwarg):
-        if extra is not None:
-            names.add(extra.arg)
+    names = _python_parameter_names(node.args)
     declared: set[str] = set()
     for statement in node.body if isinstance(node.body, list) else [node.body]:
         _collect_client_scope_bindings(statement, names, declared, analysis)
@@ -1202,15 +1426,12 @@ def _drop_client_bindings(scope: _ClientScope, names: set[str]) -> None:
 
 
 def _bind_client_import(node: ast.Import | ast.ImportFrom, scope: _ClientScope) -> None:
-    for alias in node.names:
-        if alias.name == "*":
-            continue
-        name = alias.asname or alias.name.split(".")[0]
+    for name, path in _python_import_bindings(node):
+        # Every import rebinds its name, so a live handle under it is gone even when the module
+        # cannot be resolved; only a resolvable path becomes a constructor alias.
         _drop_client_bindings(scope, {name})
-        if isinstance(node, ast.Import):
-            scope.aliases[name] = alias.name if alias.asname else name
-        elif node.module:
-            scope.aliases[name] = f"{node.module}.{alias.name}"
+        if path is not None:
+            scope.aliases[name] = path
 
 
 def _call_is_client_handle_sink(node: ast.Call, handles: dict[str, str]) -> bool:
@@ -1219,6 +1440,183 @@ def _call_is_client_handle_sink(node: ast.Call, handles: dict[str, str]) -> bool
         return False
     constructor = handles.get(func.value.id)
     return bool(constructor and func.attr in _PYTHON_CLIENT_SPECS[constructor].methods)
+
+
+# Non-blocking counterpart to the chain above. Issue #4296 records what that chain gives up: a name a
+# compound statement both calls and rebinds, a construction inside a branch, a walrus, and every
+# handle reached by a value rather than by a name. Staying silent there is only defensible while the
+# signal hard-blocks, because an ambiguous case costs a blocked benign skill. A warning can take the
+# opposite trade, so this pass takes it and reports the same shape at `HIGH`.
+#
+# The model is deliberately coarse -- a proven client constructor is called somewhere in the file,
+# and a method that constructor supports is called on some receiver. That is the shape PR #4265
+# measured against its precise version over 46,624 files, where both flagged exactly the same files;
+# spending path- and exception-aware machinery on the warning channel would buy the same result for
+# the cost that review already rejected once. Dropping the *name* requirement is what makes a
+# rebind, a branch, a walrus, an attribute hop, a container item, a factory return, and a
+# cross-scope flow stop mattering. The price is that an unrelated `.get(...)` in a file that also
+# builds a client and reads sensitive data matches too -- paid in a finding routed to the LLM
+# scanner for adjudication, never in a blocked install. That is the evaluation the #4265 review
+# asked for before any wider model is allowed to produce `CRITICAL` findings.
+#
+# Three syntactic anchors survive: the constructor must be spelled as a call through a proven
+# import, the sink must be spelled `<expr>.method(...)`, and the sink's receiver must not be a
+# *never-rebound* import alias -- an import proves the receiver is a module only while that alias
+# still holds one, so a name the file rebinds stays a candidate. "Proven" is read against every
+# path an import may bind the name to, not the last one: a name imported on both arms of a branch
+# holds whichever arm ran, and collapsing it would silence the branch-created client this rule
+# exists for. Only paths that can still reach a known constructor are retained, so an alias shared by
+# any number of unrelated imports costs nothing to resolve. The payload half, by contrast, is the
+# blocking rules' own signal recomputed under the lazy-node exclusion, so it resolves names exactly
+# as those rules do. A locally aliased constructor
+# (`Ctor = requests.Session`) and a detached or dynamic sink (`send = s.post`, `getattr(s, "post")`)
+# stay outside both signals. Lazily evaluated PEP 695 type syntax is skipped for sinks and payload
+# alike, for the same reason the blocking walker skips it: a value the runtime never evaluates
+# cannot satisfy the rule.
+#
+# The pass is iterative and node-budgeted, so an adversarial tree costs neither recursion nor branch
+# copies. Imports are recorded by the same walk and resolved only after it, against a map whose
+# per-name size is bounded by the constructor table, so no step of the pass does work that the
+# budget does not see. It runs only on files that already show an exfil payload and no proven sink
+# -- its cost is bounded by that gate as much as by the budget.
+
+
+@dataclass(frozen=True)
+class _ClientHeuristicHit:
+    """One heuristic sink, plus the exfil payload flags recomputed without lazily evaluated code."""
+
+    sink: ast.AST
+    sensitive_read: bool
+    env_dump: bool
+
+
+def _scan_python_client_heuristic(rel_path: str, tree: ast.AST, scopes: _PythonImportScopes) -> list[SecurityFinding]:
+    """Warn where the blocking client-handle chain gives up but the file still shows the exfil shape."""
+    try:
+        hit = _find_client_handle_heuristic_sink(tree, scopes, rel_path)
+    except RecursionError:
+        # Same contract as the blocking signal: an adversarially deep tree drops this best-effort
+        # finding and leaves every deterministic finding for the file in place.
+        logger.warning("SkillScan client-handle heuristic analysis hit recursion limit for %s", rel_path)
+        return []
+    if hit is None or not (hit.sensitive_read or hit.env_dump):
+        return []
+    payload = " + ".join(part for part, present in (("sensitive read", hit.sensitive_read), ("environment dump", hit.env_dump)) if present)
+    return [_finding_for_node("python-client-exfil-heuristic", rel_path, hit.sink, f"{payload} + unproven client egress")]
+
+
+def _find_client_handle_heuristic_sink(tree: ast.AST, scopes: _PythonImportScopes, rel_path: str) -> _ClientHeuristicHit | None:
+    """Return the first supported client method call in a file that also constructs such a client.
+
+    `scopes` is the per-scope map the blocking rules resolve names with. The payload half reads it
+    directly. The constructor half keeps its own map of every path an import may bind a name to,
+    recorded by this walk under the scope the import binds and matched after it against the scopes
+    the use can see, so a conditional import cannot hide a client behind the one recorded last, an
+    import that appears after its use still counts, and an import the use could only `NameError`
+    on -- a class body's, from a method -- proves nothing.
+    """
+    remaining = _PYTHON_CLIENT_HEURISTIC_BUDGET
+    # (binding scope, name) -> import paths that can still reach a constructor. A key is present for
+    # every import that binds the name, even with no such path, because presence alone is what
+    # proves a receiver is spelled as an import path rather than constructed in this file.
+    targets: dict[tuple[ast.AST, str], set[str]] = {}
+    calls: list[tuple[ast.expr, ast.AST]] = []
+    candidates: list[tuple[str, str, ast.AST, ast.AST]] = []
+    rebound: set[str] = set()
+    sensitive_read = False
+    env_dump = False
+    stack: list[tuple[ast.AST, ast.AST]] = [(tree, tree)]
+    while stack:
+        if remaining <= 0:
+            # Report from the deterministic prefix already walked rather than scan an unbounded
+            # tree; under-reporting is the documented cost of every budget in this analyzer.
+            logger.warning("SkillScan client-handle heuristic analysis exhausted work budget for %s", rel_path)
+            break
+        remaining -= 1
+        node, scope = stack.pop()
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            _record_client_import_targets(node, scope, scopes, targets)
+        elif isinstance(node, ast.Call):
+            # A call spelled entirely as a proven import path (`requests.Session`, `environ.get`)
+            # names a module attribute rather than a value constructed at runtime, so it can be the
+            # constructor half of the pair but never the instance half. Which calls are constructors
+            # is decided only after the walk, against the finished import map, because an alias like
+            # `from requests import Session as Client` spells no constructor at the call site.
+            calls.append((node.func, scope))
+            if isinstance(node.func, ast.Attribute) and node.func.attr in _PYTHON_CLIENT_SINK_METHODS:
+                candidates.append((node.func.attr, _attribute_root_name(node.func), scope, node))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _SENSITIVE_PATH_RE.search(node.value):
+            sensitive_read = True
+        elif isinstance(node, (ast.Attribute, ast.Name)) and _python_name(node, scopes.aliases(scope)) == "os.environ":
+            env_dump = True
+        rebound.update(_heuristic_bound_names(node))
+        for child, child_scope in reversed(list(_python_child_scopes(node, scope))):
+            if isinstance(child, _PYTHON_LAZILY_EVALUATED_NODES):
+                # Skipped for sinks and payloads alike, but a `type X = ...` still binds X, and that
+                # binding is what stops X from being treated as a stable import path below.
+                rebound.update(_heuristic_bound_names(child))
+                continue
+            stack.append((child, child_scope))
+    constructors = set().union(*(_python_client_import_targets(func, scope, scopes, targets) & _PYTHON_CLIENT_CONSTRUCTORS for func, scope in calls))
+    supported = {method for constructor in constructors for method in _PYTHON_CLIENT_SPECS[constructor].methods}
+    for method, root, scope, node in candidates:
+        # An import path is only evidence that the receiver is a module while that alias still holds
+        # it. The import maps never invalidate an import, so a name the file rebinds --
+        # `from pathlib import Path as session` then `session = requests.Session()` -- has to stay a
+        # candidate, or the anchor would swallow the very rebind cases this rule exists to cover.
+        imported = any((visible, root) in targets for visible in scopes.visible_scopes(scope, root))
+        if method in supported and (not imported or root in rebound):
+            return _ClientHeuristicHit(sink=node, sensitive_read=sensitive_read, env_dump=env_dump)
+    return None
+
+
+def _record_client_import_targets(node: ast.Import | ast.ImportFrom, scope: ast.AST, scopes: _PythonImportScopes, targets: dict[tuple[ast.AST, str], set[str]]) -> None:
+    """Record what one import may bind each name to, under the scope it binds, keeping only paths that can reach a constructor.
+
+    Retaining every path would let an alias shared by thousands of unrelated imports make each
+    attribute hop on it cost thousands of string builds; filtering at the prefix keeps every set
+    no larger than the constructor table, so resolution is linear in the nodes the budget charges.
+    """
+    for name, path in _python_import_bindings(node):
+        paths = targets.setdefault((scopes.binding_scope(scope, name), name), set())
+        if path in _PYTHON_CLIENT_IMPORT_PATHS:
+            paths.add(path)
+
+
+def _python_client_import_targets(node: ast.AST, scope: ast.AST, scopes: _PythonImportScopes, targets: dict[tuple[ast.AST, str], set[str]]) -> frozenset[str]:
+    """Every constructor-reaching import path an expression used at `scope` may name.
+
+    Empty unless the root name is bound by an import in a scope the use can see. Every visible
+    binding counts, not only the innermost, because which of several imports of one name ran is
+    the ambiguity this coarse half deliberately keeps.
+    """
+    if isinstance(node, ast.Name):
+        return frozenset().union(*(targets.get((visible, node.id), ()) for visible in scopes.visible_scopes(scope, node.id)))
+    if isinstance(node, ast.Attribute):
+        return frozenset(path for base in _python_client_import_targets(node.value, scope, scopes, targets) if (path := f"{base}.{node.attr}") in _PYTHON_CLIENT_IMPORT_PATHS)
+    return frozenset()
+
+
+def _heuristic_bound_names(node: ast.AST) -> tuple[str, ...]:
+    """Names this node binds by anything other than an import, coarsely and without scope analysis."""
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        return (node.id,)
+    if isinstance(node, ast.arg):
+        return (node.arg,)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.TypeAlias)):
+        name = node.name
+        return (name.id,) if isinstance(name, ast.Name) else (name,)
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        return (node.name,)
+    if isinstance(node, _PYTHON_MATCH_CAPTURE_NODES):
+        return tuple(_match_capture_names(node))
+    return ()
+
+
+def _attribute_root_name(node: ast.AST) -> str:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else ""
 
 
 def _yaml_load_uses_safe_loader(node: ast.Call) -> bool:
