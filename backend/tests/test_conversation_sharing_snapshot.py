@@ -2412,3 +2412,107 @@ def test_plain_path_flood_time_stays_small():
 
     assert result == attack
     assert elapsed < 2.0, f"plain flood took {elapsed:.2f}s"
+
+
+def test_strip_nested_think_blocks_match_the_outer_close():
+    """A nested ``<think>`` open must not end the outer strip at the inner
+    close: the renderer serves everything up to the outer ``</think>`` as
+    reasoning, so an inner-close short-circuit publishes the tail."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    out = strip("<think>outer <think>inner</think> outer-secret</think> visible")
+    assert "outer-secret" not in out
+    assert "inner" not in out
+    assert "visible" in out
+
+    deep = strip("<think>a<think>b<think>c</think>b2</think>a2</think>tail")
+    assert "a2" not in deep and "b2" not in deep
+    assert "tail" in deep
+
+    # An inner open that never closes still strips through the outer close.
+    unclosed_inner = strip("<think>outer <think>inner</think> outer-secret</think> visible")
+    assert "outer-secret" not in unclosed_inner
+
+    # Real code spans keep their literal nested tags untouched.
+    assert strip("`<think>a<think>b</think>c</think>`") == "`<think>a<think>b</think>c</think>`"
+
+
+def test_neutralize_decodes_every_single_ascii_entity_alias():
+    """The renderer decodes all HTML5 aliases for the admitted ASCII set;
+    one missed alias shields a private phrase (``&UnderBar;`` round-14)."""
+    from app.gateway.shares.snapshot import (
+        _collapse_separators_once,
+        _neutralize_private_references,
+    )
+
+    for alias, char in [
+        ("underbar", "_"),
+        ("UnderBar", "_"),
+        ("midast", "*"),
+        ("diacriticalgrave", "`"),
+        ("vert", "|"),
+        ("verticalbar", "|"),
+        ("hat", "^"),
+    ]:
+        view, _ = _collapse_separators_once(f"a&{alias};b")
+        assert view == f"a{char}b", alias
+
+    out = _neutralize_private_references("[x](/workspace/chats/&UnderBar;secret)")
+    assert "secret" not in out, out
+
+
+def test_entity_free_ampersand_keeps_identity_spans():
+    """A bare ``&`` that starts no valid entity cannot change any collapse
+    pass, so it must keep the identity fast path instead of materializing
+    per-character span tuples (500 kB of ``a`` + ``&`` peaked ~150 MB)."""
+    from app.gateway.shares.snapshot import (
+        _collapse_separators_with_offsets,
+        _normalize_workspace_path_with_offsets,
+    )
+
+    text = "a" * 1000 + "&"
+    view, spans = _collapse_separators_with_offsets(text, resolve_dots=False)
+    assert view == text
+    assert type(spans).__name__ == "_IdentitySpans"
+
+    view, spans = _normalize_workspace_path_with_offsets(text, resolve_dots=False)
+    assert view == text
+    assert spans is None
+
+    # A valid entity still decodes (and therefore materializes a real map).
+    view, spans = _collapse_separators_with_offsets("a&amp;b", resolve_dots=False)
+    assert view == "a&b"
+    assert type(spans).__name__ != "_IdentitySpans"
+
+
+def test_strip_gfm_table_cells_never_pair_backticks_across_rows():
+    """remarkGfm parses every table row and cell as its own inline context
+    at the block level, so backticks may not pair across rows or unescaped
+    pipes — the cross-row pairing hid ``<think>`` reasoning the renderer
+    serves as prose."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    out = strip("| a ` |\n| --- |\n| <think>secret</think> ` tail |")
+    assert "secret" not in out
+    assert "tail" in out
+
+    # A table interrupts a paragraph: its backtick cannot pair into it.
+    out = strip("plain `\n| a |\n| --- |\n| <think>table-secret</think> ` |")
+    assert "table-secret" not in out
+    assert "plain" in out
+
+    # An escaped pipe is cell content, not a boundary.
+    out = strip("| a \\| ` |\n| --- |\n| <think>escaped-secret</think> ` |")
+    assert "escaped-secret" not in out
+
+    # A balanced span inside one cell is still code (no over-strip).
+    out = strip("| `<think>keep-in-code</think>` |\n| --- |\n| plain |")
+    assert "keep-in-code" in out
+
+    # A pipe-less one-column header is a table too (micromark accepts it).
+    out = strip("head\n| --- |\n| <think>onecol-secret</think> ` |")
+    assert "onecol-secret" not in out

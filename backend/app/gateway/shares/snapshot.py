@@ -233,7 +233,11 @@ _ENTITY_CODEPOINTS = {0x2F: "/", 0x5C: "/", 0x25: "%", 0x26: "&"}
 # separators collapse), and ``Tab``/``NewLine`` decode to real whitespace:
 # the renderer line-breaks there too, so the shadow splitting the token is
 # display-truthful, and boundary admissibility still judges pre-decode
-# bytes.
+# bytes. Keys are lowercase: the lookup lowercases the entity body, and the
+# regex alternation is case-insensitive, so each entry covers every casing
+# (``&Hat;``, ``&UnderBar;``). All HTML5 aliases for the admitted
+# characters are present — a missing alias decodes in the renderer but not
+# in the classification shadow (the round-14 ``&UnderBar;`` leak).
 _ENTITY_NAMES = {
     "tab": "\t",
     "newline": "\n",
@@ -247,6 +251,7 @@ _ENTITY_NAMES = {
     "lpar": "(",
     "rpar": ")",
     "ast": "*",
+    "midast": "*",
     "plus": "+",
     "comma": ",",
     "period": ".",
@@ -259,10 +264,14 @@ _ENTITY_NAMES = {
     "quest": "?",
     "commat": "@",
     "bsol": "/",
-    "Hat": "^",
+    "hat": "^",
     "lowbar": "_",
+    "underbar": "_",
     "grave": "`",
+    "diacriticalgrave": "`",
     "verbar": "|",
+    "vert": "|",
+    "verticalbar": "|",
 }
 # Numeric references decode without the trailing ``;`` too: CommonMark
 # escapes a malformed reference's ``&`` (so the pure-markdown renderer shows
@@ -552,6 +561,146 @@ def _commonmark_inline_code_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+# GFM table recognition (round-14): the frontend renders with remarkGfm,
+# whose table tokenizer consumes rows at the block level. A delimiter row is
+# ``[0-4 spaces]``, optional border pipes, and cells of ``:?-+:?`` separated
+# by pipes; micromark additionally requires at least one ``:`` or ``|`` (a
+# bare ``---`` is a setext underline or thematic break) and the same cell
+# count as the header row — checked in ``_gfm_table_starts``.
+_GFM_TABLE_DELIMITER_RE = re.compile(r"[ \t]{0,4}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*")
+# Blockquote-marker run (0-3 leading spaces, then one or more ``>`` markers)
+# consumed by the container construct before the table tokenizer sees a row.
+_GFM_QUOTE_MARKER_RE = re.compile(r"[ \t]{0,3}(?:>[ \t]*)+")
+
+
+def _gfm_row_prefix(line: str) -> int:
+    """Length of the leading blockquote-marker run on one segment line."""
+    match = _GFM_QUOTE_MARKER_RE.match(line)
+    return match.end() if match is not None else 0
+
+
+def _gfm_unescaped_pipes(content: str) -> list[int]:
+    r"""Pipe positions that divide cells. A pipe preceded by an odd backslash
+    run is escaped cell content — micromark consumes ``\\``/``\|`` pairs as
+    escapes before the block-level cell split."""
+    positions: list[int] = []
+    backslash_run = 0
+    for index, char in enumerate(content):
+        if char == "\\":
+            backslash_run += 1
+            continue
+        if char == "|" and backslash_run % 2 == 0:
+            positions.append(index)
+        backslash_run = 0
+    return positions
+
+
+def _gfm_nonempty_cell_count(content: str, pipes: list[int]) -> int:
+    """Non-empty cells after the pipe split (border pipes add no cell)."""
+    count = 0
+    previous = -1
+    for position in [*pipes, len(content)]:
+        if position - previous > 1:
+            count += 1
+        previous = position
+    return count
+
+
+def _gfm_table_starts(header_content: str, header_pipes: list[int], delimiter_content: str) -> bool:
+    if _GFM_TABLE_DELIMITER_RE.fullmatch(delimiter_content) is None:
+        return False
+    if ":" not in delimiter_content and "|" not in delimiter_content:
+        return False
+    if _gfm_nonempty_cell_count(header_content, header_pipes) == 0:
+        return False
+    delimiter_pipes = _gfm_unescaped_pipes(delimiter_content)
+    return _gfm_nonempty_cell_count(delimiter_content, delimiter_pipes) == _gfm_nonempty_cell_count(
+        header_content,
+        header_pipes,
+    )
+
+
+def _gfm_row_cell_ranges(
+    line_start: int,
+    prefix_len: int,
+    content: str,
+    pipes: list[int],
+) -> list[tuple[int, int]]:
+    """Cell-content extents of one table row, mapped to segment offsets."""
+    ranges: list[tuple[int, int]] = []
+    base = line_start + prefix_len
+    previous = -1
+    for position in [*pipes, len(content)]:
+        if position - previous > 1:
+            ranges.append((base + previous + 1, base + position))
+        previous = position
+    return ranges
+
+
+def _segment_gfm_inline_contexts(segment: str) -> list[tuple[int, int]]:
+    """Disjoint inline contexts of one paragraph segment.
+
+    Every GFM table row and cell is its own inline context in the renderer
+    (pipes split cells before inline parsing), so backticks can never pair
+    across rows or unescaped pipes; scanning the whole segment would pair
+    them and preserve ``<think>`` reasoning the renderer serves as prose. A
+    table interrupts a paragraph, so spans never bridge into or out of one.
+    When the renderer would NOT split (e.g. a lazy delimiter line inside a
+    quote), the split still happens — over-stripping, the module's
+    leak-vs-loss safe direction. Body rows run to the segment end: the walk
+    never leaves a blank line inside a segment, and micromark accepts any
+    non-blank line as a body row.
+    """
+    lines: list[tuple[int, int, int]] = []
+    for match in re.finditer(r"[^\r\n]*(?:\r\n|\r|\n|$)", segment):
+        line_start, line_end = match.span()
+        if line_start == len(segment):
+            break
+        content_end = line_end
+        if content_end > line_start and segment[content_end - 1] == "\n":
+            content_end -= 1
+            if content_end > line_start and segment[content_end - 1] == "\r":
+                content_end -= 1
+        elif content_end > line_start and segment[content_end - 1] == "\r":
+            content_end -= 1
+        lines.append((line_start, content_end, line_end))
+    views = [segment[start:end] for start, end, _ in lines]
+
+    ranges: list[tuple[int, int]] = []
+    pre_start = 0
+    i = 0
+    while i + 1 < len(lines):
+        header_prefix = _gfm_row_prefix(views[i])
+        delimiter_prefix = _gfm_row_prefix(views[i + 1])
+        header_content = views[i][header_prefix:]
+        delimiter_content = views[i + 1][delimiter_prefix:]
+        header_pipes = _gfm_unescaped_pipes(header_content)
+        if not _gfm_table_starts(header_content, header_pipes, delimiter_content):
+            i += 1
+            continue
+        if pre_start < i:
+            ranges.append((lines[pre_start][0], lines[i][0]))
+        ranges.extend(_gfm_row_cell_ranges(lines[i][0], header_prefix, header_content, header_pipes))
+        k = i + 2
+        while k < len(lines) and not _is_commonmark_blank(views[k]):
+            body_prefix = _gfm_row_prefix(views[k])
+            body_content = views[k][body_prefix:]
+            ranges.extend(
+                _gfm_row_cell_ranges(
+                    lines[k][0],
+                    body_prefix,
+                    body_content,
+                    _gfm_unescaped_pipes(body_content),
+                ),
+            )
+            k += 1
+        i = k
+        pre_start = k
+    if pre_start < len(lines):
+        ranges.append((lines[pre_start][0], lines[-1][2]))
+    return ranges
+
+
 def _quote_depth(content: str) -> int:
     """Number of leading blockquote markers (a line starting "> > " nests two)."""
     depth = 0
@@ -801,8 +950,10 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
         nonlocal segment_start
         if segment_start is None:
             return
-        for begin, end in _commonmark_inline_code_spans(text[segment_start:segment_end]):
-            regions.append((segment_start + begin, segment_start + end))
+        segment = text[segment_start:segment_end]
+        for begin, end in _segment_gfm_inline_contexts(segment):
+            for cbegin, cend in _commonmark_inline_code_spans(segment[begin:end]):
+                regions.append((segment_start + begin + cbegin, segment_start + begin + cend))
         segment_start = None
 
     def close_indented() -> None:
@@ -1004,6 +1155,30 @@ def _find_think_close(text: str, start: int) -> tuple[int, int] | None:
     return None
 
 
+def _find_matching_think_close(text: str, start: int) -> tuple[int, int] | None:
+    """Close matching the open at *start*, tracking nesting depth.
+
+    An inner ``<think>…</think>`` pair must not end the outer block early:
+    the renderer serves everything up to the outer close as reasoning, so
+    returning the first close would publish the outer tail. Each iteration
+    consumes the nearest open or close, so the scan stays linear."""
+    depth = 1
+    cursor = start
+    while True:
+        opening = _find_think_open(text, cursor)
+        closing = _find_think_close(text, cursor)
+        if closing is None:
+            return None
+        if opening is not None and opening[0] < closing[0]:
+            depth += 1
+            cursor = opening[1]
+            continue
+        depth -= 1
+        if depth == 0:
+            return closing
+        cursor = closing[1]
+
+
 def _strip_think_blocks_outside_markdown_code(text: str) -> str:
     """Remove model reasoning while preserving literal tags in code examples."""
     # Build an equal-length classification shadow whose NULs cannot introduce
@@ -1022,7 +1197,7 @@ def _strip_think_blocks_outside_markdown_code(text: str) -> str:
     cursor = 0
     while opening := _find_think_open(shadow, cursor):
         kept_ranges.append((cursor, opening[0]))
-        close = _find_think_close(shadow, opening[1])
+        close = _find_matching_think_close(shadow, opening[1])
         if close is None:
             cursor = len(text)
             break
@@ -1226,10 +1401,14 @@ def _collapse_separators_with_offsets(text: str, *, resolve_dots: bool = True) -
     normalized like their resolved forms; ``resolve_dots=False`` yields the
     as-written view for the dual-shadow classification.
     """
-    if "&" not in text and "\\" not in text and _FOLDABLE_SLASH_RUN_RE.search(text) is None:
+    if ("&" not in text or _HTML_ENTITY_RE.search(text) is None) and "\\" not in text and _FOLDABLE_SLASH_RUN_RE.search(text) is None:
         # Without entity/backslash introducers or foldable separator runs
         # (a ``//`` after ``:`` is a scheme separator and stays) no pass can
-        # change the text; dot removal needs a real dot segment.
+        # change the text; dot removal needs a real dot segment. A bare ``&``
+        # that starts no valid entity is inert, so it keeps the identity map
+        # too — otherwise one ampersand in an otherwise-plain token would
+        # materialize per-character span tuples (hundreds of MiB at
+        # snapshot scale, round-14 measurement).
         if not resolve_dots or "/." not in text:
             return text, _IdentitySpans(len(text))
         normalized, spans = _remove_dot_segments_once(text, _IdentitySpans(len(text)))
@@ -1265,8 +1444,11 @@ def _normalize_workspace_path_with_offsets(text: str, *, resolve_dots: bool) -> 
     # dot-segment removal, so a path with none of those is its own
     # normalized view. ``None`` spans mean exactly that identity mapping —
     # a near-capacity plain path no longer materializes a per-character
-    # tuple list per view (the measured 2 MiB case peaked near 1 GiB).
-    if "%" not in text and "&" not in text and "\\" not in text and "//" not in text:
+    # tuple list per view (the measured 2 MiB case peaked near 1 GiB). A
+    # bare ``&`` that starts no valid entity is equally inert and keeps the
+    # same identity map (round-14: one trailing ``&`` on a 500 kB string
+    # otherwise peaked ~150 MB per view).
+    if "%" not in text and ("&" not in text or _HTML_ENTITY_RE.search(text) is None) and "\\" not in text and "//" not in text:
         if not resolve_dots or "/." not in text:
             return text, None
         spans = [(index, index) for index in range(len(text))]

@@ -31,16 +31,24 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   sections are stripped outside Markdown code examples — code recognition
   is block-aware per CommonMark (fences, all seven raw-HTML block types,
   indented code, ATX headings including empty forms inside quote/list
-  containers, and lazy paragraphs). Once a list or quote appears,
-  document-level fence/indent protection is suppressed: item indentation is
-  not modeled, so possible code is over-stripped rather than reasoning leaked.
+  containers, and lazy paragraphs); nested reasoning tags match to their
+  outer close by depth; and GFM table rows and cells are separate inline
+  contexts (remarkGfm splits them at the block level before inline parsing,
+  so backticks never pair across a row or an unescaped pipe). Once a list
+  or quote appears, document-level fence/indent protection is suppressed:
+  item indentation is not modeled, so possible code is over-stripped rather
+  than reasoning leaked.
   Owner-only references are replaced in messages and titles, both at create
   and public-read time. They cover `/mnt/user-data`; every `/api/threads/{id}`
   route and subpath (plus nginx's `/api/langgraph/threads/…` alias); and rooted
   `/workspace/chats/{id}` or `/workspace/agents/{agent}/chats/{id}` routes,
   including copied HTTP(S) URLs. Classification uses a bounded normalized
   shadow for percent, JSON slash, HTML-entity, and Unicode escapes while cuts
-  retain exact source coordinates. Workspace routes require a literal root or
+  retain exact source coordinates; every HTML5 alias for the admitted
+  single-ASCII entities decodes (`UnderBar`, `midast`, `vert`, `grave`
+  family included), and plain text whose `&` starts no valid entity keeps
+  the identity span map instead of materializing per-character tuples.
+  Workspace routes require a literal root or
   literal HTTP(S) scheme/authority; encoded anchors, protocol-relative/UNC,
   relative-dot, and Windows-drive forms stay public. Only canonical agent and
   thread-id grammars match; lowercase `/new` stays public, and identifier
