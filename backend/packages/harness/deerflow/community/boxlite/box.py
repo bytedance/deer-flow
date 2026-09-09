@@ -25,6 +25,7 @@ import threading
 from typing import TYPE_CHECKING, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -290,10 +291,8 @@ class BoxliteBox(Sandbox):
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
-        r = self._sh(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        # splitlines() already removed the terminators; do NOT strip entries —
-        # a filename that legitimately ends in whitespace would be corrupted.
-        return [line for line in (r.stdout or "").splitlines() if line]
+        r = self._sh(remote_list_dir_command(resolved, max_depth))
+        return parse_remote_list_dir_output(r.stdout, resolved, pipeline_exit_code=r.exit_code)
 
     def glob(
         self,
