@@ -60,7 +60,21 @@ async def test_forward_revision_cannot_skip_required_batch_columns(tmp_path, mon
         # Keep the project schema present so only the batch-column guard can
         # reject this database, on both direct and concurrent-startup paths.
         await asyncio.to_thread(bootstrap._upgrade, cfg, "0020_threads_meta_project_id")
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("ALTER TABLE threads_meta ADD COLUMN incarnation VARCHAR(32)"))
+            await conn.execute(sa.text("ALTER TABLE mcp_tasks ADD COLUMN thread_incarnation VARCHAR(32)"))
         if race:
+            current_head, current_revisions = bootstrap._get_revision_metadata()
+            assert current_head == "0019_thread_incarnations"
+            assert {"0020_threads_meta_project_id", "0021_batch_acceptance", current_head} <= current_revisions
+            monkeypatch.setattr(
+                bootstrap,
+                "_get_revision_metadata",
+                lambda: (
+                    "0020_threads_meta_project_id",
+                    current_revisions - {"0021_batch_acceptance", current_head},
+                ),
+            )
 
             def raced_upgrade(*args):
                 sync = sa.create_engine(f"sqlite:///{tmp_path / 'forward.db'}")
