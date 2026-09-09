@@ -473,7 +473,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
 
         data = _load_yaml_file(config_path)
 
-        tool_entries = [t for t in data.get("tools", []) if t.get("name") == tool_name]
+        tool_entries = [t for t in (data.get("tools") or []) if isinstance(t, dict) and t.get("name") == tool_name]
         if not tool_entries:
             return CheckResult(
                 label,
@@ -642,7 +642,7 @@ def check_sandbox(config_path: Path) -> list[CheckResult]:
             ]
 
         sandbox_use = sandbox.get("use", "")
-        tools = data.get("tools", [])
+        tools = data.get("tools") or []
         tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
         results: list[CheckResult] = []
 

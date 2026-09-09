@@ -63,7 +63,7 @@ from collections.abc import Callable, Mapping
 from typing import Any, TypedDict
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.subagents.report_contract import MAX_ACCEPTANCE_CRITERIA, MAX_CRITERION_CHARS
+from deerflow.subagents.report_contract import MAX_ACCEPTANCE_CRITERIA, normalize_acceptance_criteria
 
 CHECK_SOURCE = "acceptance_checklist"
 CHECK_REQUIREMENT = "delegation_acceptance_criteria"
@@ -137,6 +137,22 @@ class AcceptanceVerdict(TypedDict):
     leaves: list[AcceptanceLeaf]
     unchecked: list[str]  # criteria with no deterministic check (PR5 judge input)
     all_hold: bool  # every leaf checked and holds
+
+
+def parse_file_criterion(criterion: str) -> tuple[str, str] | None:
+    """Classify normalized file criteria for both sandbox admission and checks.
+
+    Keep admission on the same Unicode-aware patterns as the checker so no
+    recognized spelling can fall through to an unowned lazy acquisition.
+    """
+    file_match = _FILE_LEAF_RE.match(criterion)
+    if file_match is not None:
+        family = "file_exists" if file_match.group("mode").lower() == "exists" else "file_non_empty"
+        return family, file_match.group("path")
+    written_match = _FILE_WRITTEN_RE.match(criterion)
+    if written_match is not None:
+        return "file_written", written_match.group("path")
+    return None
 
 
 def _bound_detail(text: str) -> str:
@@ -1254,29 +1270,10 @@ def check_acceptance_criteria(
 
     Returns ``None`` when no usable criterion exists (caller stamps nothing).
     Synchronous: the async call site offloads via ``asyncio.to_thread`` —
-    ``content_reader`` performs sandbox IO. Criteria hygiene mirrors
-    ``report_contract.render_acceptance_criteria_block`` (strip, drop empties,
-    cap count/length) so the checked list matches the delegated list.
+    ``content_reader`` performs sandbox IO. The shared normalizer keeps the
+    checked list identical to the persisted and delegated list.
     """
-    if not acceptance_criteria:
-        return None
-    # Lazy import: the sanitizer lives in agents.middlewares, and this package
-    # is imported in cycles with deerflow.agents (same pattern as
-    # report_contract). Criterion text is model-supplied untrusted data; it
-    # must be neutralized here exactly as render_acceptance_criteria_block
-    # does, or a blocked tag in a criterion would be reintroduced into the
-    # lead-visible result text by render_acceptance_section.
-    from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
-
-    criteria: list[str] = []
-    for criterion in acceptance_criteria:
-        if not isinstance(criterion, str):
-            continue
-        cleaned = criterion.strip()[:MAX_CRITERION_CHARS].strip()
-        if cleaned:
-            criteria.append(neutralize_untrusted_tags(cleaned))
-        if len(criteria) >= MAX_ACCEPTANCE_CRITERIA:
-            break
+    criteria = normalize_acceptance_criteria(acceptance_criteria)
     if not criteria:
         return None
 
@@ -1292,15 +1289,11 @@ def check_acceptance_criteria(
         readable_prober = _probe_file_readable
     leaves: list[AcceptanceLeaf] = []
     for criterion in criteria:
-        file_match = _FILE_LEAF_RE.match(criterion)
-        written_match = _FILE_WRITTEN_RE.match(criterion)
+        file_criterion = parse_file_criterion(criterion)
         tests_match = _TESTS_PASSED_RE.match(criterion)
-        if file_match is not None:
-            mode = file_match.group("mode").lower()
-            family = "file_exists" if mode == "exists" else "file_non_empty"
-            leaf = _check_file_leaf(family, file_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober, readable_prober=readable_prober)
-        elif written_match is not None:
-            leaf = _check_file_leaf("file_written", written_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober, readable_prober=readable_prober)
+        if file_criterion is not None:
+            family, path = file_criterion
+            leaf = _check_file_leaf(family, path, runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober, readable_prober=readable_prober)
         elif tests_match is not None:
             leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions, thread_data)
         else:
