@@ -1,7 +1,7 @@
-"""Migration tests for 0019_conversation_shares (#4548).
+"""Migration tests for 0022_conversation_shares (#4548).
 
 Runs the full alembic chain on an empty SQLite database (not
-``create_all`` + stamp), then exercises the 0018 downgrade/upgrade cycle.
+``create_all`` + stamp), then exercises the parent-revision downgrade/upgrade cycle.
 """
 
 from __future__ import annotations
@@ -20,17 +20,17 @@ from deerflow.persistence.bootstrap import _MIGRATIONS_DIR
 pytestmark = pytest.mark.asyncio
 
 _SCRIPT_LOCATION = str(_MIGRATIONS_DIR)
-_REVISION = "0019_conversation_shares"
-_PREVIOUS = "0018_oauth_identity_pg_partial"
+_REVISION = "0022_conversation_shares"
+_PREVIOUS = "0019_thread_incarnations"
 
 
 def test_pins_immediate_parent_revision() -> None:
-    """The docstring renumber after main's 0017/0018 must not drift again."""
+    """The renumber after main's 0019-0021 series must not drift again."""
     import importlib.util
     from pathlib import Path
 
-    module_path = Path(_MIGRATIONS_DIR) / "versions" / "0019_conversation_shares.py"
-    spec = importlib.util.spec_from_file_location("migration_0019", module_path)
+    module_path = Path(_MIGRATIONS_DIR) / "versions" / "0022_conversation_shares.py"
+    spec = importlib.util.spec_from_file_location("migration_0022", module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert module.down_revision == _PREVIOUS

@@ -35,6 +35,10 @@ The landing-page case studies open as allowlisted, read-only showcases without r
 
 ## InfoQuest
 
+InfoQuest reader, web search, and image search use a 30-second HTTP connect/read
+inactivity timeout. The crawl `timeout` and `navigation_timeout` settings remain
+separate server-side options; they do not control the local HTTP timeout.
+
 DeerFlow has newly integrated the intelligent search and crawling toolset independently developed by BytePlus--[InfoQuest (supports free online experience)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
 
 <a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
@@ -411,6 +415,14 @@ every run. To reuse the last build instead, pass `SKIP_FRONTEND_BUILD=1` (or add
 is opt-in: it fails fast when `frontend/.next` has no completed build.
 
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
+
+For a read-only demo without the Gateway, run `make build-static` from `frontend/`,
+then `HOSTNAME=127.0.0.1 PORT=3000 node --env-file=.env .next/standalone/server.js`
+from the same directory. The build includes public demo assets and resolves
+supported demo API reads locally; writes are unavailable. To display the homepage
+GitHub star count, set `GITHUB_OAUTH_TOKEN` in `frontend/.env` before starting Node.
+The token stays on the server; missing credentials or GitHub failures hide the
+count. Restart Node after changing the token; no rebuild is needed.
 
 #### LangGraph Studio (Optional)
 
@@ -998,6 +1010,9 @@ Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, and SearXNG search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
 
+When using Tavily for `web_fetch`, extracted pages without a title use their URL
+as the heading; their content remains available to the agent.
+
 Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. Every HTTP route that starts or enables a future Agent run requires `runs:create`: this includes the stateless `POST /api/runs/stream` and `POST /api/runs/wait` endpoints plus scheduled-task create, update, resume, and manual-trigger mutations. Scheduled-task mutations retain their existing `threads:write` requirement, and the stateless routes separately enforce ownership when the optional thread ID is supplied in the request body. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. Model access follows the same provider: the Gateway `models` list is filtered per principal, `model:use` is enforced on model detail requests and again when the runtime resolves the agent's model, and a denied default model falls back to the first remaining candidate that also passes `model:use`. The built-in RBAC provider supports per-role `tools`, `routes`, `models`, `skills`, and `sandbox` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
 
 Advanced deployments can also extend the agent runtime itself by declaring zero-argument `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. DeerFlow loads the same configured class list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, and broken modules fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Per-context parameterization and separate lead-only/subagent-only middleware lists are not supported yet.
@@ -1212,6 +1227,10 @@ The Web UI shows the active goal above the composer. The same command is availab
 
 ### Manual Context Compaction
 
+The Web UI preserves persisted message order when merging history with live updates. Streaming steps around a persisted result inside the loaded history stay together, including steps that arrive after the result. Steps captured during compaction also remain visible before their persisted result when history has not refreshed and the UI has not rendered them yet.
+
+Compaction keeps the current user request and summarizes older assistant/tool activity. When rescuing that request leaves an assistant/tool-only summary window, input trimming favors its most recent content. For mixed histories whose user-message anchor falls outside the trimming budget, compaction retains the existing final-message fallback. `summarization.trim_tokens_to_summarize` (4000 by default) controls trimming of the raw summary input; escaping and prompt formatting add overhead beyond that budget. Setting this option to `null` disables input trimming for the summary model; choose that only when the model can accept the full history being compacted.
+
 Use `/compact` in the Web UI composer to summarize older context for the current thread. DeerFlow keeps the full chat visible, but future model calls use the compacted summary plus recent messages. The command is ignored when there is not enough history to compact, and it is blocked while the thread has a run in flight, including when that run is owned by another Gateway worker. If a multi-worker reservation loses its lease, DeerFlow cancels the checkpoint writer before the replacing run proceeds and returns a retryable conflict after cleanup. Thread-title edits are serialized through the same state-write boundary and show a conflict without closing the rename dialog when a run is active.
 
 The chat header also shows a context-window gauge when the selected model has a positive `context_window` configured. It estimates the latest materialized checkpoint's message tokens and keeps the previous same-thread percentage visible while data refetches, independently of the cumulative token-usage setting.
@@ -1298,11 +1317,16 @@ Each task gets its own execution environment with a full filesystem view — ski
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 
+Uploaded Markdown outlines skip fenced code examples, so code comments do not
+crowd out real document sections from the agent's heading preview.
+
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes, and stdio MCP temporary/debug files under the DeerFlow-owned `.mcp/` namespace are excluded because they are process-internal state (like `.git/` and `node_modules/`, any directory named `.mcp` is excluded at any depth). Large, binary, or sensitive-looking files are shown as metadata only.
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes.
+
+CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.
 
 Text artifacts are streamed with HTTP byte-range support. The Web UI initially
 loads at most 1 MiB, shows the preview size when a file is larger, and waits for
@@ -1439,6 +1463,8 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 
 ## Embedded Python Client
 
+`DeerFlowClient.stream()` includes `summary_text` in each `values` event. This is the current compacted context summary, or `None` when absent. Consumers can record changes without reading checkpoint internals; repeated snapshots may carry the same summary, and an initial snapshot may already contain one from an earlier turn.
+
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
 
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
@@ -1484,6 +1510,22 @@ The HTTP Gateway accepts `values`, `messages-tuple`, `updates`, `debug`, `tasks`
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
 
+## Project membership
+
+A conversation joins a project at creation time (when a project is selected) or
+later through the move menu. Runs never modify membership: submitting a message
+cannot assign or reassign a conversation. Moving a conversation out of a project
+keeps it unassigned until it is explicitly moved again.
+
+Moving a conversation refreshes its header affiliation as well as the project
+lists, including when an older metadata request is still in flight.
+
+Projects require the current database tables and columns. A database stamped
+`0019_thread_incarnations` from the older 0018-based rollout is rejected at
+startup if the project schema is missing. Follow the
+[offline database recovery procedure](docs/database-forward-revision-recovery.md)
+before starting this build against that database.
+
 ## Conversation Sharing
 
 The current implementation provides **backend API groundwork only** for
@@ -1498,7 +1540,6 @@ Multi-replica deployments must give every replica the same
 `SHARE_TOKEN_PEPPER`; see the
 [Gateway API documentation](backend/docs/API.md#conversation-sharing-4548)
 for the current create, list, revoke, and resolve contracts.
-
 ## Scheduled Tasks
 
 DeerFlow now includes a first-class scheduled-task MVP in the workspace.

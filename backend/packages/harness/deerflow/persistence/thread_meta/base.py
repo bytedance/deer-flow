@@ -15,7 +15,7 @@ three-state semantics (see :mod:`deerflow.runtime.user_context`):
 from __future__ import annotations
 
 import abc
-from typing import Any
+from typing import Any, ClassVar, Final
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
@@ -25,9 +25,35 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel
 THREAD_PINNED_METADATA_KEY = "deerflow_pinned"
 THREAD_ARCHIVED_METADATA_KEY = "deerflow_archived"
 
+# Cross-component metadata key. Keep in sync with
+# ``frontend/src/core/threads/utils.ts`` and
+# ``frontend/tests/e2e/utils/mock-api.ts``.
+THREAD_PROJECT_METADATA_KEY = "deerflow_project_id"
+
+
+class _ProjectFilterUnset:
+    """Sentinel for ``search(project_id=...)``: absent filter vs explicit unassigned."""
+
+    _instance: ClassVar[_ProjectFilterUnset | None] = None
+
+    def __new__(cls) -> _ProjectFilterUnset:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "<PROJECT_FILTER_UNSET>"
+
+
+PROJECT_FILTER_UNSET: Final = _ProjectFilterUnset()
+
 
 class InvalidMetadataFilterError(ValueError):
     """Raised when all client-supplied metadata filter keys are rejected."""
+
+
+class ThreadOwnershipConflictError(Exception):
+    """Raised when create would overwrite a thread owned by another user."""
 
 
 class ThreadMetaStore(abc.ABC):
@@ -40,8 +66,27 @@ class ThreadMetaStore(abc.ABC):
         user_id: str | None | _AutoSentinel = AUTO,
         display_name: str | None = None,
         metadata: dict | None = None,
+        project_id: str | None = None,
     ) -> dict:
-        pass
+        """Create a thread row; when ``project_id`` is set, validate the
+        project inside the insert transaction and raise
+        ``ProjectNotAssignableError`` on failure (no partial row)."""
+
+    @abc.abstractmethod
+    async def claim_unowned(self, thread_id: str, owner: str) -> bool:
+        """Atomically claim a legacy row whose owner is ``None``.
+
+        Returns ``True`` only when this call changed ``user_id`` from ``None``
+        to ``owner``. Missing and already-owned rows return ``False``.
+        """
+
+    @abc.abstractmethod
+    async def set_project(self, thread_id: str, project_id: str | None, *, user_id: str | None | _AutoSentinel = AUTO) -> bool:
+        """Atomically move a thread into/out of a project (RFC v2 §5.2).
+
+        Returns False when the thread is missing/foreign, or the target
+        project is missing/foreign/archived. Must not touch ``updated_at``.
+        """
 
     @abc.abstractmethod
     async def get(self, thread_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> dict | None:
@@ -54,6 +99,7 @@ class ThreadMetaStore(abc.ABC):
         metadata: dict[str, Any] | None = None,
         status: str | None = None,
         archived: bool | None = None,
+        project_id: str | None | _ProjectFilterUnset = PROJECT_FILTER_UNSET,
         limit: int = 100,
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,

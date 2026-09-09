@@ -882,6 +882,19 @@ tools:
   #   # api_key: $CRW_API_KEY
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
 
+  # Web search tool (uses Sofya, requires SOFYA_API_KEY)
+  # Sofya returns the content of the result pages, not only their snippets.
+  # Sign up at https://sofya.co to get a key.
+  # Note: set SOFYA_API_KEY in your environment before starting the app.
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.sofya.tools:web_search_tool
+  #   max_results: 5                # capped at 20 by the Sofya provider
+  #   # search_depth: basic         # basic reads the result pages, snippets returns snippets only
+  #   contents_max_characters: 2000 # per-result content cap; 0 disables it
+  #   # api_key: $SOFYA_API_KEY     # Optional explicit env-var reference
+
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
   # sites and SPAs. Deploy your own: https://github.com/browserless/browserless
@@ -1057,6 +1070,15 @@ tools:
   #   # api_key: $CRW_API_KEY
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+
+  # Web fetch tool (uses Sofya, requires SOFYA_API_KEY)
+  # Returns the page as markdown. Also handles PDF, DOCX and other documents.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.sofya.tools:web_fetch_tool
+  #   # api_key: $SOFYA_API_KEY
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation

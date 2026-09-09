@@ -33,6 +33,9 @@ PAT_ALLOWED_SCOPES: frozenset[str] = frozenset(
         "runs:create",
         "runs:read",
         "runs:cancel",
+        "projects:read",
+        "projects:write",
+        "projects:delete",
     }
 )
 
@@ -53,6 +56,7 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"GET", "PUT", "DELETE"}), re.compile(r"^/api/threads/[^/]+/goal$")),
     (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/state$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/(compact|history|branches)$")),
+    (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/move$")),
     # Conversation sharing (#4548): create/list/revoke run under the
     # threads:read permission with strict ownership, so a PAT holding that
     # scope manages its own share links. The public-resolution route
@@ -60,6 +64,15 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     # policy — it must never become a PAT-credentialed surface.
     (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/shares$")),
     (frozenset({"DELETE"}), re.compile(r"^/api/threads/[^/]+/shares/[^/]+$")),
+    # Projects subtree: same enumerated-no-dead-methods precision as the
+    # threads/runs rules — only the methods the projects router implements
+    # are admitted, so a future projects route is default-denied until
+    # explicitly listed. Scope narrowing (projects:read|write|delete and
+    # threads:write for move) stays enforced by ``@require_permission``.
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/projects$")),
+    (frozenset({"GET", "PATCH", "DELETE"}), re.compile(r"^/api/projects/[^/]+$")),
+    (frozenset({"POST"}), re.compile(r"^/api/projects/[^/]+/(archive|restore)$")),
+    (frozenset({"GET"}), re.compile(r"^/api/projects/[^/]+/threads$")),
     # Runs subtree: enumerated per implemented subroute instead of a
     # ``runs(/.*)?`` wildcard, so a route added under /runs is default-denied
     # until explicitly listed — the same no-dead-methods precision the

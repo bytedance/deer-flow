@@ -1,7 +1,7 @@
 """conversation shares (#4548).
 
-Revision ID: 0019_conversation_shares
-Revises: 0018_oauth_identity_pg_partial
+Revision ID: 0022_conversation_shares
+Revises: 0019_thread_incarnations
 Create Date: 2026-08-28
 """
 
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0019_conversation_shares"
-down_revision: str | Sequence[str] | None = "0018_oauth_identity_pg_partial"
+revision: str = "0022_conversation_shares"
+down_revision: str | Sequence[str] | None = "0019_thread_incarnations"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

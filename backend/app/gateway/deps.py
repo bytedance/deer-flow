@@ -518,12 +518,14 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.thread_store = make_thread_store(sf, app.state.store)
         if sf is not None:
             from deerflow.persistence.mcp_tasks import McpTaskRepository
+            from deerflow.persistence.projects import ProjectRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
             from deerflow.persistence.subagent_batches import SubagentBatchRepository
 
+            app.state.project_repo = ProjectRepository(sf)
             app.state.scheduled_task_repo = ScheduledTaskRepository(
                 sf,
                 run_repository=app.state.run_store,
@@ -536,6 +538,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:
             app.state.mcp_task_repo = None
+            app.state.project_repo = None
             app.state.subagent_batch_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
@@ -653,6 +656,7 @@ get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
+get_project_repo = _require("project_repo", "Projects")
 
 
 def get_store(request: Request):
