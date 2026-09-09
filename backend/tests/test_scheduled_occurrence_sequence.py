@@ -21,7 +21,7 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
-from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, ScheduledTaskRow
 
 pytestmark = pytest.mark.asyncio
 
@@ -250,17 +250,26 @@ async def test_recovery_lookup_prefers_the_highest_sequence_whenever_one_exists(
 
 @pytest.mark.parametrize("recovery_method", ["cancel_stuck_once_tasks", "reconcile_stuck_once_tasks"])
 @pytest.mark.parametrize(
-    ("sequenced_status", "unsequenced_status", "expected_status", "expected_count"),
-    [("running", "skipped", "running", 0), ("success", "running", "completed", 1)],
-    ids=["unsequenced-skipped-while-sequenced-active", "unsequenced-running-while-sequenced-success"],
+    ("sequenced_status", "unsequenced_status"),
+    [("running", "skipped"), ("success", "running"), ("success", "interrupted"), ("failed", "running")],
+    ids=[
+        "unsequenced-skipped-while-sequenced-active",
+        "unsequenced-running-while-sequenced-success",
+        "unsequenced-interrupted-while-sequenced-success",
+        "unsequenced-running-while-sequenced-failed",
+    ],
 )
-async def test_once_recovery_projects_only_the_sequenced_occurrence(occurrence_factories, recovery_method, sequenced_status, unsequenced_status, expected_status, expected_count):
-    """A pre-upgrade row with a later caller timestamp cannot drive the parent.
+async def test_once_recovery_defers_while_any_occurrence_is_live_then_projects_the_sequence_winner(occurrence_factories, recovery_method, sequenced_status, unsequenced_status):
+    """Mixed-writer interleavings from review, both recovery paths, both backends.
 
-    Both symptoms from review: an unsequenced ``skipped`` row must not cancel a
-    parent whose sequenced occurrence is still live, and an unsequenced
-    ``running`` row must not stall finalisation of a parent whose sequenced
-    occurrence already succeeded.
+    A live occurrence row is the task's newest admission by construction
+    (``uq_scheduled_task_run_active``), whatever its caller clock and whether or
+    not it carries a sequence, so recovery defers while one exists: an
+    unsequenced ``skipped`` row cannot cancel a parent whose sequenced
+    occurrence is live, and an unsequenced ``running`` row cannot be skipped
+    over to finalise the parent from an older sequenced outcome.  Once no row is
+    live, the sequence winner decides and a terminalised unsequenced row never
+    overrides it.
     """
     first, _second = occurrence_factories
     await _create_task(first, schedule_type="once")
@@ -275,11 +284,28 @@ async def test_once_recovery_projects_only_the_sequenced_occurrence(occurrence_f
     kwargs = {"error": "interrupted: recovery"}
     if recovery_method == "reconcile_stuck_once_tasks":
         kwargs["now"] = datetime.now(UTC) + timedelta(minutes=10)
-    for _ in range(2):  # a second pass must not change the outcome
+
+    async def recover():
         count = await getattr(task_repo, recovery_method)(**kwargs)
         task = await task_repo.get_internal("task")
         assert task is not None
+        return count, task
+
+    any_live = sequenced_status in ACTIVE_RUN_STATUSES or unsequenced_status in ACTIVE_RUN_STATUSES
+    sequence_outcome = ONCE_TASK_STATUS_BY_RUN_STATUS.get(sequenced_status, "running")
+    expected_status, expected_count = ("running", 0) if any_live else (sequence_outcome, 1)
+    for _ in range(2):  # a second pass must not change the outcome
+        count, task = await recover()
         assert task["status"] == expected_status
         assert task["last_error"] is None
         assert count == expected_count
-        expected_count = 0 if expected_status == "completed" else expected_count
+        expected_count = 0
+
+    if unsequenced_status in ACTIVE_RUN_STATUSES:
+        # The pre-upgrade node died and occurrence recovery terminalised its
+        # row: the sequence winner now decides, not the newer unsequenced row.
+        assert await ScheduledTaskRunRepository(first).update_status("unsequenced", status="interrupted", error="pre-upgrade node died")
+        count, task = await recover()
+        assert task["status"] == sequence_outcome
+        assert task["last_error"] is None
+        assert count == 1

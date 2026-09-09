@@ -587,6 +587,24 @@ class ScheduledTaskRepository:
         return (await session.execute(legacy_stmt)).scalars().first()
 
     @staticmethod
+    async def _has_active_occurrence(session: AsyncSession, task_id: str) -> bool:
+        """True while any occurrence row of the task is queued/launching/running.
+
+        ``uq_scheduled_task_run_active`` allows one such row per task, so a live
+        row is the newest admission regardless of its caller clock or whether
+        it carries a sequence.
+        """
+        stmt = (
+            select(ScheduledTaskRunRow.id)
+            .where(
+                ScheduledTaskRunRow.task_id == task_id,
+                ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalars().first() is not None
+
+    @staticmethod
     def _finalise_once_task_from_run(
         task_row: ScheduledTaskRow,
         run_row: ScheduledTaskRunRow | None,
@@ -640,24 +658,38 @@ class ScheduledTaskRepository:
         ``scheduled_task_runs`` row.  If the run already reached a terminal
         status the parent task is finalised to match (``success`` →
         ``completed``, ``failed`` → ``failed``, ``interrupted`` →
-        ``cancelled``, ``skipped`` → ``cancelled``).  Active occurrences
-        (queued/launching/running) are left untouched.  Tasks whose latest
-        run row is absent receive the generic cancellation.
+        ``cancelled``, ``skipped`` → ``cancelled``).  While any occurrence
+        row is still active (queued/launching/running), sequenced or not, the
+        parent is left untouched: ``uq_scheduled_task_run_active`` makes that
+        row the task's newest admission.  Tasks whose latest run row is absent
+        receive the generic cancellation.
         """
-        stmt = select(ScheduledTaskRow).where(
+        stmt = select(ScheduledTaskRow.id).where(
             ScheduledTaskRow.schedule_type == "once",
             ScheduledTaskRow.status == "running",
             ScheduledTaskRow.lease_expires_at.is_(None),
         )
         async with self._sf() as session:
-            result = await session.execute(stmt)
-            stuck_rows = list(result.scalars())
-            if not stuck_rows:
+            task_ids = list((await session.execute(stmt)).scalars())
+            if not task_ids:
                 return 0
             now = datetime.now(UTC)
             reconciled = 0
-            for task_row in stuck_rows:
-                run_row = await self._fetch_latest_run(session, task_row.id)
+            for task_id in task_ids:
+                # Row lock (no SQLite writer emulation, so the race regressions
+                # can still commit concurrently): on Postgres this serialises
+                # against admission, which locks the parent before inserting a
+                # queued occurrence, so no live row can appear between the
+                # probe below and this commit.
+                task_row = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+                if task_row is None or task_row.status != "running" or task_row.lease_expires_at is not None:
+                    continue
+                run_row = await self._fetch_latest_run(session, task_id)
+                if await self._has_active_occurrence(session, task_id):
+                    # The live row is the newest admission whatever its clock or
+                    # sequence; its own completion, or a later pass once it is
+                    # terminal, owns the parent.
+                    continue
                 if run_row is not None and not can_project(task_row, run_row):
                     # Same eligibility rule as every other parent write: a row
                     # that cannot project leaves the parent untouched.
@@ -722,6 +754,11 @@ class ScheduledTaskRepository:
                 # Filtering by terminal status only could exclude a newer skipped
                 # or active row, causing us to finalise based on an older run.
                 run_row = await self._fetch_latest_run(session, task.id)
+                if await self._has_active_occurrence(session, task.id):
+                    # Any live occurrence, sequenced or not, is the newest
+                    # admission; reconcile_active_runs terminalises it once its
+                    # durable run is gone and the next pass finalises the parent.
+                    continue
                 if run_row is not None and not can_project(task, run_row):
                     # Same eligibility rule as every other parent write.
                     continue
