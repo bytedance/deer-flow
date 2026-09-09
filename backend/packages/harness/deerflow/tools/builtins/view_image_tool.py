@@ -1,3 +1,4 @@
+import hashlib
 import mimetypes
 from pathlib import Path
 from typing import Annotated
@@ -46,6 +47,55 @@ def _sanitize_image_error(error: Exception, thread_data: ThreadDataState | None)
     from deerflow.sandbox.tools import mask_local_paths_in_output
 
     return mask_local_paths_in_output(f"{type(error).__name__}: {error}", thread_data)
+
+
+def _is_file_not_found_error(error: BaseException) -> bool:
+    """Recognize an explicit missing-file error through provider wrappers.
+
+    ``Sandbox.download_file`` promises ``OSError`` for read failures. Some
+    optional SDKs expose a more precise missing-file subtype before their
+    adapter wraps it; E2B's ``FileNotFoundException`` is one such case. Keep
+    the core tool independent of optional provider imports while preserving
+    that cause-chain signal. Generic 404-looking strings are deliberately not
+    accepted: only an explicit exception type may enable host recovery.
+    """
+
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, FileNotFoundError):
+            return True
+        error_type = type(current)
+        if error_type.__name__ == "FileNotFoundException" and error_type.__module__.split(".", 1)[0] == "e2b":
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _read_verified_host_copy(
+    actual_path: str | Path,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+) -> bytes | None:
+    """Read a synchronized host image only when it matches prior metadata."""
+
+    path = Path(actual_path)
+    try:
+        if not path.exists() or not path.is_file():
+            return None
+        size = path.stat().st_size
+        if size != expected_size or size > _MAX_IMAGE_BYTES:
+            return None
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) != size:
+        return None
+    if hashlib.sha256(data).hexdigest() != expected_sha256:
+        return None
+    return data
 
 
 @tool("view_image", parse_docstring=True)
@@ -114,22 +164,52 @@ def view_image_tool(
     sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
     sandbox_id = sandbox_state.get("sandbox_id") if isinstance(sandbox_state, dict) else None
     sandbox = get_sandbox_provider().get(sandbox_id) if sandbox_id else None
+    viewed_images = state.get("viewed_images")
+    previous_view = viewed_images.get(image_path) if isinstance(viewed_images, dict) else None
+    previous_source_id = previous_view.get("source_sandbox_id") if isinstance(previous_view, dict) else None
+    read_source_sandbox_id: str | None = None
 
     if sandbox is not None:
         try:
             image_data = sandbox.download_file(image_path)
-        except FileNotFoundError:
-            return Command(
-                update={"messages": [ToolMessage(f"Error: Image file not found: {image_path}", tool_call_id=tool_call_id)]},
-            )
+            read_source_sandbox_id = sandbox_id
         except IsADirectoryError:
             return Command(
                 update={"messages": [ToolMessage(f"Error: Path is not a file: {image_path}", tool_call_id=tool_call_id)]},
             )
         except Exception as e:
-            return Command(
-                update={"messages": [ToolMessage(f"Error reading image file: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
-            )
+            # A replacement sandbox may be live without containing files from
+            # the earlier generation. Recover only from an explicitly missing
+            # file and only when the synchronized host copy matches the exact
+            # metadata of the previously viewed image. Other live-client
+            # failures stay fail-closed so a stale mirror cannot mask them.
+            if _is_file_not_found_error(e) and isinstance(previous_view, dict) and previous_source_id != sandbox_id:
+                previous_size = previous_view.get("size")
+                previous_sha256 = previous_view.get("sha256")
+                if isinstance(previous_size, int) and isinstance(previous_sha256, str):
+                    recovered = _read_verified_host_copy(
+                        actual_path,
+                        expected_size=previous_size,
+                        expected_sha256=previous_sha256,
+                    )
+                    if recovered is not None:
+                        image_data = recovered
+                    else:
+                        return Command(
+                            update={"messages": [ToolMessage(f"Error: Image file not found: {image_path}", tool_call_id=tool_call_id)]},
+                        )
+                else:
+                    return Command(
+                        update={"messages": [ToolMessage(f"Error: Image file not found: {image_path}", tool_call_id=tool_call_id)]},
+                    )
+            elif _is_file_not_found_error(e):
+                return Command(
+                    update={"messages": [ToolMessage(f"Error: Image file not found: {image_path}", tool_call_id=tool_call_id)]},
+                )
+            else:
+                return Command(
+                    update={"messages": [ToolMessage(f"Error reading image file: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
+                )
         image_size = len(image_data)
     else:
         path = Path(actual_path)
@@ -182,13 +262,15 @@ def view_image_tool(
         )
     mime_type = detected_mime_type
 
-    new_viewed_images = {
-        image_path: {
-            "mime_type": mime_type,
-            "size": image_size,
-            "actual_path": str(actual_path),
-        }
+    image_metadata = {
+        "mime_type": mime_type,
+        "size": image_size,
+        "actual_path": str(actual_path),
+        "sha256": hashlib.sha256(image_data).hexdigest(),
     }
+    if read_source_sandbox_id is not None:
+        image_metadata["source_sandbox_id"] = read_source_sandbox_id
+    new_viewed_images = {image_path: image_metadata}
 
     return Command(
         update={"viewed_images": new_viewed_images, "messages": [ToolMessage("Successfully read image", tool_call_id=tool_call_id)]},

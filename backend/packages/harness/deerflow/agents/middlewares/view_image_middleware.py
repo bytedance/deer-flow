@@ -1,6 +1,7 @@
 """Middleware for injecting image details into the model request."""
 
 import base64
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -117,23 +118,36 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         return tool_call_ids.issubset(completed_tool_ids)
 
     @staticmethod
-    def _encode_image_bytes(image_bytes: bytes, mime_type: str, expected_size: int) -> str | None:
+    def _encode_image_bytes(
+        image_bytes: bytes,
+        mime_type: str,
+        expected_size: int,
+        expected_sha256: str | None = None,
+    ) -> str | None:
         """Validate image bytes against recorded metadata and return a data URL."""
         current_size = len(image_bytes)
         if current_size != expected_size or current_size > _MAX_IMAGE_BYTES:
+            return None
+        if expected_sha256 is not None and hashlib.sha256(image_bytes).hexdigest() != expected_sha256:
             return None
         base64_data = base64.b64encode(image_bytes).decode("utf-8")
         return f"data:{mime_type};base64,{base64_data}"
 
     @classmethod
-    def _read_host_image_as_data_url(cls, actual_path: str, mime_type: str, expected_size: int) -> str | None:
+    def _read_host_image_as_data_url(
+        cls,
+        actual_path: str,
+        mime_type: str,
+        expected_size: int,
+        expected_sha256: str | None = None,
+    ) -> str | None:
         """Read a validated host mirror and return a data URL, or None on failure.
 
         ``actual_path`` is server-set by ``view_image_tool`` and held in
         LangGraph-controlled state. The host path remains the compatibility path
-        for local execution and older checkpoints. When a live sandbox is
-        available, ``_read_image_as_data_url`` reads that sandbox instead so a
-        remote provider never loses to a missing or stale gateway mirror.
+        for local execution and older checkpoints. Provenance-aware checkpoints
+        additionally verify the exact SHA-256 before a synchronized host copy can
+        stand in for bytes from an earlier sandbox generation.
         """
         try:
             file_path = Path(actual_path)
@@ -144,7 +158,12 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 return None
             with open(file_path, "rb") as f:
                 image_bytes = f.read()
-            return cls._encode_image_bytes(image_bytes, mime_type, expected_size)
+            return cls._encode_image_bytes(
+                image_bytes,
+                mime_type,
+                expected_size,
+                expected_sha256,
+            )
         except OSError:
             return None
 
@@ -156,43 +175,96 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         actual_path: str,
         mime_type: str,
         expected_size: int,
+        expected_sha256: str | None,
+        source_sandbox_id: str | None,
     ) -> str | None:
-        """Read image bytes from the active sandbox, falling back to the host mirror.
+        """Read the exact image bytes represented by ``viewed_images`` metadata.
 
-        A remote sandbox is the source of truth while it is live: generated or
-        modified files can exist there before release-time synchronization, and
-        the gateway mirror may be missing or stale. If the provider still has the
-        sandbox instance, read through ``Sandbox.download_file`` and do not fall
-        back on download failure. Host fallback is only for runs without a live
-        sandbox client (local/legacy checkpoints).
+        A live sandbox is authoritative only for metadata recorded from that same
+        sandbox generation. If the thread now points at a replacement sandbox,
+        the previous image can be reconstructed from the synchronized host mirror
+        only when its SHA-256 exactly matches the bytes that ``view_image`` saw.
+        Legacy metadata without a digest never authorizes this cross-generation
+        fallback. When no live sandbox exists, the historical host compatibility
+        path remains available (digest-checked when present).
         """
         from deerflow.sandbox.overwrite import unwrap_sandbox
         from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
         sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
         sandbox_id = sandbox_state.get("sandbox_id") if isinstance(sandbox_state, dict) else None
-        if sandbox_id:
-            sandbox = get_sandbox_provider().get(sandbox_id)
-            if sandbox is not None:
+        sandbox = get_sandbox_provider().get(sandbox_id) if sandbox_id else None
+
+        if sandbox is not None:
+            provenance_matches_live = source_sandbox_id == sandbox_id
+            provenance_identifies_other_source = expected_sha256 is not None and source_sandbox_id != sandbox_id
+
+            if provenance_identifies_other_source:
+                # The current client belongs to a different generation (or the
+                # image was originally read from the host). Reproduce the exact
+                # historical bytes rather than letting an unrelated same-path
+                # file in the replacement sandbox win.
+                if actual_path:
+                    host_data_url = cls._read_host_image_as_data_url(
+                        actual_path,
+                        mime_type,
+                        expected_size,
+                        expected_sha256,
+                    )
+                    if host_data_url is not None:
+                        return host_data_url
                 try:
                     image_bytes = sandbox.download_file(image_path)
                 except Exception:
-                    logger.warning("Failed to read viewed image %s from sandbox %s", image_path, sandbox_id, exc_info=True)
+                    logger.warning(
+                        "Failed to recover viewed image %s from replacement sandbox %s",
+                        image_path,
+                        sandbox_id,
+                        exc_info=True,
+                    )
                     return None
-                return cls._encode_image_bytes(image_bytes, mime_type, expected_size)
+                return cls._encode_image_bytes(
+                    image_bytes,
+                    mime_type,
+                    expected_size,
+                    expected_sha256,
+                )
+
+            if not provenance_matches_live and expected_sha256 is None:
+                # A legacy checkpoint cannot prove which sandbox generation
+                # supplied these bytes. Do not silently reinterpret historical
+                # image context through a newly active remote filesystem.
+                return None
+
+            try:
+                image_bytes = sandbox.download_file(image_path)
+            except Exception:
+                logger.warning("Failed to read viewed image %s from sandbox %s", image_path, sandbox_id, exc_info=True)
+                return None
+            return cls._encode_image_bytes(
+                image_bytes,
+                mime_type,
+                expected_size,
+                expected_sha256,
+            )
 
         if not actual_path:
             return None
-        return cls._read_host_image_as_data_url(actual_path, mime_type, expected_size)
+        return cls._read_host_image_as_data_url(
+            actual_path,
+            mime_type,
+            expected_size,
+            expected_sha256,
+        )
 
     def _create_image_details_message(self, state: ViewImageMiddlewareState) -> list[str | dict]:
         """Create a formatted message with all viewed image details.
 
         Reads image files on-demand from the active sandbox when available and
         encodes them as base64 for the model. The base64 data is NOT persisted in
-        state -- only lightweight metadata (path, mime_type, size) is stored in
-        ``viewed_images``, avoiding large duplicate payloads across every
-        checkpoint (see #4138).
+        state -- only lightweight metadata (path, mime_type, size, digest, and
+        source sandbox id when applicable) is stored in ``viewed_images``,
+        avoiding large duplicate payloads across every checkpoint (see #4138).
 
         Args:
             state: Current state containing viewed_images
@@ -212,12 +284,22 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             mime_type = image_data.get("mime_type", "unknown")
             actual_path = image_data.get("actual_path", "")
             expected_size = image_data.get("size", 0)
+            expected_sha256 = image_data.get("sha256")
+            source_sandbox_id = image_data.get("source_sandbox_id")
 
             # Add text description
             content_blocks.append({"type": "text", "text": f"\n- **{image_path}** ({mime_type})"})
 
             # Read the image file on-demand and encode as base64 for the model
-            data_url = self._read_image_as_data_url(state, image_path, actual_path, mime_type, expected_size)
+            data_url = self._read_image_as_data_url(
+                state,
+                image_path,
+                actual_path,
+                mime_type,
+                expected_size,
+                expected_sha256 if isinstance(expected_sha256, str) else None,
+                source_sandbox_id if isinstance(source_sandbox_id, str) else None,
+            )
             if data_url:
                 content_blocks.append(
                     {
@@ -324,6 +406,9 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
+        # Sync injection executes inline on this call stack. There is no detached
+        # worker to drain: an outer sandbox lease cannot reach its finally/release
+        # boundary until this blocking read returns or raises.
         return handler(self._inject(request))
 
     @override
