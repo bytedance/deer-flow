@@ -307,12 +307,48 @@ class SkillStateConfig(BaseModel):
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
 
 
+class ConfiguredMiddlewareSpec(BaseModel):
+    """One config-declared AgentMiddleware with optional constructor arguments."""
+
+    class_path: str = Field(
+        ...,
+        alias="class",
+        min_length=1,
+        description="AgentMiddleware class path in 'module.path:ClassName' form.",
+    )
+    kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Keyword arguments passed to the middleware constructor.",
+    )
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @field_validator("class_path")
+    @classmethod
+    def _strip_class_path(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("middleware class path must be a non-empty string")
+        return stripped
+
+    @field_validator("kwargs", mode="before")
+    @classmethod
+    def _kwargs_none_is_empty(cls, value: Any) -> Any:
+        return {} if value is None else value
+
+    @field_validator("kwargs")
+    @classmethod
+    def _kwargs_keys_are_strings(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if not all(isinstance(key, str) and key.strip() for key in value):
+            raise ValueError("middleware kwargs keys must be non-empty strings")
+        return value
+
+
 class ExtensionsConfig(BaseModel):
     """Unified configuration for MCP servers and skills."""
 
-    middlewares: list[str] = Field(
+    middlewares: list[str | ConfiguredMiddlewareSpec] = Field(
         default_factory=list,
-        description="AgentMiddleware class paths loaded into the lead-agent and subagent middleware chains. Each entry uses 'module.path:ClassName'.",
+        description="AgentMiddleware entries loaded into the lead-agent and subagent middleware chains. Each entry is a 'module.path:ClassName' string or an object with 'class' and optional 'kwargs'.",
     )
     mcp_servers: dict[str, McpServerConfig] = Field(
         default_factory=dict,
@@ -324,6 +360,20 @@ class ExtensionsConfig(BaseModel):
         description="Map of skill name to state configuration",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    @field_validator("middlewares")
+    @classmethod
+    def _normalize_middleware_entries(cls, value: list[str | ConfiguredMiddlewareSpec]) -> list[str | ConfiguredMiddlewareSpec]:
+        normalized: list[str | ConfiguredMiddlewareSpec] = []
+        for entry in value:
+            if isinstance(entry, str):
+                stripped = entry.strip()
+                if not stripped:
+                    raise ValueError("middleware class path must be a non-empty string")
+                normalized.append(stripped)
+                continue
+            normalized.append(entry)
+        return normalized
 
     @model_validator(mode="after")
     def _validate_task_server_names_fit_storage(self) -> "ExtensionsConfig":
