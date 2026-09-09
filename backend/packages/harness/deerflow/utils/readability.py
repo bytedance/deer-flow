@@ -1,8 +1,9 @@
 import logging
 import re
 import subprocess
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
+from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 from readabilipy import simple_json_from_html_string
 
@@ -55,8 +56,33 @@ class Article:
         return content
 
 
+def _resolve_html_urls(html: str, url: str) -> str:
+    """Resolve destinations before extraction can discard the document's base tag."""
+    soup = BeautifulSoup(html, "html.parser")
+    base_url = url
+    base = soup.find("base", href=True)
+    if base is not None:
+        try:
+            candidate = urljoin(url, str(base["href"]).strip())
+            if urlparse(candidate).scheme not in {"data", "javascript"}:
+                base_url = candidate
+        except ValueError:
+            pass  # An invalid base must not prevent extraction of the page.
+    for element in soup.find_all(["a", "img"]):
+        attribute = "href" if element.name == "a" else "src"
+        value = element.get(attribute)
+        if isinstance(value, str):
+            try:
+                element[attribute] = urljoin(base_url, value.strip())
+            except ValueError:
+                continue  # Preserve a malformed destination without losing the article.
+    return str(soup)
+
+
 class ReadabilityExtractor:
-    def extract_article(self, html: str) -> Article:
+    def extract_article(self, html: str, *, url: str | None = None) -> Article:
+        if url:
+            html = _resolve_html_urls(html, url)
         try:
             article = simple_json_from_html_string(html, use_readability=True)
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
