@@ -212,11 +212,11 @@ const EMPTY_MESSAGE_IDENTITIES_SET: ReadonlySet<string> = new Set<string>();
 export type LocalTurnAnchor = {
   threadId: string;
   humanIdentity: string | null;
-  /** Filled in once any rendered or canonical copy of the human reveals it. */
-  runId?: string;
   baselineIdentities: ReadonlySet<string>;
   /** Canonical REST-history identities already loaded when this turn began. */
   preSubmitHistoryIdentities: ReadonlySet<string>;
+  /** Transient-bridge identities already established before this turn began. */
+  preSubmitBridgeIdentities: ReadonlySet<string>;
   /**
    * Highest authoritative feed position known before submit. Older pages that
    * arrive later may still be confirmed as pre-submit history through this
@@ -259,7 +259,10 @@ function getConfirmedPreSubmitHistoryIdentities(
   if (localTurnAnchor === null) {
     return new Set();
   }
-  const confirmed = new Set(localTurnAnchor.preSubmitHistoryIdentities);
+  const confirmed = new Set([
+    ...localTurnAnchor.preSubmitHistoryIdentities,
+    ...localTurnAnchor.preSubmitBridgeIdentities,
+  ]);
   const maxSeq = localTurnAnchor.preSubmitMaxSeq;
   if (maxSeq === undefined) {
     return confirmed;
@@ -273,6 +276,23 @@ function getConfirmedPreSubmitHistoryIdentities(
   }
   return confirmed;
 }
+
+function findMessageRunIdByIdentity(
+  messages: Message[],
+  identity: string,
+): string | undefined {
+  for (const message of messages) {
+    if (messageIdentity(message) !== identity) {
+      continue;
+    }
+    const runId = getMessageRunId(message);
+    if (runId) {
+      return runId;
+    }
+  }
+  return undefined;
+}
+
 function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
   const lastIndexByIdentity = new Map<string, number>();
   messages.forEach((message, index) => {
@@ -659,7 +679,9 @@ export function restoreLocalTurnMessageOrder(
       !isHiddenFromUIMessage(message) &&
       identity !== undefined &&
       !baselineMessageIdentities.has(identity) &&
-      (!isCanonicalHistoryMessage(identity) || isCurrentTurnStep(message));
+      ((!isCanonicalHistoryMessage(identity) &&
+        !isConfirmedHistoryMessage(identity)) ||
+        isCurrentTurnStep(message));
     if (isVisiblePendingStep) {
       earlyPendingSteps.push(message);
     } else {
@@ -2185,6 +2207,13 @@ export function useThreadStream({
         preSubmitHistoryIdentities: new Set(
           visibleHistory.map(messageIdentity).filter(isNonEmptyString),
         ),
+        preSubmitBridgeIdentities: new Set(
+          transientHistoryThreadIdRef.current === threadId
+            ? transientHistoryBridgeRef.current
+                .map(messageIdentity)
+                .filter(isNonEmptyString)
+            : EMPTY_MESSAGE_IDENTITIES,
+        ),
         preSubmitMaxSeq: maxMessageSeq([
           ...visibleHistory,
           ...persistedMessages,
@@ -2403,6 +2432,13 @@ export function useThreadStream({
         baselineIdentities: new Set(pendingUsageBaselineMessageIdsRef.current),
         preSubmitHistoryIdentities: new Set(
           visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+        ),
+        preSubmitBridgeIdentities: new Set(
+          transientHistoryThreadIdRef.current === threadId
+            ? transientHistoryBridgeRef.current
+                .map(messageIdentity)
+                .filter(isNonEmptyString)
+            : EMPTY_MESSAGE_IDENTITIES,
         ),
         preSubmitMaxSeq: maxMessageSeq([
           ...visibleHistory,
@@ -2669,16 +2705,18 @@ export function useThreadStream({
       renderMessages,
       visibleOptimisticMessages,
     );
-    const localTurnAnchor = localTurnAnchorRef.current;
+    const localTurnAnchor =
+      localTurnAnchorRef.current?.threadId === threadId
+        ? localTurnAnchorRef.current
+        : null;
     const canonicalHistoryIdentities = new Set(
       visibleHistory.map(messageIdentity).filter(isNonEmptyString),
     );
-    // Only canonical history known to predate this local submit may be moved
-    // across its human anchor. The fixed identity snapshot covers messages
-    // already loaded from REST but absent from the checkpoint baseline; the
+    // Only established history known to predate this local submit may be moved
+    // across its human anchor. The fixed identity snapshots cover messages
+    // already loaded from REST and pre-existing transient-bridge rescue; the
     // authoritative seq boundary also admits older pages that finish loading
-    // after submit. Transient compaction rescue and later external turns are
-    // deliberately outside both sets.
+    // after submit. Post-submit rescue and later external turns stay outside.
     const confirmedHistoryIdentities = getConfirmedPreSubmitHistoryIdentities(
       visibleHistory,
       localTurnAnchor,
@@ -2697,17 +2735,16 @@ export function useThreadStream({
       // optimistic one; recover the run from any rendered or canonical copy so
       // an interrupt-flushed current-run step is still recognised as ours.
       const anchorRunId =
-        localTurnAnchor.runId ??
-        [...renderMessages, ...effectiveHistory]
-          .filter(
-            (message) =>
-              messageIdentity(message) === localTurnAnchor.humanIdentity,
-          )
-          .map(getMessageRunId)
-          .find(isNonEmptyString);
+        findMessageRunIdByIdentity(
+          renderMessages,
+          localTurnAnchor.humanIdentity,
+        ) ??
+        findMessageRunIdByIdentity(
+          effectiveHistory,
+          localTurnAnchor.humanIdentity,
+        );
       if (anchorRunId) {
         currentTurnRunIds.add(anchorRunId);
-        localTurnAnchor.runId ??= anchorRunId;
       }
     }
     return localTurnAnchor === null

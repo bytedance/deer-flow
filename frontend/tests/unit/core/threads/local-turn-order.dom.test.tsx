@@ -416,6 +416,117 @@ test("keeps established history order while the submitted human is outside the r
   ]);
 });
 
+test("keeps a pre-submit older-turn rescue above the submitted human", async () => {
+  rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const rescuedOldHuman = {
+    id: "rescued-old-human",
+    type: "human",
+    content: "Older request",
+    run_id: "run-old",
+    additional_kwargs: { deerflow_seq: 1 },
+  } as Message;
+  const rescuedOldAnswer = aiMessage("rescued-old-answer", "Older answer", {
+    run_id: "run-old",
+    seq: 2,
+  });
+  const recentHuman = {
+    id: "recent-human",
+    type: "human",
+    content: "Recent request",
+    run_id: "run-recent",
+    additional_kwargs: { deerflow_seq: 3 },
+  } as Message;
+  const recentAnswer = aiMessage("recent-answer", "Recent answer", {
+    run_id: "run-recent",
+    seq: 4,
+  });
+  const rows = [
+    historyRow(3, "run-recent", recentHuman),
+    historyRow(4, "run-recent", recentAnswer),
+  ];
+  streamMockState.messages = [
+    rescuedOldHuman,
+    rescuedOldAnswer,
+    recentHuman,
+    recentAnswer,
+  ];
+  const { rerender, result } = await renderSeededThread({
+    historyRows: () => rows,
+  });
+
+  const removeAll = {
+    id: "__remove_all__",
+    type: "remove",
+    content: "",
+  } as Message;
+  const hiddenSummary = humanMessage("summary-old", "Conversation summary", {
+    hide_from_ui: true,
+  });
+  act(() => {
+    streamMockState.onUpdateEvent?.(
+      {
+        "DeerFlowSummarizationMiddleware.before_model": {
+          messages: [removeAll, hiddenSummary, recentHuman, recentAnswer],
+        },
+      },
+      { mutate: () => undefined },
+    );
+    streamMockState.messages = [hiddenSummary, recentHuman, recentAnswer];
+    rerender();
+  });
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(100);
+  });
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "rescued-old-human",
+    "rescued-old-answer",
+    "recent-human",
+    "recent-answer",
+  ]);
+
+  await act(async () => {
+    await result.current.sendMessage("thread-1", {
+      files: [],
+      text: "Continue the work",
+    });
+  });
+  const submitCalls = streamMockState.submit.mock.calls as unknown as Array<
+    [{ messages: Message[] }]
+  >;
+  const submittedId = submitCalls.at(-1)?.[0].messages.at(-1)?.id;
+  expect(typeof submittedId).toBe("string");
+  const serverHuman = {
+    id: `${submittedId}__user`,
+    type: "human",
+    content: "Continue the work",
+    run_id: "run-current",
+  } as Message;
+  const currentStep = aiMessage("current-step", "Current step", {
+    run_id: "run-current",
+  });
+  streamMockState.messages = [
+    hiddenSummary,
+    recentHuman,
+    recentAnswer,
+    serverHuman,
+    currentStep,
+  ];
+  streamMockState.isLoading = true;
+  rerender();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(100);
+  });
+
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "rescued-old-human",
+    "rescued-old-answer",
+    "recent-human",
+    "recent-answer",
+    `${submittedId}__user`,
+    "current-step",
+  ]);
+});
+
 test("keeps a transiently rescued current-turn step behind its submitted human", async () => {
   rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const previousHuman = humanMessage("previous-human", "Previous request");
