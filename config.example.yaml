@@ -1283,6 +1283,14 @@ loop_detection:
 
 read_before_write:
   enabled: true
+  # A blocked call never ran and must be re-issued after a re-read, so its
+  # payload (write_file content, str_replace old_str/new_str) is dead weight in
+  # every later model call. Replace it with a short placeholder in model-bound
+  # requests; stored history, receipts, and the run journal keep the original.
+  elide_blocked_payloads: true
+  # Only elide payload fields at least this many characters long.
+  # 0 elides every non-empty payload.
+  elide_min_chars: 2000
 
 # ============================================================================
 # Provider Safety Termination Configuration

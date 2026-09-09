@@ -23,6 +23,15 @@ Design invariants:
   binary content, or sandboxes like AIO/E2B that report read failures as
   ``"Error: ..."`` strings instead of raising), it lets the tool run and
   produce its own error.
+- Blocked payloads are dead weight: the call never ran, and the gate demands
+  a re-read plus a fresh call, so the model re-emits the content anyway. The
+  blocked ToolMessage carries ``WRITE_BLOCK_KEY`` and ``wrap_model_call``
+  replaces the paired call's payload arguments (``content``, ``old_str``,
+  ``new_str``) with a short deterministic placeholder in the *model-bound
+  request only*. ``state["messages"]``, tool receipts, and the run journal
+  keep the original arguments, and nothing is externalized to disk: handing
+  the model a file reference to content it must re-derive after reading the
+  target would only invite bypassing the gate through ``bash``.
 """
 
 import asyncio
@@ -35,11 +44,14 @@ from collections.abc import Awaitable, Callable
 from typing import Any, override
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_call_args import rewrite_messages_tool_call_args
 from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result, stamp_exception_meta
+from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
 from deerflow.sandbox.tools import (
     read_current_file_content,
@@ -50,9 +62,20 @@ from deerflow.sandbox.tools import (
 logger = logging.getLogger(__name__)
 
 READ_MARK_KEY = "deerflow_read_mark"
+#: Stamped on the error ToolMessage of a gate-blocked call: ``{"path", "tool"}``.
+WRITE_BLOCK_KEY = "deerflow_write_block"
 
 _READ_TOOLS = frozenset({"read_file"})
 _GATED_WRITE_TOOLS = frozenset({"write_file", "str_replace"})
+# Payload arguments per gated tool — the bulk of a write call. Everything else
+# (path, description, flags) stays visible after a block.
+_PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
+    "write_file": ("content",),
+    "str_replace": ("old_str", "new_str"),
+}
+# Deterministic for a given payload so repeated model calls keep the same
+# request prefix (prompt caching) instead of drifting.
+_ELIDED_PAYLOAD_TEMPLATE = "[payload elided: {chars} chars; this {tool_name} call was blocked by the read-before-write gate and nothing was written]"
 
 # AIO/E2B-style sandboxes convert read failures (including missing files)
 # into "Error: ..." strings instead of raising. Content with this prefix is
@@ -95,9 +118,18 @@ def _content_hash(content: str) -> str:
 class ReadBeforeWriteMiddleware(AgentMiddleware):
     """Version gate: block writes to existing files not read at their current version."""
 
-    def __init__(self, content_reader: Callable[[Any, str], str] | None = None) -> None:
+    def __init__(
+        self,
+        content_reader: Callable[[Any, str], str] | None = None,
+        *,
+        config: ReadBeforeWriteConfig | None = None,
+    ) -> None:
         super().__init__()
         self._content_reader = content_reader or read_current_file_content
+        self._config = config if config is not None else ReadBeforeWriteConfig()
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {"config": self._config.model_dump(mode="python")}
 
     @override
     def wrap_tool_call(
@@ -248,6 +280,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             tool_call_id=str(tool_call.get("id", "")),
             name=tool_name,
             status="error",
+            additional_kwargs={WRITE_BLOCK_KEY: {"path": norm_path, "tool": tool_name}},
         )
 
     @staticmethod
@@ -271,6 +304,36 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
                 mark_hash = mark.get("hash")
                 return mark_hash if isinstance(mark_hash, str) else None
         return None
+
+    # -- model-bound payload elision --------------------------------------
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        return handler(self._elide_blocked_payloads(request))
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        # Pure in-memory rewrite: no sandbox or file I/O, so it stays on the loop.
+        return await handler(self._elide_blocked_payloads(request))
+
+    def _elide_blocked_payloads(self, request: ModelRequest) -> ModelRequest:
+        if not self._config.elide_blocked_payloads:
+            return request
+        messages = getattr(request, "messages", None)
+        if not isinstance(messages, list):
+            return request
+        patched = elide_blocked_write_payloads(messages, min_chars=self._config.elide_min_chars)
+        if patched is None:
+            return request
+        return request.override(messages=patched)
 
     # -- mark stamping ---------------------------------------------------
 
@@ -305,3 +368,57 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             if candidates:
                 return candidates[-1]
         return None
+
+
+# -- blocked payload elision (policy) -----------------------------------------
+
+
+def elide_blocked_write_payloads(messages: list[Any], *, min_chars: int) -> list[Any] | None:
+    """Return ``messages`` with gate-blocked write payloads replaced by placeholders, or ``None`` if unchanged.
+
+    Only the policy lives here: a call qualifies when a ``WRITE_BLOCK_KEY``
+    ToolMessage answered it, and its payload fields become
+    ``_ELIDED_PAYLOAD_TEMPLATE``. The surface-by-surface rewrite (structured
+    ``tool_calls``, raw provider payload, ``tool_use`` blocks, chunk args) is
+    ``tool_call_args.rewrite_messages_tool_call_args``, which never mutates the
+    input and passes untouched messages through by identity, so the stored
+    history keeps the original arguments and the output is identical across
+    model calls.
+    """
+    blocked_ids = _blocked_tool_call_ids(messages)
+    if not blocked_ids:
+        return None
+
+    def replacement_for(_message: AIMessage, tool_call: dict[str, Any]) -> dict[str, Any] | None:
+        if tool_call.get("id") not in blocked_ids:
+            return None
+        args = tool_call.get("args")
+        return _elide_args(args, str(tool_call.get("name")), min_chars) if isinstance(args, dict) else None
+
+    return rewrite_messages_tool_call_args(messages, replacement_for)
+
+
+def _blocked_tool_call_ids(messages: list[Any]) -> set[str]:
+    ids: set[str] = set()
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        block = (message.additional_kwargs or {}).get(WRITE_BLOCK_KEY)
+        if isinstance(block, dict) and isinstance(message.tool_call_id, str) and message.tool_call_id:
+            ids.add(message.tool_call_id)
+    return ids
+
+
+def _elide_args(args: dict[str, Any], tool_name: str, min_chars: int) -> dict[str, Any] | None:
+    fields = _PAYLOAD_FIELDS.get(tool_name)
+    if not fields:
+        return None
+    elided: dict[str, Any] | None = None
+    for field in fields:
+        value = args.get(field)
+        if not isinstance(value, str) or not value or len(value) < min_chars:
+            continue
+        if elided is None:
+            elided = dict(args)
+        elided[field] = _ELIDED_PAYLOAD_TEMPLATE.format(chars=len(value), tool_name=tool_name)
+    return elided

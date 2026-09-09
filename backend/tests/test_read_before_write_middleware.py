@@ -13,11 +13,11 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _make_request(name, args, messages=()):
+def _make_request(name, args, messages=(), tool_call_id="call-1"):
     runtime = MagicMock()
     runtime.context = {"thread_id": "t-test"}
     return ToolCallRequest(
-        tool_call={"name": name, "args": args, "id": "call-1"},
+        tool_call={"name": name, "args": args, "id": tool_call_id},
         tool=None,
         state={"messages": list(messages)},
         runtime=runtime,
@@ -437,3 +437,272 @@ class TestSamePathSerialization:
         mark = read_result.additional_kwargs.get("deerflow_read_mark")
         assert mark is not None
         assert mark["hash"] == _sha(read_result.content)
+
+
+class TestBlockedPayloadElision:
+    """Model-bound requests drop the dead payload of gate-blocked writes; state stays intact."""
+
+    PATH = "/mnt/user-data/outputs/report.md"
+
+    @staticmethod
+    def _config(**overrides):
+        from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
+
+        return ReadBeforeWriteConfig(**overrides)
+
+    def _middleware(self, files=None, **config_overrides):
+        from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+
+        files = {self.PATH: "v1"} if files is None else files
+
+        def reader(_runtime, path):
+            normalized = posixpath.normpath(path)
+            if normalized not in files:
+                raise FileNotFoundError(path)
+            return files[normalized]
+
+        return ReadBeforeWriteMiddleware(content_reader=reader, config=self._config(**config_overrides))
+
+    @staticmethod
+    def _model_request(messages):
+        from langchain.agents.middleware.types import ModelRequest
+
+        return ModelRequest(model=None, messages=list(messages), tools=[], state={"messages": list(messages)}, runtime=MagicMock())
+
+    def _blocked_turn(self, mw, name, args, tool_call_id="call-1"):
+        """Run a gated call against an unread file; return ``(AIMessage, blocked ToolMessage)``."""
+        ai = AIMessage(content="", tool_calls=[{"name": name, "id": tool_call_id, "args": dict(args)}])
+        request = _make_request(name, dict(args), [HumanMessage(content="go"), ai], tool_call_id=tool_call_id)
+        blocked = mw.wrap_tool_call(request, MagicMock(side_effect=AssertionError("handler must not run when blocked")))
+        assert blocked.status == "error"
+        return ai, blocked
+
+    @staticmethod
+    def _captured(handler):
+        return handler.call_args[0][0]
+
+    def test_blocked_result_carries_write_block_marker(self):
+        from deerflow.agents.middlewares.read_before_write_middleware import WRITE_BLOCK_KEY
+
+        mw = self._middleware()
+        _ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+        assert blocked.additional_kwargs[WRITE_BLOCK_KEY] == {"path": self.PATH, "tool": "write_file"}
+
+    def test_allowed_write_result_has_no_marker(self):
+        from deerflow.agents.middlewares.read_before_write_middleware import WRITE_BLOCK_KEY
+
+        mw = self._middleware()
+        messages = [_read_marked_message(self.PATH, "v1")]
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"}, messages)
+        handler = MagicMock(return_value=ToolMessage(content="OK", tool_call_id="call-1", name="write_file"))
+        result = mw.wrap_tool_call(request, handler)
+        assert WRITE_BLOCK_KEY not in result.additional_kwargs
+
+    def test_elides_blocked_write_file_content_in_model_request(self):
+        mw = self._middleware()
+        payload = "x" * 5000
+        ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": payload})
+        human = HumanMessage(content="go")
+        request = self._model_request([human, ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        captured = self._captured(handler)
+        assert captured is not request
+        rewritten = captured.messages[1]
+        assert rewritten is not ai
+        args = rewritten.tool_calls[0]["args"]
+        assert args["path"] == self.PATH
+        assert args["description"] == "d"
+        assert args["content"].startswith("[payload elided: 5000 chars")
+        assert "read-before-write" in args["content"]
+        assert payload not in args["content"]
+        # Untouched neighbours are passed through by identity; the stored history is never rewritten.
+        assert captured.messages[0] is human
+        assert captured.messages[2] is blocked
+        assert request.messages[1] is ai
+        assert request.state["messages"][1] is ai
+        assert ai.tool_calls[0]["args"]["content"] == payload
+
+    def test_successful_write_payload_is_left_alone(self):
+        mw = self._middleware()
+        payload = "x" * 5000
+        ai = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "call-1", "args": {"description": "d", "path": self.PATH, "content": payload}}])
+        ok = ToolMessage(content="OK", tool_call_id="call-1", name="write_file")
+        request = self._model_request([HumanMessage(content="go"), ai, ok])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        assert self._captured(handler) is request
+        assert ai.tool_calls[0]["args"]["content"] == payload
+
+    def test_only_the_blocked_call_is_elided_when_ids_differ(self):
+        mw = self._middleware()
+        payload = "x" * 5000
+        ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": payload}, tool_call_id="call-blocked")
+        other = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "call-ok", "args": {"description": "d", "path": "/mnt/user-data/outputs/new.md", "content": payload}}])
+        ok = ToolMessage(content="OK", tool_call_id="call-ok", name="write_file")
+        request = self._model_request([HumanMessage(content="go"), other, ok, ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        captured = self._captured(handler)
+        assert captured.messages[1] is other
+        assert captured.messages[3].tool_calls[0]["args"]["content"].startswith("[payload elided")
+
+    def test_rewrites_raw_tool_calls_and_tool_use_blocks_consistently(self):
+        import json
+
+        mw = self._middleware()
+        payload = "y" * 5000
+        args = {"description": "d", "path": self.PATH, "content": payload}
+        ai = AIMessage(
+            content=[
+                {"type": "text", "text": "writing"},
+                {"type": "tool_use", "id": "call-1", "name": "write_file", "input": dict(args), "partial_json": json.dumps(args)},
+            ],
+            tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(args)}],
+            additional_kwargs={"tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "write_file", "arguments": json.dumps(args)}}]},
+        )
+        request = _make_request("write_file", dict(args), [HumanMessage(content="go"), ai])
+        blocked = mw.wrap_tool_call(request, MagicMock())
+        model_request = self._model_request([HumanMessage(content="go"), ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(model_request, handler)
+
+        rewritten = self._captured(handler).messages[1]
+        structured = rewritten.tool_calls[0]["args"]
+        assert structured["content"].startswith("[payload elided")
+        raw = json.loads(rewritten.additional_kwargs["tool_calls"][0]["function"]["arguments"])
+        assert raw == structured
+        assert rewritten.additional_kwargs["tool_calls"][0]["function"]["name"] == "write_file"
+        block = rewritten.content[1]
+        assert block["input"] == structured
+        assert "partial_json" not in block
+        assert rewritten.content[0] == {"type": "text", "text": "writing"}
+        # Serialized payload must be gone from every surface the provider adapters read.
+        assert payload not in json.dumps(rewritten.model_dump(), ensure_ascii=False)
+        # Original objects are untouched.
+        assert ai.content[1]["input"]["content"] == payload
+        assert payload in ai.additional_kwargs["tool_calls"][0]["function"]["arguments"]
+
+    def test_str_replace_elides_old_and_new_str(self):
+        mw = self._middleware()
+        old_str, new_str = "a" * 3000, "b" * 4000
+        ai, blocked = self._blocked_turn(mw, "str_replace", {"description": "d", "path": self.PATH, "old_str": old_str, "new_str": new_str})
+        request = self._model_request([HumanMessage(content="go"), ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        args = self._captured(handler).messages[1].tool_calls[0]["args"]
+        assert args["old_str"].startswith("[payload elided: 3000 chars")
+        assert args["new_str"].startswith("[payload elided: 4000 chars")
+        assert "str_replace" in args["new_str"]
+        assert args["path"] == self.PATH
+
+    def test_payload_below_min_chars_stays_visible(self):
+        mw = self._middleware()
+        ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "short " * 20})
+        request = self._model_request([HumanMessage(content="go"), ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        assert self._captured(handler) is request
+
+    def test_mixed_fields_only_elide_those_over_threshold(self):
+        mw = self._middleware(elide_min_chars=1000)
+        ai, blocked = self._blocked_turn(mw, "str_replace", {"description": "d", "path": self.PATH, "old_str": "tiny", "new_str": "n" * 1000})
+        request = self._model_request([HumanMessage(content="go"), ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        args = self._captured(handler).messages[1].tool_calls[0]["args"]
+        assert args["old_str"] == "tiny"
+        assert args["new_str"].startswith("[payload elided: 1000 chars")
+
+    def test_min_chars_zero_elides_any_non_empty_payload(self):
+        mw = self._middleware(elide_min_chars=0)
+        ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+        empty_ai, empty_blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": ""}, tool_call_id="call-2")
+        request = self._model_request([HumanMessage(content="go"), ai, blocked, empty_ai, empty_blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        captured = self._captured(handler)
+        assert captured.messages[1].tool_calls[0]["args"]["content"].startswith("[payload elided: 2 chars")
+        assert captured.messages[3] is empty_ai
+
+    def test_disabled_by_config_passes_request_through(self):
+        mw = self._middleware(elide_blocked_payloads=False)
+        ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "x" * 5000})
+        request = self._model_request([HumanMessage(content="go"), ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        assert self._captured(handler) is request
+
+    def test_elision_is_deterministic_across_model_calls(self):
+        mw = self._middleware()
+        ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "x" * 5000})
+        first, second = MagicMock(return_value=AIMessage(content="ok")), MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(self._model_request([HumanMessage(content="go"), ai, blocked]), first)
+        mw.wrap_model_call(self._model_request([HumanMessage(content="go"), ai, blocked]), second)
+
+        assert self._captured(first).messages[1].tool_calls == self._captured(second).messages[1].tool_calls
+
+    def test_async_model_call_elides(self):
+        import asyncio
+
+        mw = self._middleware()
+        ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "x" * 5000})
+        request = self._model_request([HumanMessage(content="go"), ai, blocked])
+        seen = {}
+
+        async def handler(model_request):
+            seen["request"] = model_request
+            return AIMessage(content="ok")
+
+        asyncio.run(mw.awrap_model_call(request, handler))
+
+        assert seen["request"] is not request
+        assert seen["request"].messages[1].tool_calls[0]["args"]["content"].startswith("[payload elided")
+
+    def test_release_policy_declares_config(self):
+        mw = self._middleware(elide_min_chars=123)
+        params = mw.release_policy_parameters()
+        assert params["config"]["enabled"] is True
+        assert params["config"]["elide_blocked_payloads"] is True
+        assert params["config"]["elide_min_chars"] == 123
+
+    def test_malformed_unhashable_ids_do_not_break_elision(self):
+        import json
+
+        mw = self._middleware()
+        payload = "z" * 5000
+        args = {"description": "d", "path": self.PATH, "content": payload}
+        ai, blocked = self._blocked_turn(mw, "write_file", args)
+        # A provider payload with a list-typed id must be skipped, not raise from a membership probe.
+        weird = AIMessage(
+            content=[{"type": "tool_use", "id": ["not", "a", "string"], "name": "write_file", "input": dict(args)}],
+            tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(args)}],
+            additional_kwargs={"tool_calls": [{"id": ["not", "a", "string"], "type": "function", "function": {"name": "write_file", "arguments": json.dumps(args)}}]},
+        )
+        request = self._model_request([HumanMessage(content="go"), weird, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        rewritten = self._captured(handler).messages[1]
+        assert rewritten.tool_calls[0]["args"]["content"].startswith("[payload elided")
+        assert rewritten.content[0]["input"]["content"] == payload
+        assert payload in rewritten.additional_kwargs["tool_calls"][0]["function"]["arguments"]
