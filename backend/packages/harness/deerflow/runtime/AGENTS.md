@@ -10,8 +10,9 @@ Keep these invariants together when changing its buffer or progress handling:
 - **In-flight owner:** a threshold flush owns its detached batch until the
   wrapper starts; after that, the exact `put_batch` task owns the batch.
   `_pending_flush_tasks` supervises wrappers, `_active_write_tasks` fences a
-  write started by an explicit `flush()` from the moment it is created until it
-  settles, and `_detached_write_tasks` supervises writes that outlived the flush
+  write started by an explicit `flush()` from the moment it is created until the
+  owner applies its terminal outcome (no task-completion callback releases it
+  early), and `_detached_write_tasks` supervises writes that outlived the flush
   deadline. `_flush_lock` serializes explicit flushes. A progress snapshot
   remains owned by the journal and the module-level cancellation registry until
   its task settles.
@@ -31,7 +32,9 @@ Keep these invariants together when changing its buffer or progress handling:
   durable writes, but it does not drop supervision of a write already in flight.
   `_active_write_tasks` / `_detached_write_tasks` are preserved so a late result
   still advances `feed_generation` (or re-buffers a failure) instead of being
-  silently forgotten.
+  silently forgotten. Best-effort progress snapshots are cancelled and retained
+  globally rather than awaited to completion, so a stubborn reporter can never
+  block a fenced worker from tearing down.
 - **Stale-work fence:** ordinary journal events have no durable lease token or
   idempotency key. Their safety fence is therefore to retain and observe the one
   original write task and never retry an ambiguous outcome. Successors cannot
@@ -39,8 +42,10 @@ Keep these invariants together when changing its buffer or progress handling:
   only explicitly failed in-process writes are eligible for retry. Write outcome
   transitions are centralized: a write that settles within the deadline is
   resolved by `_put_batch_cancellation_safe`, one that times out is resolved by
-  `_resolve_detached_write`, and no other code may bump `feed_generation` or
-  re-buffer a batch outside those two resolvers.
+  `_resolve_detached_write`. The only pre-write re-buffer path is `_on_flush_done`,
+  which restores a threshold batch whose wrapper was cancelled before its store
+  write started; once a store write has started, no other code may bump
+  `feed_generation` or re-buffer a batch outside those two resolvers.
 
 The shared `runtime/cancellation.py::wait_for_task_until` helper absorbs repeated
 caller cancellation only within one absolute deadline. Compare
