@@ -127,7 +127,7 @@ class StreamEvent:
     """A single event from the streaming agent response.
 
     Event types align with the LangGraph SSE protocol:
-        - ``"values"``: Full state snapshot (title, messages, artifacts).
+        - ``"values"``: State snapshot (title, messages, artifacts, summary_text).
         - ``"messages-tuple"``: Per-message update (AI text, tool calls, tool results).
         - ``"end"``: Stream finished.
 
@@ -858,7 +858,7 @@ class DeerFlowClient:
 
         Yields:
             StreamEvent with one of:
-            - type="values"          data={"title": str|None, "messages": [...], "artifacts": [...]}
+            - type="values"          data={"title": str|None, "messages": [...], "artifacts": [...], "summary_text": str|None}
             - type="custom"          data={...}
             - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str}
             - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str, "usage_metadata": {...}}
@@ -1107,6 +1107,7 @@ class DeerFlowClient:
                 type="values",
                 data={
                     "title": chunk.get("title"),
+                    "summary_text": chunk.get("summary_text"),
                     "messages": [self._serialize_message(m) for m in messages],
                     "artifacts": chunk.get("artifacts", []),
                 },

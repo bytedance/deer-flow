@@ -1123,6 +1123,18 @@ def _factory_app_config(model_names, *, summary_model_name=None, summarization_k
     )
 
 
+@pytest.mark.parametrize("trim_limit", [None, 80, 4000])
+def test_factory_preserves_explicit_summary_input_limit(monkeypatch, trim_limit):
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model([]))
+    config = _factory_app_config(("run-model",))
+    config.summarization.trim_tokens_to_summarize = trim_limit
+
+    middleware = create_summarization_middleware(app_config=config, run_model_name="run-model", keep=("messages", 2))
+
+    assert middleware is not None
+    assert middleware.trim_tokens_to_summarize == trim_limit
+
+
 def test_factory_null_case_anchor_is_run_model_not_models0(monkeypatch):
     """model_name: null builds the summary model from ``run_model_name``, never
     config.models[0]. A run on a non-default model whose models[0] provider is broken
