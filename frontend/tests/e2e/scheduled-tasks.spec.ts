@@ -337,3 +337,53 @@ test("detail pane falls back to a visible task after filters hide the selected t
     0,
   );
 });
+
+for (const runAt of ["2026-11-01T06:30:00Z", "2027-06-01T12:30:45Z"]) {
+  test(`editing title and prompt preserves one-time instant ${runAt}`, async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [],
+      scheduledTasks: [
+        {
+          id: "task-instant",
+          thread_id: null,
+          context_mode: "fresh_thread_per_run",
+          title: "Original title",
+          prompt: "Original prompt",
+          schedule_type: "once",
+          schedule_spec: { run_at: runAt },
+          timezone: "America/New_York",
+          status: "enabled",
+          next_run_at: runAt,
+          last_run_at: null,
+          last_run_id: null,
+          last_error: null,
+          run_count: 0,
+          created_at: "2026-07-01T00:00:00Z",
+          updated_at: "2026-07-01T00:00:00Z",
+        },
+      ],
+    });
+    await page.goto("/workspace/scheduled-tasks");
+    const detail = page.getByTestId("scheduled-task-detail");
+    await detail.getByRole("button", { name: "Edit", exact: true }).click();
+    await detail.getByPlaceholder("Edit title").fill("Renamed task");
+    await detail.getByPlaceholder("Edit prompt").fill("Updated prompt");
+    const submitted = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        new URL(request.url()).pathname === "/api/scheduled-tasks/task-instant",
+    );
+    await detail
+      .getByRole("button", { name: "Save edit", exact: true })
+      .click();
+    const request = await submitted;
+    expect(request.postDataJSON()).toMatchObject({
+      title: "Renamed task",
+      prompt: "Updated prompt",
+      schedule_spec: { run_at: runAt },
+      timezone: "America/New_York",
+    });
+  });
+}

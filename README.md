@@ -1529,6 +1529,8 @@ before starting this build against that database.
 
 DeerFlow now includes a first-class scheduled-task MVP in the workspace.
 
+Editing a one-time task's title or prompt preserves its original execution time, including seconds and the selected occurrence during a daylight-saving clock rollback. Changing its date, time, or timezone recalculates the execution time.
+
 Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`
