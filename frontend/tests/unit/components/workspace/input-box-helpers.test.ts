@@ -550,6 +550,17 @@ describe("shouldReseedPickDraft", () => {
     expect(shouldReseedPickDraft("/")).toBe(false);
   });
 
+  it("supersedes a slash query followed by trailing whitespace", () => {
+    // A partial activation plus a trailing space or newline is still the user
+    // mid-activation: classifying the raw draft lets the whitespace hide the
+    // shape and reseed `/chosen-skill /data-an ` with the stale partial.
+    expect(shouldReseedPickDraft("/data-an ")).toBe(false);
+    expect(shouldReseedPickDraft("/data-an\n")).toBe(false);
+    // Whitespace-only and prose drafts keep their existing classification.
+    expect(shouldReseedPickDraft("  ")).toBe(true);
+    expect(shouldReseedPickDraft("/data-analysis analyze foo.csv ")).toBe(true);
+  });
+
   it("drops empty drafts", () => {
     expect(shouldReseedPickDraft("")).toBe(false);
     expect(shouldReseedPickDraft(null)).toBe(false);

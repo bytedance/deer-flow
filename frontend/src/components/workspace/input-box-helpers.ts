@@ -182,8 +182,10 @@ export function shouldReseedPickDraft(
   // submit `/skill-name /query` with the stale partial as the message body.
   // The slash path keeps the same invariant — it only seeds chip mode from
   // an entire slash query and then clears it.
+  // Trailing whitespace typed after a partial must not hide that shape, so
+  // the activation check classifies the trimmed draft.
   return (
-    Boolean(draft) && getLeadingSlashSkillQuery(draft!) === null
+    Boolean(draft) && getLeadingSlashSkillQuery(draft!.trimEnd()) === null
   );
 }
 
