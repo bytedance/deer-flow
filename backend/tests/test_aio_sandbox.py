@@ -602,7 +602,7 @@ class TestListDirSerialization:
         """list_dir should hold the lock during execution."""
         lock_was_held = []
 
-        original_exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/a\n/b")))
+        original_exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/a\n/b\n\n__DF_FIND_STATUS__:0\n", exit_code=0)))
 
         def tracking_exec(command, **kwargs):
             lock_was_held.append(sandbox._lock.locked())
@@ -613,6 +613,39 @@ class TestListDirSerialization:
         result = sandbox.list_dir("/test")
         assert result == ["/a", "/b"]
         assert lock_was_held == [True], "list_dir must hold the lock during exec_command"
+
+    def test_list_dir_raises_when_exec_fails(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(side_effect=RuntimeError("sandbox down"))
+
+        with pytest.raises(OSError, match="Failed to list directory"):
+            sandbox.list_dir("/test")
+
+    def test_list_dir_raises_when_find_returns_no_entries(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="\n__DF_FIND_STATUS__:1\n", exit_code=1)))
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/missing")
+
+    def test_list_dir_raises_oserror_when_result_data_is_none(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=None))
+
+        with pytest.raises(OSError, match="Failed to list directory"):
+            sandbox.list_dir("/test")
+
+    def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="", exit_code=127)))
+
+        with pytest.raises(OSError, match="exited with code 127"):
+            sandbox.list_dir("/test")
+
+    def test_list_dir_uses_find_H(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/test\n\n__DF_FIND_STATUS__:0\n", exit_code=0)))
+
+        sandbox.list_dir("/test")
+
+        command = sandbox._client.shell.exec_command.call_args.kwargs["command"]
+        assert "find -H " in command
+        assert "\\( -type f -o -type d \\)" in command
 
 
 class TestNoChangeTimeout:
@@ -657,7 +690,7 @@ class TestNoChangeTimeout:
 
         def mock_exec(command, **kwargs):
             calls.append(kwargs)
-            return SimpleNamespace(data=SimpleNamespace(output="/a\n/b"))
+            return SimpleNamespace(data=SimpleNamespace(output="/a\n/b\n\n__DF_FIND_STATUS__:0\n", exit_code=0))
 
         sandbox._client.shell.exec_command = mock_exec
 
@@ -904,6 +937,6 @@ class TestClose:
 def test_list_dir_preserves_trailing_space_in_filename(sandbox):
     """ "notes.txt " (trailing space) is a legal Linux filename; find prints it
     verbatim, one entry per line, so a per-line strip() corrupts the name."""
-    sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/test/notes.txt \n/test/sub\n")))
+    sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/test/notes.txt \n/test/sub\n\n__DF_FIND_STATUS__:0\n", exit_code=0)))
 
     assert sandbox.list_dir("/test") == ["/test/notes.txt ", "/test/sub"]
