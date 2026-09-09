@@ -256,9 +256,8 @@ Direct pytest collection or execution of `tests/test_client_live.py` remains
 skipped unless `DEER_FLOW_RUN_LIVE_TESTS=1` is set. Do not add that opt-in to
 default CI workflows.
 
-Jina request-failure logging tests set a dummy API key so the separate once-per-process
-missing-key warning cannot make assertions depend on test order or shard placement.
-Missing-key behavior has its own tests in `tests/test_jina_client.py`.
+Jina logging tests isolate missing-key warnings with dummy keys (`tests/test_jina_client.py`).
+InfoQuest HTTP calls share a 30s connect/read inactivity timeout, separate from remote crawl timeouts; see `tests/test_infoquest_http_timeout.py`.
 
 ### Running the Full Application
 
@@ -326,16 +325,21 @@ capture and `run_agent()` lifecycle in `tests/test_run_worker_delivery.py`.
 
 ### Web Search Recency
 
-DDG, Brave, Tavily, and SearXNG `web_search` share optional
+DDG, Brave, Tavily, SearXNG, and Sofya `web_search` share optional
 `time_range=day|week|month|year`; omission preserves request shape. DDG maps to
-`d|w|m|y`, Brave to `pd|pw|pm|py`, and Tavily/SearXNG pass values unchanged.
+`d|w|m|y`, Brave to `pd|pw|pm|py`, Tavily/SearXNG pass values unchanged, and
+Sofya passes them unchanged as `freshness`.
 For recency, DDGS 9.14.1 uses only enabled Brave, DuckDuckGo, and Yahoo engines
 that honor `timelimit`: `auto`/`all` resolves to this set, incompatible configured
 engines are removed, and an empty set falls back to it. Re-check on DDGS upgrades.
 
+### Tavily Fetch
+
+Title fallback: result URL, then request URL.
+
 ### File Upload
 
-Multi-file upload with automatic document conversion:
+Multi-file uploads convert documents; outlines skip fenced code:
 - Endpoint: `POST /api/threads/{thread_id}/uploads`
 - Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
 - Rejects directory inputs before copying so uploads stay all-or-nothing
