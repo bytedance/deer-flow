@@ -1264,7 +1264,7 @@ def _write_lark_cli_sandbox_launcher(staging: Path) -> None:
     launcher.chmod(0o755)
 
 
-def _is_symlink_or_junction(path: Path) -> bool:
+def _is_symlink_or_reparse(path: Path) -> bool:
     """True for a symlink or any Windows ``FILE_ATTRIBUTE_REPARSE_POINT``.
 
     Matches the credential-tree policy (:func:`_stat_is_symlink_or_reparse`):
@@ -1283,10 +1283,10 @@ def _is_symlink_or_junction(path: Path) -> bool:
 
 
 def _validate_lark_cli_sandbox_runtime(root: Path) -> None:
-    if _is_symlink_or_junction(root) or not root.is_dir():
+    if _is_symlink_or_reparse(root) or not root.is_dir():
         raise ValueError("Managed Lark CLI sandbox runtime root must be a regular directory, not a symlink or reparse point.")
     for path in root.rglob("*"):
-        if _is_symlink_or_junction(path):
+        if _is_symlink_or_reparse(path):
             raise ValueError(f"Managed Lark CLI sandbox runtime must not contain a symlink or reparse point: {path.as_posix()}")
         if not (path.is_dir() or path.is_file()):
             raise ValueError(f"Managed Lark CLI sandbox runtime contains an unsupported file type: {path.as_posix()}")

@@ -514,7 +514,7 @@ def test_validate_lark_cli_sandbox_runtime_rejects_non_executable_files_on_posix
         lark_cli._validate_lark_cli_sandbox_runtime(root)
 
 
-def test_is_symlink_or_junction_matches_credential_any_reparse_policy() -> None:
+def test_is_symlink_or_reparse_matches_credential_any_reparse_policy() -> None:
     """Runtime guard uses the same single-lstat reparse test as the credential tree."""
 
     class _FakePath:
@@ -525,12 +525,12 @@ def test_is_symlink_or_junction_matches_credential_any_reparse_policy() -> None:
         def lstat(self):
             return SimpleNamespace(st_mode=self._st_mode, st_file_attributes=self._st_attrs)
 
-    assert not lark_cli._is_symlink_or_junction(_FakePath(stat.S_IFDIR))
-    assert not lark_cli._is_symlink_or_junction(_FakePath(stat.S_IFREG))
-    assert lark_cli._is_symlink_or_junction(_FakePath(stat.S_IFLNK))
+    assert not lark_cli._is_symlink_or_reparse(_FakePath(stat.S_IFDIR))
+    assert not lark_cli._is_symlink_or_reparse(_FakePath(stat.S_IFREG))
+    assert lark_cli._is_symlink_or_reparse(_FakePath(stat.S_IFLNK))
     # Cloud / ProjFS / AppExecLink: reparse bit set, but not a symlink or junction.
-    assert lark_cli._is_symlink_or_junction(_FakePath(stat.S_IFDIR, stat.FILE_ATTRIBUTE_REPARSE_POINT))
-    assert lark_cli._is_symlink_or_junction(_FakePath(stat.S_IFREG, stat.FILE_ATTRIBUTE_REPARSE_POINT))
+    assert lark_cli._is_symlink_or_reparse(_FakePath(stat.S_IFDIR, stat.FILE_ATTRIBUTE_REPARSE_POINT))
+    assert lark_cli._is_symlink_or_reparse(_FakePath(stat.S_IFREG, stat.FILE_ATTRIBUTE_REPARSE_POINT))
     assert lark_cli._stat_is_symlink_or_reparse(SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT))
 
 
