@@ -508,6 +508,41 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_list_by_thread_keyset_cursor(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="success", created_at="2024-01-01T00:00:00+00:00")
+        await repo.put("r2", thread_id="t1", status="success", created_at="2024-01-02T00:00:00+00:00")
+        await repo.put("r3", thread_id="t1", status="success", created_at="2024-01-03T00:00:00+00:00")
+        first = await repo.list_by_thread("t1", limit=2)
+        assert [row["run_id"] for row in first] == ["r3", "r2"]
+        second = await repo.list_by_thread(
+            "t1",
+            limit=2,
+            before_created_at=first[-1]["created_at"],
+            before_run_id=first[-1]["run_id"],
+        )
+        assert [row["run_id"] for row in second] == ["r1"]
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_list_by_thread_keyset_breaks_timestamp_ties(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        tied = "2024-01-01T00:00:00+00:00"
+        await repo.put("a", thread_id="t1", status="success", created_at=tied)
+        await repo.put("b", thread_id="t1", status="success", created_at=tied)
+        await repo.put("c", thread_id="t1", status="success", created_at=tied)
+        first = await repo.list_by_thread("t1", limit=2)
+        assert [row["run_id"] for row in first] == ["c", "b"]
+        second = await repo.list_by_thread(
+            "t1",
+            limit=2,
+            before_created_at=first[-1]["created_at"],
+            before_run_id=first[-1]["run_id"],
+        )
+        assert [row["run_id"] for row in second] == ["a"]
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_owner_none_returns_all(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", user_id="alice", status="success")

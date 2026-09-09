@@ -7,10 +7,16 @@ only `0018_oauth_identity_pg_partial` plus two nullable `VARCHAR(32)` columns:
 serve this build's repositories. Startup now rejects it without changing the
 schema or revision, and reports the missing tables/columns.
 
-Normal databases on this tree's known migration chain upgrade automatically.
+Normal databases on the known migration chain in this tree upgrade automatically.
 The procedure below is only for the exact original incarnation rollout shape.
-An incarnation-stamped database that already has all current ORM tables and
-columns can still use the audited compatibility exception without re-stamping.
+Current and future builds that know the reused `0019_thread_incarnations` id
+first check the fixed canonical-0019 table/column floor, then upgrade to their
+local head. The published 0020 rollback binary does not use this fixed snapshot:
+it validates its own ORM floor before skipping the unknown revision. Current
+tests remove 0019 from the mocked local revision set to exercise the same
+unknown-revision path, but they still run the current fixed-floor validator.
+Because the fixed floor is not derived from current ORM metadata, future columns
+are not required before their migration runs.
 
 ## Offline migration
 
@@ -29,8 +35,9 @@ columns can still use the audited compatibility exception without re-stamping.
    `DEERFLOW_RECOVERY_POSTGRES_SCHEMA` to the configured application schema, if
    one is used. Keep credentials out of shell history.
 4. Rebase the version marker to the verified common parent and run the normal
-   migrations. `purge=True` is necessary because this tree does not contain the
-   out-of-tree revision; it replaces the version row, not application data.
+   migrations. `purge=True` replaces the version row, not application data;
+   it is necessary because the same revision id was previously deployed with a
+   different parent.
 
    ```bash
    uv run python - <<'PY'
@@ -53,18 +60,20 @@ columns can still use the audited compatibility exception without re-stamping.
    PY
    ```
 
-   This applies `0019_projects` and `0020_threads_meta_project_id`, preserving
-   the two incarnation columns and their existing values. Do not stamp directly
-   to head: that would skip the DDL and reproduce the missing-column failure.
-5. Confirm the version is `0020_threads_meta_project_id`, the project table and
+   This applies `0019_projects`, `0020_threads_meta_project_id`,
+   `0021_batch_acceptance`, and the idempotent
+   `0019_thread_incarnations` head, preserving the two incarnation columns and
+   their existing values. Do not stamp directly to head: that would skip the
+   Projects and batch-acceptance DDL and reproduce the missing-schema failure.
+5. Confirm the version is `0019_thread_incarnations`, the project table and
    membership column/index exist, and existing incarnation values are retained.
    Start this build, verify existing conversations load and a new conversation
-   can be created, then resume service. Do not restart older binaries that
-   cannot read this tree's head revision.
+   can be created, then resume service. Rolling back is supported only to the
+   audited `0020_threads_meta_project_id` compatibility build.
 
 Bootstrap never performs this re-stamp itself. The regression in
 `backend/tests/test_persistence_forward_revision_compat.py` constructs the
 original schema, verifies startup rejection, and exercises the recovery while
-checking thread reads/inserts and preservation of incarnation data. The future
-incarnation migration must chain from the current local head and handle these
+checking thread reads/inserts and preservation of incarnation data. The
+incarnation migration chains from `0021_batch_acceptance` and handles these
 already-present nullable columns idempotently.
