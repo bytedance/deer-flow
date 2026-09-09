@@ -77,7 +77,12 @@ status=$?
 duration=$((SECONDS - start))
 
 [ "$status" -eq 2 ] || fail "case 1: expected exit 2 for a child that died before listening, got $status"
-[ "$duration" -le 5 ] || fail "case 1: fail-fast took ${duration}s; it should not approach the 15s timeout"
+# The bound only has to catch a regression to the full 15s timeout (which line
+# 79's exit-code check would also catch). Keep generous headroom for a cold
+# windows-latest runner: on Windows the probe runs one powershell.exe +
+# Get-NetTCPConnection call before the kill -0 liveness check, and a fresh
+# runner's first PowerShell/CIM start can take several seconds on its own.
+[ "$duration" -le 10 ] || fail "case 1: fail-fast took ${duration}s; it should not approach the 15s timeout"
 
 # ── Case 2: live child, port opens after several polls -> exit 0 + progress ──
 
