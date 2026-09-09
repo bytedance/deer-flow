@@ -22,6 +22,18 @@ export const RESERVED_SLASH_SKILL_NAMES = new Set([
 
 export const SLASH_SKILL_RE = /^\/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+|$)/;
 
+// The name grammar of SLASH_SKILL_RE (and the backend gate it mirrors) as a
+// standalone predicate: every surface that *offers* a skill — the picker and
+// the slash suggestions — must only offer names that can actually activate.
+// The runtime skill parser accepts any non-empty metadata name, so custom
+// and archive-installed skills can carry uppercase or whitespace the
+// lowercase-only grammar can never parse.
+const ACTIVATABLE_SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export function isActivatableSkillName(name: string): boolean {
+  return ACTIVATABLE_SKILL_NAME_RE.test(name);
+}
+
 /**
  * The two builtin slash commands the composer offers alongside skills.
  * Exported from this contract-pinned module so every consumer derives from

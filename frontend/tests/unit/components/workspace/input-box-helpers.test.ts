@@ -556,3 +556,24 @@ describe("shouldReseedPickDraft", () => {
     expect(shouldReseedPickDraft(undefined)).toBe(false);
   });
 });
+
+describe("getSelectableSkills slash-name grammar", () => {
+  it("rejects names the slash parser can never activate", () => {
+    // The runtime parser accepts any non-empty metadata name, but the
+    // backend slash gate is lowercase-hyphen only: /DataTools never
+    // activates, and a whitespace name would parse as a different skill.
+    const skills = [
+      makeSkill("DataTools"),
+      makeSkill("data tools"),
+      makeSkill("data_tools"),
+      makeSkill("data.tools"),
+      makeSkill("data--analysis"),
+      makeSkill("-data"),
+      makeSkill("data-"),
+      makeSkill("data-analysis"),
+    ];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "data-analysis",
+    ]);
+  });
+});

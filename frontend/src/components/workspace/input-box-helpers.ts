@@ -1,5 +1,6 @@
 import {
   COMPOSER_BUILTIN_COMMAND_NAMES,
+  isActivatableSkillName,
   RESERVED_SLASH_SKILL_NAMES,
   type Skill,
 } from "@/core/skills";
@@ -205,6 +206,12 @@ export function getSelectableSkills(
   );
   return skills.filter((skill) => {
     if (!skill.enabled) {
+      return false;
+    }
+    // Grammar before shadowing: a name the slash parser can never match
+    // (uppercase, whitespace, underscores, leading/trailing hyphens) must
+    // not be offered even when no reserved word shadows it.
+    if (!isActivatableSkillName(skill.name)) {
       return false;
     }
     const name = skill.name.toLowerCase();
