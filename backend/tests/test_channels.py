@@ -7273,6 +7273,109 @@ class TestChannelService:
 
         _run(go())
 
+    def test_readiness_retry_defers_when_old_instance_fails_to_stop(self):
+        """A retained channel whose stop() fails must not be replaced this round.
+
+        The pre-retry cleanup retains the instance when stop() raises; the
+        readiness attempt then declines instead of letting _start_channel
+        overwrite the still-tracked, still-listening channel — the one-hop-
+        later orphan shape from the review.
+        """
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        class FailingStopChannel(Channel):
+            def __init__(self, bus, config):
+                super().__init__(name="telegram", bus=bus, config=config)
+                self.stop_calls = 0
+                self.bus.subscribe_outbound(self._on_outbound)
+
+            async def start(self):
+                self._running = True
+
+            async def stop(self):
+                self.stop_calls += 1
+                self._running = False
+                raise RuntimeError("stop boom")
+
+            async def send(self, msg):
+                raise NotImplementedError
+
+            async def _on_outbound(self, msg):
+                raise AssertionError("a listener slated for cleanup must never receive outbounds")
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            stale = FailingStopChannel(bus=service.bus, config={})
+            service._channels["telegram"] = stale
+
+            ready = await service.ensure_channel_ready("telegram", attempts=2)
+
+            assert ready is False
+            assert service._channels.get("telegram") is stale  # retained, not overwritten
+            assert stale.stop_calls == 1  # each retry stops the retained instance again
+            # The listener stays subscribed precisely because the instance is
+            # retained: only a completed stop may unsubscribe it.
+            assert any(getattr(listener, "__self__", None) is stale for listener in service.bus._outbound_listeners)
+
+            # Shutdown reports the retained channel's failing stop (ExceptionGroup)
+            # instead of silently orphaning it — expected here by construction.
+            with pytest.raises(Exception):
+                await service.stop()
+
+        _run(go())
+
+    def test_restart_and_remove_retain_channel_when_stop_fails(self):
+        """restart_channel and remove_channel defer instead of orphaning a failed stop."""
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        class FailingStopChannel(Channel):
+            def __init__(self, bus, config):
+                super().__init__(name="telegram", bus=bus, config=config)
+                self.stop_calls = 0
+                self.bus.subscribe_outbound(self._on_outbound)
+
+            async def start(self):
+                self._running = True
+
+            async def stop(self):
+                self.stop_calls += 1
+                self._running = False
+                raise RuntimeError("stop boom")
+
+            async def send(self, msg):
+                raise NotImplementedError
+
+            async def _on_outbound(self, msg):
+                raise AssertionError("a listener slated for cleanup must never receive outbounds")
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            original = FailingStopChannel(bus=service.bus, config={})
+            service._channels["telegram"] = original
+
+            assert await service.restart_channel("telegram") is False
+            assert service._channels.get("telegram") is original
+            assert original.stop_calls == 1
+            assert any(getattr(listener, "__self__", None) is original for listener in service.bus._outbound_listeners)
+
+            assert await service.remove_channel("telegram") is False
+            assert service._channels.get("telegram") is original
+            assert original.stop_calls == 2
+            assert any(getattr(listener, "__self__", None) is original for listener in service.bus._outbound_listeners)
+
+            with pytest.raises(Exception):
+                await service.stop()
+
+        _run(go())
+
     def test_failed_channel_startup_is_transactional(self, monkeypatch):
         """A channel that never reaches is_running must be stopped before discard.
 

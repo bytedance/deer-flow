@@ -255,11 +255,15 @@ class ChannelService:
                 return True
 
             if channel is not None:
-                try:
-                    await channel.stop()
-                except Exception:
-                    logger.exception("Error stopping non-running channel before readiness retry")
-                self._channels.pop(name, None)
+                # Ownership-preserving cleanup: the instance is retained when
+                # its stop() fails or is cancelled, and this round must NOT
+                # start a replacement over it — _start_channel would overwrite
+                # the tracked entry and orphan the still-subscribed listener
+                # one hop later (the gap this closes from the review on 5227).
+                await self._stop_and_discard_channel(name, channel)
+                if self._channels.get(name) is channel:
+                    logger.warning("Readiness retry deferred: previous %s channel failed to stop and remains tracked", name)
+                    return False
 
             max_attempts = max(1, attempts)
             for attempt in range(max_attempts):
@@ -329,11 +333,14 @@ class ChannelService:
     async def restart_channel(self, name: str, *, reload_config: bool = True) -> bool:
         """Restart a specific channel. Returns True if successful."""
         if name in self._channels:
-            try:
-                await self._channels[name].stop()
-            except Exception:
-                logger.exception("Error stopping channel for restart")
-            del self._channels[name]
+            channel = self._channels[name]
+            # Same ownership rule as readiness retries: retain an instance
+            # whose stop() fails, and decline the restart rather than
+            # overwriting a still-tracked (still-listening) channel.
+            await self._stop_and_discard_channel(name, channel)
+            if self._channels.get(name) is channel:
+                logger.warning("Restart deferred: %s channel failed to stop and remains tracked", name)
+                return False
 
         if reload_config:
             # Reading config.yaml and the runtime store is disk IO; keep it
@@ -364,26 +371,30 @@ class ChannelService:
     async def remove_channel(self, name: str) -> bool:
         """Remove runtime config for a channel and stop it if currently running."""
         self._config.pop(name, None)
-        channel = self._channels.pop(name, None)
+        channel = self._channels.get(name)
         if channel is None:
             return True
-        try:
-            await channel.stop()
-            logger.info("Channel stopped and removed")
-            return True
-        except Exception:
-            logger.exception("Error stopping channel for removal")
+        # Stop-then-drop with the shared ownership rule: a channel whose
+        # stop() fails stays tracked (and returns False) instead of being
+        # popped first and leaking its subscribed listener on failure.
+        await self._stop_and_discard_channel(name, channel)
+        if self._channels.get(name) is channel:
+            logger.warning("Removal incomplete: %s channel failed to stop and remains tracked", name)
             return False
+        logger.info("Channel stopped and removed")
+        return True
 
     async def _stop_and_discard_channel(self, name: str, channel: Channel) -> None:
-        """Stop a channel whose startup did not complete, then drop it.
+        """Stop a channel and drop it only once its ``stop()`` has completed.
 
+        This is the single ownership-preserving cleanup every discard path
+        routes through (failed startup, readiness retry, restart, removal).
         ``start()`` subscribes the outbound listener before the transport is
-        up, so an instance that never reaches ``is_running`` (or raises
-        mid-start) must be ``stop()``-ed before it is discarded: otherwise the
-        bus keeps a strong reference to the dead listener and every future
-        outbound for this channel name fans out to it, while repeated
-        readiness attempts accumulate more stale listeners the service can no
+        up, so an instance that never reached ``is_running`` — or a running
+        one being torn down — must be ``stop()``-ed before it is discarded:
+        otherwise the bus keeps a strong reference to the dead listener and
+        every future outbound for this channel name fans out to it, while
+        repeated attempts accumulate more stale listeners the service can no
         longer clean up (the instances are untracked by then). Discord's
         fail-fast ``is_running`` makes this reachable for a client thread that
         dies immediately (invalid token); the same hygiene applies to any
@@ -394,10 +405,11 @@ class ChannelService:
         mid-cleanup (or a ``stop()`` that raises) leaves it tracked, so a
         retried readiness attempt stops it again before replacing it and
         service shutdown can still reach it — untracking first would orphan
-        resources nobody can clean up anymore. Startup retries cannot silently
-        replace a retained instance: ``ensure_channel_ready`` serializes on the
-        per-channel readiness lock and stops whatever non-running instance it
-        finds under the name before starting a fresh one.
+        resources nobody can clean up anymore. Callers check for retention
+        (``self._channels.get(name) is channel``) and defer starting or
+        removing a replacement for that round, so startup cannot silently
+        overwrite a still-listening retained instance; ``ensure_channel_ready``
+        additionally serializes on the per-channel readiness lock.
         """
         try:
             await channel.stop()
