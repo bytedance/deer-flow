@@ -17,6 +17,9 @@ const streamMockState = rs.hoisted(() => ({
     | ((state: { values: { messages: Message[] } }) => void)
     | undefined,
   onError: undefined as ((error: unknown) => void) | undefined,
+  onUpdateEvent: undefined as
+    | ((data: unknown, options: { mutate: (updater: unknown) => void }) => void)
+    | undefined,
   onCustomEvent: undefined as ((event: unknown) => void) | undefined,
   stop: rs.fn(async () => undefined),
   submit: rs.fn(async () => undefined),
@@ -26,10 +29,15 @@ rs.mock("@langchain/langgraph-sdk/react", () => ({
   useStream: (options: {
     onFinish?: (state: { values: { messages: Message[] } }) => void;
     onError?: (error: unknown) => void;
+    onUpdateEvent?: (
+      data: unknown,
+      options: { mutate: (updater: unknown) => void },
+    ) => void;
     onCustomEvent?: (event: unknown) => void;
   }) => {
     streamMockState.onFinish = options.onFinish;
     streamMockState.onError = options.onError;
+    streamMockState.onUpdateEvent = options.onUpdateEvent;
     streamMockState.onCustomEvent = options.onCustomEvent;
     return {
       isLoading: streamMockState.isLoading,
@@ -153,6 +161,7 @@ beforeEach(() => {
   streamMockState.messages = [];
   streamMockState.onFinish = undefined;
   streamMockState.onError = undefined;
+  streamMockState.onUpdateEvent = undefined;
   streamMockState.onCustomEvent = undefined;
   streamMockState.stop.mockClear();
   streamMockState.submit.mockClear();
@@ -404,6 +413,150 @@ test("keeps established history order while the submitted human is outside the r
     "recent-answer",
     `${submittedId}__user`,
     "new-step",
+  ]);
+});
+
+test("keeps a transiently rescued current-turn step behind its submitted human", async () => {
+  rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const previousHuman = humanMessage("previous-human", "Previous request");
+  const previousAnswer = aiMessage("previous-answer", "Previous answer", {
+    run_id: "run-previous",
+  });
+  const rows = [
+    historyRow(1, "run-previous", previousHuman),
+    historyRow(2, "run-previous", previousAnswer),
+  ];
+  streamMockState.messages = [previousHuman, previousAnswer];
+  const { rerender, result } = await renderSeededThread({
+    historyRows: () => rows,
+  });
+
+  const submittedId = await submitVisibleTurn(result);
+  const serverHuman = {
+    id: `${submittedId}__user`,
+    type: "human",
+    content: "Continue the work",
+    run_id: "run-current",
+  } as Message;
+  // Deliberately omit run_id: this is the streamed step whose ownership has
+  // not yet been restored by canonical history.
+  const rescuedStep = aiMessage("rescued-step", "First current step");
+  const retainedStep = aiMessage("retained-step", "Latest current step", {
+    run_id: "run-current",
+  });
+  streamMockState.messages = [serverHuman, rescuedStep, retainedStep];
+  streamMockState.isLoading = true;
+  rerender();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(100);
+  });
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "previous-human",
+    "previous-answer",
+    `${submittedId}__user`,
+    "rescued-step",
+    "retained-step",
+  ]);
+
+  const removeAll = {
+    id: "__remove_all__",
+    type: "remove",
+    content: "",
+  } as Message;
+  const hiddenSummary = humanMessage(
+    "summary-current",
+    "Conversation summary",
+    { hide_from_ui: true },
+  );
+  act(() => {
+    streamMockState.onUpdateEvent?.(
+      {
+        "DeerFlowSummarizationMiddleware.before_model": {
+          messages: [removeAll, hiddenSummary, serverHuman, retainedStep],
+        },
+      },
+      { mutate: () => undefined },
+    );
+    streamMockState.messages = [hiddenSummary, serverHuman, retainedStep];
+    rerender();
+  });
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(100);
+  });
+
+  // The rescued step is transient current-turn state, not canonical old
+  // history, so it must remain behind the submitted human.
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "previous-human",
+    "previous-answer",
+    `${submittedId}__user`,
+    "rescued-step",
+    "retained-step",
+  ]);
+});
+
+test("does not move a later externally submitted answer ahead of the retained local anchor", async () => {
+  rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const previousHuman = humanMessage("previous-human", "Previous request");
+  const previousAnswer = aiMessage("previous-answer", "Previous answer", {
+    run_id: "run-previous",
+  });
+  let rows = [
+    historyRow(1, "run-previous", previousHuman),
+    historyRow(2, "run-previous", previousAnswer),
+  ];
+  streamMockState.messages = [previousHuman, previousAnswer];
+  const { rerender, result } = await renderSeededThread({
+    historyRows: () => rows,
+  });
+
+  const submittedId = await submitVisibleTurn(result);
+  const localHuman = {
+    id: `${submittedId}__user`,
+    type: "human",
+    content: "Continue the work",
+    run_id: "run-local",
+  } as Message;
+  const localAnswer = aiMessage("local-answer", "Local answer", {
+    run_id: "run-local",
+  });
+  streamMockState.messages = [localHuman, localAnswer];
+  streamMockState.isLoading = true;
+  rerender();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(100);
+  });
+
+  const remoteHuman = humanMessage("remote-human", "Later request elsewhere");
+  const remoteAnswer = aiMessage("remote-answer", "Later external answer", {
+    run_id: "run-remote",
+  });
+  rows = [
+    historyRow(1, "run-previous", previousHuman),
+    historyRow(2, "run-previous", previousAnswer),
+    historyRow(3, "run-local", localHuman),
+    historyRow(4, "run-local", localAnswer),
+    historyRow(5, "run-remote", remoteHuman),
+    historyRow(6, "run-remote", remoteAnswer),
+  ];
+  await act(async () => {
+    streamMockState.onFinish?.({
+      values: { messages: streamMockState.messages },
+    });
+    streamMockState.isLoading = false;
+  });
+  rerender();
+  await flushFrames();
+
+  // The local anchor survives finish only to repair its own turn. Canonical
+  // messages submitted later by another client must retain their feed order.
+  expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+    "previous-human",
+    "previous-answer",
+    `${submittedId}__user`,
+    "local-answer",
+    "remote-human",
+    "remote-answer",
   ]);
 });
 

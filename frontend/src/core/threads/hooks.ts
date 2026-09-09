@@ -206,6 +206,14 @@ export type LocalTurnAnchor = {
   /** Filled in once any rendered or canonical copy of the human reveals it. */
   runId?: string;
   baselineIdentities: ReadonlySet<string>;
+  /** Canonical REST-history identities already loaded when this turn began. */
+  preSubmitHistoryIdentities: ReadonlySet<string>;
+  /**
+   * Highest authoritative feed position known before submit. Older pages that
+   * arrive later may still be confirmed as pre-submit history through this
+   * boundary; messages from later external turns may not.
+   */
+  preSubmitMaxSeq?: number;
 };
 
 const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
@@ -234,6 +242,39 @@ const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
 function messageSeq(message: Message): number | undefined {
   const seq = message.additional_kwargs?.[MESSAGE_SEQ_KEY];
   return typeof seq === "number" ? seq : undefined;
+}
+
+function maxMessageSeq(messages: Message[]): number | undefined {
+  let maxSeq: number | undefined;
+  for (const message of messages) {
+    const seq = messageSeq(message);
+    if (seq !== undefined && (maxSeq === undefined || seq > maxSeq)) {
+      maxSeq = seq;
+    }
+  }
+  return maxSeq;
+}
+
+function getConfirmedPreSubmitHistoryIdentities(
+  visibleHistory: Message[],
+  localTurnAnchor: LocalTurnAnchor | null,
+): Set<string> {
+  if (localTurnAnchor === null) {
+    return new Set();
+  }
+  const confirmed = new Set(localTurnAnchor.preSubmitHistoryIdentities);
+  const maxSeq = localTurnAnchor.preSubmitMaxSeq;
+  if (maxSeq === undefined) {
+    return confirmed;
+  }
+  for (const message of visibleHistory) {
+    const identity = messageIdentity(message);
+    const seq = messageSeq(message);
+    if (identity !== undefined && seq !== undefined && seq <= maxSeq) {
+      confirmed.add(identity);
+    }
+  }
+  return confirmed;
 }
 
 function messageIdentity(message: Message): string | undefined {
@@ -747,6 +788,7 @@ export function restoreLocalTurnMessageOrder(
   confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
   currentTurnRunIds: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
   anchorHumanIdentity?: string | null,
+  canonicalHistoryIdentities: ReadonlySet<string> = confirmedHistoryIdentities,
 ): Message[] {
   // When the caller recorded the exact human identity this turn submitted
   // (LocalTurnAnchor), only that message may anchor the repair. `null` means
@@ -796,13 +838,14 @@ export function restoreLocalTurnMessageOrder(
     return messages;
   }
 
-  // A message that canonical history (the REST /messages page) has already
-  // committed is an established part of a previous turn, no matter whether it
-  // also reached the live checkpoint baseline. Only a visible ai/tool step that
-  // is absent from BOTH sources is genuinely new output from the in-flight
-  // submit, and only that belongs after the new human input.
+  // The fixed confirmed set decides which suffix messages may move back across
+  // this turn's human. The wider canonical set has a different job in the
+  // prefix: a REST-history message is not speculative current-turn output just
+  // because the latest-page window advanced after submit.
   const isConfirmedHistoryMessage = (identity: string | undefined) =>
     identity !== undefined && confirmedHistoryIdentities.has(identity);
+  const isCanonicalHistoryMessage = (identity: string | undefined) =>
+    identity !== undefined && canonicalHistoryIdentities.has(identity);
   // Steps of the CURRENT run must never be treated as displaced history: after
   // an interrupt/stop the current turn's already-executed steps are persisted
   // into canonical history, but they still belong AFTER the new human input.
@@ -828,7 +871,7 @@ export function restoreLocalTurnMessageOrder(
       !isHiddenFromUIMessage(message) &&
       identity !== undefined &&
       !baselineMessageIdentities.has(identity) &&
-      (!isConfirmedHistoryMessage(identity) || isCurrentTurnStep(message));
+      (!isCanonicalHistoryMessage(identity) || isCurrentTurnStep(message));
     if (isVisiblePendingStep) {
       earlyPendingSteps.push(message);
     } else {
@@ -2313,6 +2356,13 @@ export function useThreadStream({
         threadId,
         humanIdentity: hideFromUI ? null : `message:${humanMessageId}`,
         baselineIdentities: new Set(pendingUsageBaselineMessageIdsRef.current),
+        preSubmitHistoryIdentities: new Set(
+          visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+        ),
+        preSubmitMaxSeq: maxMessageSeq([
+          ...visibleHistory,
+          ...persistedMessages,
+        ]),
       };
 
       // Build optimistic files list with uploading status
@@ -2493,6 +2543,7 @@ export function useThreadStream({
       queryClient,
       humanMessageCount,
       persistedMessages,
+      visibleHistory,
     ],
   );
 
@@ -2524,6 +2575,13 @@ export function useThreadStream({
         // prepare response's replacement identity once it lands below.
         humanIdentity: null,
         baselineIdentities: new Set(pendingUsageBaselineMessageIdsRef.current),
+        preSubmitHistoryIdentities: new Set(
+          visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+        ),
+        preSubmitMaxSeq: maxMessageSeq([
+          ...visibleHistory,
+          ...persistedMessages,
+        ]),
       };
       setLiveMessagesThreadId(threadId);
       listeners.current.onSend?.(threadId);
@@ -2637,7 +2695,14 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [context, humanMessageCount, persistedMessages, queryClient, thread],
+    [
+      context,
+      humanMessageCount,
+      persistedMessages,
+      queryClient,
+      thread,
+      visibleHistory,
+    ],
   );
 
   const regenerateMessage = useCallback(
@@ -2778,21 +2843,28 @@ export function useThreadStream({
       renderMessages,
       visibleOptimisticMessages,
     );
-    // Canonical history identities are established messages from previous
-    // turns; they must be treated as confirmed regardless of whether the live
-    // checkpoint baseline captured them (e.g. an ask_clarification card that
-    // reached the REST history page but not the checkpoint `messages` value).
-    const confirmedHistoryIdentities = new Set(
-      effectiveHistory.map(messageIdentity).filter(isNonEmptyString),
-    );
     const localTurnAnchor = localTurnAnchorRef.current;
+    const canonicalHistoryIdentities = new Set(
+      visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+    );
+    // Only canonical history known to predate this local submit may be moved
+    // across its human anchor. The fixed identity snapshot covers messages
+    // already loaded from REST but absent from the checkpoint baseline; the
+    // authoritative seq boundary also admits older pages that finish loading
+    // after submit. Transient compaction rescue and later external turns are
+    // deliberately outside both sets.
+    const confirmedHistoryIdentities = getConfirmedPreSubmitHistoryIdentities(
+      visibleHistory,
+      localTurnAnchor,
+    );
     // The current turn's run(s): visible ai/tool steps that appear in the live
-    // checkpoint but are NOT part of the pre-submit baseline. These are output
-    // from the in-flight submit and must never be moved before their human.
+    // checkpoint but are neither part of the pre-submit baseline nor already
+    // canonical REST history. These are output from the in-flight submit and
+    // must never be moved before their human.
     const currentTurnRunIds = getCurrentTurnRunIds(
       renderMessages,
       localTurnAnchor ? localTurnAnchor.baselineIdentities : null,
-      confirmedHistoryIdentities,
+      canonicalHistoryIdentities,
     );
     if (localTurnAnchor?.humanIdentity) {
       // The surviving merged copy of the submitted human can be the run_id-less
@@ -2820,6 +2892,7 @@ export function useThreadStream({
           confirmedHistoryIdentities,
           currentTurnRunIds,
           localTurnAnchor.humanIdentity,
+          canonicalHistoryIdentities,
         );
   }, [
     previouslyRenderedOrder,
