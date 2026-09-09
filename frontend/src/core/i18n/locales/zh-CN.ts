@@ -305,6 +305,7 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    stopStreamingUnavailable: "你的角色无权停止正在运行的回合。",
   },
 
   // Sidebar

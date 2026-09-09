@@ -1172,9 +1172,10 @@ export function InputBox({
 
   const handleStopStreaming = useCallback(() => {
     // Roles denied runs:cancel must not interrupt the in-progress turn —
-    // the Gateway would 403 the cancel anyway. Gate here so every entry
-    // point (button click, Enter-key form submit routed as kind "stop")
-    // converges on one check.
+    // the Gateway would 403 the cancel anyway. The submit-button click is
+    // the only live entry point today (handleSubmit returns early with the
+    // pleaseWaitStreaming toast while streaming), but gate in the handler
+    // as defense-in-depth so any future stop path is covered too.
     if (!canStopStreaming) {
       return;
     }
@@ -1382,6 +1383,9 @@ export function InputBox({
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
   const composerLocked = isComposerDisabled || polishingInput;
+  // A denied runs:cancel role sees a disabled stop affordance, not a removed
+  // one — the composer must still show that a turn is in flight.
+  const stopDenied = status === "streaming" && !canStopStreaming;
   const inputPolishUndoAvailable =
     !polishingInput &&
     inputPolishUndo !== null &&
@@ -2754,11 +2758,18 @@ export function InputBox({
             </ModelSelector>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={
-                composerLocked || (status === "streaming" && !canStopStreaming)
-              }
+              disabled={composerLocked || stopDenied}
               variant="outline"
               status={status}
+              // A bare disabled stop square reads as a broken composer;
+              // explain the permission boundary (native title, since a
+              // Radix tooltip won't fire on a disabled button).
+              aria-label={
+                stopDenied ? t.inputBox.stopStreamingUnavailable : undefined
+              }
+              title={
+                stopDenied ? t.inputBox.stopStreamingUnavailable : undefined
+              }
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();
