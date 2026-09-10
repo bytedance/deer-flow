@@ -10,8 +10,9 @@ sandbox-visible uploads directory (or as a hidden name in test layouts), so a
 replacement file cannot masquerade as the companion even when the number is
 reused, while an in-place edit of the same inode stays attached.
 The sidecar JSON lives beside the files it describes and is hidden from
-listings. Reads open it no-follow with a byte and entry cap so a sandbox
-cannot turn the mapping file into an unbounded Gateway parse. Writes prune
+listings. Reads open it no-follow and nonblocking, with a byte and entry
+cap, so a sandbox cannot block the Gateway on a FIFO or turn the mapping
+into an unbounded parse. Writes prune
 to those same caps (oldest entries first, binary-searching the serialized
 size) and unpin evicted rows so this
 module cannot persist a map its own reader would drop. Companion deletion
@@ -395,11 +396,17 @@ def _sanitize_mapping(raw: object) -> dict[str, CompanionEntry]:
 
 
 def _open_sidecar_no_follow(path: Path) -> int:
-    """Open *path* read-only without following a symlink. Caller closes the fd."""
+    """Open *path* read-only without following a symlink. Caller closes the fd.
+
+    ``O_NONBLOCK`` keeps a sandbox-replaced FIFO from stalling ``os.open``
+    before the regular-file check runs.
+    """
     has_nofollow = hasattr(os, "O_NOFOLLOW")
     flags = os.O_RDONLY
     if has_nofollow:
         flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_BINARY"):

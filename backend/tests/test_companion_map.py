@@ -7,6 +7,7 @@ import json
 import math
 import os
 import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -772,6 +773,43 @@ class TestSidecarReadBounds:
         (tmp_path / "c.md").write_text("c", encoding="utf-8")
 
         assert load_companion_map(tmp_path) == {"a.pdf": "a.md", "b.pdf": "b.md"}
+
+    def test_sidecar_open_uses_nonblocking_flag_when_available(self, tmp_path, monkeypatch):
+        if not hasattr(os, "O_NONBLOCK"):
+            pytest.skip("O_NONBLOCK not available on this platform")
+        captured: list[int] = []
+        real_open = os.open
+
+        def _open(path, flags, *args):
+            captured.append(flags)
+            return real_open(path, flags, *args)
+
+        monkeypatch.setattr(companion_map_mod.os, "open", _open)
+        (tmp_path / COMPANION_MAP_FILENAME).write_text("{}", encoding="utf-8")
+
+        assert load_companion_map(tmp_path) == {}
+        assert captured
+        assert captured[0] & os.O_NONBLOCK
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo is POSIX-only")
+    def test_fifo_sidecar_without_writer_returns_empty(self, tmp_path):
+        os.mkfifo(tmp_path / COMPANION_MAP_FILENAME)
+        result: dict[str, object] = {}
+        errors: list[BaseException] = []
+
+        def _load() -> None:
+            try:
+                result["map"] = load_companion_map(tmp_path)
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=_load, daemon=True)
+        worker.start()
+        worker.join(timeout=2)
+        if worker.is_alive():
+            pytest.fail("load_companion_map blocked on a FIFO sidecar with no writer")
+        assert errors == []
+        assert result["map"] == {}
 
 
 class TestSidecarWriteBounds:
