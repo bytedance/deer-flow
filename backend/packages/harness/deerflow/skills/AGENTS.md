@@ -30,3 +30,31 @@ Lets a caller pass per-request, short-lived end-user credentials (e.g. an ERP to
 - **Leak surfaces sealed** (verified by a real-gateway e2e run — secret reaches the sandbox but none of these): prompt (value never in a message), trace (`tracing/metadata.py` never copies `context`), checkpoint (secrets live on `runtime.context`, not graph state), audit (journal records names only), stdout (`tools.py::mask_secret_values` redacts injected values from bash output), and **run-record persistence + run API** (`services.py::start_run` stores `redact_config_secrets(body.config)` so `runs.kwargs_json` and `RunResponse.kwargs` never carry the secret).
 - **Historical retention**: API response hiding prevents legacy `metadata.auth_token` and `config.metadata.auth_token` from being returned now; it does not delete values already retained in databases, run events, logs, snapshots, exports, or backups. Deployments that ever used either legacy carrier must rotate the credential and clean every retained copy under their retention policy. Restarting or upgrading DeerFlow performs neither action.
 - **Scope / non-goals**: no persistence/vaulting — values are request-scoped and never stored server-side, so long-lived use means the caller re-supplies `context.secrets` on each request while the skill stays in `skill_context`; subagents do not inherit the skill injection set. MCP interceptors may independently consume the same supported request-scoped carrier. Tests: `tests/test_skill_request_scoped_secrets.py`, `tests/test_mcp_session_pool.py`.
+
+### Custom skill export
+
+`skills/export.py` owns read-only custom package capture and `.skill` ZIP construction.
+`export_manifest` returns bounded facts and structural blockers; `build_skill_export`
+requires the manifest's content revision. Both accept a cooperative cancellation event.
+Snapshots use unnamed temporary files, and ZIP bytes come exclusively from captured
+raw bytes. The v1 length-delimited digest covers UTF-8 paths, node kind, size, raw
+content SHA-256, and normalized executable semantics, including empty directories.
+The source is rechecked under `skill_projection_read_lock`: this uses the same user
+projection lock identity as mutations without invalidating or rebuilding projections.
+Local storage uses a separate `.custom.projection.lock` beside its custom root for
+both mutations and exports. Both storage writers create and remove temporary files
+inside the mutation lock. Import normalizes regular-file permissions to 0644/0755.
+
+Export is not activation, execution, or a safety-review verdict. It never bypasses
+installation scanning. Entry, file, aggregate, ZIP, path, depth, lock, and soft time
+limits are independent of SkillScan configuration. Source files and directory nodes
+are opened through no-follow directory descriptors; unsupported platforms fail closed.
+Resource limits raise errors rather than returning truncated manifests. Frontmatter parsing
+is separately bounded to 1 MiB. Before shared validation constructs any YAML objects,
+a cancellable event preflight rejects aliases (including merge aliases), nesting beyond
+32 levels, and more than 16384 events. Larger UTF-8 bodies remain supported and stream into
+the raw snapshot. Malformed secret declarations produce a content-free warning. Ownership is
+resolved only through `get_custom_skill_dir`, never through legacy/public fallback.
+Only relative paths and generic diagnostic text are exposed. Tests live in
+`tests/test_skill_export.py`; `scripts/benchmark/skill_export.py` measures real public,
+64 MiB, 4096-entry, and cancellation workloads in fresh processes.

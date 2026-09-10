@@ -5,13 +5,14 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import BinaryIO, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from starlette.datastructures import FormData, Headers, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
+from app.gateway.skill_export import SkillExportResponse, export_http_error, run_export_work
 from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_skills_system_prompt_cache_async, refresh_user_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import (
@@ -25,6 +26,7 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
+from deerflow.skills.export import SkillExportError, build_skill_export, export_manifest
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
@@ -386,6 +388,43 @@ async def list_custom_skills(config: AppConfig = Depends(get_config)) -> SkillsL
     except Exception as e:
         logger.error("Failed to list custom skills: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list custom skills: {str(e)}")
+
+
+@router.get("/skills/custom/{skill_name}/export-manifest", summary="Preview Custom Skill Export")
+async def preview_custom_skill_export(skill_name: str, request: Request, response: Response, config: AppConfig = Depends(get_config)) -> dict:
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    try:
+        result, lease = await run_export_work(lambda cancel: export_manifest(_get_user_skill_storage(config), skill_name, cancel), request)
+    except SkillExportError as error:
+        raise export_http_error(error) from error
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(500, detail={"code": "skill_export_failed", "message": "Could not prepare the skill export."}) from None
+    try:
+        response.headers["Cache-Control"] = "private, no-store"
+        return result
+    finally:
+        lease.release()
+
+
+@router.get("/skills/custom/{skill_name}/export", summary="Download Custom Skill Archive")
+async def download_custom_skill_export(
+    skill_name: str,
+    request: Request,
+    expected_revision: str = Query(..., pattern=r"^[a-f0-9]{64}$"),
+    config: AppConfig = Depends(get_config),
+) -> Response:
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    try:
+        archive, lease = await run_export_work(lambda cancel: build_skill_export(_get_user_skill_storage(config), skill_name, expected_revision, cancel), request)
+    except SkillExportError as error:
+        raise export_http_error(error) from error
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(500, detail={"code": "skill_export_failed", "message": "Could not prepare the skill export."}) from None
+    return SkillExportResponse(archive, skill_name, lease)
 
 
 @router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")

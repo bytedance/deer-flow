@@ -147,3 +147,5 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 archive/search behavior, read [Thread lifecycle invariants](../../docs/THREAD_LIFECYCLE.md).
 It owns lineage and settled-checkpoint rules, legacy fallback boundaries, archive
 filtering before pagination, owner isolation, and activity-time preservation.
+
+Custom Skill export routes require `require_admin_user` (PAT excluded). `skill_export.py` owns two non-queuing process slots through worker drain and response completion; the harness owns immutable capture. Resolve the user inside the ContextVar-preserving file-I/O worker. On cancellation signal/drain the worker, close unclaimed results, then release the slot. Response cleanup belongs in ASGI `finally`, including failures before body iteration. Never log raw file exceptions or source content. See `../../docs/API.md` for the wire contract.

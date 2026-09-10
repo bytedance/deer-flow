@@ -1323,6 +1323,64 @@ export const enUS: Translations = {
       },
     },
     skills: {
+      exportPrevious: "Previous 50 files",
+      exportNotices: {
+        skill_export_yaml_alias:
+          "YAML aliases are not supported for export. Replace aliases with explicit values in SKILL.md.",
+        skill_export_yaml_complexity:
+          "The YAML declarations are too deeply nested or complex to export.",
+        skill_export_invalid_declaration:
+          "A malformed credential declaration was omitted; inspect SKILL.md.",
+        skill_export_link: "Linked files or directories cannot be exported.",
+        skill_export_unsupported_node:
+          "Only ordinary files and directories are supported; hard links and special files cannot be exported.",
+        skill_export_invalid_path:
+          "This path is not portable or conflicts with another path.",
+        skill_export_nested_skill:
+          "Nested SKILL.md files are not accepted by the installer.",
+        skill_export_executable_binary:
+          "Executable binaries are not accepted by the installer.",
+        skill_export_invalid_frontmatter:
+          "SKILL.md must have valid declarations and its name must match the skill folder.",
+        skill_export_sensitive_filename:
+          "This filename may contain local credentials or repository metadata.",
+        skill_export_platform_declarations:
+          "Configure the declared tools and credentials in the destination environment.",
+      },
+      exportSkill: "Export",
+      exportTitle: "Export skill",
+      exportDescription: "Download the currently saved skill as a .skill file.",
+      exportLoading: "Preparing file list…",
+      exportFiles: "Files",
+      exportDirectories: "Directories",
+      exportSize: "Uncompressed size",
+      exportContents: "Package contents",
+      exportMore: "Next 50 files",
+      exportRequirements: "Declared requirements",
+      exportCompatibility: "Compatibility",
+      exportTools: "Allowed tools",
+      exportSecrets: "Credential names",
+      exportOptional: "optional",
+      exportRequired: "required",
+      exportUndeclared: "Not declared",
+      exportScope:
+        "Includes all files inside this skill. Account settings, conversations and history outside the skill folder are excluded. Configure tools and credentials again on the destination.",
+      exportWarnings: "Check package contents",
+      exportWarningDescription:
+        "These notices are based on filenames and declarations. Secrets written inside package files are included unchanged. This is not a security scan.",
+      exportBlocked: "This package cannot be exported",
+      exportDownload: "Download .skill",
+      exportDownloading: "Preparing download…",
+      exportHandedOff: "File handed to your browser for download.",
+      exportChanged:
+        "The skill changed. Refresh the file list before downloading.",
+      exportRefresh: "Refresh file list",
+      exportFailed: "Could not export this skill. Try again.",
+      exportBusy: "Two exports are active. Try again shortly.",
+      exportTimeout: "Preparing the package timed out. Try again shortly.",
+      exportLimit: "The package exceeds an export limit.",
+      exportNotFound:
+        "This custom skill no longer exists. Refresh the skill list.",
       title: "Agent Skills",
       description:
         "Manage the configuration and enabled status of the agent skills.",
