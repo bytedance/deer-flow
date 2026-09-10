@@ -117,3 +117,28 @@ describe("formatToolDetail", () => {
     ).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
   });
 });
+
+it("keeps dense previews valid JSON with complete original property names", () => {
+  const value = Object.fromEntries(
+    Array.from({ length: 8000 }, (_, i) => [`k${i}`, i]),
+  );
+  const preview = formatToolDetail(value);
+  const parsed = JSON.parse(preview.text) as Record<string, unknown>;
+  expect(preview.truncated).toBe(true);
+  expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+  for (const [key, child] of Object.entries(parsed)) {
+    if (key !== "…") expect(child).toBe(value[key]);
+  }
+});
+
+it("accounts for quotes, escapes and indentation before accepting keys", () => {
+  for (const key of ["L".repeat(11999), "\n".repeat(6000)]) {
+    const preview = formatToolDetail({ [key]: "v".repeat(5000) });
+    expect(JSON.parse(preview.text)).toEqual({ "…": "…" });
+    expect(preview.truncated).toBe(true);
+  }
+  const preview = formatToolDetail({ nested: { text: '\n"\\'.repeat(12000) } });
+  expect(() => JSON.parse(preview.text)).not.toThrow();
+  expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+  expect(preview.truncated).toBe(true);
+});

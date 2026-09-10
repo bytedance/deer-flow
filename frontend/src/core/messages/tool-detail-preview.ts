@@ -2,65 +2,88 @@ export const TOOL_PREVIEW_LIMIT = 12_000;
 const MAX_NODES = TOOL_PREVIEW_LIMIT;
 const MAX_DEPTH = 6;
 
-/** 先限制遍历和字符串长度，再序列化；不对完整载荷执行 stringify。 */
+/** Serialize bounded previews with space reserved for complete JSON tokens. */
 export function formatToolDetail(value: unknown): {
   text: string;
   truncated: boolean;
 } {
   let truncated = false;
-  let remaining = TOOL_PREVIEW_LIMIT;
   let nodes = 0;
   const seen = new WeakSet<object>();
-  const cutString = (text: string) => {
-    const cut = text.slice(0, Math.max(0, remaining));
-    remaining -= cut.length;
-    if (cut.length < text.length) {
-      truncated = true;
-      return cut.length > 0 ? cut.slice(0, -1) + "…" : "…";
-    }
-    return cut;
+  const marker = () => {
+    truncated = true;
+    return JSON.stringify("…");
   };
-  const visit = (item: unknown, depth: number): unknown => {
-    if (++nodes > MAX_NODES || remaining <= 0 || depth > MAX_DEPTH) {
-      truncated = true;
-      return "…";
+  const quote = (text: string, budget: number): string => {
+    // Bound the input before escaping; escaping can expand each character.
+    const candidate = JSON.stringify(text.slice(0, budget));
+    if (text.length <= budget && candidate.length <= budget) return candidate;
+    truncated = true;
+    let low = 0;
+    let high = Math.min(text.length, budget);
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (JSON.stringify(text.slice(0, middle) + "…").length <= budget)
+        low = middle;
+      else high = middle - 1;
     }
-    if (typeof item === "string") return cutString(item);
-    if (item === null || typeof item === "boolean" || typeof item === "number")
-      return item;
-    if (typeof item === "bigint") return item.toString();
-    if (typeof item !== "object") return typeof item;
-    if (seen.has(item)) {
-      truncated = true;
-      return "…";
+    return JSON.stringify(text.slice(0, low) + "…");
+  };
+  const visit = (item: unknown, depth: number, budget: number): string => {
+    if (++nodes > MAX_NODES || depth > MAX_DEPTH) return marker();
+    if (typeof item === "string") return quote(item, budget);
+    if (
+      item === null ||
+      typeof item === "boolean" ||
+      typeof item === "number"
+    ) {
+      const token = JSON.stringify(item);
+      return token.length <= budget ? token : marker();
     }
+    if (typeof item === "bigint") return quote(item.toString(), budget);
+    if (typeof item !== "object") return quote(typeof item, budget);
+    if (seen.has(item)) return marker();
+    const array = Array.isArray(item);
+    const indent = "  ".repeat(depth + 1);
+    const closing = "\n" + "  ".repeat(depth) + (array ? "]" : "}");
+    const notice = array ? '"…"' : '"…": "…"';
+    // Reserve the closing delimiter and a possible final truncation entry.
+    const reserve = closing.length + 2 + indent.length + notice.length;
+    if (budget < 1 + reserve) return marker();
     seen.add(item);
-    const output: unknown[] | Record<string, unknown> = Array.isArray(item)
-      ? []
-      : (Object.create(null) as Record<string, unknown>);
-    // 不创建完整的 keys/entries 数组，达到预算即停止读取子值。
+    let output = array ? "[" : "{";
+    let count = 0;
+    let hasEllipsis = false;
     for (const key in item) {
       if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
-      // 对象键必须完整保留，截短后可能与已有键重名并覆盖真实数据。
-      const keyLength = Array.isArray(output) ? 0 : key.length;
-      if (nodes >= MAX_NODES || remaining <= 0 || keyLength > remaining) {
+      const prefix = (count ? ",\n" : "\n") + indent;
+      const available = budget - output.length - prefix.length - reserve;
+      // Never shorten a property name, including its JSON escape sequences.
+      const encodedKey = array
+        ? ""
+        : key.length <= available
+          ? JSON.stringify(key) + ": "
+          : null;
+      if (
+        nodes >= MAX_NODES ||
+        encodedKey === null ||
+        available - encodedKey.length < 3
+      ) {
         truncated = true;
-        if (Array.isArray(output)) output.push("…");
-        else if (!("…" in output)) output["…"] = "…";
+        if (array || !hasEllipsis) output += prefix + notice;
         break;
       }
-      remaining -= keyLength;
       const descriptor = Object.getOwnPropertyDescriptor(item, key);
       const child =
         descriptor && "value" in descriptor
-          ? visit(descriptor.value, depth + 1)
-          : "…";
-      if (!descriptor || !("value" in descriptor)) truncated = true;
-      if (Array.isArray(output)) output.push(child);
-      else output[key] = child;
+          ? visit(descriptor.value, depth + 1, available - encodedKey.length)
+          : marker();
+      output += prefix + encodedKey + child;
+      count++;
+      if (key === "…") hasEllipsis = true;
     }
     seen.delete(item);
-    return output;
+    return output + (output.length === 1 ? (array ? "]" : "}") : closing);
   };
   // 只尝试解析有界的文本，长结果直接展示文本前缀。
   let source = value;
@@ -75,15 +98,13 @@ export function formatToolDetail(value: unknown): {
       /* 普通文本保持原样。 */
     }
   }
-  const bounded = visit(source, 0);
-  const serialized =
-    typeof bounded === "string" ? bounded : JSON.stringify(bounded, null, 2);
-  if (serialized.length > TOOL_PREVIEW_LIMIT) truncated = true;
-  return {
-    text:
-      serialized.length > TOOL_PREVIEW_LIMIT
-        ? serialized.slice(0, TOOL_PREVIEW_LIMIT - 1) + "…"
-        : serialized,
-    truncated,
-  };
+  if (typeof source === "string") {
+    truncated = source.length > TOOL_PREVIEW_LIMIT;
+    return {
+      text: truncated ? source.slice(0, TOOL_PREVIEW_LIMIT - 1) + "…" : source,
+      truncated,
+    };
+  }
+  const text = visit(source, 0, TOOL_PREVIEW_LIMIT);
+  return { text, truncated };
 }
