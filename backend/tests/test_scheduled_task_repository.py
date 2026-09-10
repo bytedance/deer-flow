@@ -926,14 +926,13 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
 async def test_lease_aware_once_takeover_fallthrough_finalizes_peer_terminal_outcome(tmp_path):
     """A takeover whose fall-through observes a terminal peer outcome finalizes the parent.
 
-    Regression for review comments r3994555070 / r3979241541: the sweep's takeover
-    (CAS succeeds here — the durable run is ``running`` with an expired lease) falls
-    through to the shared ``_fetch_latest_run`` / ``_has_active_occurrence`` /
-    ``_finalise_once_task_from_run`` finalization. The peer already committed the
-    terminal ``success`` occurrence, so the parent must be finalised to ``completed``
-    with ``last_error`` cleared, not blindly set to ``cancelled``. The same shared
-    finalization is what the CAS-loss path (`not claimed` -> refreshed terminal status)
-    converges on, so this pins the r3979241541 / r3994555070 outcome either way.
+    Regression for #5034: the sweep's takeover (CAS succeeds here - the durable run is
+    ``running`` with an expired lease) falls through to the shared ``_fetch_latest_run`` /
+    ``_has_active_occurrence`` / ``_finalise_once_task_from_run`` finalization. The peer
+    already committed the terminal ``success`` occurrence, so the parent must be finalised
+    to ``completed`` with ``last_error`` cleared, not blindly set to ``cancelled``. The
+    same shared finalization is what the CAS-loss path (``not claimed`` -> refreshed
+    terminal status) converges on, so the outcome is pinned either way.
     """
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
@@ -944,12 +943,12 @@ async def test_lease_aware_once_takeover_fallthrough_finalizes_peer_terminal_out
         durable_run_repo = RunRepository(sf)
         now = datetime.now(UTC)
         await task_repo.create(
-            task_id="task-once-cas-loss",
+            task_id="task-once-takeover-fallthrough",
             user_id="user-1",
             thread_id=None,
             context_mode="fresh_thread_per_run",
             assistant_id="lead_agent",
-            title="cas loss",
+            title="takeover fallthrough",
             prompt="p",
             schedule_type="once",
             schedule_spec={"run_at": (now + timedelta(minutes=5)).isoformat()},
@@ -957,25 +956,25 @@ async def test_lease_aware_once_takeover_fallthrough_finalizes_peer_terminal_out
             next_run_at=None,
         )
         await task_repo.update(
-            "task-once-cas-loss",
+            "task-once-takeover-fallthrough",
             user_id="user-1",
-            updates={"status": "running", "last_run_id": "run-once-cas-loss"},
+            updates={"status": "running", "last_run_id": "run-once-takeover-fallthrough"},
         )
         # The peer committed the terminal occurrence; its durable run is still
         # present but no longer live (dead lease), so the sweep attempts a
         # takeover and must finalise from the committed success instead of
         # cancelling the parent.
         await run_repo.create(
-            run_record_id="task-once-cas-loss-row",
-            task_id="task-once-cas-loss",
-            thread_id="thread-cas-loss",
+            run_record_id="task-once-takeover-fallthrough-row",
+            task_id="task-once-takeover-fallthrough",
+            thread_id="thread-takeover-fallthrough",
             scheduled_for=now,
             trigger="schedule",
             status="success",
         )
         await durable_run_repo.put(
-            "run-once-cas-loss",
-            thread_id="thread-cas-loss",
+            "run-once-takeover-fallthrough",
+            thread_id="thread-takeover-fallthrough",
             user_id="user-1",
             status="running",
             owner_worker_id="worker-a",
@@ -983,7 +982,7 @@ async def test_lease_aware_once_takeover_fallthrough_finalizes_peer_terminal_out
         )
 
         assert await task_repo.reconcile_stuck_once_tasks(error="restart", now=now) == 1
-        task = await task_repo.get("task-once-cas-loss", user_id="user-1")
+        task = await task_repo.get("task-once-takeover-fallthrough", user_id="user-1")
         assert task is not None and task["status"] == "completed"
         assert task["last_error"] is None
     finally:
