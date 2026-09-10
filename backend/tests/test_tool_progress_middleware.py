@@ -597,6 +597,8 @@ def test_before_agent_resets_blocked_states_for_new_run():
     mw = _make_mw(stagnation_threshold=1, warn_escalation_count=1)
     rt_run1 = _make_runtime(thread_id="t1", run_id="run-1")
     rt_run2 = _make_runtime(thread_id="t1", run_id="run-2")
+    journal = MagicMock()
+    rt_run2.context["__run_journal"] = journal
     req = _make_tool_request(runtime=rt_run1)
 
     # Drive the tool to BLOCKED via auth error (immediate block, no WARN stage)
@@ -626,6 +628,22 @@ def test_before_agent_resets_blocked_states_for_new_run():
     assert tool_state.consecutive_problems == 0
     assert tool_state.block_reason is None
     assert tool_state.recent_word_sets == ()
+    journal.record_middleware.assert_called_once()
+    reset = journal.record_middleware.call_args.kwargs
+    assert reset["hook"] == "before_agent"
+    assert reset["action"] == "reset"
+    assert reset["changes"] == {
+        "is_subagent": False,
+        "agent_id": None,
+        "tool_name": "web_search",
+        "from_phase": "blocked",
+        "to_phase": "active",
+        "consecutive_problems": 0,
+        "error_type": None,
+        "recoverable_by_model": None,
+        "recommended_next_action": None,
+        "threshold": None,
+    }
 
 
 def test_before_agent_resets_warned_states_for_new_run():
@@ -638,6 +656,8 @@ def test_before_agent_resets_warned_states_for_new_run():
     mw = _make_mw(stagnation_threshold=2, warn_escalation_count=5)
     rt_run1 = _make_runtime(thread_id="t1", run_id="run-1")
     rt_run2 = _make_runtime(thread_id="t1", run_id="run-2")
+    journal = MagicMock()
+    rt_run2.context["__run_journal"] = journal
     req = _make_tool_request(runtime=rt_run1)
     error_msg = _make_error_message()
 
@@ -655,6 +675,8 @@ def test_before_agent_resets_warned_states_for_new_run():
     assert tool_state.phase == "active"
     assert tool_state.consecutive_problems == 0
     assert tool_state.recent_word_sets == ()
+    assert journal.record_middleware.call_args.kwargs["action"] == "reset"
+    assert journal.record_middleware.call_args.kwargs["changes"]["from_phase"] == "warned"
 
 
 def test_before_agent_resets_active_state_consecutive_problems_and_word_sets():
@@ -958,11 +980,12 @@ def test_assess_and_transition_blocked_state_immediate_stop_is_idempotent():
 
     auth_meta = ToolResultMeta(**auth_meta_kwargs)
 
-    new_state, hint = mw._assess_and_transition(blocked_state, auth_meta, "")
+    new_state, hint, transition = mw._assess_and_transition(blocked_state, auth_meta, "")
 
     assert new_state.phase == "blocked"
     assert new_state.block_reason is not None
     assert hint is None  # no hint on immediate block path
+    assert transition is None
 
 
 def test_assess_and_transition_blocked_state_non_stop_increments_count():
@@ -990,12 +1013,13 @@ def test_assess_and_transition_blocked_state_non_stop_increments_count():
 
     rate_meta = ToolResultMeta(**rate_meta_kwargs)
 
-    new_state, _hint = mw._assess_and_transition(blocked_state, rate_meta, "")
+    new_state, _hint, transition = mw._assess_and_transition(blocked_state, rate_meta, "")
 
     # Must stay blocked (not regress to warned or active).
     assert new_state.phase == "blocked"
     # Counter must NOT be incremented: blocked is terminal, state returned unchanged.
     assert new_state.consecutive_problems == 3
+    assert transition is None
 
 
 def test_assess_and_transition_blocked_recoverable_does_not_regress_to_warned():
@@ -1025,11 +1049,12 @@ def test_assess_and_transition_blocked_recoverable_does_not_regress_to_warned():
 
     no_results_meta = ToolResultMeta(**no_results_meta_kwargs)
 
-    new_state, hint = mw._assess_and_transition(blocked_state, no_results_meta, "")
+    new_state, hint, transition = mw._assess_and_transition(blocked_state, no_results_meta, "")
 
     assert new_state.phase == "blocked", "blocked must not regress to warned even when the new error is recoverable"
     assert hint is None
     assert new_state is blocked_state  # exact same object returned (no copy)
+    assert transition is None
 
 
 # ---------------------------------------------------------------------------
@@ -1454,7 +1479,7 @@ class TestToolProgressRunEvents:
             "error_type": None,
             "recoverable_by_model": True,
             "recommended_next_action": "continue",
-            "threshold": 1,
+            "threshold": None,
         }
 
     @pytest.mark.anyio

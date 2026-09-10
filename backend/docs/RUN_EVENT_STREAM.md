@@ -97,10 +97,12 @@ event.
 
 `middleware:tool_progress` records effective result-quality state transitions
 from `ToolProgressMiddleware`: `warn` for ACTIVE → WARNED, `block` for a
-transition to BLOCKED, and `recover` for WARNED → ACTIVE after a useful result.
+transition to BLOCKED, `recover` for WARNED → ACTIVE after a useful result,
+and `reset` when a new run deliberately clears a prior WARNED/BLOCKED phase.
 The bounded `changes` object contains the tool name, source and destination
 phases, consecutive-problem count, normalized error classification and recovery
-advice, effective transition threshold, and subagent attribution. Tool
+advice, effective transition threshold (null when no threshold fired), and
+subagent attribution. Tool
 arguments, prompts, message content, tool results, and content-derived hashes
 are never copied into this event. Producer-supplied metadata is projected onto
 fixed error/action vocabularies and a strict boolean-or-null before persistence,

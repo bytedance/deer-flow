@@ -25,6 +25,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
@@ -250,6 +251,11 @@ class RunJournal(BaseCallbackHandler):
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
+        self._owner_thread_id = threading.get_ident()
+        try:
+            self._owner_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            self._owner_loop = None
 
         # Write buffer
         self._buffer: list[dict] = []
@@ -995,6 +1001,26 @@ class RunJournal(BaseCallbackHandler):
             action: Specific action performed (e.g., "generate_title").
             changes: Dict describing the state changes made.
         """
+        if threading.get_ident() != self._owner_thread_id:
+            owner_loop = self._owner_loop
+            if owner_loop is None or owner_loop.is_closed() or not owner_loop.is_running():
+                logger.warning("Dropping cross-thread middleware event after run loop shutdown")
+                return
+            try:
+                owner_loop.call_soon_threadsafe(
+                    partial(
+                        self.record_middleware,
+                        tag,
+                        name=name,
+                        hook=hook,
+                        action=action,
+                        changes=dict(changes),
+                    )
+                )
+            except RuntimeError:
+                logger.warning("Dropping cross-thread middleware event after run loop shutdown")
+            return
+
         self._put(
             event_type=MIDDLEWARE_EVENT_PATTERN.event_type(tag),
             category=MIDDLEWARE_EVENT_PATTERN.category,

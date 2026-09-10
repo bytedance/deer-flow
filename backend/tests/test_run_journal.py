@@ -38,6 +38,30 @@ def test_tool_promotion_claim_is_atomic_across_parallel_sync_wrappers():
 
 
 @pytest.mark.anyio
+async def test_cross_thread_middleware_events_are_serialized_on_owner_loop():
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-thread", "t-thread", store, flush_threshold=1)
+
+    def record_from_tool_worker() -> None:
+        journal.record_middleware(
+            "tool_progress",
+            name="ToolProgressMiddleware",
+            hook="wrap_tool_call",
+            action="warn",
+            changes={"from_phase": "active", "to_phase": "warned"},
+        )
+
+    await asyncio.to_thread(record_from_tool_worker)
+    # Yield so the owner loop can apply the queued append before terminal flush.
+    await asyncio.sleep(0)
+    await journal.flush()
+
+    events = await store.list_events("t-thread", "r-thread")
+    assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
+    assert events[0]["content"]["changes"]["to_phase"] == "warned"
+
+
+@pytest.mark.anyio
 async def test_close_flushes_and_detaches_runtime_dependencies():
     class ProgressReporter:
         async def __call__(self, snapshot):

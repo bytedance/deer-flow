@@ -136,10 +136,13 @@ different delegated agents promote the same tool. The active catalog is fixed
 for one graph execution, so the claim needs no persisted catalog hash.
 
 **Tool-progress phase events** (`agents/middlewares/tool_progress_middleware.py`):
-effective ACTIVE → WARNED, WARNED/ACTIVE → BLOCKED, and WARNED → ACTIVE
-transitions append `middleware:tool_progress` through `RunJournal`. The append
-shares the middleware's state lock so parallel completions cannot publish BLOCK
-before the WARN transition that preceded it. The persisted projection accepts
+effective ACTIVE → WARNED, WARNED/ACTIVE → BLOCKED, WARNED → ACTIVE recovery,
+and new-run WARNED/BLOCKED → ACTIVE resets append `middleware:tool_progress`
+through `RunJournal`. The append shares the middleware's state lock so parallel
+completions cannot publish BLOCK before the WARN transition that preceded it.
+Sync lead-tool callbacks schedule journal mutation onto its owning event-loop
+thread; they never mutate or flush `RunJournal._buffer` from an executor thread.
+The persisted projection accepts
 only framework-defined error/action values and strict booleans (using null for
 invalid values) from the producer-supplied tool stamp; tool content, args,
 prompts, and derived hashes do not enter the event. Ordinary task-tool subagents use the narrow parent-loop
