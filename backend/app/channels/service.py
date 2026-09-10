@@ -446,7 +446,7 @@ class ChannelService:
         # guard makes the invariant hold at the mechanism itself.
         retained = self._channels.get(name)
         if retained is not None:
-            logger.warning("Refusing to start %s: previous channel instance is still tracked after failed cleanup", name)
+            logger.warning("Refusing to start %s: another channel instance is still tracked under this name (previous cleanup incomplete, or the instance is still running)", name)
             return False
 
         try:
