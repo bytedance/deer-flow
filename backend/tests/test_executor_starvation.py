@@ -22,9 +22,7 @@ def test_default_executor_saturation_keeps_work_queued():
             first = asyncio.create_task(asyncio.to_thread(blocker))
             await first_started.wait()
 
-            second = asyncio.create_task(
-                asyncio.to_thread(loop.call_soon_threadsafe, second_started.set)
-            )
+            second = asyncio.create_task(asyncio.to_thread(loop.call_soon_threadsafe, second_started.set))
             await asyncio.sleep(0)
             assert not second_started.is_set()
 
@@ -59,7 +57,7 @@ def test_waiter_timeout_does_not_stop_started_sync_work():
 
             try:
                 await asyncio.wait_for(running, timeout=0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
             assert running.cancelled()
@@ -82,16 +80,15 @@ def test_waiter_timeout_does_not_stop_started_sync_work():
     asyncio.run(scenario())
 
 
-def test_dedicated_file_io_pool_runs_while_default_executor_is_saturated():
+def test_dedicated_file_io_pool_runs_while_default_executor_is_saturated(monkeypatch):
     async def scenario():
         from deerflow.utils import file_io
 
         loop = asyncio.get_running_loop()
         default_executor = ThreadPoolExecutor(max_workers=1)
         dedicated_executor = ThreadPoolExecutor(max_workers=1)
-        original_executor = file_io._FILE_IO_EXECUTOR
+        monkeypatch.setattr(file_io, "_FILE_IO_EXECUTOR", dedicated_executor)
         loop.set_default_executor(default_executor)
-        file_io._FILE_IO_EXECUTOR = dedicated_executor
         release = threading.Event()
         default_started = asyncio.Event()
         dedicated_started = asyncio.Event()
@@ -116,7 +113,6 @@ def test_dedicated_file_io_pool_runs_while_default_executor_is_saturated():
             await default_task
         finally:
             release.set()
-            file_io._FILE_IO_EXECUTOR = original_executor
             dedicated_executor.shutdown(wait=True, cancel_futures=True)
             default_executor.shutdown(wait=True, cancel_futures=True)
 
