@@ -114,7 +114,7 @@ The run worker owns the authoritative terminal event:
 
 | Event type | Category | Producer |
 | --- | --- | --- |
-| `run.end` | `outputs` | Worker finalization after durable `RunRow.status`; orphan recovery after atomic takeover |
+| `run.end` | `outputs` | Worker finalization after durable `RunRow.status`; RunManager after atomic orphan/cancel/admission takeover |
 
 `RunJournal.on_chain_end()` only captures and reconciles the latest root graph
 output. It does not publish a lifecycle event. This matters when an active goal
@@ -135,11 +135,13 @@ nested representation is not currently identical across storage backends:
 
 When present, `run.end.metadata.status` is one of `success`, `error`, `timeout`,
 or `interrupted` and mirrors the already-durable `RunRow.status`. Recovery
-events also set `metadata.recovered: true`. Error text, prompts, tool arguments,
-and tool results are never copied into terminal metadata. Runs without a
-completed root invocation use `{}` as content. Consumers may use the event as
-terminal evidence, but must still read `RunRow.status` when the event is absent
-and must not depend on backend-identical nested output values.
+events also set `metadata.recovered: true`. This includes orphan reconciliation,
+an expired-lease cancel takeover, and runs claimed by cross-worker
+interrupt/rollback admission. Error text, prompts, tool arguments, and tool
+results are never copied into terminal metadata. Runs without a completed root
+invocation use `{}` as content. Consumers may use the event as terminal
+evidence, but must still read `RunRow.status` when the event is absent and must
+not depend on backend-identical nested output values.
 
 `subagents/step_events.py::subagent_run_event()` maps streamed `task_*` chunks
 to persisted events. The worker batches them through `put_batch()`:
@@ -214,12 +216,13 @@ be used by new producers.
 - Tool-call intent is embedded in `llm.ai.response.content.tool_calls`; it is
   not a first-class event. A missing or timed-out result may have no dedicated
   outcome event.
-- `RunRow.status` remains the lifecycle source of truth. A crash or event-store
-  outage after the row becomes terminal but before the idempotent `run.end`
-  write can leave the event missing. Orphan takeover backfills the runs it
-  terminalizes, but there is no historical terminal-row backfill scan. Older
-  `run.end` rows produced before this contract remain legacy graph-completion
-  markers and are not rewritten.
+- `RunRow.status` remains the lifecycle source of truth. A crash, caller
+  cancellation, or event-store outage after the row becomes terminal but before
+  the idempotent `run.end` write can leave the event missing. Current orphan,
+  cancel-takeover, and cross-worker admission claim paths backfill the runs they
+  terminalize, but there is no historical terminal-row scan. Older `run.end`
+  rows produced before this contract remain legacy graph-completion markers and
+  are not rewritten.
 - Nested non-JSON values in `run.end.content` have backend-dependent
   representations: memory retains Python values, while JSONL and database
   stores read them back as strings.

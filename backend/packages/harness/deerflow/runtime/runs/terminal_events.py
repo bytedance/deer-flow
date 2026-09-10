@@ -1,8 +1,10 @@
-"""Idempotent persistence for authoritative run lifecycle events."""
+"""Idempotent persistence for authoritative terminal run evidence."""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,6 +24,19 @@ _TERMINAL_RUN_STATUSES = frozenset(
         RunStatus.interrupted,
     }
 )
+
+
+@contextmanager
+def _run_owner_context(user_id: str | None) -> Iterator[None]:
+    """Bind an out-of-request event write to the claimed RunRow owner."""
+    if user_id is None:
+        yield
+        return
+    token = set_current_user(SimpleNamespace(id=user_id))
+    try:
+        yield
+    finally:
+        reset_current_user(token)
 
 
 async def persist_run_terminal_event(
@@ -49,8 +64,7 @@ async def persist_run_terminal_event(
     if recovered:
         metadata["recovered"] = True
 
-    token = set_current_user(SimpleNamespace(id=user_id)) if user_id is not None else None
-    try:
+    with _run_owner_context(user_id):
         existing, created = await event_store.put_if_absent(
             thread_id=thread_id,
             run_id=run_id,
@@ -59,9 +73,6 @@ async def persist_run_terminal_event(
             content={} if content is None else content,
             metadata=metadata,
         )
-    finally:
-        if token is not None:
-            reset_current_user(token)
 
     if not created:
         existing_status = (existing.get("metadata") or {}).get("status")
@@ -72,4 +83,24 @@ async def persist_run_terminal_event(
                 existing_status,
                 status.value,
             )
+    return created
+
+
+async def persist_run_delivery_receipt(
+    event_store: RunEventStore,
+    *,
+    thread_id: str,
+    run_id: str,
+    content: dict[str, Any],
+    user_id: str | None = None,
+) -> bool:
+    """Persist a recovered run's delivery singleton under its stored owner."""
+    with _run_owner_context(user_id):
+        _, created = await event_store.put_if_absent(
+            thread_id=thread_id,
+            run_id=run_id,
+            event_type="run.delivery",
+            category="outputs",
+            content=content,
+        )
     return created

@@ -133,12 +133,17 @@ durably persisted its final `RunRow.status`, it writes exactly one run-scoped
 (`success`, `error`, `timeout`, or `interrupted`); recovery additionally sets
 `recovered: true`, and error text, prompts, tool arguments, and tool results
 must not be added. Runs without a completed root output use `{}`. An ownership-
-lost worker writes neither the row nor the event; orphan recovery first wins
-the lease-aware takeover, then idempotently backfills the error event under the
-run owner's user context. Event-store failure never rolls back a terminal row,
-so `RunRow.status` remains authoritative when `run.end` is missing. Recovery
-does not scan already-terminal historical rows, and an older-runtime
-`run.end` is preserved rather than overwritten.
+lost worker writes neither the row nor the event. Every non-owner terminalizer
+must first win its atomic RunStore transition, then best-effort backfill both a
+zero `run.delivery` receipt and `run.end` under the claimed row's user context:
+this covers orphan reconciliation, expired-lease `cancel()` takeover, and
+store rows claimed as `interrupted` by cross-worker interrupt/rollback
+admission. Claimed non-run reservations never receive run events, and active
+local workers retain responsibility for their own final output. Event-store
+failure never rolls back a terminal row or a replacement admission, so
+`RunRow.status` remains authoritative when `run.end` is missing. Recovery does
+not scan already-terminal historical rows, and an older-runtime `run.end` is
+preserved rather than overwritten.
 
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel

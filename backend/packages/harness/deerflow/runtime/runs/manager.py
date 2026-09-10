@@ -28,7 +28,7 @@ from .store.base import (
     run_is_before_cursor,
     run_sort_key,
 )
-from .terminal_events import persist_run_terminal_event
+from .terminal_events import persist_run_delivery_receipt, persist_run_terminal_event
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -1092,12 +1092,12 @@ class RunManager:
         if self._event_store is None:
             return True
         try:
-            await self._event_store.put_if_absent(
+            await persist_run_delivery_receipt(
+                self._event_store,
                 thread_id=record.thread_id,
                 run_id=record.run_id,
-                event_type="run.delivery",
-                category="outputs",
                 content={"presented": 0, "paths": [], "by_tool": {}},
+                user_id=record.user_id,
             )
             return True
         except Exception:
@@ -1107,6 +1107,13 @@ class RunManager:
                 exc_info=True,
             )
             return False
+
+    async def _ensure_recovered_run_events(self, record: RunRecord) -> None:
+        """Best-effort terminal singleton backfill for an atomically claimed run."""
+        if record.operation_kind != ThreadOperationKind.run:
+            return
+        await self._ensure_delivery_receipt(record)
+        await self._ensure_terminal_event(record)
 
     async def _ensure_terminal_event(self, record: RunRecord) -> bool:
         """Idempotently backfill authoritative ``run.end`` after takeover."""
@@ -1459,6 +1466,18 @@ class RunManager:
             return CancelOutcome.unknown
 
         if taken:
+            try:
+                taken_record = self._record_from_store(
+                    {
+                        **row,
+                        "status": RunStatus.error.value,
+                        "error": take_over_msg,
+                    }
+                )
+            except Exception:
+                logger.warning("Failed to map cancelled run %s for terminal event backfill", run_id, exc_info=True)
+            else:
+                await self._ensure_recovered_run_events(taken_record)
             logger.warning("Run %s taken over by worker %s (action=%s)", run_id, self._worker_id, action)
             return CancelOutcome.taken_over
 
@@ -1610,6 +1629,8 @@ class RunManager:
         grace_seconds = self._run_ownership_config.grace_seconds if self._run_ownership_config else 10
 
         interrupted_records: list[RunRecord] = []
+        claimed_store_rows: list[dict[str, Any]] = []
+        locally_finalizing_run_ids: set[str] = set()
         record = RunRecord(
             run_id=run_id,
             thread_id=thread_id,
@@ -1654,6 +1675,11 @@ class RunManager:
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
             local_inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing]
+            locally_finalizing_run_ids = {
+                local.run_id
+                for local in local_inflight
+                if local.finalizing or (local.task is not None and not local.task.done())
+            }
 
             if multitask_strategy in ("interrupt", "rollback") and any(record.operation_kind != ThreadOperationKind.run for record in local_inflight):
                 raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
@@ -1728,7 +1754,7 @@ class RunManager:
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
-                            await self._call_store_with_retry(
+                            _, claimed_store_rows = await self._call_store_with_retry(
                                 "create_thread_operation_atomic",
                                 run_id,
                                 lambda: self._store.create_thread_operation_atomic(**create_kwargs),
@@ -1747,9 +1773,10 @@ class RunManager:
                                 # worker won the race for this thread.
                                 raise ConflictError(f"Thread {thread_id} already has an active run") from exc
                             raise
-                    # ``create_thread_operation_atomic`` already marked any claimed store
-                    # rows as interrupted in the same transaction; no extra
-                    # store write is needed for them.
+                    # ``create_thread_operation_atomic`` already marked any claimed
+                    # store rows as interrupted in the same transaction. Keep its
+                    # returned snapshots for post-commit event backfill; no extra
+                    # RunStore write is needed for them.
 
             # 3) Only now safe to register locally — store insert succeeded.
             self._runs[run_id] = record
@@ -1772,12 +1799,24 @@ class RunManager:
                     interrupted_records.append(r)
 
         # Outside the lock: persist interrupted status for locally-cancelled
-        # runs. Store-side claimed rows are already finalised. Cancellation at
-        # this point happens after the replacement was admitted, so close that
-        # new run before propagating cancellation to the caller.
+        # runs, then backfill terminal events for store-only claimed runs.
+        # Store-side claimed rows are already finalised. Cancellation at this
+        # point happens after the replacement was admitted, so close that new
+        # run before propagating cancellation to the caller.
         try:
             for interrupted_record in interrupted_records:
                 await self._persist_status(interrupted_record, RunStatus.interrupted)
+            for claimed_row in claimed_store_rows:
+                if claimed_row.get("operation_kind", ThreadOperationKind.run.value) != ThreadOperationKind.run.value:
+                    continue
+                if claimed_row.get("run_id") in locally_finalizing_run_ids:
+                    continue
+                try:
+                    claimed_record = self._record_from_store(claimed_row)
+                except Exception:
+                    logger.warning("Failed to map atomically claimed run for terminal event backfill", exc_info=True)
+                    continue
+                await self._ensure_recovered_run_events(claimed_record)
         except asyncio.CancelledError:
             cleanup = asyncio.create_task(self._close_cancelled_admission(record))
             cleanup.set_name(f"deerflow-close-cancelled-admission-{record.run_id}")
@@ -1937,8 +1976,7 @@ class RunManager:
                 # permanently overwrite a live run's later detailed receipt. The
                 # receipt remains best-effort, matching normal terminal delivery
                 # when its event store is unavailable.
-                await self._ensure_delivery_receipt(record)
-                await self._ensure_terminal_event(record)
+                await self._ensure_recovered_run_events(record)
                 recovered.append(record)
 
         if recovered:

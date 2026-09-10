@@ -21,8 +21,10 @@ import pytest
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, ThreadOperationKind
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, _generate_worker_id
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.user_context import get_current_user
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,6 +45,21 @@ def _make_manager(store=None, **kwargs) -> RunManager:
         run_ownership_config=kwargs.pop("run_ownership_config", _lease_config()),
         **kwargs,
     )
+
+
+class _OwnerCapturingEventStore(MemoryRunEventStore):
+    def __init__(self, run_store: MemoryRunStore):
+        super().__init__()
+        self._run_store = run_store
+        self.writes: list[tuple[str, str, str | None]] = []
+
+    async def put_if_absent(self, **kwargs):
+        row = await self._run_store.get(kwargs["run_id"])
+        assert row is not None
+        assert row["status"] not in {"pending", "running"}
+        user = get_current_user()
+        self.writes.append((kwargs["run_id"], kwargs["event_type"], user.id if user is not None else None))
+        return await super().put_if_absent(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +159,109 @@ async def test_interrupt_reclaims_expired_checkpoint_write_reservation():
     assert stale is not None
     assert stale["status"] == "interrupted"
     assert stale["owner_worker_id"] == "worker-b"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+async def test_cross_worker_admission_backfills_terminal_events_for_every_claimed_run(strategy):
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store)
+    expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    for run_id, owner_id in (("old-run-a", "owner-a"), ("old-run-b", "owner-b")):
+        await store.put(
+            run_id,
+            thread_id="thread-1",
+            status="running",
+            operation_kind=ThreadOperationKind.run,
+            user_id=owner_id,
+            owner_worker_id=f"dead-{owner_id}",
+            lease_expires_at=expired,
+            created_at=expired,
+        )
+    await store.put(
+        "expired-checkpoint-write",
+        thread_id="thread-1",
+        status="pending",
+        operation_kind=ThreadOperationKind.checkpoint_write,
+        user_id="reservation-owner",
+        owner_worker_id="dead-reservation-owner",
+        lease_expires_at=expired,
+        created_at=expired,
+    )
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-b",
+        run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=10),
+    )
+
+    admitted = await manager.create_or_reject(
+        "thread-1",
+        multitask_strategy=strategy,
+        user_id="new-owner",
+    )
+
+    assert admitted.status == RunStatus.pending
+    for run_id in ("old-run-a", "old-run-b"):
+        claimed = await store.get(run_id)
+        assert claimed is not None
+        assert claimed["status"] == "interrupted"
+        delivery = await events.list_events("thread-1", run_id, event_types=["run.delivery"])
+        terminal = await events.list_events("thread-1", run_id, event_types=["run.end"])
+        assert len(delivery) == 1
+        assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+        assert len(terminal) == 1
+        assert terminal[0]["metadata"] == {"status": "interrupted", "recovered": True}
+
+    assert await events.list_events("thread-1", "expired-checkpoint-write") == []
+    assert set(events.writes) == {
+        ("old-run-a", "run.delivery", "owner-a"),
+        ("old-run-a", "run.end", "owner-a"),
+        ("old-run-b", "run.delivery", "owner-b"),
+        ("old-run-b", "run.end", "owner-b"),
+    }
+
+
+@pytest.mark.anyio
+async def test_cross_worker_admission_survives_terminal_event_store_failure():
+    class FailingEventStore(MemoryRunEventStore):
+        def __init__(self):
+            super().__init__()
+            self.attempted_types: list[str] = []
+
+        async def put_if_absent(self, **kwargs):
+            self.attempted_types.append(kwargs["event_type"])
+            raise RuntimeError("event store unavailable")
+
+    store = MemoryRunStore()
+    events = FailingEventStore()
+    expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    await store.put(
+        "old-run",
+        thread_id="thread-1",
+        status="running",
+        user_id="old-owner",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired,
+        created_at=expired,
+    )
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-b",
+        run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=10),
+    )
+
+    admitted = await manager.create_or_reject(
+        "thread-1",
+        multitask_strategy="interrupt",
+        user_id="new-owner",
+    )
+
+    assert admitted.status == RunStatus.pending
+    assert (await store.get(admitted.run_id))["status"] == "pending"
+    assert (await store.get("old-run"))["status"] == "interrupted"
+    assert events.attempted_types == ["run.delivery", "run.end"]
 
 
 @pytest.mark.anyio
@@ -1647,6 +1767,49 @@ async def test_cancel_takeover_from_crashed_worker():
     row = await store.get("run-expired")
     assert row is not None
     assert row["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_cancel_takeover_backfills_owner_scoped_terminal_events_once():
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store)
+    grace = 10
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+    await store.put(
+        "run-expired",
+        thread_id="t1",
+        status="running",
+        user_id="run-owner",
+        created_at=datetime.now(UTC).isoformat(),
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+    )
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace),
+    )
+
+    first = await manager.cancel("run-expired")
+    second = await manager.cancel("run-expired")
+    recovered_record = await manager.get("run-expired", user_id=None)
+    assert recovered_record is not None
+    await manager._ensure_recovered_run_events(recovered_record)
+
+    assert first == CancelOutcome.taken_over
+    assert second == CancelOutcome.not_cancellable
+    delivery = await events.list_events("t1", "run-expired", event_types=["run.delivery"])
+    terminal = await events.list_events("t1", "run-expired", event_types=["run.end"])
+    assert len(delivery) == 1
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {"status": "error", "recovered": True}
+    assert events.writes == [
+        ("run-expired", "run.delivery", "run-owner"),
+        ("run-expired", "run.end", "run-owner"),
+        ("run-expired", "run.delivery", "run-owner"),
+        ("run-expired", "run.end", "run-owner"),
+    ]
 
 
 @pytest.mark.anyio
