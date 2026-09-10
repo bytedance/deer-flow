@@ -11,10 +11,15 @@ from langgraph.types import Command
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
-from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.manager import (
+    ORPHAN_RECOVERY_STOP_REASON,
+    CancelOutcome,
+    RunManager,
+)
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, _delivery_content_with_outputs, run_agent
@@ -505,7 +510,10 @@ async def test_delivery_event_is_singleton_across_goal_continuations(monkeypatch
     terminal = await _terminal_events(store, "thread-1", record.run_id)
     assert len(terminal) == 1
     assert terminal[0]["content"]["messages"][0].content == "turn 2"
-    assert terminal[0]["metadata"] == {"status": "success"}
+    assert terminal[0]["metadata"] == {
+        "status": "success",
+        "authoritative": True,
+    }
 
 
 @pytest.mark.anyio
@@ -538,7 +546,10 @@ async def test_delivery_event_emitted_exactly_once_on_error_path():
     terminal = await _terminal_events(store, "thread-1", record.run_id)
     assert len(terminal) == 1
     assert terminal[0]["content"] == {}
-    assert terminal[0]["metadata"] == {"status": "error"}
+    assert terminal[0]["metadata"] == {
+        "status": "error",
+        "authoritative": True,
+    }
 
 
 @pytest.mark.anyio
@@ -766,8 +777,136 @@ async def test_delivery_event_emitted_when_cancelled_waiting_for_prior_finalizat
     terminal = await _terminal_events(store, "thread-1", record.run_id)
     assert len(terminal) == 1
     assert terminal[0]["content"] == {}
-    assert terminal[0]["metadata"] == {"status": "interrupted"}
+    assert terminal[0]["metadata"] == {
+        "status": "interrupted",
+        "authoritative": True,
+    }
     run_manager.update_run_completion.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_metadata_wrapper_start_failure_preserves_error_terminal_event():
+    """A setup failure must not be rewritten as cancellation at startup."""
+    run_store = MemoryRunStore()
+    event_store = MemoryRunEventStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create_or_reject("thread-metadata-failure")
+    bridge = _make_bridge()
+    error = "Failed to verify existing thread metadata"
+
+    agent_factory = MagicMock(side_effect=AssertionError("agent must not be built after metadata setup fails"))
+
+    async def metadata_wrapper() -> None:
+        assert await run_manager.fail_start_if_pending(record.run_id, error=error) is True
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=event_store),
+            agent_factory=agent_factory,
+            graph_input={},
+            config={},
+        )
+
+    wrapper = asyncio.create_task(metadata_wrapper())
+    record.task = wrapper
+    await wrapper
+
+    stored = await run_store.get(record.run_id)
+    terminal = await _terminal_events(event_store, record.thread_id, record.run_id)
+
+    assert record.status == RunStatus.error
+    assert record.error == error
+    assert stored is not None
+    assert stored["status"] == RunStatus.error.value
+    assert stored["error"] == error
+    assert len(terminal) == 1
+    assert terminal[0]["content"] == {}
+    assert terminal[0]["metadata"] == {
+        "status": "error",
+        "authoritative": True,
+    }
+    agent_factory.assert_not_called()
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_metadata_wrapper_start_failure_preserves_remote_cancel_winner():
+    """An active wrapper publishes the accepted cancel, not a recovered error."""
+    run_store = MemoryRunStore()
+    event_store = MemoryRunEventStore()
+    ownership = RunOwnershipConfig(
+        lease_seconds=30,
+        grace_seconds=10,
+        heartbeat_enabled=True,
+    )
+    run_manager = RunManager(
+        store=run_store,
+        worker_id="worker-a",
+        run_ownership_config=ownership,
+    )
+    peer = RunManager(
+        store=run_store,
+        worker_id="worker-b",
+        run_ownership_config=ownership,
+    )
+    record = await run_manager.create_or_reject("thread-metadata-failure-cancel-race")
+    bridge = _make_bridge()
+    failure_cas_started = asyncio.Event()
+    release_failure_cas = asyncio.Event()
+    original_finalize = run_store.finalize_if_owned_and_not_cancelled
+
+    async def paused_finalize(*args, **kwargs):
+        failure_cas_started.set()
+        await release_failure_cas.wait()
+        return await original_finalize(*args, **kwargs)
+
+    run_store.finalize_if_owned_and_not_cancelled = paused_finalize
+    agent_factory = MagicMock(side_effect=AssertionError("agent must not be built after cancellation wins"))
+
+    async def metadata_wrapper() -> None:
+        assert (
+            await run_manager.fail_start_if_pending(
+                record.run_id,
+                error="Failed to verify existing thread metadata",
+            )
+            is True
+        )
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=event_store),
+            agent_factory=agent_factory,
+            graph_input={},
+            config={},
+        )
+
+    wrapper = asyncio.create_task(metadata_wrapper())
+    record.task = wrapper
+    await asyncio.wait_for(failure_cas_started.wait(), timeout=1)
+    assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
+    release_failure_cas.set()
+    await asyncio.wait_for(wrapper, timeout=1)
+
+    stored = await run_store.get(record.run_id)
+    terminal = await _terminal_events(event_store, record.thread_id, record.run_id)
+    assert record.status == RunStatus.interrupted
+    assert record.abort_action == "rollback"
+    assert record.error is None
+    assert record.stop_reason == ORPHAN_RECOVERY_STOP_REASON
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert stored["cancel_action"] == "rollback"
+    assert stored["error"] is None
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {
+        "status": "interrupted",
+        "authoritative": True,
+    }
+    agent_factory.assert_not_called()
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
 @pytest.mark.anyio
@@ -799,7 +938,10 @@ async def test_terminal_event_writer_supports_every_authoritative_run_status(sta
     events = await _terminal_events(store, "thread-1", "run-1")
     assert len(events) == 1
     assert events[0]["content"] == {"result": "first"}
-    assert events[0]["metadata"] == {"status": status.value}
+    assert events[0]["metadata"] == {
+        "status": status.value,
+        "authoritative": True,
+    }
 
 
 @pytest.mark.anyio

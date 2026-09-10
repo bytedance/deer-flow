@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 from deerflow.persistence.run import RunRepository
-from deerflow.runtime import CancelOutcome, RunManager, RunStatus, ThreadOperationKind
+from deerflow.runtime import LOCAL_FINALIZER_PENDING_STOP_REASON, ORPHAN_RECOVERY_STOP_REASON, CancelOutcome, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.store.base import RunStore
 
@@ -958,6 +958,44 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_interrupt_marks_an_expired_run_as_recovered_on_sql_store(self, tmp_path):
+        """SQL admission persists the no-producer liveness edge atomically."""
+        from deerflow.config.run_ownership_config import RunOwnershipConfig
+
+        repo = await _make_repo(tmp_path)
+        expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+        await repo.put(
+            "expired-run",
+            thread_id="thread-T",
+            status="running",
+            operation_kind=ThreadOperationKind.run,
+            owner_worker_id="dead-worker",
+            lease_expires_at=expired,
+            created_at=expired,
+        )
+        manager = RunManager(
+            store=repo,
+            worker_id="worker-b",
+            run_ownership_config=RunOwnershipConfig(
+                heartbeat_enabled=True,
+                lease_seconds=30,
+                grace_seconds=10,
+            ),
+        )
+
+        admitted = await manager.create_or_reject(
+            "thread-T",
+            multitask_strategy="interrupt",
+        )
+
+        stale = await repo.get("expired-run")
+        assert admitted.status == RunStatus.pending
+        assert stale is not None
+        assert stale["status"] == RunStatus.interrupted.value
+        assert stale["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_is_unique_violation_detects_real_sqlite_integrity_error(self, tmp_path):
         """``_is_unique_violation`` must return True for a real SQLite IntegrityError.
 
@@ -1147,6 +1185,100 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_sql_atomic_admission_preserves_first_action_and_refreshes_finalizer_lease(
+        self,
+        tmp_path,
+    ):
+        repo = await _make_repo(tmp_path)
+        old_lease = (datetime.now(UTC) + timedelta(seconds=5)).isoformat()
+        stale_admission_lease = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=old_lease,
+        )
+        assert await repo.request_cancel("run-1", action="interrupt") == "interrupt"
+
+        replacement, claimed = await repo.create_thread_operation_atomic(
+            "run-2",
+            thread_id="t1",
+            owner_worker_id="worker-a",
+            lease_expires_at=stale_admission_lease,
+            multitask_strategy="rollback",
+            recovery_stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+            local_finalizer_run_ids={"run-1"},
+            local_finalizer_stop_reason=LOCAL_FINALIZER_PENDING_STOP_REASON,
+            lease_seconds=60,
+        )
+
+        assert len(claimed) == 1
+        assert claimed[0]["cancel_action"] == "interrupt"
+        assert claimed[0]["stop_reason"] == LOCAL_FINALIZER_PENDING_STOP_REASON
+        assert datetime.fromisoformat(claimed[0]["lease_expires_at"]) > (datetime.now(UTC) + timedelta(seconds=50))
+        assert datetime.fromisoformat(replacement["lease_expires_at"]) > (datetime.now(UTC) + timedelta(seconds=50))
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_sql_terminal_renew_and_expired_finalizer_claim_are_exact(
+        self,
+        tmp_path,
+    ):
+        repo = await _make_repo(tmp_path)
+        live = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        next_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="interrupted",
+            owner_worker_id="worker-a",
+            lease_expires_at=live,
+            stop_reason=LOCAL_FINALIZER_PENDING_STOP_REASON,
+        )
+
+        renewal = await repo.renew_lease(
+            "run-1",
+            owner_worker_id="worker-a",
+            lease_expires_at=next_lease,
+        )
+        assert renewal.renewed is True
+        assert (
+            await repo.claim_expired_local_finalizer(
+                "run-1",
+                owner_worker_id="worker-b",
+                recovery_stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+                grace_seconds=0,
+            )
+            is None
+        )
+
+        expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        # Test-only direct update puts the row on the exact expiry boundary.
+        await repo.update_lease(
+            "run-1",
+            owner_worker_id="worker-a",
+            lease_expires_at=expired,
+        )
+        claimed = await repo.claim_expired_local_finalizer(
+            "run-1",
+            owner_worker_id="worker-b",
+            recovery_stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+            grace_seconds=0,
+        )
+        assert claimed is not None
+        assert claimed["owner_worker_id"] == "worker-b"
+        assert claimed["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+        assert (
+            await repo.renew_lease(
+                "run-1",
+                owner_worker_id="worker-a",
+                lease_expires_at=next_lease,
+            )
+        ).renewed is False
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_request_cancel_rejects_terminal_run(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("run-1", thread_id="t1", status="success")
@@ -1173,6 +1305,34 @@ class TestRunRepository:
         assert result.finalized is False
         assert result.cancel_action == "rollback"
         assert (await repo.get("run-1"))["status"] == "running"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_cancel_request_wins_before_owner_start_failure(self, tmp_path):
+        """The owner-fenced failure CAS must not overwrite a pending cancel."""
+        repo = await _make_repo(tmp_path)
+        lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="pending",
+            owner_worker_id="worker-a",
+            lease_expires_at=lease,
+        )
+
+        assert await repo.request_cancel("run-1", action="rollback") == "rollback"
+        result = await repo.finalize_if_owned_and_not_cancelled(
+            "run-1",
+            owner_worker_id="worker-a",
+            status="error",
+            error="Failed to attach run worker",
+        )
+
+        assert result.finalized is False
+        assert result.cancel_action == "rollback"
+        row = await repo.get("run-1")
+        assert row["status"] == "pending"
+        assert row["error"] is None
         await _cleanup()
 
     @pytest.mark.anyio

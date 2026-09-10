@@ -94,7 +94,7 @@
       "producer": "Run worker finalization after durable RunRow status; RunManager after atomic orphan takeover, expired-lease cancel takeover, or cross-worker interrupt/rollback claim",
       "content_schema": true,
       "content_description": "Opaque output from the latest completed root graph invocation in the Gateway run. Error, timeout, interrupted, preflight-failure, and recovered runs without a completed root output use an empty object. Values nested inside an output may have backend-dependent representations when they are not directly JSON serializable.",
-      "lifecycle_semantics": "At most one event per run. When present, metadata.status mirrors the authoritative terminal RunRow.status and is written only after that status is durable. Goal continuations update the captured output but do not emit additional events.",
+      "lifecycle_semantics": "At most one event per run. New producers set metadata.authoritative=true; metadata.status mirrors the authoritative terminal RunRow.status and the event is written only after every visible tail frame and that status are durable. A consumer may combine a matching marked event with the terminal RunRow as durable proof that a missing bridge END can be synthesized. Goal continuations update the captured output but do not emit additional events. Legacy unmarked run.end rows are preserved but are not terminal-delivery proof because their ordering relative to late frames is unknown.",
       "storage_semantics": {
         "memory": "Retains the original Python container and nested values.",
         "jsonl": "Persists JSON with json.dumps(default=str), so nested non-JSON values are restored as strings.",
@@ -102,9 +102,10 @@
       },
       "metadata_schema": {
         "type": "object",
-        "required": ["status"],
+        "required": ["status", "authoritative"],
         "properties": {
           "status": {"enum": ["success", "error", "timeout", "interrupted"]},
+          "authoritative": {"const": true},
           "recovered": {"const": true}
         },
         "additionalProperties": true
@@ -438,7 +439,7 @@
       "id": "terminal-event-durability",
       "status": "best-effort mirror after authoritative row",
       "affected_event_types": ["run.end"],
-      "notes": "RunRow.status remains authoritative. A process crash, caller cancellation, or event-store outage after the terminal RunRow write but before run.end persistence can leave the event missing. Current orphan, cancel-takeover, and cross-worker admission claim paths backfill run.end for rows they terminalize, but do not scan historical terminal rows. Pre-existing run.end rows created by older runtimes remain legacy completion markers and are not rewritten."
+      "notes": "RunRow.status remains authoritative. A process crash, caller cancellation, or event-store outage after the terminal RunRow write but before run.end persistence can leave the event missing. Current orphan, cancel-takeover, and cross-worker admission claim paths backfill run.end for rows they terminalize, but do not scan historical terminal rows. A matching metadata.authoritative=true run.end plus a terminal RunRow is durable stream-finalization proof when run.delivery is absent and bridge END publication fails. Pre-existing unmarked run.end rows remain legacy completion markers, are not rewritten, and cannot be used for that liveness shortcut."
     },
     {
       "id": "run-end-backend-serialization",

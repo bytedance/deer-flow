@@ -345,8 +345,18 @@ def test_worker_terminal_event_catalog_has_one_authoritative_run_end():
 @pytest.mark.parametrize("status", ["success", "error", "timeout", "interrupted"])
 def test_run_end_contract_accepts_every_authoritative_terminal_status(status):
     schema = _contract_events()["run.end"]["metadata_schema"]
-    _assert_schema_valid(schema, {"status": status})
-    _assert_schema_valid(schema, {"status": status, "recovered": True})
+    _assert_schema_valid(schema, {"status": status, "authoritative": True})
+    _assert_schema_valid(
+        schema,
+        {"status": status, "authoritative": True, "recovered": True},
+    )
+
+
+def test_run_end_contract_rejects_legacy_unmarked_metadata():
+    schema = _contract_events()["run.end"]["metadata_schema"]
+    validator = Draft202012Validator(schema)
+
+    assert list(validator.iter_errors({"status": "success"}))
 
 
 @pytest.mark.anyio

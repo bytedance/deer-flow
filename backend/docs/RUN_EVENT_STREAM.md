@@ -133,15 +133,22 @@ nested representation is not currently identical across storage backends:
   `json.dumps(default=str)`, so nested values that are not directly JSON
   serializable are read back as strings.
 
-When present, `run.end.metadata.status` is one of `success`, `error`, `timeout`,
-or `interrupted` and mirrors the already-durable `RunRow.status`. Recovery
-events also set `metadata.recovered: true`. This includes orphan reconciliation,
-an expired-lease cancel takeover, and runs claimed by cross-worker
+New `run.end` events set `metadata.authoritative: true` and
+`metadata.status` to one of `success`, `error`, `timeout`, or `interrupted`.
+The status mirrors the already-durable `RunRow.status`; the producer writes the
+marked singleton only after every client-visible tail frame. Recovery events
+also set `metadata.recovered: true`. This includes orphan reconciliation, an
+expired-lease cancel takeover, and runs claimed by cross-worker
 interrupt/rollback admission. Error text, prompts, tool arguments, and tool
 results are never copied into terminal metadata. Runs without a completed root
-invocation use `{}` as content. Consumers may use the event as terminal
-evidence, but must still read `RunRow.status` when the event is absent and must
-not depend on backend-identical nested output values.
+invocation use `{}` as content.
+
+When a retained stream lacks its END marker, a consumer may synthesize END from
+a fresh owner-scoped read only when the terminal `RunRow.status` matches a
+marked `run.end`, or when the stronger `run.delivery` receipt is present. An
+older unmarked `run.end` is preserved for history but is not safe liveness
+evidence because its ordering relative to late visible frames is unknown.
+Consumers must not depend on backend-identical nested output values.
 
 `subagents/step_events.py::subagent_run_event()` maps streamed `task_*` chunks
 to persisted events. The worker batches them through `put_batch()`:
@@ -220,9 +227,10 @@ be used by new producers.
   cancellation, or event-store outage after the row becomes terminal but before
   the idempotent `run.end` write can leave the event missing. Current orphan,
   cancel-takeover, and cross-worker admission claim paths backfill the runs they
-  terminalize, but there is no historical terminal-row scan. Older `run.end`
-  rows produced before this contract remain legacy graph-completion markers and
-  are not rewritten.
+  terminalize, but there is no historical terminal-row scan. A terminal row
+  plus a matching `metadata.authoritative: true` event can recover a missing
+  bridge END; older unmarked `run.end` rows remain legacy graph-completion
+  markers, are not rewritten, and cannot enable that shortcut.
 - Nested non-JSON values in `run.end.content` have backend-dependent
   representations: memory retains Python values, while JSONL and database
   stores read them back as strings.

@@ -30,7 +30,7 @@ from typing import Annotated, TypedDict
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -139,11 +139,13 @@ async def test_shutdown_terminalizes_task_cancelled_before_agent_worker_starts()
     )
     assert stored is not None
     assert stored["status"] == RunStatus.interrupted.value
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
     assert len(delivery) == 1
     assert len(terminal) == 1
     assert terminal[0]["metadata"] == {
         "status": RunStatus.interrupted.value,
         "recovered": True,
+        "authoritative": True,
     }
     assert [[item.run_id for item in batch] for batch in recovered_batches] == [[record.run_id]]
 

@@ -977,7 +977,18 @@ async def run_agent(
 
         start_outcome = await run_manager.try_start(run_id)
         if start_outcome is not RunStartOutcome.started:
-            if record.abort_event.is_set():
+            # A metadata/setup wrapper can fail the still-pending run and set
+            # its abort event before this worker reaches the startup barrier.
+            # In that case ``error`` is already the authoritative outcome;
+            # treating every abort as a cancellation would overwrite it with
+            # ``interrupted`` and make the local record diverge from a durable
+            # row whose terminal CAS has already committed.  Only active runs
+            # still need the cancellation transition here.  Already-terminal
+            # runs continue through ``finally`` so their run.end is published.
+            if record.abort_event.is_set() and record.status in {
+                RunStatus.pending,
+                RunStatus.running,
+            }:
                 await _finish_cancellation(
                     record.abort_action,
                     restore_checkpoint=False,

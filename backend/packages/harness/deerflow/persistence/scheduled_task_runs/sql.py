@@ -21,6 +21,12 @@ QUEUED_RUN_STATUSES: tuple[str, ...] = ("queued",)
 EXECUTING_RUN_STATUSES: tuple[str, ...] = ("launching", "running")
 ACTIVE_RUN_STATUSES: tuple[str, ...] = (*QUEUED_RUN_STATUSES, *EXECUTING_RUN_STATUSES)
 _SCHEDULER_BUDGET_LOCK_KEY = 4694001
+_RECOVERED_RUN_STOP_REASONS = frozenset(
+    {
+        "orphan_recovered",
+        "scheduled_task_orphan_recovered",
+    }
+)
 
 
 def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_seconds: int) -> bool:
@@ -758,7 +764,7 @@ class ScheduledTaskRunRepository:
                     # would hold SQLite's writer lock across the nested short
                     # transaction used by that durable-run CAS.
                     associations.append((task, row, candidate))
-                    if on_runs_recovered is not None and candidate.status not in {"pending", "running"} and candidate.stop_reason == "scheduled_task_orphan_recovered":
+                    if on_runs_recovered is not None and candidate.status not in {"pending", "running"} and candidate.stop_reason in _RECOVERED_RUN_STOP_REASONS:
                         # Heal a scheduler takeover that committed before this
                         # process completed terminal observability. Keep this
                         # parent row active until the post-commit callback
@@ -880,7 +886,7 @@ class ScheduledTaskRunRepository:
                     if row is None or row.status not in EXECUTING_RUN_STATUSES:
                         continue
                     candidate = await session.get(RunRow, run_id)
-                    if candidate is None or candidate.status in {"pending", "running"} or candidate.stop_reason != "scheduled_task_orphan_recovered":
+                    if candidate is None or candidate.status in {"pending", "running"} or candidate.stop_reason not in _RECOVERED_RUN_STOP_REASONS:
                         continue
                     self._associate_scheduled_run(row, candidate)
                     self._associate_task_with_run(task, row, candidate)

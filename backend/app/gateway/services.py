@@ -44,6 +44,7 @@ from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
+    LOCAL_FINALIZER_PENDING_STOP_REASON,
     ORPHAN_RECOVERY_STOP_REASON,
     CheckpointStateAccessor,
     ConflictError,
@@ -84,6 +85,14 @@ from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
+
+_SCHEDULED_TASK_ORPHAN_RECOVERY_STOP_REASON = "scheduled_task_orphan_recovered"
+_ORPHAN_RECOVERY_STOP_REASONS = frozenset(
+    {
+        ORPHAN_RECOVERY_STOP_REASON,
+        _SCHEDULED_TASK_ORPHAN_RECOVERY_STOP_REASON,
+    }
+)
 
 
 @asynccontextmanager
@@ -221,15 +230,19 @@ async def _ensure_thread_metadata(
         return
 
 
-async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
-    """True when a terminal run has no retained stream on bridges that can tell."""
+async def _terminal_record_stream_missing(
+    bridge: StreamBridge,
+    record: RunRecord,
+    run_mgr: RunManager,
+) -> bool:
+    """Require durable completion evidence before replacing a missing stream."""
     if not _run_is_terminal(record):
         return False
     stream_exists = getattr(bridge, "stream_exists", None)
     if stream_exists is None:
         return False
     try:
-        return not bool(await stream_exists(record.run_id))
+        stream_missing = not bool(await stream_exists(record.run_id))
     except Exception:
         logger.debug(
             "Failed to probe stream existence for terminal run %s",
@@ -237,24 +250,42 @@ async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecor
             exc_info=True,
         )
         return False
+    if not stream_missing:
+        return False
+    return await _terminal_completion_observed_after_heartbeat(record, run_mgr)
 
 
-async def _orphan_recovery_observed_after_heartbeat(
+async def _terminal_completion_observed_after_heartbeat(
     record: RunRecord,
     run_mgr: RunManager,
 ) -> bool:
-    """Return whether durable orphan recovery is the consumer's liveness edge.
+    """Return whether durable evidence makes a missing bridge END recoverable.
 
-    A normal terminal status is not sufficient: the producer persists status
-    before publishing its final error/data frames and END. Orphan recovery is
-    different because the producer is known to be gone and the durable
-    ``stop_reason`` is written atomically with the terminal status. Only that
-    explicit signal may synthesize END after a heartbeat.
+    A normal terminal status is not sufficient: older producers could persist
+    it before publishing their final error/data frames and END. Orphan recovery
+    is safe because its durable ``stop_reason`` proves the producer is gone.
+    ``run.delivery`` provides a second safe boundary: workers persist that
+    singleton only after all visible tail frames and before the terminal row.
+    New-runtime ``run.end`` events carry an explicit authoritative marker and
+    are written after the terminal row; either pair acts as a durable outbox if
+    bridge END publication is lost. Legacy unmarked ``run.end`` rows are not
+    trusted because their tail ordering is unknown.
     """
-    if not record.store_only:
+    task = record.task
+    if not (record.store_only or record.ownership_lost or task is None or task.done()):
         return False
-    refreshed = await run_mgr.get(record.run_id, user_id=record.user_id)
-    return refreshed is not None and _run_is_terminal(refreshed) and refreshed.stop_reason == ORPHAN_RECOVERY_STOP_REASON
+    refreshed = await run_mgr.get_durable(record.run_id, user_id=record.user_id)
+    if refreshed is None or not _run_is_terminal(refreshed):
+        return False
+    if refreshed.stop_reason in _ORPHAN_RECOVERY_STOP_REASONS:
+        return True
+    if await run_mgr.has_durable_run_delivery(refreshed):
+        return True
+    if await run_mgr.has_durable_authoritative_run_end(refreshed):
+        return True
+    if refreshed.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON:
+        return await run_mgr.recover_expired_local_finalizer(refreshed)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1721,7 +1752,7 @@ async def sse_consumer(
     tests) keep ``end`` when a terminal record's stream is gone.
     """
     last_event_id = request.headers.get("Last-Event-ID")
-    if await _terminal_record_stream_missing(bridge, record):
+    if await _terminal_record_stream_missing(bridge, record, run_mgr):
         if emit_gap_on_missing_stream:
             # Creating-endpoint retry: a bare `end` looks like the run
             # produced nothing. Point the client at durable state instead.
@@ -1762,7 +1793,7 @@ async def sse_consumer(
                 return
 
             if entry is HEARTBEAT_SENTINEL:
-                if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
+                if await _terminal_completion_observed_after_heartbeat(record, run_mgr):
                     yield format_sse("end", None)
                     return
                 yield ": heartbeat\n\n"
@@ -1821,7 +1852,7 @@ async def wait_for_run_completion(
         response.
     """
     completed = False
-    if await _terminal_record_stream_missing(bridge, record):
+    if await _terminal_record_stream_missing(bridge, record, run_mgr):
         return True
 
     resume_from_event_id: str | None = None
@@ -1842,7 +1873,7 @@ async def wait_for_run_completion(
                     resume_from_event_id = entry.latest_available_event_id
                     gap_seen = True
                     break
-                if entry is HEARTBEAT_SENTINEL and await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
+                if entry is HEARTBEAT_SENTINEL and await _terminal_completion_observed_after_heartbeat(record, run_mgr):
                     completed = True
                     return True
                 if await request.is_disconnected():

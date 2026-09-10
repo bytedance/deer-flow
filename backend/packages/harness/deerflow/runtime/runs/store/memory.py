@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from deerflow.runtime.runs.store.base import (
+    LOCAL_FINALIZER_PENDING_STOP_REASON,
     LeaseRenewal,
     RunIdempotencyConflict,
     RunStore,
@@ -20,6 +21,8 @@ from deerflow.utils.time import is_lease_expired
 
 
 class MemoryRunStore(RunStore):
+    supports_atomic_recovery_markers = True
+
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
         # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
@@ -189,10 +192,11 @@ class MemoryRunStore(RunStore):
         if run is None or run.get("owner_worker_id") != owner_worker_id:
             return False
         rollback_refinement = run.get("status") == "interrupted" and status == "error"
-        if not rollback_refinement and is_lease_expired(
-            run.get("lease_expires_at"),
-            grace_seconds=0,
-        ):
+        active_source = run.get("status") in ("pending", "running")
+        local_finalizer_source = run.get("status") not in ("pending", "running") and run.get("stop_reason") == LOCAL_FINALIZER_PENDING_STOP_REASON
+        if not (active_source or local_finalizer_source or rollback_refinement):
+            return False
+        if (active_source or local_finalizer_source) and is_lease_expired(run.get("lease_expires_at"), grace_seconds=0):
             return False
         return await self.update_status(
             run_id,
@@ -313,7 +317,9 @@ class MemoryRunStore(RunStore):
         run = self._runs.get(run_id)
         if run is None:
             return False
-        if run["status"] not in ("pending", "running"):
+        active_source = run["status"] in ("pending", "running")
+        local_finalizer_source = not active_source and run.get("stop_reason") == LOCAL_FINALIZER_PENDING_STOP_REASON and not is_lease_expired(run.get("lease_expires_at"), grace_seconds=0)
+        if not (active_source or local_finalizer_source):
             return False
         if run.get("owner_worker_id") != owner_worker_id:
             return False
@@ -343,6 +349,30 @@ class MemoryRunStore(RunStore):
             renewed=True,
             cancel_action=run.get("cancel_action") if run is not None else None,
         )
+
+    async def claim_expired_local_finalizer(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        recovery_stop_reason: str,
+        grace_seconds: int,
+    ) -> dict[str, Any] | None:
+        run = self._runs.get(run_id)
+        if (
+            run is None
+            or run.get("status") in ("pending", "running")
+            or run.get("stop_reason") != LOCAL_FINALIZER_PENDING_STOP_REASON
+            or not is_lease_expired(
+                run.get("lease_expires_at"),
+                grace_seconds=grace_seconds,
+            )
+        ):
+            return None
+        run["owner_worker_id"] = owner_worker_id
+        run["stop_reason"] = recovery_stop_reason
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return run
 
     async def request_cancel(self, run_id: str, *, action: str) -> str | None:
         if action not in ("interrupt", "rollback"):
@@ -515,10 +545,15 @@ class MemoryRunStore(RunStore):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        recovery_stop_reason: str | None = None,
+        local_finalizer_run_ids: set[str] | None = None,
+        local_finalizer_stop_reason: str | None = None,
+        lease_seconds: int | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
 
         now = datetime.now(UTC).isoformat()
+        fresh_lease_expires_at = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat() if lease_seconds is not None else lease_expires_at
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
 
         if idempotency_key is not None:
@@ -575,6 +610,15 @@ class MemoryRunStore(RunStore):
                 r["status"] = "interrupted"
                 r["error"] = "Cancelled by newer run"
                 r["owner_worker_id"] = owner_worker_id
+                if r.get("cancel_action") is None:
+                    r["cancel_action"] = multitask_strategy
+                    r["cancel_requested_at"] = now
+                if r.get("operation_kind", "run") == "run":
+                    if local_finalizer_stop_reason is not None and r["run_id"] in (local_finalizer_run_ids or set()):
+                        r["stop_reason"] = local_finalizer_stop_reason
+                        r["lease_expires_at"] = fresh_lease_expires_at
+                    elif recovery_stop_reason is not None:
+                        r["stop_reason"] = recovery_stop_reason
                 r["updated_at"] = now
                 claimed.append(r)
 
@@ -591,7 +635,7 @@ class MemoryRunStore(RunStore):
             "kwargs": kwargs or {},
             "error": None,
             "owner_worker_id": owner_worker_id,
-            "lease_expires_at": lease_expires_at,
+            "lease_expires_at": fresh_lease_expires_at,
             "idempotency_key": idempotency_key,
             "cancel_action": None,
             "cancel_requested_at": None,

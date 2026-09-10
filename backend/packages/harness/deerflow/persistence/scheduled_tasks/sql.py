@@ -17,6 +17,12 @@ from deerflow.utils.time import coerce_iso
 logger = logging.getLogger(__name__)
 
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+_RECOVERED_RUN_STOP_REASONS = frozenset(
+    {
+        "orphan_recovered",
+        "scheduled_task_orphan_recovered",
+    }
+)
 
 
 class ActiveScheduledTaskMutationConflict(Exception):
@@ -542,7 +548,7 @@ class ScheduledTaskRepository:
                 )
                 task_run = run_result.scalars().first()
                 candidate = await self._find_underlying_run(session, task_run, task)
-                if on_runs_recovered is not None and candidate is not None and candidate.status not in {"pending", "running"} and candidate.stop_reason == "scheduled_task_orphan_recovered":
+                if on_runs_recovered is not None and candidate is not None and candidate.status not in {"pending", "running"} and candidate.stop_reason in _RECOVERED_RUN_STOP_REASONS:
                     # A prior scheduler process may have committed the run
                     # takeover but died before publishing terminal
                     # observability or closing this parent row. Keep the row
@@ -595,7 +601,7 @@ class ScheduledTaskRepository:
                     if task is None or task.status != "running":
                         continue
                     candidate = await session.get(RunRow, run_id)
-                    if candidate is None or candidate.status in {"pending", "running"} or candidate.stop_reason != "scheduled_task_orphan_recovered":
+                    if candidate is None or candidate.status in {"pending", "running"} or candidate.stop_reason not in _RECOVERED_RUN_STOP_REASONS:
                         continue
                     task.status = "cancelled"
                     task.last_error = error

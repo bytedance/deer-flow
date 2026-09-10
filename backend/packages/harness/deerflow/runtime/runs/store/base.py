@@ -17,6 +17,8 @@ from typing import Any
 
 from deerflow.utils.time import coerce_iso
 
+LOCAL_FINALIZER_PENDING_STOP_REASON = "local_finalizer_pending"
+
 
 @dataclass(frozen=True)
 class EditReplayVisibility:
@@ -110,6 +112,13 @@ def run_is_before_cursor(
 
 
 class RunStore(abc.ABC):
+    # The class that defines create_thread_operation_atomic() may opt into the
+    # extended atomic-recovery keywords by defining this flag alongside it.
+    # Passive subclasses inherit that proven implementation; a subclass that
+    # overrides the method must opt in again so old strict signatures remain
+    # compatible.
+    supports_atomic_recovery_markers = False
+
     @abc.abstractmethod
     async def put(
         self,
@@ -409,6 +418,24 @@ class RunStore(abc.ABC):
         and cancellation predicates in one atomic operation. Failing closed
         keeps a stale worker from publishing an outcome through a legacy store
         that cannot provide that fencing guarantee.
+        """
+        raise NotImplementedError
+
+    async def claim_expired_local_finalizer(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        recovery_stop_reason: str,
+        grace_seconds: int,
+    ) -> dict[str, Any] | None:
+        """Fence an expired terminal local finalizer and return its new row.
+
+        Implementations must atomically match the exact
+        ``local_finalizer_pending`` marker and an expired (or missing) lease,
+        transfer ownership, and replace the marker with
+        *recovery_stop_reason*. Returning ``None`` means a live finalizer or a
+        concurrent receipt/recovery path still owns the decision.
         """
         raise NotImplementedError
 

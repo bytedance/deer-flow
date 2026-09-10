@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
-from deerflow.runtime import DisconnectMode, RunManager, RunStatus, ThreadOperationKind
+from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, DisconnectMode, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy, RunStartOutcome
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -420,7 +420,7 @@ async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
     """Worker attach failures should finalize only runs still pending startup."""
     store = MemoryRunStore()
     events = MemoryRunEventStore()
-    on_recovered = AsyncMock()
+    on_recovered = AsyncMock(return_value=False)
     manager = RunManager(
         store=store,
         event_store=events,
@@ -445,13 +445,20 @@ async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
     assert stored is not None
     assert stored["status"] == RunStatus.error.value
     assert stored["error"] == error
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    assert record.stop_reason == ORPHAN_RECOVERY_STOP_REASON
     delivery = await events.list_events("thread-1", record.run_id, event_types=["run.delivery"])
     terminal = await events.list_events("thread-1", record.run_id, event_types=["run.end"])
     assert len(delivery) == 1
     assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
     assert len(terminal) == 1
-    assert terminal[0]["metadata"] == {"status": "error", "recovered": True}
+    assert terminal[0]["metadata"] == {
+        "status": "error",
+        "recovered": True,
+        "authoritative": True,
+    }
     on_recovered.assert_awaited_once()
+    assert on_recovered.await_args.args[0][0].stop_reason == ORPHAN_RECOVERY_STOP_REASON
 
     running = await manager.create_or_reject("thread-2")
     assert await manager.try_start(running.run_id) == RunStartOutcome.started
@@ -467,10 +474,87 @@ async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
 
 
 @pytest.mark.anyio
+async def test_fail_start_if_pending_adopts_durable_cancel_winner():
+    """A remote cancel accepted before the startup-failure CAS must win."""
+    store = MemoryRunStore()
+    events = MemoryRunEventStore()
+    on_recovered = AsyncMock(return_value=False)
+    ownership = RunOwnershipConfig(
+        lease_seconds=30,
+        grace_seconds=10,
+        heartbeat_enabled=True,
+    )
+    owner = RunManager(
+        store=store,
+        event_store=events,
+        on_orphans_recovered=on_recovered,
+        worker_id="worker-a",
+        run_ownership_config=ownership,
+    )
+    peer = RunManager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=ownership,
+    )
+    record = await owner.create_or_reject("thread-start-failure-cancel-race")
+
+    failure_cas_started = asyncio.Event()
+    release_failure_cas = asyncio.Event()
+    original_finalize = store.finalize_if_owned_and_not_cancelled
+
+    async def paused_finalize(*args, **kwargs):
+        failure_cas_started.set()
+        await release_failure_cas.wait()
+        return await original_finalize(*args, **kwargs)
+
+    store.finalize_if_owned_and_not_cancelled = paused_finalize
+    startup_failure = asyncio.create_task(
+        owner.fail_start_if_pending(
+            record.run_id,
+            error="Failed to attach run worker: boom",
+            emit_terminal_events=True,
+        )
+    )
+    await asyncio.wait_for(failure_cas_started.wait(), timeout=1)
+
+    assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
+    release_failure_cas.set()
+    assert await asyncio.wait_for(startup_failure, timeout=1) is True
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert stored["cancel_action"] == "rollback"
+    assert stored["error"] is None
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    assert record.status == RunStatus.interrupted
+    assert record.abort_action == "rollback"
+    assert record.error is None
+    delivery = await events.list_events(
+        record.thread_id,
+        record.run_id,
+        event_types=["run.delivery"],
+    )
+    terminal = await events.list_events(
+        record.thread_id,
+        record.run_id,
+        event_types=["run.end"],
+    )
+    assert len(delivery) == 1
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {
+        "status": "interrupted",
+        "recovered": True,
+        "authoritative": True,
+    }
+    on_recovered.assert_awaited_once()
+
+
+@pytest.mark.anyio
 async def test_taskless_cancel_backfills_terminal_events_once():
     store = MemoryRunStore()
     events = MemoryRunEventStore()
-    on_recovered = AsyncMock()
+    on_recovered = AsyncMock(return_value=False)
     manager = RunManager(
         store=store,
         event_store=events,
@@ -486,8 +570,17 @@ async def test_taskless_cancel_backfills_terminal_events_once():
     assert len(delivery) == 1
     assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
     assert len(terminal) == 1
-    assert terminal[0]["metadata"] == {"status": "interrupted", "recovered": True}
+    assert terminal[0]["metadata"] == {
+        "status": "interrupted",
+        "recovered": True,
+        "authoritative": True,
+    }
     on_recovered.assert_awaited_once()
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    assert record.stop_reason == ORPHAN_RECOVERY_STOP_REASON
+    assert on_recovered.await_args.args[0][0].stop_reason == ORPHAN_RECOVERY_STOP_REASON
 
 
 @pytest.mark.anyio
@@ -573,7 +666,11 @@ async def test_reconcile_orphaned_run_backfills_delivery_after_atomic_takeover()
     terminal = await events.list_events("thread-1", "running-run", event_types=["run.end"])
     assert len(terminal) == 1
     assert terminal[0]["content"] == {}
-    assert terminal[0]["metadata"] == {"status": "error", "recovered": True}
+    assert terminal[0]["metadata"] == {
+        "status": "error",
+        "recovered": True,
+        "authoritative": True,
+    }
     assert (await store.get("running-run"))["status"] == "error"
 
 
@@ -617,7 +714,11 @@ async def test_terminalize_recovered_runs_backfills_events_and_notifies_gateway(
     )
     assert len(delivery) == 1
     assert len(terminal) == 1
-    assert terminal[0]["metadata"] == {"status": "error", "recovered": True}
+    assert terminal[0]["metadata"] == {
+        "status": "error",
+        "recovered": True,
+        "authoritative": True,
+    }
     assert [[item.run_id for item in batch] for batch in callback_batches] == [["scheduler-recovered"]]
 
 
@@ -693,7 +794,9 @@ async def test_reconcile_preserves_legacy_terminal_event_without_overwriting_its
     terminal = await events.list_events("thread-1", "running-run", event_types=["run.end"])
     assert len(terminal) == 1
     assert terminal[0]["content"] == {"legacy": True}
-    assert terminal[0]["metadata"] == {"status": "success"}
+    assert terminal[0]["metadata"] == {
+        "status": "success",
+    }
     assert (await store.get("running-run"))["status"] == "error"
     assert "authoritative RunRow status is 'error'" in caplog.text
 
@@ -1217,6 +1320,7 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
+    old.task = asyncio.create_task(asyncio.Event().wait())
     store.create_thread_operation_atomic = AsyncMock(side_effect=RuntimeError("db down"))
 
     with pytest.raises(RuntimeError, match="db down"):
@@ -1226,8 +1330,11 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     assert list(manager._runs) == [old.run_id]
     assert old.status == RunStatus.running
     assert old.abort_event.is_set() is False
+    assert old.task.done() is False
     assert stored_old is not None
     assert stored_old["status"] == "running"
+    old.task.cancel()
+    await asyncio.gather(old.task, return_exceptions=True)
 
 
 @pytest.mark.anyio
@@ -1252,6 +1359,69 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     assert old.abort_event.is_set() is False
     assert stored_old is not None
     assert stored_old["status"] == "running"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+async def test_create_or_reject_drains_commit_before_return_when_cancelled(
+    strategy: str,
+) -> None:
+    """Cancellation after commit must close both sides of atomic admission."""
+
+    class CommitThenBlockStore(MemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.committed = asyncio.Event()
+            self.release_return = asyncio.Event()
+
+        async def create_thread_operation_atomic(self, run_id: str, **kwargs: Any):
+            result = await super().create_thread_operation_atomic(run_id, **kwargs)
+            self.committed.set()
+            await self.release_return.wait()
+            return result
+
+    store = CommitThenBlockStore()
+    events = MemoryRunEventStore()
+    manager = RunManager(store=store, event_store=events)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+
+    admission = asyncio.create_task(
+        manager.create_or_reject(
+            "thread-1",
+            multitask_strategy=strategy,
+        )
+    )
+    await asyncio.wait_for(store.committed.wait(), timeout=1)
+    admission.cancel()
+    await asyncio.sleep(0)
+    assert admission.done() is False
+    admission.cancel()
+    await asyncio.sleep(0)
+    assert admission.done() is False
+
+    store.release_return.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(admission, timeout=1)
+
+    rows = await store.list_by_thread("thread-1", limit=10)
+    replacement = next(row for row in rows if row["run_id"] != old.run_id)
+    assert old.status == RunStatus.interrupted
+    assert old.abort_event.is_set()
+    assert replacement["status"] == RunStatus.interrupted.value
+    assert replacement["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    assert not await manager.has_inflight("thread-1")
+
+    for run_id in (old.run_id, replacement["run_id"]):
+        delivery = await events.list_events("thread-1", run_id, event_types=["run.delivery"])
+        terminal = await events.list_events("thread-1", run_id, event_types=["run.end"])
+        assert len(delivery) == 1
+        assert len(terminal) == 1
+        assert terminal[0]["metadata"] == {
+            "status": "interrupted",
+            "recovered": True,
+            "authoritative": True,
+        }
 
 
 @pytest.mark.anyio
@@ -1297,7 +1467,11 @@ async def test_create_or_reject_cancellation_after_registration_interrupts_repla
     assert len(delivery) == 1
     assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
     assert len(terminal) == 1
-    assert terminal[0]["metadata"] == {"status": "interrupted", "recovered": True}
+    assert terminal[0]["metadata"] == {
+        "status": "interrupted",
+        "recovered": True,
+        "authoritative": True,
+    }
 
 
 @pytest.mark.anyio

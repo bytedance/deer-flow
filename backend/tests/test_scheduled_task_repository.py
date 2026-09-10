@@ -340,7 +340,8 @@ async def test_lease_aware_recovery_preserves_live_peer_and_reclaims_expired_pee
 
 
 @pytest.mark.asyncio
-async def test_scheduled_reconciliation_retries_observability_for_preclaimed_run(tmp_path):
+@pytest.mark.parametrize("stop_reason", ["scheduled_task_orphan_recovered", "orphan_recovered"])
+async def test_scheduled_reconciliation_retries_observability_for_preclaimed_run(tmp_path, stop_reason: str):
     """A crash after takeover but before bookkeeping is healed next poll."""
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
@@ -391,7 +392,7 @@ async def test_scheduled_reconciliation_retries_observability_for_preclaimed_run
             user_id="user-1",
             status="error",
             error="lease expired",
-            stop_reason="scheduled_task_orphan_recovered",
+            stop_reason=stop_reason,
             owner_worker_id="dead-scheduler-process",
             lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
         )
@@ -873,7 +874,8 @@ async def test_cancel_stuck_once_tasks_reconciles_orphaned_running(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tmp_path):
+@pytest.mark.parametrize("preclaimed_by_generic_reaper", [False, True])
+async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tmp_path, preclaimed_by_generic_reaper: bool):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
         sf = get_session_factory()
@@ -926,6 +928,14 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
             owner_worker_id="worker-dead",
             lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
         )
+        if preclaimed_by_generic_reaper:
+            assert await durable_run_repo.claim_for_takeover_as(
+                "run-once-dead",
+                owner_worker_id="gateway-orphan-recovery",
+                grace_seconds=10,
+                error="restart",
+                stop_reason="orphan_recovered",
+            )
 
         first = await task_repo.reconcile_stuck_once_tasks(
             error="restart",
@@ -952,7 +962,7 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
         recovered = await durable_run_repo.get("run-once-dead", user_id=None)
         assert recovered is not None
         assert recovered["status"] == "error"
-        assert recovered["owner_worker_id"] == "scheduler-recovery"
+        assert recovered["owner_worker_id"] == ("gateway-orphan-recovery" if preclaimed_by_generic_reaper else "scheduler-recovery")
     finally:
         await close_engine()
 
