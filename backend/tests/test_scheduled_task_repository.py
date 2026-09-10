@@ -923,14 +923,17 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
 
 
 @pytest.mark.asyncio
-async def test_lease_aware_once_takeover_cas_loss_finalizes_peer_terminal_outcome(tmp_path):
-    """A takeover that observes a terminal peer outcome finalizes the parent.
+async def test_lease_aware_once_takeover_fallthrough_finalizes_peer_terminal_outcome(tmp_path):
+    """A takeover whose fall-through observes a terminal peer outcome finalizes the parent.
 
-    Regression for review comment r3994555070 / r3979241541: when a peer's run
-    committed ``success`` around the takeover attempt, the parent must be
-    finalised to ``completed`` from the committed occurrence, not blindly set
-    to ``cancelled`` (the durable run is no longer ``pending``/``running``, so
-    the takeover-CAS guard does not ``continue``).
+    Regression for review comments r3994555070 / r3979241541: the sweep's takeover
+    (CAS succeeds here — the durable run is ``running`` with an expired lease) falls
+    through to the shared ``_fetch_latest_run`` / ``_has_active_occurrence`` /
+    ``_finalise_once_task_from_run`` finalization. The peer already committed the
+    terminal ``success`` occurrence, so the parent must be finalised to ``completed``
+    with ``last_error`` cleared, not blindly set to ``cancelled``. The same shared
+    finalization is what the CAS-loss path (`not claimed` -> refreshed terminal status)
+    converges on, so this pins the r3979241541 / r3994555070 outcome either way.
     """
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
