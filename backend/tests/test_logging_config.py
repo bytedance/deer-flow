@@ -89,6 +89,24 @@ def test_httpx_url_query_redaction_filter_rewrites_request_records() -> None:
     assert "AAE-token-secret" not in telegram_formatted
     assert "bot123456" not in telegram_formatted
 
+    # Userinfo credentials in the authority (basic-auth style endpoints that
+    # httpx accepts, e.g. MCP/extension proxies) must be blanked too — the
+    # authority is split so only <redacted>@ survives in front of the host.
+    userinfo = logging.LogRecord(
+        "httpx",
+        logging.INFO,
+        __file__,
+        1,
+        "HTTP Request: %s %s HTTP/1.1 %d %d",
+        ("GET", "https://user:token123@internal-proxy.corp:8080/v1/secret-endpoint", 200, 9),
+        None,
+    )
+    assert filt.filter(userinfo) is True
+    userinfo_formatted = userinfo.getMessage()
+    assert "https://<redacted>@internal-proxy.corp:8080/<redacted>" in userinfo_formatted
+    assert "token123" not in userinfo_formatted
+    assert "user:" not in userinfo_formatted
+
     # A bare origin without path/query is left as-is.
     bare = logging.LogRecord(
         "httpx",

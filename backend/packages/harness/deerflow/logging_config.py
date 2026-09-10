@@ -21,22 +21,32 @@ _TRACE_FILTER_NAME = "deerflow_trace_context_filter"
 # credentials live in the query string, and the repo-wide inbound-media rule
 # is that no part of a media URL beyond its host may reach the logs — so even
 # successful downloads would leak unless the record itself is rewritten.
-_URL_REDACT_RE = re.compile(r"(?P<base>[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#\s]+)(?P<rest>[/?#]\S*)")
+# The authority is split so userinfo (basic-auth ``user:pass@`` credentials,
+# accepted by httpx for MCP/extension/community-tool endpoints) is blanked
+# too, not just the path and query.
+_URL_REDACT_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s@]*@)?(?P<host>[^/?#\s]+)(?P<rest>[/?#]\S*)")
 
 
 class HttpxUrlQueryRedactionFilter(logging.Filter):
     """Redact inbound URLs in httpx request log records down to scheme + host.
 
-    The record is rewritten in place (``msg`` set to the redacted formatted
-    message, ``args`` cleared) so every downstream handler and formatter —
-    text or JSON — sees the same redacted line, while the method/status/
-    duration observability is preserved. Records whose message carries no
+    Path, query, fragment, and any userinfo credentials in the authority are
+    replaced; the host (and port) stay for operator debuggability. The record
+    is rewritten in place (``msg`` set to the redacted formatted message,
+    ``args`` cleared) so every downstream handler and formatter — text or
+    JSON — sees the same redacted line, while the method/status/duration
+    observability is preserved. Records whose message carries no
     ``scheme://host/<anything>`` URL pass through untouched.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        redacted = _URL_REDACT_RE.sub(lambda match: match.group("base") + "/<redacted>", message)
+
+        def _redact(match: re.Match[str]) -> str:
+            userinfo = "<redacted>@" if match.group("userinfo") else ""
+            return match.group("scheme") + userinfo + match.group("host") + "/<redacted>"
+
+        redacted = _URL_REDACT_RE.sub(_redact, message)
         if redacted != message:
             record.msg = redacted
             record.args = None
