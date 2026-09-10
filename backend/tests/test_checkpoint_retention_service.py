@@ -241,7 +241,7 @@ async def test_runtime_duration_leaf_pruned_by_default(saver_env: _SaverEnv) -> 
 
 
 @pytest.mark.anyio
-async def def test_duration_link_protected_after_next_run(saver_env: _SaverEnv) -> None:
+async def test_duration_link_protected_after_next_run(saver_env: _SaverEnv) -> None:
     """Contract protected set item 4: once a later run has been written on top
     of a duration-only checkpoint, that checkpoint is a chain link on the new
     head's ancestor chain and must not be touched (deleting it would need
