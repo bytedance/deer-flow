@@ -816,6 +816,7 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 
 - 在 `/workspace/scheduled-tasks` 管理任务
 - 每个定时任务可以选择复用同一个 thread 及其历史对话，也可以选择每次运行新建一个 thread
+- 每个任务可以固定使用 `lead_agent`（默认）或当前用户已有的自定义 agent；未知名字会被拒绝
 - 将现有任务复制到创建表单中作为可编辑草稿，不复制运行历史
 - 支持 `once` 和 `cron` 两种调度方式
 - 后台定时执行以非交互式 DeerFlow run 运行（那里不会暴露 `ask_clarification`）

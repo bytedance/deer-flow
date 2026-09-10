@@ -459,6 +459,8 @@ export const zhCN: Translations = {
       title: "创建定时任务",
       taskTitle: "任务标题",
       prompt: "提示词",
+      agent: "Agent",
+      leadAgent: "默认 Agent（lead_agent）",
       submit: "创建",
       fillRequired: "请填写所有必填项",
     },
@@ -482,6 +484,7 @@ export const zhCN: Translations = {
     },
     detail: {
       contextMode: "上下文模式",
+      agent: "Agent",
       thread: "线程",
       lastThread: "上个线程",
       schedule: "调度",
