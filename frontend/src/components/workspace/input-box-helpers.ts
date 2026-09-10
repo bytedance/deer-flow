@@ -166,59 +166,51 @@ export function getLeadingSlashSkillQuery(value: string): string | null {
   return query;
 }
 
-// The full list the composer's skill picker offers: every enabled skill that
-// is not shadowed by a reserved slash name. Unlike getMatchingSkillSuggestions
-// this is the unqueried catalog — cmdk does the filtering inside the picker.
-// Composer builtin commands own their names the same way reserved names do
-// (a skill literally named `compact` would submit as the compact command, not
-// the skill), so both sets are excluded.
+// One gate for every surface that offers skills — the picker
+// (getSelectableSkills) and the slash suggestions (getMatchingSkillSuggestions):
+// offered ⇒ activatable. A skill must be enabled, its name must parse under
+// the slash activation grammar (isActivatableSkillName — custom and
+// archive-installed skills can carry uppercase or whitespace the
+// lowercase-only grammar can never match), and its case-folded name must not
+// be shadowed: the reserved control commands (the shared contract) and the
+// composer's builtin commands own their names, so submitting a skill carrying
+// either would run the command or reach the model as literal text with
+// nothing activated. Shadowing folds case because the slash path lowercases
+// names before its reserved lookup — a custom skill named `Compact` or `HELP`
+// is unreachable there, so the picker must not offer it either.
+function foldShadowedSlashNames(
+  builtinCommandNames: Iterable<string>,
+): Set<string> {
+  return new Set([
+    ...RESERVED_SLASH_SKILL_NAMES,
+    ...[...builtinCommandNames].map((name) => name.toLowerCase()),
+  ]);
+}
 
-export function shouldReseedPickDraft(
-  draft: string | null | undefined,
+function isOfferableSkill(
+  skill: Skill,
+  foldedShadowedNames: ReadonlySet<string>,
 ): boolean {
-  // A pick supersedes a draft that was itself the user starting an
-  // activation: reseeding a bare `/query` would land it in the chip editor
-  // as literal text, reopen the suggestion catalog over the composer, and
-  // submit `/skill-name /query` with the stale partial as the message body.
-  // The slash path keeps the same invariant — it only seeds chip mode from
-  // an entire slash query and then clears it.
-  // Trailing whitespace typed after a partial must not hide that shape, so
-  // the activation check classifies the trimmed draft.
+  // Grammar before shadowing: a name the slash parser can never match
+  // (uppercase, whitespace, underscores, leading/trailing hyphens) must not
+  // be offered even when no reserved word shadows it.
   return (
-    Boolean(draft) && getLeadingSlashSkillQuery(draft!.trimEnd()) === null
+    skill.enabled &&
+    isActivatableSkillName(skill.name) &&
+    !foldedShadowedNames.has(skill.name.toLowerCase())
   );
 }
 
+// The full list the composer's skill picker offers: the unqueried catalog —
+// cmdk does the filtering inside the picker.
 export function getSelectableSkills(
   skills: Skill[],
   builtinCommandNames: ReadonlySet<string> = new Set(
     COMPOSER_BUILTIN_COMMAND_NAMES,
   ),
 ): Skill[] {
-  // Fold once, mirroring getMatchingSkillSuggestions: the slash path
-  // lowercases the name before the reserved lookup, so a custom skill named
-  // `Compact` or `HELP` is unreachable there — the picker must not offer an
-  // activation the composer can never perform. Custom and archive-installed
-  // skills can carry uppercase (the grammar check only guards skills/public).
-  const foldedBuiltins = new Set(
-    [...builtinCommandNames].map((name) => name.toLowerCase()),
-  );
-  const foldedReserved = new Set(
-    [...RESERVED_SLASH_SKILL_NAMES].map((name) => name.toLowerCase()),
-  );
-  return skills.filter((skill) => {
-    if (!skill.enabled) {
-      return false;
-    }
-    // Grammar before shadowing: a name the slash parser can never match
-    // (uppercase, whitespace, underscores, leading/trailing hyphens) must
-    // not be offered even when no reserved word shadows it.
-    if (!isActivatableSkillName(skill.name)) {
-      return false;
-    }
-    const name = skill.name.toLowerCase();
-    return !foldedReserved.has(name) && !foldedBuiltins.has(name);
-  });
+  const foldedShadowedNames = foldShadowedSlashNames(builtinCommandNames);
+  return skills.filter((skill) => isOfferableSkill(skill, foldedShadowedNames));
 }
 
 export function getMatchingSkillSuggestions(
@@ -227,15 +219,9 @@ export function getMatchingSkillSuggestions(
   builtinCommands: SlashSuggestion[],
 ): SlashSuggestion[] {
   const normalizedQuery = query.toLowerCase();
-  // A name the slash parsers refuse must not be offered here either. Both
-  // parsers drop `RESERVED_SLASH_SKILL_NAMES` (the shared contract), and the
-  // builtin commands own their own names in the composer, so a skill carrying
-  // either one is unreachable: submitting it either runs the command or
-  // reaches the model as literal text with nothing activated.
-  const reservedNames = new Set([
-    ...RESERVED_SLASH_SKILL_NAMES,
-    ...builtinCommands.map(({ name }) => name.toLowerCase()),
-  ]);
+  const foldedShadowedNames = foldShadowedSlashNames(
+    builtinCommands.map(({ name }) => name),
+  );
 
   const builtinMatches = builtinCommands.filter(({ name, description }) => {
     if (!normalizedQuery) {
@@ -253,22 +239,11 @@ export function getMatchingSkillSuggestions(
       index,
       name: skill.name.toLowerCase(),
     }))
-    .filter(({ skill, name }) => {
-      if (!skill.enabled) {
-        return false;
-      }
-      // Grammar before shadowing, mirroring getSelectableSkills: a name the
-      // slash parser can never match (uppercase, whitespace, underscores,
-      // leading/trailing hyphens) must not be offered even when no reserved
-      // word shadows it.
-      if (!isActivatableSkillName(skill.name)) {
-        return false;
-      }
-      if (reservedNames.has(name)) {
-        return false;
-      }
-      return !normalizedQuery || name.includes(normalizedQuery);
-    })
+    .filter(
+      ({ skill, name }) =>
+        isOfferableSkill(skill, foldedShadowedNames) &&
+        (!normalizedQuery || name.includes(normalizedQuery)),
+    )
     .sort((a, b) => {
       const aStartsWith = a.name.startsWith(normalizedQuery);
       const bStartsWith = b.name.startsWith(normalizedQuery);
@@ -285,6 +260,20 @@ export function getMatchingSkillSuggestions(
     }));
 
   return [...skillMatches, ...builtinMatches].slice(0, MAX_SKILL_SUGGESTIONS);
+}
+
+export function shouldReseedPickDraft(
+  draft: string | null | undefined,
+): boolean {
+  // A pick supersedes a draft that was itself the user starting an
+  // activation: reseeding a bare `/query` would land it in the chip editor
+  // as literal text, reopen the suggestion catalog over the composer, and
+  // submit `/skill-name /query` with the stale partial as the message body.
+  // The slash path keeps the same invariant — it only seeds chip mode from
+  // an entire slash query and then clears it.
+  // Trailing whitespace typed after a partial must not hide that shape, so
+  // the activation check classifies the trimmed draft.
+  return Boolean(draft) && getLeadingSlashSkillQuery(draft!.trimEnd()) === null;
 }
 
 export function parseGoalCommand(value: string): GoalCommand | null {

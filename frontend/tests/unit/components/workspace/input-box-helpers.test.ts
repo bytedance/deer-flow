@@ -375,9 +375,9 @@ describe("getMatchingSkillSuggestions", () => {
       makeSkill("data-analysis"),
     ];
     const result = getMatchingSkillSuggestions(skills, "", builtins);
-    expect(
-      result.filter((s) => s.kind === "skill").map((s) => s.name),
-    ).toEqual(["data-analysis"]);
+    expect(result.filter((s) => s.kind === "skill").map((s) => s.name)).toEqual(
+      ["data-analysis"],
+    );
   });
 
   it("agrees with the picker catalog on grammar-violating names", () => {
@@ -560,7 +560,11 @@ describe("getSelectableSkills case folding", () => {
       { name: "goal", kind: "builtin", description: "Set a goal" },
     ];
     const selectable = getSelectableSkills(skills).map((skill) => skill.name);
-    const slashOffered = getMatchingSkillSuggestions(skills, "", builtinCommands)
+    const slashOffered = getMatchingSkillSuggestions(
+      skills,
+      "",
+      builtinCommands,
+    )
       .filter((s) => s.kind === "skill")
       .map((s) => (s as { name: string }).name);
     expect(selectable).toEqual(["data-analysis"]);
