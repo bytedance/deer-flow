@@ -1242,7 +1242,8 @@ Unicode code points), or leave it blank to show the existing identifier. Control
 characters and bidirectional formatting controls are rejected; ordinary multilingual
 text and emoji are supported. Invisible-only names and invisible formatting
 characters such as zero-width spaces are rejected. Invalid display names in
-older or hand-edited storage fall back to the agent identifier when read.
+older or hand-edited storage fall back to the agent identifier when read;
+a warning identifies the affected agent.
 Re-bootstrapping preserves valid display names. The gallery,
 chat header, and welcome page use this label; URLs and API calls continue to use
 the stable English `name`. API callers can pass `display_name` to agent creation

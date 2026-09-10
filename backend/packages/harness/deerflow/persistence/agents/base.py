@@ -58,7 +58,7 @@ def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
         # inaccessible. Retry only without that field: other errors still fail.
         data.pop("display_name", None)
         config = AgentConfig(**data)
-        logger.warning("Ignoring invalid stored agent display_name")
+        logger.warning("Ignoring invalid stored agent display_name for agent %r", name)
         return config
 
 
