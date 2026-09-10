@@ -12,7 +12,7 @@ from starlette.formparsers import MultiPartException, MultiPartParser
 
 from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
-from app.gateway.skill_export import SkillExportResponse, export_http_error, run_export_work
+from app.gateway.skill_export import ExportClientDisconnected, SkillExportManifestResponse, SkillExportResponse, export_http_error, run_export_work
 from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_skills_system_prompt_cache_async, refresh_user_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import (
@@ -390,11 +390,13 @@ async def list_custom_skills(config: AppConfig = Depends(get_config)) -> SkillsL
         raise HTTPException(status_code=500, detail=f"Failed to list custom skills: {str(e)}")
 
 
-@router.get("/skills/custom/{skill_name}/export-manifest", summary="Preview Custom Skill Export")
-async def preview_custom_skill_export(skill_name: str, request: Request, response: Response, config: AppConfig = Depends(get_config)) -> dict:
+@router.get("/skills/custom/{skill_name}/export-manifest", response_model=SkillExportManifestResponse, response_model_exclude_unset=True, summary="Preview Custom Skill Export")
+async def preview_custom_skill_export(skill_name: str, request: Request, response: Response, config: AppConfig = Depends(get_config)) -> SkillExportManifestResponse | Response:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         result, lease = await run_export_work(lambda cancel: export_manifest(_get_user_skill_storage(config), skill_name, cancel), request)
+    except ExportClientDisconnected:
+        return Response(status_code=204)
     except SkillExportError as error:
         raise export_http_error(error) from error
     except HTTPException:
@@ -403,7 +405,7 @@ async def preview_custom_skill_export(skill_name: str, request: Request, respons
         raise HTTPException(500, detail={"code": "skill_export_failed", "message": "Could not prepare the skill export."}) from None
     try:
         response.headers["Cache-Control"] = "private, no-store"
-        return result
+        return SkillExportManifestResponse.model_validate(result)
     finally:
         lease.release()
 
@@ -418,6 +420,8 @@ async def download_custom_skill_export(
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         archive, lease = await run_export_work(lambda cancel: build_skill_export(_get_user_skill_storage(config), skill_name, expected_revision, cancel), request)
+    except ExportClientDisconnected:
+        return Response(status_code=204)
     except SkillExportError as error:
         raise export_http_error(error) from error
     except HTTPException:

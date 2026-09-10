@@ -5,15 +5,60 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException, Request
+from pydantic import BaseModel
+from starlette.requests import ClientDisconnect
 from starlette.responses import StreamingResponse
 
 from deerflow.skills.export import SkillExportArchive, SkillExportError
 from deerflow.utils.file_io import run_file_io
 
+# Slots are shared across all users in this Gateway process.
 _slots = threading.BoundedSemaphore(2)
+TRANSFER_TIMEOUT_SECONDS = 120.0
+
+
+class ExportClientDisconnected(Exception):
+    """A peer disconnect, distinct from cancellation of the server task."""
+
+
+class SkillExportNotice(BaseModel):
+    code: str
+    message: str
+    path: str | None = None
+
+
+class SkillExportFile(BaseModel):
+    path: str
+    type: Literal["file", "directory"]
+    size: int
+    executable: bool
+
+
+class SkillExportSecret(BaseModel):
+    name: str
+    optional: bool
+
+
+class SkillExportRequirements(BaseModel):
+    compatibility: str | None
+    allowed_tools: list[str] | None
+    required_secrets: list[SkillExportSecret] | None
+
+
+class SkillExportManifestResponse(BaseModel):
+    skill_name: str
+    revision: str | None
+    can_export: bool
+    file_count: int
+    directory_count: int
+    total_bytes: int
+    files: list[SkillExportFile]
+    requirements: SkillExportRequirements
+    warnings: list[SkillExportNotice]
+    blockers: list[SkillExportNotice]
 
 
 class ExportLease:
@@ -23,7 +68,7 @@ class ExportLease:
     @classmethod
     def acquire(cls) -> ExportLease:
         if not _slots.acquire(blocking=False):
-            raise HTTPException(429, detail={"code": "skill_export_busy", "message": "Two skill exports are active. Try again shortly."})
+            raise HTTPException(429, detail={"code": "skill_export_busy", "message": "Both export slots in this Gateway process are in use across all users. Retry after an export finishes."})
         return cls()
 
     def release(self) -> None:
@@ -70,7 +115,7 @@ async def run_export_work(work: Callable[[threading.Event], Any], request: Reque
         if disconnected is not None:
             done, _ = await asyncio.wait((task, disconnected), return_when=asyncio.FIRST_COMPLETED)
             if disconnected in done:
-                raise asyncio.CancelledError
+                raise ExportClientDisconnected
         return await asyncio.shield(task), lease
     except BaseException:
         cancel_event.set()
@@ -115,7 +160,13 @@ class SkillExportResponse(StreamingResponse):
 
     async def __call__(self, scope, receive, send) -> None:
         try:
-            await super().__call__(scope, receive, send)
+            try:
+                async with asyncio.timeout(TRANSFER_TIMEOUT_SECONDS):
+                    await super().__call__(scope, receive, send)
+            except TimeoutError:
+                # Headers may already be sent. Abort the incomplete transfer;
+                # never report success or append JSON to a partial ZIP.
+                raise ClientDisconnect from None
         finally:
             try:
                 await _finish_io(self.archive.close)

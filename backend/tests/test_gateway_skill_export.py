@@ -191,7 +191,7 @@ async def test_client_disconnect_signals_worker_and_preserves_user_context():
         while not started.is_set():
             await asyncio.sleep(0.01)
         disconnected.set()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(service.ExportClientDisconnected):
             await task
         leases = [service.ExportLease.acquire(), service.ExportLease.acquire()]
         for lease in leases:
@@ -235,3 +235,81 @@ def test_export_upload_roundtrip_uses_existing_scanner_and_rejects_conflict(app,
                 assert (bob.get_custom_skill_dir("data-analysis") / path.relative_to(source)).read_bytes() == path.read_bytes()
         conflict = client.post("/api/skills/install/upload", files={"archive": ("data-analysis.skill", archive.content, "application/zip")})
         assert conflict.status_code == 409
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["export-manifest", "export?expected_revision=" + "a" * 64])
+async def test_disconnect_exits_router_without_asgi_error(app, monkeypatch, suffix):
+    started = threading.Event()
+
+    def work(*args):
+        started.set()
+        assert args[-1].wait(3)
+        raise RuntimeError("worker cancelled")
+
+    async def receive():
+        while not started.is_set():
+            await asyncio.sleep(0.001)
+        return {"type": "http.disconnect"}
+
+    async def admin(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(skills, "require_admin_user", admin)
+    monkeypatch.setattr(skills, "export_manifest", work)
+    monkeypatch.setattr(skills, "build_skill_export", work)
+    plain_app = FastAPI()
+    plain_app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    plain_app.include_router(skills.router)
+    path, _, query = ("/api/skills/custom/demo/" + suffix).partition("?")
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}, "http_version": "1.1", "method": "GET", "scheme": "http", "path": path, "query_string": query.encode(), "headers": []}
+    messages = []
+
+    async def send(message):
+        messages.append(message)
+
+    await plain_app(scope, receive, send)
+    assert messages[0]["status"] == 204
+    leases = [service.ExportLease.acquire(), service.ExportLease.acquire()]
+    for lease in leases:
+        lease.release()
+
+
+@pytest.mark.asyncio
+async def test_stalled_transfer_has_deadline_and_releases_archive_and_slot(monkeypatch):
+    monkeypatch.setattr(service, "TRANSFER_TIMEOUT_SECONDS", 0.02, raising=False)
+    file = BytesIO(b"zip")
+    lease = service.ExportLease.acquire()
+    response = service.SkillExportResponse(SkillExportArchive(file, 3), "demo", lease)
+    body_started = asyncio.Event()
+
+    async def send(message):
+        if message["type"] == "http.response.body":
+            body_started.set()
+            await asyncio.Event().wait()
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send))
+    try:
+        await asyncio.wait_for(body_started.wait(), 1)
+        with pytest.raises(ClientDisconnect):
+            await asyncio.wait_for(asyncio.shield(task), 0.5)
+        assert file.closed
+        leases = [service.ExportLease.acquire(), service.ExportLease.acquire()]
+        for acquired in leases:
+            acquired.release()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def test_manifest_openapi_has_nested_response_contract(app):
+    schema = app.openapi()
+    response = schema["paths"]["/api/skills/custom/{skill_name}/export-manifest"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    model = schema["components"]["schemas"][response["$ref"].rsplit("/", 1)[-1]]
+    assert set(model["required"]) == {"skill_name", "revision", "can_export", "file_count", "directory_count", "total_bytes", "files", "requirements", "warnings", "blockers"}
+    for field in ("files", "warnings", "blockers"):
+        assert "$ref" in model["properties"][field]["items"]
+    assert "$ref" in model["properties"]["requirements"]
