@@ -202,6 +202,26 @@ class RunStore(abc.ABC):
         """
         pass
 
+    async def update_status_if_owned(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        owner_worker_id: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> bool | None:
+        """Update status only while *owner_worker_id* still owns a live lease.
+
+        Multi-worker stores must implement the owner and non-expired lease
+        predicates atomically for active rows. A same-owner ``interrupted`` to
+        ``error`` rollback refinement may proceed without an active lease
+        because the terminal row already fences peers. Failing closed keeps an
+        older third-party store safe in heartbeat mode; single-worker callers
+        continue to use :meth:`update_status` directly.
+        """
+        raise NotImplementedError
+
     @abc.abstractmethod
     async def start_run(self, run_id: str) -> bool:
         """Atomically transition a pending run to running.
@@ -359,6 +379,24 @@ class RunStore(abc.ABC):
         )
         return StatusFinalization(finalized=updated is not False)
 
+    async def finalize_if_owned_and_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        status: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> StatusFinalization:
+        """Finalize only while the caller still owns the active row.
+
+        Multi-worker stores must combine the owner, live-lease, active-status,
+        and cancellation predicates in one atomic operation. Failing closed
+        keeps a stale worker from publishing an outcome through a legacy store
+        that cannot provide that fencing guarantee.
+        """
+        raise NotImplementedError
+
     @abc.abstractmethod
     async def claim_for_takeover(
         self,
@@ -382,6 +420,23 @@ class RunStore(abc.ABC):
           - the row doesn't exist.
         """
         pass
+
+    async def claim_for_takeover_as(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        grace_seconds: int,
+        error: str,
+        stop_reason: str | None = None,
+    ) -> bool:
+        """Claim an expired run and atomically transfer its fencing owner.
+
+        Multi-worker stores must override this primitive. Keeping it separate
+        from the legacy claim method avoids silently pretending that a store
+        without an owner CAS can fence the former worker.
+        """
+        raise NotImplementedError
 
     @abc.abstractmethod
     async def list_inflight_with_expired_lease(

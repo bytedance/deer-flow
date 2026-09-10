@@ -710,6 +710,7 @@ class ScheduledTaskRunRepository:
         *,
         error: str,
         now: datetime,
+        owner_worker_id: str,
         lease_grace_seconds: int = 10,
     ) -> int:
         """Reconcile only rows whose underlying owner is no longer live.
@@ -784,8 +785,9 @@ class ScheduledTaskRunRepository:
                     # Run takeover commits in its own short transaction. If this
                     # outer commit fails, the next poll finishes scheduled-row
                     # bookkeeping while the run remains safely terminal.
-                    claimed = await self._run_repository.claim_for_takeover(
+                    claimed = await self._run_repository.claim_for_takeover_as(
                         candidate.run_id,
+                        owner_worker_id=owner_worker_id,
                         grace_seconds=lease_grace_seconds,
                         error=error,
                         stop_reason="scheduled_task_orphan_recovered",

@@ -1128,6 +1128,97 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_owner_scoped_completion_rejects_a_stale_worker(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-b",
+        )
+
+        result = await repo.finalize_if_owned_and_not_cancelled(
+            "run-1",
+            owner_worker_id="worker-a",
+            status="success",
+        )
+
+        assert result.finalized is False
+        assert result.cancel_action is None
+        row = await repo.get("run-1")
+        assert row["status"] == "running"
+        assert row["owner_worker_id"] == "worker-b"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_owner_scoped_terminal_writes_require_a_live_lease(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=expired,
+        )
+
+        finalized = await repo.finalize_if_owned_and_not_cancelled(
+            "run-1",
+            owner_worker_id="worker-a",
+            status="success",
+        )
+        interrupted = await repo.update_status_if_owned(
+            "run-1",
+            "interrupted",
+            owner_worker_id="worker-a",
+        )
+
+        assert finalized.finalized is False
+        assert interrupted is False
+        assert (await repo.get("run-1"))["status"] == "running"
+        await repo.update_status("run-1", "interrupted")
+        assert (
+            await repo.update_status_if_owned(
+                "run-1",
+                "error",
+                owner_worker_id="worker-a",
+                error="Rolled back by user",
+            )
+            is True
+        )
+        row = await repo.get("run-1")
+        assert row["status"] == "error"
+        assert row["error"] == "Rolled back by user"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_takeover_claim_transfers_fencing_owner(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        grace = 10
+        expired = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=expired,
+        )
+
+        claimed = await repo.claim_for_takeover_as(
+            "run-1",
+            owner_worker_id="worker-b",
+            grace_seconds=grace,
+            error="recovered",
+        )
+
+        assert claimed is True
+        row = await repo.get("run-1")
+        assert row["status"] == "error"
+        assert row["error"] == "recovered"
+        assert row["owner_worker_id"] == "worker-b"
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_reconciliation_skips_run_renewed_after_scan(self, tmp_path):
         """The SQL takeover CAS must reject a candidate renewed after its scan."""
         repo = await _make_repo(tmp_path)

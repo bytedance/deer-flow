@@ -418,11 +418,19 @@ async def test_try_start_respects_durable_and_racing_cancels():
 async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
     """Worker attach failures should finalize only runs still pending startup."""
     store = MemoryRunStore()
-    manager = RunManager(store=store)
+    events = MemoryRunEventStore()
+    manager = RunManager(store=store, event_store=events)
     record = await manager.create_or_reject("thread-1")
     error = "Failed to attach run worker: boom"
 
-    assert await manager.fail_start_if_pending(record.run_id, error=error) is True
+    assert (
+        await manager.fail_start_if_pending(
+            record.run_id,
+            error=error,
+            emit_terminal_events=True,
+        )
+        is True
+    )
 
     stored = await store.get(record.run_id)
     assert record.status == RunStatus.error
@@ -431,6 +439,12 @@ async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
     assert stored is not None
     assert stored["status"] == RunStatus.error.value
     assert stored["error"] == error
+    delivery = await events.list_events("thread-1", record.run_id, event_types=["run.delivery"])
+    terminal = await events.list_events("thread-1", record.run_id, event_types=["run.end"])
+    assert len(delivery) == 1
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {"status": "error", "recovered": True}
 
     running = await manager.create_or_reject("thread-2")
     assert await manager.try_start(running.run_id) == RunStartOutcome.started
@@ -443,6 +457,24 @@ async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
     assert stored_running is not None
     assert stored_running["status"] == RunStatus.running.value
     assert stored_running["error"] is None
+
+
+@pytest.mark.anyio
+async def test_taskless_cancel_backfills_terminal_events_once():
+    store = MemoryRunStore()
+    events = MemoryRunEventStore()
+    manager = RunManager(store=store, event_store=events)
+    record = await manager.create_or_reject("thread-1")
+
+    assert await manager.cancel(record.run_id) == CancelOutcome.cancelled
+    assert await manager.cancel(record.run_id) == CancelOutcome.cancelled
+
+    delivery = await events.list_events("thread-1", record.run_id, event_types=["run.delivery"])
+    terminal = await events.list_events("thread-1", record.run_id, event_types=["run.end"])
+    assert len(delivery) == 1
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {"status": "interrupted", "recovered": True}
 
 
 @pytest.mark.anyio
@@ -1145,7 +1177,8 @@ async def test_create_or_reject_cancellation_after_registration_interrupts_repla
 ) -> None:
     """Cancellation after admission must not leave the replacement active."""
     store = MemoryRunStore()
-    manager = RunManager(store=store)
+    events = MemoryRunEventStore()
+    manager = RunManager(store=store, event_store=events)
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
     persist_started = asyncio.Event()
@@ -1174,6 +1207,12 @@ async def test_create_or_reject_cancellation_after_registration_interrupts_repla
     assert replacement.abort_event.is_set()
     assert stored_replacement is not None
     assert stored_replacement["status"] == RunStatus.interrupted.value
+    delivery = await events.list_events("thread-1", replacement.run_id, event_types=["run.delivery"])
+    terminal = await events.list_events("thread-1", replacement.run_id, event_types=["run.end"])
+    assert len(delivery) == 1
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {"status": "interrupted", "recovered": True}
 
 
 @pytest.mark.anyio

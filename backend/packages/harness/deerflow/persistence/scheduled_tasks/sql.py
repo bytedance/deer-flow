@@ -508,6 +508,7 @@ class ScheduledTaskRepository:
         *,
         error: str,
         now: datetime,
+        owner_worker_id: str,
         lease_grace_seconds: int = 10,
     ) -> int:
         """Cancel once tasks only after their underlying run is no longer live."""
@@ -543,8 +544,9 @@ class ScheduledTaskRepository:
                     # Run takeover commits in its own short transaction. If this
                     # outer commit fails, the next poll finishes task bookkeeping
                     # while the underlying run remains safely terminal.
-                    claimed = await self._run_repository.claim_for_takeover(
+                    claimed = await self._run_repository.claim_for_takeover_as(
                         candidate.run_id,
+                        owner_worker_id=owner_worker_id,
                         grace_seconds=lease_grace_seconds,
                         error=error,
                         stop_reason="scheduled_task_orphan_recovered",

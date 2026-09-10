@@ -658,8 +658,10 @@ async def test_multi_instance_start_uses_lease_aware_reconciliation():
     assert run_repo.reconcile_count == 1
     assert run_repo.reconciled is not None
     assert run_repo.reconciled["lease_grace_seconds"] == 17
+    assert run_repo.reconciled["owner_worker_id"] == service._lease_owner
     assert task_repo.reconciled_stuck_once is not None
     assert task_repo.reconciled_stuck_once["lease_grace_seconds"] == 17
+    assert task_repo.reconciled_stuck_once["owner_worker_id"] == service._lease_owner
     assert task_repo.cancelled_stuck_once is None
 
 

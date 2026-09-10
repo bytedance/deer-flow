@@ -321,7 +321,11 @@ async def test_expired_launch_claim_is_requeued_but_waiting_timeout_fails(tmp_pa
         )
         assert claimed is not None
 
-        reconciled = await run_repo.reconcile_active_runs(error="gateway lease expired", now=now + timedelta(seconds=6))
+        reconciled = await run_repo.reconcile_active_runs(
+            error="gateway lease expired",
+            now=now + timedelta(seconds=6),
+            owner_worker_id="scheduler-recovery",
+        )
 
         assert reconciled == 1
         row = (await run_repo.list_by_task("task-stale-claim"))[0]

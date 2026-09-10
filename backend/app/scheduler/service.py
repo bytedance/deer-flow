@@ -595,6 +595,7 @@ class ScheduledTaskService:
             stale = await self._task_run_repo.reconcile_active_runs(
                 error=error,
                 now=now,
+                owner_worker_id=self._lease_owner,
                 lease_grace_seconds=self._run_lease_grace_seconds,
             )
             if stale:
@@ -605,6 +606,7 @@ class ScheduledTaskService:
             stuck = await self._task_repo.reconcile_stuck_once_tasks(
                 error=error,
                 now=now,
+                owner_worker_id=self._lease_owner,
                 lease_grace_seconds=self._run_lease_grace_seconds,
             )
             if stuck:

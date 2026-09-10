@@ -16,6 +16,7 @@ from deerflow.runtime.runs.store.base import (
     run_is_before_cursor,
     run_sort_key,
 )
+from deerflow.utils.time import is_lease_expired
 
 
 class MemoryRunStore(RunStore):
@@ -174,6 +175,31 @@ class MemoryRunStore(RunStore):
             run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
+
+    async def update_status_if_owned(
+        self,
+        run_id,
+        status,
+        *,
+        owner_worker_id,
+        error=None,
+        stop_reason=None,
+    ):
+        run = self._runs.get(run_id)
+        if run is None or run.get("owner_worker_id") != owner_worker_id:
+            return False
+        rollback_refinement = run.get("status") == "interrupted" and status == "error"
+        if not rollback_refinement and is_lease_expired(
+            run.get("lease_expires_at"),
+            grace_seconds=0,
+        ):
+            return False
+        return await self.update_status(
+            run_id,
+            status,
+            error=error,
+            stop_reason=stop_reason,
+        )
 
     async def start_run(self, run_id) -> bool:
         run = self._runs.get(run_id)
@@ -348,6 +374,35 @@ class MemoryRunStore(RunStore):
         run["updated_at"] = datetime.now(UTC).isoformat()
         return StatusFinalization(finalized=True)
 
+    async def finalize_if_owned_and_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        status: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> StatusFinalization:
+        run = self._runs.get(run_id)
+        if run is None or run.get("owner_worker_id") != owner_worker_id:
+            return StatusFinalization(finalized=False)
+        if is_lease_expired(run.get("lease_expires_at"), grace_seconds=0):
+            return StatusFinalization(finalized=False)
+        if run.get("cancel_action") is not None:
+            return StatusFinalization(
+                finalized=False,
+                cancel_action=run["cancel_action"],
+            )
+        if run["status"] not in ("pending", "running"):
+            return StatusFinalization(finalized=False)
+        run["status"] = status
+        if error is not None:
+            run["error"] = error
+        if stop_reason is not None:
+            run["stop_reason"] = stop_reason
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return StatusFinalization(finalized=True)
+
     async def claim_for_takeover(
         self,
         run_id: str,
@@ -372,6 +427,26 @@ class MemoryRunStore(RunStore):
             run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
+
+    async def claim_for_takeover_as(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        grace_seconds: int,
+        error: str,
+        stop_reason: str | None = None,
+    ) -> bool:
+        claim_kwargs = {
+            "grace_seconds": grace_seconds,
+            "error": error,
+        }
+        if stop_reason is not None:
+            claim_kwargs["stop_reason"] = stop_reason
+        claimed = await self.claim_for_takeover(run_id, **claim_kwargs)
+        if claimed:
+            self._runs[run_id]["owner_worker_id"] = owner_worker_id
+        return claimed
 
     async def list_inflight_with_expired_lease(
         self,

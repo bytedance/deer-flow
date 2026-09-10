@@ -823,7 +823,7 @@ async def run_agent(
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
-    terminal_status_kwargs = {"persist": False} if event_store is not None else {}
+    terminal_status_kwargs = {"persist": False, "stage_terminal": True} if event_store is not None else {}
 
     run_id = record.run_id
     thread_id = record.thread_id
@@ -887,7 +887,8 @@ async def run_agent(
         restore_checkpoint: bool = True,
     ) -> None:
         nonlocal checkpoint_rollback_completed
-        await run_manager.set_finalizing(run_id, True)
+        if event_store is None:
+            await run_manager.set_finalizing(run_id, True)
         if action == "rollback":
             await run_manager.set_status(
                 run_id,
@@ -1660,9 +1661,6 @@ async def run_agent(
                         "Extension task-stop notification interrupted for run %s; completing cleanup first",
                         run_id,
                     )
-            if record.finalizing:
-                await run_manager.set_finalizing(run_id, False)
-
             await bridge.publish_end(run_id)
 
             if deferred_finalization_interrupt is not None:
@@ -1692,11 +1690,20 @@ async def run_agent(
                         run_id,
                     )
                 finally:
-                    _release_run_scoped_references(
-                        runnable_configs,
-                        runtime_ctx,
-                        journal,
-                    )
+                    try:
+                        _release_run_scoped_references(
+                            runnable_configs,
+                            runtime_ctx,
+                            journal,
+                        )
+                    finally:
+                        if record.finalizing:
+                            clear_finalizing = asyncio.create_task(run_manager.set_finalizing(run_id, False))
+                            clear_finalizing.set_name(f"deerflow-clear-finalizing-{run_id}")
+                            lease_cleanup_interrupt = await _await_task_stop_after_host_cancellation(
+                                clear_finalizing,
+                                lease_cleanup_interrupt,
+                            )
                 # Drop graph and per-run payload references before the terminal
                 # worker task itself becomes collectable.
                 agent = None

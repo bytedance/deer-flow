@@ -281,13 +281,18 @@ async def test_lease_aware_recovery_preserves_live_peer_and_reclaims_expired_pee
             lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
         )
 
-        reconciled = await task_run_repo.reconcile_active_runs(error="restart", now=now)
+        reconciled = await task_run_repo.reconcile_active_runs(
+            error="restart",
+            now=now,
+            owner_worker_id="scheduler-recovery",
+        )
         assert reconciled == 1
         assert (await task_run_repo.list_by_task("task-live"))[0]["status"] == "running"
         assert (await task_run_repo.list_by_task("task-expired"))[0]["status"] == "interrupted"
         recovered = await durable_run_repo.get("run-expired", user_id=None)
         assert recovered is not None
         assert recovered["status"] == "error"
+        assert recovered["owner_worker_id"] == "scheduler-recovery"
         assert recovered["stop_reason"] == "scheduled_task_orphan_recovered"
         with pytest.raises(ActiveScheduledRunConflict):
             await task_run_repo.create(
@@ -374,7 +379,14 @@ async def test_reconcile_live_launch_repairs_bookkeeping_before_releasing_claim(
             lease_expires_at=(now + timedelta(seconds=120)).isoformat(),
         )
 
-        assert await task_run_repo.reconcile_active_runs(error="lease expired", now=now) == 0
+        assert (
+            await task_run_repo.reconcile_active_runs(
+                error="lease expired",
+                now=now,
+                owner_worker_id="scheduler-recovery",
+            )
+            == 0
+        )
         row = (await task_run_repo.list_by_task("task-live-launch"))[0]
         assert row["status"] == "running"
         assert row["run_id"] == "run-live-launch"
@@ -474,7 +486,14 @@ async def test_reconcile_locks_task_before_its_active_run(tmp_path):
             run_repository=durable_run_repo,
         )
 
-        assert await reconcile_repo.reconcile_active_runs(error="lease expired", now=now) == 0
+        assert (
+            await reconcile_repo.reconcile_active_runs(
+                error="lease expired",
+                now=now,
+                owner_worker_id="scheduler-recovery",
+            )
+            == 0
+        )
         assert lock_order == [
             (ScheduledTaskRow, "task-lock-order-a"),
             (ScheduledTaskRunRow, "task-run-lock-order-a"),
@@ -518,9 +537,23 @@ async def test_lease_aware_recovery_preserves_queued_dispatch_until_lease_expire
             status="queued",
         )
 
-        assert await task_run_repo.reconcile_active_runs(error="restart", now=now) == 0
+        assert (
+            await task_run_repo.reconcile_active_runs(
+                error="restart",
+                now=now,
+                owner_worker_id="scheduler-recovery",
+            )
+            == 0
+        )
         assert (await task_run_repo.list_by_task("task-queued"))[0]["status"] == "queued"
-        assert await task_run_repo.reconcile_active_runs(error="restart", now=now + timedelta(seconds=121)) == 0
+        assert (
+            await task_run_repo.reconcile_active_runs(
+                error="restart",
+                now=now + timedelta(seconds=121),
+                owner_worker_id="scheduler-recovery",
+            )
+            == 0
+        )
         assert (await task_run_repo.list_by_task("task-queued"))[0]["status"] == "queued"
     finally:
         await close_engine()
@@ -567,7 +600,14 @@ async def test_lease_aware_recovery_uses_parent_last_run_when_row_link_is_missin
             lease_expires_at=(now + timedelta(seconds=60)).isoformat(),
         )
 
-        assert await task_run_repo.reconcile_active_runs(error="restart", now=now) == 0
+        assert (
+            await task_run_repo.reconcile_active_runs(
+                error="restart",
+                now=now,
+                owner_worker_id="scheduler-recovery",
+            )
+            == 0
+        )
         assert (await task_run_repo.list_by_task("task-missing-link"))[0]["status"] == "running"
     finally:
         await close_engine()
@@ -763,7 +803,14 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
             lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
         )
 
-        assert await task_repo.reconcile_stuck_once_tasks(error="restart", now=now) == 1
+        assert (
+            await task_repo.reconcile_stuck_once_tasks(
+                error="restart",
+                now=now,
+                owner_worker_id="scheduler-recovery",
+            )
+            == 1
+        )
         live = await task_repo.get("task-once-live", user_id="user-1")
         dead = await task_repo.get("task-once-dead", user_id="user-1")
         assert live is not None and live["status"] == "running"
@@ -799,7 +846,14 @@ async def test_lease_aware_once_recovery_reclaims_expired_dispatch_lease(tmp_pat
             updates={"status": "running", "lease_expires_at": now - timedelta(seconds=60)},
         )
 
-        assert await repo.reconcile_stuck_once_tasks(error="restart", now=now) == 1
+        assert (
+            await repo.reconcile_stuck_once_tasks(
+                error="restart",
+                now=now,
+                owner_worker_id="scheduler-recovery",
+            )
+            == 1
+        )
         task = await repo.get("task-once-expired-lease", user_id="user-1")
         assert task is not None and task["status"] == "cancelled"
     finally:
@@ -995,7 +1049,14 @@ async def test_reconcile_recovers_live_run_link_from_metadata(tmp_path):
             lease_expires_at=(now + timedelta(seconds=60)).isoformat(),
         )
 
-        assert await task_run_repo.reconcile_active_runs(error="lease expired", now=now) == 0
+        assert (
+            await task_run_repo.reconcile_active_runs(
+                error="lease expired",
+                now=now,
+                owner_worker_id="scheduler-recovery",
+            )
+            == 0
+        )
         row = (await task_run_repo.list_by_task("task-metadata-link"))[0]
         assert row["status"] == "queued"
         assert row["run_id"] is None
@@ -1056,7 +1117,14 @@ async def test_reconcile_ignores_stale_parent_last_run_before_metadata_fallback(
             lease_expires_at=(now + timedelta(seconds=60)).isoformat(),
         )
 
-        assert await task_run_repo.reconcile_active_runs(error="lease expired", now=now) == 0
+        assert (
+            await task_run_repo.reconcile_active_runs(
+                error="lease expired",
+                now=now,
+                owner_worker_id="scheduler-recovery",
+            )
+            == 0
+        )
         assert (await task_run_repo.list_by_task("task-stale-parent-link"))[0]["status"] == "queued"
     finally:
         await close_engine()
@@ -1065,7 +1133,7 @@ async def test_reconcile_ignores_stale_parent_last_run_before_metadata_fallback(
 @pytest.mark.asyncio
 async def test_reconcile_preserves_row_when_heartbeat_wins_takeover(tmp_path):
     class RenewedRunRepository:
-        async def claim_for_takeover(self, *_args, **_kwargs):
+        async def claim_for_takeover_as(self, *_args, **_kwargs):
             return False
 
         async def get(self, *_args, **_kwargs):
@@ -1114,7 +1182,14 @@ async def test_reconcile_preserves_row_when_heartbeat_wins_takeover(tmp_path):
             lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
         )
 
-        assert await task_run_repo.reconcile_active_runs(error="lease expired", now=now) == 0
+        assert (
+            await task_run_repo.reconcile_active_runs(
+                error="lease expired",
+                now=now,
+                owner_worker_id="scheduler-recovery",
+            )
+            == 0
+        )
         row = (await task_run_repo.list_by_task("task-heartbeat-race"))[0]
         assert row["status"] == "running"
     finally:

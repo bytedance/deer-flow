@@ -1510,6 +1510,7 @@ async def start_run(
                     await run_mgr.fail_start_if_pending(
                         record.run_id,
                         error=f"Failed to attach run worker: {exc}",
+                        emit_terminal_events=True,
                     )
                     raise
         except ConflictError as exc:

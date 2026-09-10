@@ -339,9 +339,7 @@ async def test_run_journal_observed_events_exactly_match_its_catalog():
 
 
 def test_worker_terminal_event_catalog_has_one_authoritative_run_end():
-    assert {(definition.event_type, definition.category) for definition in WORKER_RUN_EVENT_DEFINITIONS} == {
-        ("run.end", "outputs")
-    }
+    assert {(definition.event_type, definition.category) for definition in WORKER_RUN_EVENT_DEFINITIONS} == {("run.end", "outputs")}
 
 
 @pytest.mark.parametrize("status", ["success", "error", "timeout", "interrupted"])

@@ -10,7 +10,7 @@ from typing import Any
 
 from deerflow.runtime.events.catalog import RUN_END_EVENT
 from deerflow.runtime.events.store.base import RunEventStore
-from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.runtime.user_context import AUTO, _AutoSentinel, reset_current_user, set_current_user
 
 from .schemas import RunStatus
 
@@ -27,12 +27,13 @@ _TERMINAL_RUN_STATUSES = frozenset(
 
 
 @contextmanager
-def _run_owner_context(user_id: str | None) -> Iterator[None]:
+def _run_owner_context(user_id: str | None | _AutoSentinel) -> Iterator[None]:
     """Bind an out-of-request event write to the claimed RunRow owner."""
-    if user_id is None:
+    if user_id is AUTO:
         yield
         return
-    token = set_current_user(SimpleNamespace(id=user_id))
+    user = SimpleNamespace(id=user_id) if user_id is not None else None
+    token = set_current_user(user)
     try:
         yield
     finally:
@@ -47,7 +48,7 @@ async def persist_run_terminal_event(
     status: RunStatus,
     content: Any | None = None,
     recovered: bool = False,
-    user_id: str | None = None,
+    user_id: str | None | _AutoSentinel = AUTO,
 ) -> bool:
     """Persist the run-scoped authoritative ``run.end`` event once.
 
@@ -92,7 +93,7 @@ async def persist_run_delivery_receipt(
     thread_id: str,
     run_id: str,
     content: dict[str, Any],
-    user_id: str | None = None,
+    user_id: str | None | _AutoSentinel = AUTO,
 ) -> bool:
     """Persist a recovered run's delivery singleton under its stored owner."""
     with _run_owner_context(user_id):

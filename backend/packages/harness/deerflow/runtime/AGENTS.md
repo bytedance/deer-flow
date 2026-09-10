@@ -139,8 +139,16 @@ zero `run.delivery` receipt and `run.end` under the claimed row's user context:
 this covers orphan reconciliation, expired-lease `cancel()` takeover, and
 store rows claimed as `interrupted` by cross-worker interrupt/rollback
 admission. Claimed non-run reservations never receive run events, and active
-local workers retain responsibility for their own final output. Event-store
-failure never rolls back a terminal row or a replacement admission, so
+local worker tasks retain responsibility for their own final output even after
+they have staged a terminal in-memory status: admission routes them through the
+local interruption/finalization barrier and must not preempt them with an empty
+recovery singleton. Heartbeat-mode terminalization atomically checks the
+worker owner, active status, and cancellation request; lease takeover transfers
+the owner in the same CAS so the stale worker cannot publish even an identical
+terminal status. Runs that terminalize before a worker can attach receive the
+same idempotent zero receipt and recovered terminal singleton from their
+compensation path. Event-store failure never rolls back a terminal row or a
+replacement admission, so
 `RunRow.status` remains authoritative when `run.end` is missing. Recovery does
 not scan already-terminal historical rows, and an older-runtime `run.end` is
 preserved rather than overwritten.
