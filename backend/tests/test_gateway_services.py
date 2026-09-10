@@ -2275,9 +2275,9 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
             record = await start_run(body, "channel-thread", request)
             await record.task
 
-        return captured_context
+        return captured_context, record.user_id
 
-    context = asyncio.run(_scenario())
+    context, run_user_id = asyncio.run(_scenario())
 
     assert context["user_id"] == "owner-1"
     assert context["user_role"] == "user"
@@ -2285,6 +2285,7 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
     assert context["oauth_id"] == "subject-123"
     assert context["channel_user_id"] == "trusted-im-sender"
     assert context["is_internal"] is True
+    assert run_user_id == "owner-1"
 
 
 def test_start_run_session_caller_anti_forgery(_stub_app_config):
@@ -2361,9 +2362,9 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
             record = await start_run(body, "thread-session-authz", request)
             await record.task
 
-        return captured_context
+        return captured_context, record.user_id
 
-    context = asyncio.run(_scenario())
+    context, run_user_id = asyncio.run(_scenario())
 
     # is_internal must be False (server-derived from auth_source="session")
     assert context["is_internal"] is False
@@ -2374,6 +2375,9 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
     # Agent Server's reserved auth fields are never valid on the Gateway path.
     assert context.get("langgraph_auth_user") is None
     assert context.get("langgraph_auth_user_id") is None
+    # The terminal-event writer consumes RunRecord.user_id explicitly.  Keep it
+    # aligned with the ambient owner used by the durable run-row insert.
+    assert run_user_id == "u1"
 
 
 def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):

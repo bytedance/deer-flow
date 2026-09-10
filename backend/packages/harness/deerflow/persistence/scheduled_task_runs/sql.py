@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -712,6 +713,7 @@ class ScheduledTaskRunRepository:
         now: datetime,
         owner_worker_id: str,
         lease_grace_seconds: int = 10,
+        on_runs_recovered: Callable[[list[str]], Awaitable[None]] | None = None,
     ) -> int:
         """Reconcile only rows whose underlying owner is no longer live.
 
@@ -719,6 +721,7 @@ class ScheduledTaskRunRepository:
         underlying run, or a queued row whose parent task still has a dispatch
         lease, belongs to another process and must survive this startup.
         """
+        recovered_run_ids: list[str] = []
         async with self._sf() as session:
             result = await session.execute(
                 select(
@@ -754,6 +757,12 @@ class ScheduledTaskRunRepository:
                     # would hold SQLite's writer lock across the nested short
                     # transaction used by that durable-run CAS.
                     associations.append((task, row, candidate))
+                    if candidate.status not in {"pending", "running"} and candidate.stop_reason == "scheduled_task_orphan_recovered":
+                        # Heal a scheduler takeover that committed before this
+                        # process crashed (or before the outer bookkeeping
+                        # transaction could commit).  Singleton events make
+                        # this post-commit notification safe to repeat.
+                        recovered_run_ids.append(candidate.run_id)
                 if candidate is not None and candidate.status not in {"pending", "running"}:
                     row.lease_owner = None
                     row.lease_expires_at = None
@@ -792,7 +801,9 @@ class ScheduledTaskRunRepository:
                         error=error,
                         stop_reason="scheduled_task_orphan_recovered",
                     )
-                    if not claimed:
+                    if claimed:
+                        recovered_run_ids.append(candidate.run_id)
+                    else:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
                         if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
                             continue
@@ -813,7 +824,9 @@ class ScheduledTaskRunRepository:
             for task, row, candidate in associations:
                 self._associate_task_with_run(task, row, candidate)
             await session.commit()
-            return stale
+        if recovered_run_ids and on_runs_recovered is not None:
+            await on_runs_recovered(list(dict.fromkeys(recovered_run_ids)))
+        return stale
 
     @staticmethod
     async def _find_underlying_run(session: AsyncSession, row: ScheduledTaskRunRow, task: ScheduledTaskRow | None) -> RunRow | None:

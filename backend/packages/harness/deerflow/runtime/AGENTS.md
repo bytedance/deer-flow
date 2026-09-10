@@ -138,17 +138,30 @@ must first win its atomic RunStore transition, then best-effort backfill both a
 zero `run.delivery` receipt and `run.end` under the claimed row's user context:
 this covers orphan reconciliation, expired-lease `cancel()` takeover, and
 store rows claimed as `interrupted` by cross-worker interrupt/rollback
-admission. Claimed non-run reservations never receive run events, and active
-local worker tasks retain responsibility for their own final output even after
-they have staged a terminal in-memory status: admission routes them through the
-local interruption/finalization barrier and must not preempt them with an empty
-recovery singleton. Heartbeat-mode terminalization atomically checks the
-worker owner, active status, and cancellation request; lease takeover transfers
-the owner in the same CAS so the stale worker cannot publish even an identical
-terminal status. Runs that terminalize before a worker can attach receive the
-same idempotent zero receipt and recovered terminal singleton from their
-compensation path. Event-store failure never rolls back a terminal row or a
-replacement admission, so
+admission. Multi-instance scheduled-task reconciliation is another takeover
+caller: its repository commits and closes the scheduler transaction before it
+hands the claimed run IDs to `RunManager.terminalize_recovered_run_ids()`,
+which re-reads the authoritative rows and shares this event plus Gateway END
+path. Claimed non-run reservations never receive run events, and active
+local worker tasks retain responsibility for their own final output once they
+have started, including after they stage a terminal in-memory status: admission
+routes them through the local interruption/finalization barrier and must not
+preempt them with an empty recovery singleton. A pending run cancelled before
+Agent startup remains `interrupted`; rollback is never attempted without a
+captured pre-run boundary, and task completion releases the finalizing barrier
+even when a cancelled Gateway metadata wrapper never entered `run_agent()`.
+During bounded shutdown, if that wrapper is cancelled before Agent startup,
+`RunManager` terminalizes only the active rows it newly persists as
+`interrupted`; a worker that already reached its own terminal path is not
+re-persisted or re-published.
+Heartbeat-mode startup atomically checks pending status, worker owner, a live
+lease, and the absence of an accepted cancellation before Agent construction.
+Terminalization atomically checks the worker owner, active status, and
+cancellation request; lease takeover transfers the owner in the same CAS so
+the stale worker cannot publish even an identical terminal status. Runs that
+terminalize before a worker can attach receive the same idempotent zero receipt
+and recovered terminal singleton from their compensation path. Event-store
+failure never rolls back a terminal row or a replacement admission, so
 `RunRow.status` remains authoritative when `run.end` is missing. Recovery does
 not scan already-terminal historical rows, and an older-runtime `run.end` is
 preserved rather than overwritten.

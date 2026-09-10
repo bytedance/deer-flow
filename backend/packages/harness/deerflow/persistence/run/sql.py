@@ -327,6 +327,30 @@ class RunRepository(RunStore):
             await session.commit()
             return result.rowcount != 0
 
+    async def start_run_if_owned(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+    ) -> bool:
+        """Start only when the pending row is still owned under a live lease."""
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status == "pending",
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.lease_expires_at.is_not(None),
+                    RunRow.lease_expires_at >= now,
+                    RunRow.cancel_action.is_(None),
+                )
+                .values(status="running", updated_at=now)
+            )
+            await session.commit()
+            return result.rowcount != 0
+
     async def update_model_name(self, run_id, model_name):
         async with self._sf() as session:
             await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(model_name=self._normalize_model_name(model_name), updated_at=datetime.now(UTC)))

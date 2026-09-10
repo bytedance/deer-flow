@@ -847,6 +847,7 @@ async def run_agent(
     workspace_changes_user_id: str | None = None
     workspace_excluded_dir_names: frozenset[str] | None = None
     snapshot_capture_failed = False
+    rollback_boundary_captured = False
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
     # Message ids checkpointed *before* this run started. The stream loop uses
@@ -889,7 +890,7 @@ async def run_agent(
         nonlocal checkpoint_rollback_completed
         if event_store is None:
             await run_manager.set_finalizing(run_id, True)
-        if action == "rollback":
+        if action == "rollback" and started:
             await run_manager.set_status(
                 run_id,
                 RunStatus.error,
@@ -897,6 +898,12 @@ async def run_agent(
                 **terminal_status_kwargs,
             )
             if not restore_checkpoint:
+                return
+            if not rollback_boundary_captured:
+                logger.warning(
+                    "Run %s rollback skipped: cancellation preceded the pre-run checkpoint boundary",
+                    run_id,
+                )
                 return
             try:
                 checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
@@ -1155,6 +1162,7 @@ async def run_agent(
             async with _checkpoint_thread_lock(thread_id):
                 try:
                     rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
+                    rollback_boundary_captured = True
                 except Exception:
                     snapshot_capture_failed = True
                     logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)

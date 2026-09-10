@@ -222,6 +222,21 @@ class RunStore(abc.ABC):
         """
         raise NotImplementedError
 
+    async def start_run_if_owned(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+    ) -> bool:
+        """Start a pending run only while *owner_worker_id* has a live lease.
+
+        Multi-worker stores must check pending status, owner, lease deadline,
+        and the absence of a cancellation request in one atomic operation. The
+        default fails closed so an older custom store cannot start duplicate or
+        already-cancelled Agent work in heartbeat mode.
+        """
+        raise NotImplementedError
+
     @abc.abstractmethod
     async def start_run(self, run_id: str) -> bool:
         """Atomically transition a pending run to running.

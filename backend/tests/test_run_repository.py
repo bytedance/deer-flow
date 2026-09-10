@@ -173,6 +173,74 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_start_run_if_owned_requires_matching_owner_and_live_lease(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        live_lease = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+        expired_lease = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+        await repo.put(
+            "live-run",
+            thread_id="t1",
+            status="pending",
+            owner_worker_id="worker-a",
+            lease_expires_at=live_lease,
+        )
+        await repo.put(
+            "expired-run",
+            thread_id="t2",
+            status="pending",
+            owner_worker_id="worker-a",
+            lease_expires_at=expired_lease,
+        )
+        await repo.put(
+            "cancelled-before-start",
+            thread_id="t3",
+            status="pending",
+            owner_worker_id="worker-a",
+            lease_expires_at=live_lease,
+        )
+        assert (
+            await repo.request_cancel(
+                "cancelled-before-start",
+                action="rollback",
+            )
+            == "rollback"
+        )
+
+        assert (
+            await repo.start_run_if_owned(
+                "live-run",
+                owner_worker_id="worker-b",
+            )
+            is False
+        )
+        assert (
+            await repo.start_run_if_owned(
+                "expired-run",
+                owner_worker_id="worker-a",
+            )
+            is False
+        )
+        assert (
+            await repo.start_run_if_owned(
+                "live-run",
+                owner_worker_id="worker-a",
+            )
+            is True
+        )
+        assert (
+            await repo.start_run_if_owned(
+                "cancelled-before-start",
+                owner_worker_id="worker-a",
+            )
+            is False
+        )
+
+        assert (await repo.get("live-run"))["status"] == "running"
+        assert (await repo.get("expired-run"))["status"] == "pending"
+        assert (await repo.get("cancelled-before-start"))["status"] == "pending"
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_update_status_with_error(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1")

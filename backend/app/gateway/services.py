@@ -1314,6 +1314,13 @@ async def start_run(
     # bypassing the check -- a leaked internal token must not grant cross-user
     # thread access.
     user = getattr(request.state, "user", None)
+    # Always freeze the effective owner on the RunRecord.  Ordinary authenticated
+    # requests do not carry the trusted internal-owner header, but the SQL store
+    # still resolves their ambient user context when it inserts the row.  Passing
+    # only ``owner_user_id`` therefore left the in-memory record unowned while its
+    # durable row was user-scoped; terminal event writers then explicitly cleared
+    # the ambient context and produced events that the owner could not query.
+    run_user_id = owner_user_id or (str(user.id) if user is not None else None)
 
     async def thread_access_allowed() -> bool:
         if user is None:
@@ -1484,7 +1491,7 @@ async def start_run(
                     kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
                     multitask_strategy=body.multitask_strategy,
                     model_name=model_name,
-                    user_id=owner_user_id,
+                    user_id=run_user_id,
                     idempotency_key=idempotency_key,
                 )
 

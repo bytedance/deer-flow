@@ -4,6 +4,7 @@ import asyncio
 import logging
 import socket
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -38,6 +39,7 @@ class ScheduledTaskService:
         queue_timeout_seconds: int = 3600,
         multi_instance: bool = False,
         run_lease_grace_seconds: int = 10,
+        on_runs_recovered: Callable[[list[str]], Awaitable[None]] | None = None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -48,6 +50,7 @@ class ScheduledTaskService:
         self._queue_timeout_seconds = queue_timeout_seconds
         self._multi_instance = multi_instance
         self._run_lease_grace_seconds = run_lease_grace_seconds
+        self._on_runs_recovered = on_runs_recovered
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -597,6 +600,7 @@ class ScheduledTaskService:
                 now=now,
                 owner_worker_id=self._lease_owner,
                 lease_grace_seconds=self._run_lease_grace_seconds,
+                on_runs_recovered=self._on_runs_recovered,
             )
             if stale:
                 logger.warning("Marked %d stale scheduled task run(s) as interrupted after lease reconciliation", stale)
@@ -608,6 +612,7 @@ class ScheduledTaskService:
                 now=now,
                 owner_worker_id=self._lease_owner,
                 lease_grace_seconds=self._run_lease_grace_seconds,
+                on_runs_recovered=self._on_runs_recovered,
             )
             if stuck:
                 logger.warning("Cancelled %d stuck once task(s) after lease reconciliation", stuck)

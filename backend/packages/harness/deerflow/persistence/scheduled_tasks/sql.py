@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -510,8 +511,10 @@ class ScheduledTaskRepository:
         now: datetime,
         owner_worker_id: str,
         lease_grace_seconds: int = 10,
+        on_runs_recovered: Callable[[list[str]], Awaitable[None]] | None = None,
     ) -> int:
         """Cancel once tasks only after their underlying run is no longer live."""
+        recovered_run_ids: list[str] = []
         async with self._sf() as session:
             result = await session.execute(
                 select(ScheduledTaskRow.id).where(
@@ -538,6 +541,12 @@ class ScheduledTaskRepository:
                 )
                 task_run = run_result.scalars().first()
                 candidate = await self._find_underlying_run(session, task_run, task)
+                if candidate is not None and candidate.status not in {"pending", "running"} and candidate.stop_reason == "scheduled_task_orphan_recovered":
+                    # A prior scheduler process may have committed the run
+                    # takeover but died before finishing this parent-task row
+                    # or publishing terminal observability.  Retry the
+                    # idempotent post-commit notification here.
+                    recovered_run_ids.append(candidate.run_id)
                 if candidate is not None and candidate.status in {"pending", "running"}:
                     if _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
                         continue
@@ -551,7 +560,9 @@ class ScheduledTaskRepository:
                         error=error,
                         stop_reason="scheduled_task_orphan_recovered",
                     )
-                    if not claimed:
+                    if claimed:
+                        recovered_run_ids.append(candidate.run_id)
+                    else:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
                         if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
                             continue
@@ -560,7 +571,9 @@ class ScheduledTaskRepository:
                 task.updated_at = datetime.now(UTC)
                 cancelled += 1
             await session.commit()
-            return cancelled
+        if recovered_run_ids and on_runs_recovered is not None:
+            await on_runs_recovered(list(dict.fromkeys(recovered_run_ids)))
+        return cancelled
 
     @staticmethod
     async def _find_underlying_run(session: AsyncSession, task_run: ScheduledTaskRunRow | None, task: ScheduledTaskRow) -> RunRow | None:

@@ -14,6 +14,8 @@ from deerflow.persistence.scheduled_task_runs import (
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict, ScheduledTaskRepository
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.runtime import RunManager
+from deerflow.runtime.events.store.db import DbRunEventStore
 
 
 @pytest.mark.asyncio
@@ -238,6 +240,17 @@ async def test_lease_aware_recovery_preserves_live_peer_and_reclaims_expired_pee
         task_repo = ScheduledTaskRepository(sf)
         task_run_repo = ScheduledTaskRunRepository(sf)
         durable_run_repo = RunRepository(sf)
+        event_store = DbRunEventStore(sf)
+        recovered_callbacks = []
+
+        async def on_orphans_recovered(records):
+            recovered_callbacks.append(records)
+
+        run_manager = RunManager(
+            store=durable_run_repo,
+            event_store=event_store,
+            on_orphans_recovered=on_orphans_recovered,
+        )
         now = datetime.now(UTC)
 
         for suffix in ("live", "expired"):
@@ -285,6 +298,7 @@ async def test_lease_aware_recovery_preserves_live_peer_and_reclaims_expired_pee
             error="restart",
             now=now,
             owner_worker_id="scheduler-recovery",
+            on_runs_recovered=run_manager.terminalize_recovered_run_ids,
         )
         assert reconciled == 1
         assert (await task_run_repo.list_by_task("task-live"))[0]["status"] == "running"
@@ -294,6 +308,24 @@ async def test_lease_aware_recovery_preserves_live_peer_and_reclaims_expired_pee
         assert recovered["status"] == "error"
         assert recovered["owner_worker_id"] == "scheduler-recovery"
         assert recovered["stop_reason"] == "scheduled_task_orphan_recovered"
+        delivery = await event_store.list_events(
+            "thread-expired",
+            "run-expired",
+            event_types=["run.delivery"],
+            user_id="user-1",
+        )
+        terminal = await event_store.list_events(
+            "thread-expired",
+            "run-expired",
+            event_types=["run.end"],
+            user_id="user-1",
+        )
+        assert len(delivery) == 1
+        assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+        assert len(terminal) == 1
+        assert terminal[0]["metadata"]["status"] == "error"
+        assert terminal[0]["metadata"]["recovered"] is True
+        assert [[record.run_id for record in records] for records in recovered_callbacks] == [["run-expired"]]
         with pytest.raises(ActiveScheduledRunConflict):
             await task_run_repo.create(
                 run_record_id="task-run-live-duplicate",
@@ -303,6 +335,77 @@ async def test_lease_aware_recovery_preserves_live_peer_and_reclaims_expired_pee
                 trigger="scheduled",
                 status="queued",
             )
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_reconciliation_retries_observability_for_preclaimed_run(tmp_path):
+    """A crash after takeover but before bookkeeping is healed next poll."""
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        task_run_repo = ScheduledTaskRunRepository(sf)
+        durable_run_repo = RunRepository(sf)
+        now = datetime.now(UTC)
+        recovered_run_ids = []
+
+        async def on_runs_recovered(run_ids):
+            recovered_run_ids.extend(run_ids)
+
+        await task_repo.create(
+            task_id="task-preclaimed",
+            user_id="user-1",
+            thread_id="thread-preclaimed",
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title="preclaimed",
+            prompt="p",
+            schedule_type="cron",
+            schedule_spec={"cron": "* * * * *"},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_run_repo.create(
+            run_record_id="task-run-preclaimed",
+            task_id="task-preclaimed",
+            thread_id="thread-preclaimed",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="running",
+        )
+        await task_run_repo.update_status(
+            "task-run-preclaimed",
+            status="running",
+            run_id="run-preclaimed",
+        )
+        await durable_run_repo.put(
+            "run-preclaimed",
+            thread_id="thread-preclaimed",
+            user_id="user-1",
+            status="error",
+            error="lease expired",
+            stop_reason="scheduled_task_orphan_recovered",
+            owner_worker_id="dead-scheduler-process",
+            lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
+        )
+
+        assert (
+            await task_run_repo.reconcile_active_runs(
+                error="lease expired",
+                now=now,
+                owner_worker_id="replacement-scheduler",
+                on_runs_recovered=on_runs_recovered,
+            )
+            == 1
+        )
+
+        assert recovered_run_ids == ["run-preclaimed"]
+        row = (await task_run_repo.list_by_task("task-preclaimed"))[0]
+        assert row["status"] == "failed"
+        assert row["run_id"] == "run-preclaimed"
     finally:
         await close_engine()
 
@@ -765,6 +868,11 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
         assert sf is not None
         task_repo = ScheduledTaskRepository(sf)
         durable_run_repo = RunRepository(sf)
+        recovered_run_ids = []
+
+        async def on_runs_recovered(run_ids):
+            recovered_run_ids.extend(run_ids)
+
         now = datetime.now(UTC)
         for suffix in ("live", "dead"):
             await task_repo.create(
@@ -798,7 +906,7 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
             "run-once-dead",
             thread_id="thread-dead",
             user_id="user-1",
-            status="error",
+            status="running",
             owner_worker_id="worker-dead",
             lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
         )
@@ -808,6 +916,7 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
                 error="restart",
                 now=now,
                 owner_worker_id="scheduler-recovery",
+                on_runs_recovered=on_runs_recovered,
             )
             == 1
         )
@@ -815,6 +924,11 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
         dead = await task_repo.get("task-once-dead", user_id="user-1")
         assert live is not None and live["status"] == "running"
         assert dead is not None and dead["status"] == "cancelled"
+        assert recovered_run_ids == ["run-once-dead"]
+        recovered = await durable_run_repo.get("run-once-dead", user_id=None)
+        assert recovered is not None
+        assert recovered["status"] == "error"
+        assert recovered["owner_worker_id"] == "scheduler-recovery"
     finally:
         await close_engine()
 

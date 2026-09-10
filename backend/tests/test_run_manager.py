@@ -565,6 +565,50 @@ async def test_reconcile_orphaned_run_backfills_delivery_after_atomic_takeover()
 
 
 @pytest.mark.anyio
+async def test_terminalize_recovered_runs_backfills_events_and_notifies_gateway():
+    """External takeover paths share RunManager's event and stream contract."""
+    store = MemoryRunStore()
+    events = MemoryRunEventStore()
+    callback_batches = []
+
+    async def on_orphans_recovered(records):
+        callback_batches.append(records)
+
+    await store.put(
+        "scheduler-recovered",
+        thread_id="thread-1",
+        user_id="user-1",
+        status="error",
+        error="owner lease expired",
+        stop_reason="scheduled_task_orphan_recovered",
+    )
+    manager = RunManager(
+        store=store,
+        event_store=events,
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    record = await manager.get("scheduler-recovered", user_id=None)
+    assert record is not None
+
+    await manager.terminalize_recovered_runs([record])
+
+    delivery = await events.list_events(
+        "thread-1",
+        "scheduler-recovered",
+        event_types=["run.delivery"],
+    )
+    terminal = await events.list_events(
+        "thread-1",
+        "scheduler-recovered",
+        event_types=["run.end"],
+    )
+    assert len(delivery) == 1
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {"status": "error", "recovered": True}
+    assert [[item.run_id for item in batch] for batch in callback_batches] == [["scheduler-recovered"]]
+
+
+@pytest.mark.anyio
 async def test_reconcile_preserves_delivery_written_before_worker_crash():
     """A crash after the receipt but before status persistence keeps its facts."""
     store = MemoryRunStore()

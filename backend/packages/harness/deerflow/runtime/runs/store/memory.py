@@ -209,6 +209,14 @@ class MemoryRunStore(RunStore):
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
 
+    async def start_run_if_owned(self, run_id, *, owner_worker_id) -> bool:
+        run = self._runs.get(run_id)
+        if run is None or run["status"] != "pending" or run.get("owner_worker_id") != owner_worker_id or is_lease_expired(run.get("lease_expires_at"), grace_seconds=0) or run.get("cancel_action") is not None:
+            return False
+        run["status"] = "running"
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return True
+
     async def update_model_name(self, run_id, model_name):
         if run_id in self._runs:
             self._runs[run_id]["model_name"] = model_name

@@ -476,15 +476,100 @@ async def test_interrupt_admission_backfills_a_cancelled_pending_worker():
         multitask_strategy="interrupt",
     )
     await asyncio.gather(old.task, return_exceptions=True)
+    await asyncio.sleep(0)
 
     assert replacement.status == RunStatus.pending
     assert old.task.cancelled()
+    assert old.finalizing is False
     delivery = await events.list_events("thread-1", old.run_id, event_types=["run.delivery"])
     terminal = await events.list_events("thread-1", old.run_id, event_types=["run.end"])
     assert len(delivery) == 1
     assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
     assert len(terminal) == 1
     assert terminal[0]["metadata"] == {"status": "interrupted", "recovered": True}
+
+
+@pytest.mark.anyio
+async def test_rollback_admission_keeps_pending_worker_terminal_event_authoritative(
+    monkeypatch,
+):
+    """A pre-start rollback is an interruption, not a checkpoint rollback."""
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store)
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-1", user_id="run-owner")
+    worker_waiting = asyncio.Event()
+    worker_finalizing = asyncio.Event()
+    release_worker_finalization = asyncio.Event()
+
+    async def wait_before_start(*_args, **_kwargs):
+        worker_waiting.set()
+        await asyncio.Event().wait()
+
+    original_set_status = manager.set_status
+
+    async def pause_cancelled_worker_status(run_id, status, **kwargs):
+        if run_id == old.run_id and status == RunStatus.interrupted and kwargs.get("stage_terminal") is True:
+            worker_finalizing.set()
+            await release_worker_finalization.wait()
+        return await original_set_status(run_id, status, **kwargs)
+
+    monkeypatch.setattr(manager, "wait_for_prior_finalizing", wait_before_start)
+    monkeypatch.setattr(manager, "set_status", pause_cancelled_worker_status)
+    rollback = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint",
+        rollback,
+    )
+    worker_task = _start_output_worker(manager, old, events)
+    await asyncio.wait_for(worker_waiting.wait(), timeout=1)
+
+    replacement = await manager.create_or_reject(
+        "thread-1",
+        multitask_strategy="rollback",
+        user_id="new-owner",
+    )
+    await asyncio.wait_for(worker_finalizing.wait(), timeout=1)
+    terminal_before_worker_cleanup = await events.list_events(
+        "thread-1",
+        old.run_id,
+        event_types=["run.end"],
+    )
+    release_worker_finalization.set()
+    await asyncio.wait_for(worker_task, timeout=1)
+
+    stored = await store.get(old.run_id)
+    delivery = await events.list_events(
+        "thread-1",
+        old.run_id,
+        event_types=["run.delivery"],
+    )
+    terminal = await events.list_events(
+        "thread-1",
+        old.run_id,
+        event_types=["run.end"],
+    )
+    assert replacement.status == RunStatus.pending
+    assert old.status == RunStatus.interrupted
+    assert old.error is None
+    assert old.finalizing is False
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert stored["error"] == "Cancelled by newer run"
+    assert len(terminal_before_worker_cleanup) == 1
+    assert terminal_before_worker_cleanup[0]["metadata"] == {
+        "status": RunStatus.interrupted.value,
+        "recovered": True,
+    }
+    assert len(delivery) == 1
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"]["status"] == stored["status"]
+    rollback.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -1242,6 +1327,123 @@ async def test_heartbeat_renews_pending_run_before_task_is_spawned():
     store.update_lease.assert_awaited_once()
     assert record.lease_expires_at is not None
     assert record.lease_expires_at > original_lease
+
+
+@pytest.mark.anyio
+async def test_try_start_fences_expired_owner_before_agent_execution():
+    """The startup CAS must reject a stale worker before Agent side effects."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await manager.create_or_reject("thread-expired-start")
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    record.lease_expires_at = expired
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    stored["lease_expires_at"] = expired
+
+    outcome = await manager.try_start(record.run_id)
+
+    assert outcome.value == "cancelled"
+    assert record.ownership_lost is True
+    assert record.abort_event.is_set()
+    assert record.status == RunStatus.error
+    assert stored["status"] == RunStatus.pending.value
+
+
+@pytest.mark.anyio
+async def test_durable_cancel_before_start_blocks_agent_without_fencing_owner():
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store)
+    ownership = _lease_config(heartbeat_enabled=True)
+    owner = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-a",
+        run_ownership_config=ownership,
+    )
+    peer = _make_manager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=ownership,
+    )
+    record = await owner.create_or_reject(
+        "thread-cancel-before-start",
+        user_id="run-owner",
+    )
+    assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
+    agent_factory_called = False
+
+    def agent_factory(**_kwargs):
+        nonlocal agent_factory_called
+        agent_factory_called = True
+        raise AssertionError("durably cancelled run built the Agent")
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            owner,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=events),
+            agent_factory=agent_factory,
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+    await asyncio.wait_for(task, timeout=1)
+
+    stored = await store.get(record.run_id)
+    terminal = await events.list_events(
+        record.thread_id,
+        record.run_id,
+        event_types=["run.end"],
+    )
+    assert agent_factory_called is False
+    assert record.ownership_lost is False
+    assert record.status == RunStatus.interrupted
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {"status": RunStatus.interrupted.value}
+
+
+@pytest.mark.anyio
+async def test_local_cancel_terminalizing_during_start_does_not_fence_owner():
+    """A same-owner cancel may persist before the failed startup CAS is read."""
+    store = MemoryRunStore()
+    owner = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await owner.create_or_reject("thread-local-cancel-before-start")
+    original_start = store.start_run_if_owned
+
+    async def cancel_before_start_returns(run_id, *, owner_worker_id):
+        assert await owner.cancel(run_id, action="interrupt") == CancelOutcome.cancelled
+        return await original_start(run_id, owner_worker_id=owner_worker_id)
+
+    store.start_run_if_owned = cancel_before_start_returns
+
+    outcome = await owner.try_start(record.run_id)
+    stored = await store.get(record.run_id)
+
+    assert outcome.value == "cancelled"
+    assert record.ownership_lost is False
+    assert record.abort_event.is_set()
+    assert record.status == RunStatus.interrupted
+    assert record.durable_terminal_status == RunStatus.interrupted
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
 
 
 @pytest.mark.anyio

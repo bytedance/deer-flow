@@ -342,6 +342,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     queue_timeout_seconds=startup_config.scheduler.queue_timeout_seconds,
                     multi_instance=startup_config.scheduler.multi_instance,
                     run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
+                    on_runs_recovered=lambda run_ids: app.state.run_manager.terminalize_recovered_run_ids(run_ids),
                 )
                 app.state.scheduled_task_service = scheduled_task_service
                 if startup_config.scheduler.enabled:
