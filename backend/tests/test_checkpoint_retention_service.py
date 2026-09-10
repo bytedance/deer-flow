@@ -12,6 +12,7 @@ metadata shape production emits.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -388,3 +389,59 @@ async def test_max_delete_per_run_caps_the_batch(saver_env: _SaverEnv) -> None:
     assert report.deleted_checkpoint_ids[0] in (old_head_id, duration_id)
     remaining = await _listed_checkpoint_ids(saver_env, thread_id)
     assert len(remaining & {old_head_id, duration_id}) == 1
+
+
+@pytest.mark.anyio
+async def test_unsupported_saver_raises_before_any_read() -> None:
+    """An untested saver is rejected up front: no row is read or deleted, so
+    no partial deletion can happen on a backend the mechanics were not
+    validated on."""
+
+    class _FakeSaver:
+        async def alist(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            raise AssertionError("alist must not run on an unsupported saver")
+            yield  # pragma: no cover
+
+    with pytest.raises(NotImplementedError):
+        await enforce_thread_retention(_FakeSaver(), _thread_id())
+
+
+@pytest.mark.anyio
+async def test_chain_walk_tolerates_missing_ancestor_row() -> None:
+    """A head whose ancestor row is missing (partial damage from an earlier
+    policy revision or manual cleanup) ends the chain walk instead of
+    crashing the whole pass; the surviving protections still hold."""
+    saver = InMemorySaver()
+    graph = _build_graph(FullState, saver)
+    thread_id = _thread_id()
+    checkpoint_ids: list[str] = []
+    for index in range(3):
+        message = HumanMessage(content=f"turn {index}: " + "x" * 256, id=f"turn-{index}")
+        await graph.ainvoke({"messages": [message]}, _config(thread_id))
+        snapshot = await graph.aget_state(_config(thread_id))
+        checkpoint_ids.append(snapshot.config["configurable"]["checkpoint_id"])
+
+    # Simulate a partially pruned thread: the middle resumable row is gone.
+    namespace = saver.storage[thread_id][""]
+    assert checkpoint_ids[1] in namespace
+    namespace.pop(checkpoint_ids[1], None)
+
+    report = await enforce_thread_retention(saver, thread_id)
+
+    assert report.protected_head_id == checkpoint_ids[-1]
+    # The head is protected; the remaining off-chain node (the oldest turn) is
+    # a leaf sibling, which is not pruned unless opted in.
+    assert report.deleted_checkpoint_ids == []
+
+
+@pytest.mark.anyio
+async def test_thread_lock_parameter_accepted(saver_env: _SaverEnv) -> None:
+    """An explicit per-thread lock is honored: with an uncontended lock the
+    call completes with the same outcome as without one."""
+    thread_id, checkpoint_ids, _message_ids = await _write_turns(saver_env, steps=2)
+
+    lock = asyncio.Lock()
+    report = await enforce_thread_retention(saver_env.saver, thread_id, thread_lock=lock)
+
+    assert report.deleted_checkpoint_ids == []
+    assert report.protected_head_id == checkpoint_ids[-1]

@@ -28,11 +28,21 @@ invoked from (post-run hook vs scheduler vs explicit admin action) is a
 maintainer decision that lands with the contract itself. Measurement-first:
 reports carry before/after per-thread stats in the same normalized shape as
 ``scripts/benchmark/checkpoint/bench_channels.py``.
+
+History fast-path interaction: the trailing duration-only leaf is also the
+carrier of the run-history metadata cache (``run_durations`` /
+``run_message_ids``) that ``get_thread_history`` reads from the latest
+checkpoint, and the parent it clones does not carry that map. Deleting the
+leaf makes the next history read fall back to store scans and re-persist a
+fresh leaf, so the wiring PR must sequence retention away from history reads
+or adopt a policy that spares cache-carrying leaves — see the contract doc,
+"History fast-path interaction (wiring requirement)".
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -76,27 +86,39 @@ class _Node:
     cp_id: str
     parent_ns: str | None
     parent_id: str | None
-    step: int
     duration_only: bool
-    mid_run: bool
     versions: frozenset = frozenset()
-
-
-def _node_step(tuple_: Any) -> int:
-    """Ordering key for "newest": the metadata step is the runtime's real
-    sequence number; ``checkpoint["step"]`` is not reliably populated on every
-    backend's raw list path."""
-    metadata = getattr(tuple_, "metadata", None) or {}
-    step = metadata.get("step")
-    if isinstance(step, int):
-        return step
-    checkpoint = getattr(tuple_, "checkpoint", None) or {}
-    step = checkpoint.get("step")
-    return step if isinstance(step, int) else -1
 
 
 def _thread_config(thread_id: str) -> dict[str, Any]:
     return {"configurable": {"thread_id": thread_id}}
+
+
+def _ensure_supported_saver(saver: BaseCheckpointSaver) -> None:
+    """Fail fast before any row is read or written on an untested saver.
+
+    The per-backend helpers below model exactly three storage layouts
+    (memory, SQLite, Postgres) and would otherwise fall through to "assume
+    Postgres" SQL for any other ``BaseCheckpointSaver``. A shallow Postgres
+    saver (no ``checkpoint_blobs``/``checkpoint_writes`` tables) or a
+    third-party saver would then issue DELETEs and die partway — with
+    autocommit on the Postgres connection, after the ``checkpoints`` row is
+    already gone. For a destructive tool, an explicit allowlist that raises
+    ``NotImplementedError`` beats a partial deletion and a confusing
+    traceback.
+    """
+    if isinstance(saver, (InMemorySaver, AsyncSqliteSaver)):
+        return
+    async_postgres_saver: type | None = None
+    try:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        async_postgres_saver = AsyncPostgresSaver
+    except Exception:
+        pass
+    if async_postgres_saver is not None and isinstance(saver, async_postgres_saver):
+        return
+    raise NotImplementedError(f"checkpoint retention supports InMemorySaver, AsyncSqliteSaver and AsyncPostgresSaver, got {type(saver).__module__}.{type(saver).__name__}")
 
 
 async def _thread_storage_stats(saver: Any, thread_id: str) -> dict[str, int]:
@@ -144,6 +166,9 @@ async def _thread_storage_stats(saver: Any, thread_id: str) -> dict[str, int]:
         stats["logical_checkpoint_bytes"] = stats["checkpoint_bytes"]
         stats["logical_write_bytes"] = stats["write_bytes"]
         return stats
+    # Reachable only for the allowlisted Postgres saver (see
+    # ``_ensure_supported_saver``): its checkpoint rows are split into
+    # ``checkpoints`` + ``checkpoint_blobs``.
     sqls = (
         ("checkpoint_rows", "checkpoint_bytes", "SELECT COUNT(*) AS rows, COALESCE(SUM(pg_column_size(checkpoint) + pg_column_size(metadata)), 0) AS bytes FROM checkpoints WHERE thread_id = %s"),
         ("blob_rows", "blob_bytes", "SELECT COUNT(*) AS rows, COALESCE(SUM(octet_length(blob)), 0) AS bytes FROM checkpoint_blobs WHERE thread_id = %s"),
@@ -212,6 +237,8 @@ async def _delete_checkpoint_rows(saver: Any, thread_id: str, key: tuple[str, st
         )
         await saver.conn.commit()
         return
+    # Reachable only for the allowlisted Postgres saver (see
+    # ``_ensure_supported_saver``).
     async with saver._cursor() as cursor:
         await cursor.execute(
             "DELETE FROM checkpoints WHERE thread_id = %s AND checkpoint_ns = %s AND checkpoint_id = %s",
@@ -249,119 +276,137 @@ async def enforce_thread_retention(
     thread_id: str,
     policy: RetentionPolicy | None = None,
     *,
+    thread_lock: AbstractAsyncContextManager[None] | None = None,
     collect_stats: bool = True,
 ) -> RetentionReport:
     """Apply *policy* to one thread's checkpoints and return what happened.
 
     Classification walks the parent chain the same way
     ``app/gateway/checkpoint_lineage.py`` does; the resume head is the newest
-    non-duration-only checkpoint by ``(step, checkpoint_id)`` and its whole
-    ancestor chain is protected. Anything off that chain is only deletable
-    when it is a leaf, not mid-run, not explicitly protected, free of writes
-    rows under the strict guard, and matches one of the two contract-proven
-    shapes. A node whose parent is already missing is left alone: partial
-    damage must not be silently compounded.
+    non-duration-only checkpoint by checkpoint id (LangGraph ids are
+    time-ordered), and its whole ancestor chain is protected. Anything off
+    that chain is only deletable when it is a leaf, not explicitly protected,
+    free of writes rows under the strict guard, and matches one of the two
+    contract-proven shapes. A node whose parent is already missing is left
+    alone: partial damage must not be silently compounded. Only savers the
+    deletion mechanics have been validated on are accepted (see
+    :func:`_ensure_supported_saver`).
+
+    Concurrency requirement: classification and deletion are two separate
+    passes over the store, so a run that forks from a node classified as a
+    leaf in between leaves a dangling ``parent_config`` — the contract's own
+    "converts a cleanup into a thread-level outage" failure class. Callers
+    must therefore serialize per-thread mutation against the runtime writer
+    by passing the thread's checkpoint lock
+    (``deerflow.runtime.runs.worker._checkpoint_thread_lock(thread_id)``) as
+    *thread_lock*; without one, retention must only run while the thread is
+    guaranteed quiescent.
     """
+    _ensure_supported_saver(saver)
     effective = policy or RetentionPolicy()
     report = RetentionReport(thread_id=thread_id)
-    if collect_stats:
-        report.stats_before = await _thread_storage_stats(saver, thread_id)
+    lock: AbstractAsyncContextManager[None] = thread_lock if thread_lock is not None else nullcontext()
+    async with lock:
+        if collect_stats:
+            report.stats_before = await _thread_storage_stats(saver, thread_id)
 
-    nodes: dict[tuple[str, str], _Node] = {}
-    async for tuple_ in saver.alist(_thread_config(thread_id), limit=None):
-        configurable = checkpoint_configurable(tuple_)
-        cp_id = configurable.get("checkpoint_id")
-        if not cp_id:
-            continue
-        ns = configurable.get("checkpoint_ns") or ""
-        parent_ns: str | None = None
-        parent_id: str | None = None
-        parent_config = getattr(tuple_, "parent_config", None)
-        if isinstance(parent_config, dict):
-            parent = parent_config.get("configurable") or {}
-            parent_ns = parent.get("checkpoint_ns") or ""
-            parent_id = parent.get("checkpoint_id")
-        checkpoint = getattr(tuple_, "checkpoint", None) or {}
-        channel_versions = checkpoint.get("channel_versions")
-        nodes[(ns, cp_id)] = _Node(
-            ns=ns,
-            cp_id=cp_id,
-            parent_ns=parent_ns,
-            parent_id=parent_id,
-            step=_node_step(tuple_),
-            duration_only=is_duration_only_checkpoint(tuple_),
-            mid_run=bool(getattr(tuple_, "next", None)),
-            versions=frozenset(channel_versions.values()) if isinstance(channel_versions, dict) else frozenset(),
-        )
-    if not nodes:
-        return report
-
-    children: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
-    for key, node in nodes.items():
-        if node.parent_id is not None:
-            children[(node.parent_ns, node.parent_id)].append(key)
-
-    resumable = [key for key, node in nodes.items() if not node.duration_only]
-    # Head = newest by checkpoint id. LangGraph ids are time-ordered (uuid7):
-    # metadata step restarts from the fork point after a branch-resume, so it
-    # is not a thread-global sequence, while max-id matches what an unsaved
-    # ``aget_tuple`` resolves as the thread's latest state.
-    head_key = max(resumable, key=lambda key: key[1]) if resumable else None
-    report.protected_head_id = head_key[1] if head_key else None
-
-    chain: set[tuple[str, str]] = set()
-    cursor = head_key
-    while cursor is not None:
-        chain.add(cursor)
-        node = nodes[cursor]
-        cursor = (node.parent_ns, node.parent_id) if node.parent_id is not None else None
-
-    guarded: set[tuple[str, str]] = set()
-    if effective.strict_pending_write_guard:
-        guarded = await _checkpoint_ids_with_writes(saver, thread_id)
-
-    deletable: list[tuple[str, str]] = []
-    for key, node in nodes.items():
-        if key in chain:
-            continue
-        if children.get(key):
-            continue
-        if key[1] in effective.protect_checkpoint_ids:
-            continue
-        if node.mid_run:
-            continue
-        if key in guarded:
-            continue
-        if node.parent_id is not None and (node.parent_ns, node.parent_id) not in nodes:
-            continue
-        if node.duration_only:
-            if not effective.prune_trailing_duration_leaves:
+        nodes: dict[tuple[str, str], _Node] = {}
+        async for tuple_ in saver.alist(_thread_config(thread_id), limit=None):
+            configurable = checkpoint_configurable(tuple_)
+            cp_id = configurable.get("checkpoint_id")
+            if not cp_id:
                 continue
-        elif not effective.prune_leaf_sibling_branches:
-            continue
-        deletable.append(key)
+            ns = configurable.get("checkpoint_ns") or ""
+            parent_ns: str | None = None
+            parent_id: str | None = None
+            parent_config = getattr(tuple_, "parent_config", None)
+            if isinstance(parent_config, dict):
+                parent = parent_config.get("configurable") or {}
+                parent_ns = parent.get("checkpoint_ns") or ""
+                parent_id = parent.get("checkpoint_id")
+            checkpoint = getattr(tuple_, "checkpoint", None) or {}
+            channel_versions = checkpoint.get("channel_versions")
+            nodes[(ns, cp_id)] = _Node(
+                ns=ns,
+                cp_id=cp_id,
+                parent_ns=parent_ns,
+                parent_id=parent_id,
+                duration_only=is_duration_only_checkpoint(tuple_),
+                versions=frozenset(channel_versions.values()) if isinstance(channel_versions, dict) else frozenset(),
+            )
+        if not nodes:
+            return report
 
-    if effective.max_delete_per_run is not None:
-        deletable = deletable[: effective.max_delete_per_run]
+        children: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
+        for key, node in nodes.items():
+            if node.parent_id is not None:
+                children[(node.parent_ns, node.parent_id)].append(key)
 
-    # Blob GC, contract deletion mechanics: a blob row is an orphan only if no
-    # SURVIVING checkpoint references its version. A real duration-only leaf
-    # copies its parent's channel_versions verbatim, so its blobs are the
-    # parent's rows — deleting "blobs keyed by the removed checkpoint's own
-    # versions" would corrupt the surviving state.
-    deleted_keys = set(deletable)
-    survivor_versions: set[Any] = set()
-    for key, node in nodes.items():
-        if key not in deleted_keys:
-            survivor_versions.update(node.versions)
+        resumable = [key for key, node in nodes.items() if not node.duration_only]
+        # Head = newest by checkpoint id. LangGraph ids are time-ordered (uuid7):
+        # metadata step restarts from the fork point after a branch-resume, so it
+        # is not a thread-global sequence, while max-id matches what an unsaved
+        # ``aget_tuple`` resolves as the thread's latest state.
+        head_key = max(resumable, key=lambda key: key[1]) if resumable else None
+        report.protected_head_id = head_key[1] if head_key else None
 
-    for key in deletable:
-        await _delete_checkpoint_rows(saver, thread_id, key)
-        report.deleted_checkpoint_ids.append(key[1])
+        chain: set[tuple[str, str]] = set()
+        cursor = head_key
+        while cursor is not None:
+            if cursor not in nodes:
+                # A head whose ancestor row is missing (partial damage from an
+                # earlier policy revision or manual cleanup) ends the chain
+                # walk instead of crashing the whole pass; the deletable loop
+                # below already leaves nodes with missing parents alone.
+                break
+            chain.add(cursor)
+            node = nodes[cursor]
+            cursor = (node.parent_ns, node.parent_id) if node.parent_id is not None else None
 
-    if deletable:
-        await _delete_unreachable_blobs(saver, thread_id, survivor_versions)
+        guarded: set[tuple[str, str]] = set()
+        if effective.strict_pending_write_guard:
+            guarded = await _checkpoint_ids_with_writes(saver, thread_id)
 
-    if collect_stats:
-        report.stats_after = await _thread_storage_stats(saver, thread_id)
-    return report
+        deletable: list[tuple[str, str]] = []
+        for key, node in nodes.items():
+            if key in chain:
+                continue
+            if children.get(key):
+                continue
+            if key[1] in effective.protect_checkpoint_ids:
+                continue
+            if key in guarded:
+                continue
+            if node.parent_id is not None and (node.parent_ns, node.parent_id) not in nodes:
+                continue
+            if node.duration_only:
+                if not effective.prune_trailing_duration_leaves:
+                    continue
+            elif not effective.prune_leaf_sibling_branches:
+                continue
+            deletable.append(key)
+
+        if effective.max_delete_per_run is not None:
+            deletable = deletable[: effective.max_delete_per_run]
+
+        # Blob GC, contract deletion mechanics: a blob row is an orphan only if no
+        # SURVIVING checkpoint references its version. A real duration-only leaf
+        # copies its parent's channel_versions verbatim, so its blobs are the
+        # parent's rows — deleting "blobs keyed by the removed checkpoint's own
+        # versions" would corrupt the surviving state.
+        deleted_keys = set(deletable)
+        survivor_versions: set[Any] = set()
+        for key, node in nodes.items():
+            if key not in deleted_keys:
+                survivor_versions.update(node.versions)
+
+        for key in deletable:
+            await _delete_checkpoint_rows(saver, thread_id, key)
+            report.deleted_checkpoint_ids.append(key[1])
+
+        if deletable:
+            await _delete_unreachable_blobs(saver, thread_id, survivor_versions)
+
+        if collect_stats:
+            report.stats_after = await _thread_storage_stats(saver, thread_id)
+        return report
