@@ -2938,22 +2938,39 @@ class TestCooperativeCancellation:
         assert result.is_execution_teardown_complete()
 
     def test_execute_async_teardown_event_is_set_after_run_with_timeout_returns(self, executor_module, classes, base_config):
-        """Terminal status is published before isolated-loop teardown finishes."""
+        """Teardown event fires only after ``_aexecute``'s lease/holder release.
+
+        Terminal status is published earlier and is not confirmation. The
+        patched ``delayed_aexecute`` models production ``_aexecute``'s
+        ``finally`` (sandbox lease / holder release) so the test pins
+        ``["release", "teardown_event"]`` rather than only "event unset
+        while the coroutine body is sleeping".
+        """
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
 
         terminal_published = threading.Event()
         release_teardown = threading.Event()
+        order: list[str] = []
+        lease_held = True
 
         async def delayed_aexecute(_task, result_holder=None):
-            result_holder.try_set_terminal(SubagentStatus.FAILED, error="synthetic")
-            terminal_published.set()
-            deadline = asyncio.get_running_loop().time() + 5
-            while not release_teardown.is_set():
-                if asyncio.get_running_loop().time() >= deadline:
-                    break
-                await asyncio.sleep(0.01)
-            return result_holder
+            nonlocal lease_held
+            try:
+                result_holder.try_set_terminal(SubagentStatus.FAILED, error="synthetic")
+                terminal_published.set()
+                deadline = asyncio.get_running_loop().time() + 5
+                while not release_teardown.is_set():
+                    if asyncio.get_running_loop().time() >= deadline:
+                        break
+                    await asyncio.sleep(0.01)
+                return result_holder
+            finally:
+                # Stand-in for production ``_aexecute``'s sandbox lease/holder
+                # release. Append only after that work so a mark moved to the
+                # top of this ``finally`` would invert the order.
+                lease_held = False
+                order.append("release")
 
         executor = SubagentExecutor(
             config=base_config,
@@ -2967,10 +2984,25 @@ class TestCooperativeCancellation:
             result = executor_module.get_background_task_result(task_id)
             assert result is not None
             assert result.status == SubagentStatus.FAILED
+            assert lease_held, "sandbox lease/holder was released before _aexecute returned"
             assert not result.is_execution_teardown_complete()
+            # Hook this result's event so "teardown_event" is recorded at the
+            # moment it is set (this class reloads the executor module, so a
+            # patch on classes["SubagentResult"] would miss the live class).
+            original_set = result.execution_teardown_event.set
+
+            def tracking_set():
+                first = not result.execution_teardown_event.is_set()
+                if first:
+                    order.append("teardown_event")
+                original_set()
+
+            result.execution_teardown_event.set = tracking_set
             release_teardown.set()
             assert result.execution_teardown_event.wait(timeout=3), "teardown event was not set after run_with_timeout"
             assert result.is_execution_teardown_complete()
+            assert not lease_held
+            assert order == ["release", "teardown_event"]
         executor_module.cleanup_background_task(task_id)
 
     def test_execute_async_isolates_duplicate_external_task_ids(self, executor_module, classes, base_config):
