@@ -22,15 +22,51 @@ describe("formatToolDetail", () => {
       expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
     }
   });
-  it("preserves a real ellipsis key when object traversal is truncated", () => {
-    const value: Record<string, number> = { "…": 42 };
-    for (let i = 0; i < 20000; i++) value[`k${i}`] = 0;
+  it.each([42, { secret: "keep-me" }])(
+    "preserves a real ellipsis key with value %j when object traversal is truncated",
+    (original) => {
+      const value: Record<string, unknown> = { "…": original };
+      for (let i = 0; i < 20000; i++) value[`k${i}`] = 0;
+
+      const preview = formatToolDetail(value);
+
+      expect(preview.truncated).toBe(true);
+      expect(
+        preview.text.startsWith(
+          JSON.stringify({ "…": original }, null, 2).slice(0, -2),
+        ),
+      ).toBe(true);
+      expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+    },
+  );
+  it("does not shorten a key into an existing ellipsis-suffixed key", () => {
+    const original = { secret: "keep-me" };
+    const value = {
+      "k…": original,
+      // Leave two characters for the next key, which used to become "k…".
+      padding: "x".repeat(
+        TOOL_PREVIEW_LIMIT - "k…secretkeep-mepadding".length - 2,
+      ),
+      keyThatMustNotBeRenamed: 0,
+    };
 
     const preview = formatToolDetail(value);
 
     expect(preview.truncated).toBe(true);
-    expect(preview.text).toContain('"…": 42');
+    expect(
+      preview.text.startsWith(
+        JSON.stringify({ "k…": original }, null, 2).slice(0, -2),
+      ),
+    ).toBe(true);
     expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+  });
+  it("omits an oversized key instead of displaying a renamed property", () => {
+    const preview = formatToolDetail({
+      ["k".repeat(TOOL_PREVIEW_LIMIT + 1)]: 42,
+    });
+
+    expect(preview.truncated).toBe(true);
+    expect(JSON.parse(preview.text)).toEqual({ "…": "…" });
   });
   it("formats JSON and preserves falsy results and plain text", () => {
     for (const text of ["null", "false", "0", "", "plain text"]) {

@@ -499,7 +499,8 @@ See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
 Each **Tool details** panel starts collapsed and shows the tool name, call ID,
 input, and received result or explicit error. Large previews are truncated;
-copy actions copy only the displayed preview. This is a frontend view of data
+fields whose names exceed the remaining preview budget are omitted rather than renamed.
+Copy actions copy only the displayed preview. This is a frontend view of data
 already received by the browser, without an additional secret-redaction layer.
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.

@@ -41,13 +41,15 @@ export function formatToolDetail(value: unknown): {
     // 不创建完整的 keys/entries 数组，达到预算即停止读取子值。
     for (const key in item) {
       if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
-      if (nodes >= MAX_NODES || remaining <= 0) {
+      // 对象键必须完整保留，截短后可能与已有键重名并覆盖真实数据。
+      const keyLength = Array.isArray(output) ? 0 : key.length;
+      if (nodes >= MAX_NODES || remaining <= 0 || keyLength > remaining) {
         truncated = true;
         if (Array.isArray(output)) output.push("…");
         else if (!("…" in output)) output["…"] = "…";
         break;
       }
-      const boundedKey = Array.isArray(output) ? key : cutString(key);
+      remaining -= keyLength;
       const descriptor = Object.getOwnPropertyDescriptor(item, key);
       const child =
         descriptor && "value" in descriptor
@@ -55,7 +57,7 @@ export function formatToolDetail(value: unknown): {
           : "…";
       if (!descriptor || !("value" in descriptor)) truncated = true;
       if (Array.isArray(output)) output.push(child);
-      else output[boundedKey] = child;
+      else output[key] = child;
     }
     seen.delete(item);
     return output;
