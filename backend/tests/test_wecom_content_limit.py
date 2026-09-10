@@ -116,6 +116,25 @@ class TestSplitForByteLimit:
         assert len(chunks) == 3
         assert not chunks[-1].endswith(_TRUNCATION_MARKER)
 
+    def test_cap_clips_the_unsplit_remainder(self, monkeypatch):
+        # The cap must apply inside the loop: the remainder past the kept
+        # chunks is clipped whole, never fully split just to be discarded.
+        import app.channels.wecom as wecom_module
+
+        seen = {}
+        real_clip = wecom_module._clip_to_byte_limit
+
+        def spy(text, limit):
+            seen["text"] = text
+            return real_clip(text, limit)
+
+        monkeypatch.setattr(wecom_module, "_clip_to_byte_limit", spy)
+        text = "x" * (_WECOM_MAX_CONTENT_BYTES * 25)
+        chunks = _split_for_byte_limit(text, _WECOM_MAX_CONTENT_BYTES)
+        assert len(chunks) == _WECOM_MAX_CHUNK_BATCH
+        expected_tail = len(text) - _WECOM_MAX_CONTENT_BYTES * (_WECOM_MAX_CHUNK_BATCH - 1)
+        assert len(seen["text"]) == expected_tail
+
 
 class TestSendWsContentLimit:
     def _channel(self) -> WeComChannel:
@@ -235,6 +254,30 @@ class TestSendWsChatSerialization:
         contents = [content for _, content in sent]
         # Either batch order is fine; what matters is no interleaving.
         assert contents in (chunks_a + chunks_b, chunks_b + chunks_a)
+
+    def test_completed_chat_lock_is_reclaimed(self):
+        ch, _ = self._recording_channel()
+        _run(ch._send_ws(self._push("c1", "short push")))
+        assert ch._ws_send_locks == {}
+        assert ch._ws_send_lock_users == {}
+
+    def test_lock_is_reclaimed_after_a_capped_batch(self):
+        ch, sent = self._recording_channel()
+        text = "x" * (_WECOM_MAX_CONTENT_BYTES * 12)
+        _run(ch._send_ws(self._push("c1", text)))
+        assert sent  # the batch went out
+        assert ch._ws_send_locks == {}
+        assert ch._ws_send_lock_users == {}
+
+    def test_concurrent_senders_each_leave_no_locks(self):
+        ch, _ = self._recording_channel()
+
+        async def many():
+            await asyncio.gather(*(ch._send_ws(self._push(f"chat-{i}", f"msg {i}")) for i in range(20)))
+
+        _run(many())
+        assert ch._ws_send_locks == {}
+        assert ch._ws_send_lock_users == {}
 
     def test_different_chats_keep_their_own_order(self):
         ch, sent = self._recording_channel()

@@ -56,12 +56,22 @@ def _split_for_byte_limit(text: str, limit: int) -> list[str]:
     """Split text into chunks within the UTF-8 byte limit.
 
     Prefers newline boundaries so markdown structure survives the split.
+    The batch cap applies inside the loop, so a pathological text is never
+    fully split just to be discarded.
     """
     if len(text.encode("utf-8")) <= limit:
         return [text]
     chunks: list[str] = []
     remaining = text
     while len(remaining.encode("utf-8")) > limit:
+        if len(chunks) >= _WECOM_MAX_CHUNK_BATCH - 1:
+            logger.warning(
+                "WeCom push of %d bytes exceeds %d messages, capping the batch",
+                len(text.encode("utf-8")),
+                _WECOM_MAX_CHUNK_BATCH,
+            )
+            chunks.append(_clip_to_byte_limit(remaining, limit))
+            return chunks
         window = remaining.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
         cut = window.rfind("\n")
         if cut <= 0:
@@ -78,16 +88,6 @@ def _split_for_byte_limit(text: str, limit: int) -> list[str]:
         remaining = remaining[cut:]
     if remaining:
         chunks.append(remaining)
-    if len(chunks) > _WECOM_MAX_CHUNK_BATCH:
-        logger.warning(
-            "WeCom push of %d bytes split into %d messages, capping at %d",
-            len(text.encode("utf-8")),
-            len(chunks),
-            _WECOM_MAX_CHUNK_BATCH,
-        )
-        kept = chunks[: _WECOM_MAX_CHUNK_BATCH - 1]
-        kept.append(_clip_to_byte_limit("".join(chunks[_WECOM_MAX_CHUNK_BATCH - 1 :]), limit))
-        return kept
     return chunks
 
 
@@ -103,6 +103,8 @@ class WeComChannel(Channel):
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
         self._ws_send_locks: dict[str, asyncio.Lock] = {}
+        self._ws_send_lock_users: dict[str, int] = {}
+        self._ws_send_locks_guard = asyncio.Lock()
         self._working_message = "Working on it..."
 
     @property
@@ -533,15 +535,27 @@ class WeComChannel(Channel):
         # so hold a per-chat lock across the whole batch: manager workers run
         # concurrently, and two long pushes to the same chat would otherwise
         # interleave chunks (A1, B1, A2, B2) and break the sequential contract.
-        lock = self._ws_send_locks.setdefault(msg.chat_id, asyncio.Lock())
-        async with lock:
-            for chunk in _split_for_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES):
-                body = {"msgtype": "markdown", "markdown": {"content": chunk}}
-                await self._send_with_retry(
-                    lambda body=body: self._ws_client.send_message(msg.chat_id, body),
-                    max_retries=_max_retries,
-                    log_prefix="[WeCom]",
-                )
+        async with self._ws_send_locks_guard:
+            lock = self._ws_send_locks.setdefault(msg.chat_id, asyncio.Lock())
+            self._ws_send_lock_users[msg.chat_id] = self._ws_send_lock_users.get(msg.chat_id, 0) + 1
+        try:
+            async with lock:
+                for chunk in _split_for_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES):
+                    body = {"msgtype": "markdown", "markdown": {"content": chunk}}
+                    await self._send_with_retry(
+                        lambda body=body: self._ws_client.send_message(msg.chat_id, body),
+                        max_retries=_max_retries,
+                        log_prefix="[WeCom]",
+                    )
+        finally:
+            async with self._ws_send_locks_guard:
+                self._ws_send_lock_users[msg.chat_id] -= 1
+                # Reclaim only while nobody else is queued on this chat's lock;
+                # the guard serializes the check so a waiter can never end up
+                # holding a fresh lock for a chat whose batch is mid-flight.
+                if self._ws_send_lock_users[msg.chat_id] == 0:
+                    self._ws_send_lock_users.pop(msg.chat_id, None)
+                    self._ws_send_locks.pop(msg.chat_id, None)
 
     async def _upload_media_ws(
         self,
