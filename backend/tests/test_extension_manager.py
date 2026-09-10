@@ -166,13 +166,16 @@ def _assert_demo_entry_point_loads(backend: Path) -> None:
     assert completed.returncode == 0, completed.stderr
 
 
-def _write_demo_wheel(directory: Path) -> Path:
-    directory.mkdir()
-    wheel = directory / "deerflow_extension_demo-1.0.0-py3-none-any.whl"
-    dist_info = "deerflow_extension_demo-1.0.0.dist-info"
+def _write_demo_wheel(directory: Path, *, version: str = "1.0.0", marker: str | None = None) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    wheel = directory / f"deerflow_extension_demo-{version}-py3-none-any.whl"
+    dist_info = f"deerflow_extension_demo-{version}.dist-info"
+    init = "def install(registry, config):\n    return None\n"
+    if marker is not None:
+        init = f"MARKER = {marker!r}\n{init}"
     records = {
-        "demo_extension/__init__.py": "def install(registry, config):\n    return None\n",
-        f"{dist_info}/METADATA": ("Metadata-Version: 2.1\nName: deerflow-extension-demo\nVersion: 1.0.0\nRequires-Python: >=3.12\n"),
+        "demo_extension/__init__.py": init,
+        f"{dist_info}/METADATA": (f"Metadata-Version: 2.1\nName: deerflow-extension-demo\nVersion: {version}\nRequires-Python: >=3.12\n"),
         f"{dist_info}/WHEEL": ("Wheel-Version: 1.0\nGenerator: deerflow-extension-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"),
         f"{dist_info}/entry_points.txt": ("[deerflow.extensions]\ndemo = demo_extension:install\n"),
     }
@@ -417,6 +420,79 @@ def test_upgrade_repins_an_installed_git_source_and_preserves_private_config(tmp
     assert result.name == "demo"
     assert marker == "v2"
     assert second_revision in (root / "backend" / "uv.lock").read_text(encoding="utf-8")
+    assert not (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo").exists()
+    plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
+    assert plugins == [
+        {
+            "name": "demo",
+            "package": "deerflow-extension-demo",
+            "use": "demo_extension:install",
+            "enabled": False,
+            "required": True,
+            "config": {"label": "keep-this"},
+        }
+    ]
+
+
+def test_upgrade_repins_an_installed_requirement_and_preserves_private_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Re-pinning ==2.0.0 to ==3.0.0 keeps the same distribution name.
+
+    added_names is empty; identification must take the added_specs fallback so
+    private config/required/enabled survive the lock re-pin.
+    """
+    root = tmp_path / "deer-flow"
+    simple_root = tmp_path / "simple"
+    package_dir = simple_root / "deerflow-extension-demo"
+    root.mkdir()
+    _write_host_project(root)
+    _write_demo_wheel(package_dir, version="2.0.0", marker="v2")
+    _write_demo_wheel(package_dir, version="3.0.0", marker="v3")
+    (package_dir / "index.html").write_text(
+        """\
+<!DOCTYPE html>
+<html><body>
+<a href="deerflow_extension_demo-2.0.0-py3-none-any.whl">deerflow_extension_demo-2.0.0-py3-none-any.whl</a>
+<a href="deerflow_extension_demo-3.0.0-py3-none-any.whl">deerflow_extension_demo-3.0.0-py3-none-any.whl</a>
+</body></html>
+""",
+        encoding="utf-8",
+    )
+
+    with _serve_directory(simple_root) as index_url:
+        monkeypatch.setenv("UV_DEFAULT_INDEX", index_url)
+        manager = ExtensionManager(root)
+        manager.install("deerflow-extension-demo==2.0.0", yes=True)
+        config_path = root / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["plugins"][0]["required"] = True
+        config["plugins"][0]["config"] = {"label": "keep-this"}
+        config["plugins"][0]["enabled"] = False
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+        result = manager.upgrade("deerflow-extension-demo==3.0.0", yes=True)
+
+        _assert_demo_entry_point_loads(root / "backend")
+        marker = subprocess.run(
+            [
+                str(root / "backend" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")),
+                "-c",
+                "import demo_extension; print(demo_extension.MARKER)",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    pyproject = (root / "backend" / "pyproject.toml").read_text(encoding="utf-8")
+    lock = (root / "backend" / "uv.lock").read_text(encoding="utf-8")
+    assert result.name == "demo"
+    assert marker == "v3"
+    assert "deerflow-extension-demo==3.0.0" in pyproject
+    assert "deerflow-extension-demo==2.0.0" not in pyproject
+    assert re.search(r'name = "deerflow-extension-demo"\s+version = "3.0.0"', lock) is not None
     assert not (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo").exists()
     plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
     assert plugins == [
