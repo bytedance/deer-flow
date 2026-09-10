@@ -137,6 +137,7 @@ export function ScheduledTaskScheduleInput({
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
     initialInterval.unit,
   );
+  const [intervalEdited, setIntervalEdited] = useState(false);
 
   // Hold the latest onChange in a ref so the effect below does not depend on
   // it. This avoids a re-render loop: if the parent passes an inline
@@ -159,7 +160,12 @@ export function ScheduledTaskScheduleInput({
       return;
     }
     if (scheduleType === "interval") {
-      const amount = clampIntervalAmount(intervalAmount, intervalUnit);
+      // Existing API-approved intervals may be below the default UI floor.
+      // Preserve their cadence on edit/duplicate until the amount or unit is
+      // explicitly changed; the server owns the configurable minimum.
+      const amount = intervalEdited
+        ? clampIntervalAmount(intervalAmount, intervalUnit)
+        : intervalAmount;
       onChangeRef.current({
         schedule_type: "interval",
         schedule_spec: {
@@ -184,6 +190,7 @@ export function ScheduledTaskScheduleInput({
     timezone,
     intervalAmount,
     intervalUnit,
+    intervalEdited,
   ]);
 
   function updateParts(patch: Partial<CronParts>) {
@@ -371,6 +378,7 @@ export function ScheduledTaskScheduleInput({
               // Do not clamp on every keystroke: typing 90 would otherwise
               // become 9 -> 60, then 600. Emit/blur still apply the floor.
               const raw = e.target.value;
+              setIntervalEdited(true);
               setIntervalAmountText(raw);
               const next = Number(raw);
               if (!Number.isInteger(next) || next <= 0) {
@@ -379,6 +387,7 @@ export function ScheduledTaskScheduleInput({
               setIntervalAmount(next);
             }}
             onBlur={() => {
+              if (!intervalEdited) return;
               const next = clampIntervalAmount(
                 Number(intervalAmountText),
                 intervalUnit,
@@ -392,6 +401,7 @@ export function ScheduledTaskScheduleInput({
             value={intervalUnit}
             onValueChange={(value) => {
               const unit = value as IntervalUnit;
+              setIntervalEdited(true);
               setIntervalUnit(unit);
               const next = clampIntervalAmount(intervalAmount, unit);
               setIntervalAmount(next);

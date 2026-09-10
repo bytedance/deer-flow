@@ -10,6 +10,40 @@ import { I18nProvider } from "@/core/i18n/context";
 afterEach(cleanup);
 
 describe("ScheduledTaskScheduleInput", () => {
+  test.each([1, 30, 59])(
+    "preserves an existing %s-second interval until explicitly edited",
+    (everySeconds) => {
+      const emitted: ScheduleValue[] = [];
+      render(
+        <I18nProvider initialLocale="en-US">
+          <ScheduledTaskScheduleInput
+            initial={{
+              schedule_type: "interval",
+              schedule_spec: { every_seconds: everySeconds },
+              timezone: "UTC",
+            }}
+            onChange={(value) => emitted.push(value)}
+          />
+        </I18nProvider>,
+      );
+
+      const amountInput = screen.getByRole<HTMLInputElement>("spinbutton");
+      expect(amountInput.value).toBe(String(everySeconds));
+      expect(emitted.at(-1)?.schedule_spec.every_seconds).toBe(everySeconds);
+
+      fireEvent.focus(amountInput);
+      fireEvent.blur(amountInput);
+      expect(amountInput.value).toBe(String(everySeconds));
+      expect(emitted.at(-1)?.schedule_spec.every_seconds).toBe(everySeconds);
+
+      fireEvent.change(amountInput, { target: { value: "9" } });
+      expect(amountInput.value).toBe("9");
+      expect(emitted.at(-1)?.schedule_spec.every_seconds).toBe(60);
+      fireEvent.blur(amountInput);
+      expect(amountInput.value).toBe("60");
+    },
+  );
+
   test("keeps interval text editable until blur applies the floor", () => {
     const emitted: ScheduleValue[] = [];
 
