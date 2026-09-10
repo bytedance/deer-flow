@@ -3,8 +3,9 @@ import mimetypes
 from pathlib import Path
 from typing import Annotated
 
-from langchain.tools import InjectedToolCallId, tool
+from langchain.tools import InjectedToolCallId
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 
 from deerflow.agents.thread_state import ThreadDataState
@@ -102,8 +103,7 @@ def _read_verified_host_copy(
     return data
 
 
-@tool("view_image", parse_docstring=True)
-def view_image_tool(
+def _view_image(
     runtime: Runtime,
     image_path: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
@@ -279,3 +279,27 @@ def view_image_tool(
     return Command(
         update={"viewed_images": new_viewed_images, "messages": [ToolMessage("Successfully read image", tool_call_id=tool_call_id)]},
     )
+
+
+async def _aview_image(
+    runtime: Runtime,
+    image_path: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Run the blocking image read without letting cancellation outlive it."""
+    from deerflow.sandbox.lease import run_sync_lifecycle_operation
+
+    return await run_sync_lifecycle_operation(
+        _view_image,
+        runtime,
+        image_path,
+        tool_call_id,
+    )
+
+
+view_image_tool = StructuredTool.from_function(
+    func=_view_image,
+    coroutine=_aview_image,
+    name="view_image",
+    parse_docstring=True,
+)
