@@ -110,6 +110,7 @@ export default function ScheduledTasksPage() {
   const [typeFilter, setTypeFilter] = useState<"all" | "once" | "cron">("all");
   const [formError, setFormError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
+  const [editTaskId, setEditTaskId] = useState<string | undefined>(undefined);
   const [editTitle, setEditTitle] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
   const [editSchedule, setEditSchedule] = useState<ScheduleValue>({
@@ -201,29 +202,29 @@ export default function ScheduledTasksPage() {
     }
   }, [filteredData, selectedTaskId]);
 
-  useEffect(() => {
+  // Reset before children commit: a keyed schedule input must never capture
+  // the previous task's draft on its first render. Same-id refetches retain edits.
+  if (editTaskId !== selectedTask?.id) {
+    setEditTaskId(selectedTask?.id);
     if (!selectedTask) {
       setEditing(false);
-      return;
+    } else {
+      setEditTitle(selectedTask.title);
+      setEditPrompt(selectedTask.prompt);
+      const spec = selectedTask.schedule_spec as {
+        cron?: string;
+        run_at?: string;
+      };
+      setEditSchedule({
+        schedule_type: selectedTask.schedule_type,
+        schedule_spec: {
+          cron: typeof spec.cron === "string" ? spec.cron : undefined,
+          run_at: typeof spec.run_at === "string" ? spec.run_at : undefined,
+        },
+        timezone: selectedTask.timezone || "UTC",
+      });
     }
-    setEditTitle(selectedTask.title);
-    setEditPrompt(selectedTask.prompt);
-    const spec = selectedTask.schedule_spec as {
-      cron?: string;
-      run_at?: string;
-    };
-    setEditSchedule({
-      schedule_type: selectedTask.schedule_type,
-      schedule_spec: {
-        cron: typeof spec.cron === "string" ? spec.cron : undefined,
-        run_at: typeof spec.run_at === "string" ? spec.run_at : undefined,
-      },
-      timezone: selectedTask.timezone || "UTC",
-    });
-    // Depend on id only so a background refetch (same task, new object reference)
-    // does not wipe edits in progress.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTask?.id]);
+  }
 
   return (
     <WorkspaceContainer>

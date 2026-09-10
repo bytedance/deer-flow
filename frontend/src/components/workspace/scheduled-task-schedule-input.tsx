@@ -100,16 +100,13 @@ export function ScheduledTaskScheduleInput({
   const [parts, setParts] = useState<CronParts>(
     () => parseCron(initial.schedule_spec.cron ?? "0 9 * * *").parts,
   );
+  const [timezone, setTimezone] = useState<string>(
+    () => initial.timezone || detectBrowserTimezone(),
+  );
   const [runAtLocal, setRunAtLocal] = useState<string>(
     initial.schedule_type === "once" && initial.schedule_spec.run_at
-      ? utcToZonedLocalInput(
-          initial.schedule_spec.run_at,
-          initial.timezone || "UTC",
-        )
+      ? utcToZonedLocalInput(initial.schedule_spec.run_at, timezone)
       : "",
-  );
-  const [timezone, setTimezone] = useState<string>(
-    initial.timezone || detectBrowserTimezone(),
   );
 
   // Minute-precision wall time cannot retain seconds or identify the later
@@ -121,7 +118,7 @@ export function ScheduledTaskScheduleInput({
       ? {
           runAt: initial.schedule_spec.run_at,
           local: runAtLocal,
-          timezone: initial.timezone || "UTC",
+          timezone,
         }
       : null,
   );

@@ -7,6 +7,7 @@ import {
   type ScheduleValue,
 } from "@/components/workspace/scheduled-task-schedule-input";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { utcToZonedLocalInput } from "@/core/scheduled-tasks/cron";
 
 rs.mock("@/core/i18n/hooks", () => ({
   useI18n: () => ({ locale: "en-US", t: enUS }),
@@ -204,4 +205,26 @@ test("a keyed task switch captures the next task's instant", () => {
     />,
   );
   expect(onChange).toHaveBeenLastCalledWith(next);
+});
+
+test("empty timezone uses the browser zone consistently without changing the instant", () => {
+  // Run this regression with TZ=Asia/Shanghai, unlike the usual UTC verifier.
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const initial = once("2026-11-01T06:30:00Z", "");
+  const onChange = rs.fn();
+  const ui = render(
+    <ScheduledTaskScheduleInput
+      initial={initial}
+      onChange={onChange}
+      scheduleTypeLocked
+    />,
+  );
+  expect(onChange).toHaveBeenLastCalledWith({ ...initial, timezone });
+  const expected = utcToZonedLocalInput(
+    initial.schedule_spec.run_at!,
+    timezone,
+  );
+  expect((ui.getByLabelText("Run at") as HTMLInputElement).value).toBe(
+    expected,
+  );
 });

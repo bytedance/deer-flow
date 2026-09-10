@@ -387,3 +387,68 @@ for (const runAt of ["2026-11-01T06:30:00Z", "2027-06-01T12:30:45Z"]) {
     });
   });
 }
+
+test("switching tasks during editing saves only the selected task's schedule", async ({
+  page,
+}) => {
+  const tasks = [
+    {
+      id: "switch-a",
+      title: "Task A",
+      prompt: "Prompt A",
+      timezone: "America/New_York",
+      runAt: "2026-03-01T05:00:00+00:00",
+    },
+    {
+      id: "switch-b",
+      title: "Task B",
+      prompt: "Prompt B",
+      timezone: "Asia/Shanghai",
+      runAt: "2027-06-01T12:30:45+00:00",
+    },
+  ];
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: tasks.map((task) => ({
+      id: task.id,
+      title: task.title,
+      prompt: task.prompt,
+      timezone: task.timezone,
+      thread_id: null,
+      context_mode: "fresh_thread_per_run",
+      schedule_type: "once",
+      schedule_spec: { run_at: task.runAt },
+      status: "enabled",
+      next_run_at: task.runAt,
+      last_run_at: null,
+      last_run_id: null,
+      last_error: null,
+      run_count: 0,
+      created_at: "2026-07-01T00:00:00Z",
+      updated_at: "2026-07-01T00:00:00Z",
+    })),
+  });
+  await page.goto("/workspace/scheduled-tasks");
+  await page.getByTestId("scheduled-task-item-switch-a").click();
+  const detail = page.getByTestId("scheduled-task-detail");
+  await detail.getByRole("button", { name: "Edit", exact: true }).click();
+  await detail.getByPlaceholder("Edit title").fill("Unsaved A");
+  await page.getByTestId("scheduled-task-item-switch-b").click();
+  await expect(detail.getByPlaceholder("Edit title")).toHaveValue("Task B");
+  await expect(detail.getByPlaceholder("Edit prompt")).toHaveValue("Prompt B");
+  await expect(detail.getByLabel("Run at")).toHaveValue("2027-06-01T20:30");
+  await detail.getByLabel("Run at").fill("2027-06-01T21:30");
+  await detail.getByLabel("Run at").fill("2027-06-01T20:30");
+  const submitted = page.waitForRequest(
+    (request) =>
+      request.method() === "PATCH" &&
+      new URL(request.url()).pathname === "/api/scheduled-tasks/switch-b",
+  );
+  await detail.getByRole("button", { name: "Save edit", exact: true }).click();
+  expect((await submitted).postDataJSON()).toMatchObject({
+    title: "Task B",
+    prompt: "Prompt B",
+    timezone: "Asia/Shanghai",
+    schedule_spec: { run_at: tasks[1]!.runAt },
+  });
+});
