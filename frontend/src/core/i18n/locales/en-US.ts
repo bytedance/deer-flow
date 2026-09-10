@@ -450,6 +450,7 @@ export const enUS: Translations = {
     scheduleType: {
       cron: "Recurring",
       once: "One-time",
+      interval: "Interval",
     },
     preset: {
       label: "Repeat",
@@ -468,6 +469,11 @@ export const enUS: Translations = {
       cronPlaceholder: "0 9 * * *",
       runAt: "Run at",
       timezone: "Timezone",
+      intervalAmount: "Every",
+      intervalUnitSeconds: "seconds",
+      intervalUnitMinutes: "minutes",
+      intervalUnitHours: "hours",
+      intervalMinHint: "Minimum 60 seconds (the default server floor).",
     },
     weekdays: {
       mon: "Mon",
@@ -506,6 +512,7 @@ export const enUS: Translations = {
       allTypes: "All types",
       cron: "Cron",
       once: "Once",
+      interval: "Interval",
     },
     detail: {
       contextMode: "Context mode",

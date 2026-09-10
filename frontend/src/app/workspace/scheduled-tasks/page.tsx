@@ -36,6 +36,7 @@ import {
 import { listAgents } from "@/core/agents/api";
 import { useAgentsApiEnabled } from "@/core/agents/hooks";
 import { useI18n } from "@/core/i18n/hooks";
+import { hasScheduleSpec } from "@/core/scheduled-tasks/cron";
 import {
   useCreateScheduledTask,
   useUpdateScheduledTask,
@@ -139,7 +140,9 @@ export default function ScheduledTasksPage() {
   const [statusFilter, setStatusFilter] = useState<
     "all" | "enabled" | "paused" | "running" | "completed" | "failed"
   >("all");
-  const [typeFilter, setTypeFilter] = useState<"all" | "once" | "cron">("all");
+  const [typeFilter, setTypeFilter] = useState<
+    "all" | "once" | "cron" | "interval"
+  >("all");
   const [formError, setFormError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
@@ -197,7 +200,9 @@ export default function ScheduledTasksPage() {
       ? st.scheduleType.cron
       : v === "once"
         ? st.scheduleType.once
-        : v;
+        : v === "interval"
+          ? st.scheduleType.interval
+          : v;
   const statusLabel = (v: string) =>
     (st.status as Record<string, string>)[v] ?? v;
   const contextModeLabel = (v: string) =>
@@ -270,12 +275,17 @@ export default function ScheduledTasksPage() {
     const spec = selectedTask.schedule_spec as {
       cron?: string;
       run_at?: string;
+      every_seconds?: number;
     };
     setEditSchedule({
       schedule_type: selectedTask.schedule_type,
       schedule_spec: {
         cron: typeof spec.cron === "string" ? spec.cron : undefined,
         run_at: typeof spec.run_at === "string" ? spec.run_at : undefined,
+        every_seconds:
+          typeof spec.every_seconds === "number"
+            ? spec.every_seconds
+            : undefined,
       },
       timezone: selectedTask.timezone || "UTC",
     });
@@ -387,9 +397,9 @@ export default function ScheduledTasksPage() {
             )}
             <Button
               onClick={() => {
-                const hasSchedule =
-                  Boolean(createSchedule.schedule_spec.cron) ||
-                  Boolean(createSchedule.schedule_spec.run_at);
+                const hasSchedule = hasScheduleSpec(
+                  createSchedule.schedule_spec,
+                );
                 if (
                   !title ||
                   !prompt ||
@@ -433,8 +443,7 @@ export default function ScheduledTasksPage() {
               disabled={
                 !title ||
                 !prompt ||
-                (!createSchedule.schedule_spec.cron &&
-                  !createSchedule.schedule_spec.run_at) ||
+                !hasScheduleSpec(createSchedule.schedule_spec) ||
                 (contextMode === "reuse_thread" && !targetThreadId) ||
                 createTask.isPending
               }
@@ -511,6 +520,13 @@ export default function ScheduledTasksPage() {
               onClick={() => setTypeFilter("once")}
             >
               {st.filters.once}
+            </Button>
+            <Button
+              variant={typeFilter === "interval" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setTypeFilter("interval")}
+            >
+              {st.filters.interval}
             </Button>
           </div>
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
