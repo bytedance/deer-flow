@@ -76,6 +76,11 @@
 
 ### 新增
 
+#### 调度器
+- **调度器：** 定时任务在 `once` 和 `cron` 之外新增 `interval`
+  （`schedule_spec.every_seconds`）。节奏为 UTC 的 `now + N`，不补跑错过的节拍。
+  N 不小于 `scheduler.min_once_delay_seconds`（默认 60 秒），不大于 30 天。
+
 #### 认证
 - **认证：** 新增用于程序化 API 访问的个人访问令牌（PAT）：
   `POST/GET/DELETE /api/v1/auth/pats` 用于管理令牌（仅展示一次，以 SHA-256
@@ -392,6 +397,14 @@
 
 ### 修复
 
+- **Artifact：** `PUT /api/threads/{id}/artifacts/{path}` 现在严格限制在
+  `/mnt/user-data/outputs` 之内。此前 outputs-only 校验只是对原始路径做字符串前缀
+  检查，百分号编码的 `..`（`outputs/%2e%2e/uploads/x.txt`，nginx 原样转发、Starlette
+  解码后）可以通过，而路径解析器只把结果限制在 `user-data/` 内，因此调用者能覆盖自己
+  线程里的上传文件或 workspace 文件。现在会先折叠 `.`/`..` 段再做前缀检查，并把解析
+  后的宿主机路径与解析后的 outputs 根目录再次比对，`outputs/` 内被植入的符号链接同样
+  无法把写入重定向到别处。该规则现在收敛为一个共享 helper，IM 渠道的附件投递也走同
+  一实现，两处不会再各自漂移。([#5321])
 - **运行时：** 会话元数据现在仅在 run 通过启动屏障后才切换为 `running`，待取消的
   run 不再短暂呈现 `running` 状态；worker 启动期间客户端可能观察到先前的会话状态
   。([#4450])
@@ -2077,3 +2090,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5281]: https://github.com/bytedance/deer-flow/pull/5281
 [#5284]: https://github.com/bytedance/deer-flow/pull/5284
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
+[#5321]: https://github.com/bytedance/deer-flow/pull/5321
