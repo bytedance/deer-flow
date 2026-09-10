@@ -276,8 +276,9 @@ async def test_disconnect_exits_router_without_asgi_error(app, monkeypatch, suff
 
 
 @pytest.mark.asyncio
-async def test_stalled_transfer_has_deadline_and_releases_archive_and_slot(monkeypatch):
-    monkeypatch.setattr(service, "TRANSFER_TIMEOUT_SECONDS", 0.02, raising=False)
+@pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
+async def test_stalled_transfer_has_deadline_and_releases_archive_and_slot(monkeypatch, spec_version):
+    monkeypatch.setattr(service, "TRANSFER_IDLE_TIMEOUT_SECONDS", 0.02)
     file = BytesIO(b"zip")
     lease = service.ExportLease.acquire()
     response = service.SkillExportResponse(SkillExportArchive(file, 3), "demo", lease)
@@ -291,7 +292,7 @@ async def test_stalled_transfer_has_deadline_and_releases_archive_and_slot(monke
     async def receive():
         await asyncio.Event().wait()
 
-    task = asyncio.create_task(response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send))
+    task = asyncio.create_task(response({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send))
     try:
         await asyncio.wait_for(body_started.wait(), 1)
         with pytest.raises(ClientDisconnect):
@@ -313,3 +314,32 @@ def test_manifest_openapi_has_nested_response_contract(app):
     for field in ("files", "warnings", "blockers"):
         assert "$ref" in model["properties"][field]["items"]
     assert "$ref" in model["properties"]["requirements"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
+async def test_progressing_slow_transfer_can_exceed_idle_deadline(monkeypatch, spec_version):
+    monkeypatch.setattr(service, "TRANSFER_IDLE_TIMEOUT_SECONDS", 0.5)
+    content = b"x" * (6 * 1024 * 1024)
+    file = BytesIO(content)
+    response = service.SkillExportResponse(SkillExportArchive(file, len(content)), "demo", service.ExportLease.acquire())
+    received = bytearray()
+    completed = False
+
+    async def send(message):
+        nonlocal completed
+        if message["type"] == "http.response.body":
+            await asyncio.sleep(0.1)
+            received.extend(message.get("body", b""))
+            completed = not message.get("more_body", False)
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    await response({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send)
+    assert completed
+    assert received == content
+    assert file.closed
+    leases = [service.ExportLease.acquire(), service.ExportLease.acquire()]
+    for lease in leases:
+        lease.release()

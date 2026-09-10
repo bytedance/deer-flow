@@ -17,7 +17,7 @@ from deerflow.utils.file_io import run_file_io
 
 # Slots are shared across all users in this Gateway process.
 _slots = threading.BoundedSemaphore(2)
-TRANSFER_TIMEOUT_SECONDS = 120.0
+TRANSFER_IDLE_TIMEOUT_SECONDS = 120.0
 
 
 class ExportClientDisconnected(Exception):
@@ -161,8 +161,15 @@ class SkillExportResponse(StreamingResponse):
     async def __call__(self, scope, receive, send) -> None:
         try:
             try:
-                async with asyncio.timeout(TRANSFER_TIMEOUT_SECONDS):
-                    await super().__call__(scope, receive, send)
+                async with asyncio.timeout(TRANSFER_IDLE_TIMEOUT_SECONDS) as idle_timeout:
+
+                    async def send_with_progress(message):
+                        await send(message)
+                        # Reset only after transport acceptance, not merely after
+                        # reading another chunk. Healthy slow clients can finish.
+                        idle_timeout.reschedule(asyncio.get_running_loop().time() + TRANSFER_IDLE_TIMEOUT_SECONDS)
+
+                    await super().__call__(scope, receive, send_with_progress)
             except TimeoutError:
                 # Headers may already be sent. Abort the incomplete transfer;
                 # never report success or append JSON to a partial ZIP.
