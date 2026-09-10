@@ -862,7 +862,7 @@ class TestWecomMediaUrlGate:
         import httpx
 
         from app.channels import manager
-        from deerflow.logging_config import HttpxUrlQueryRedactionFilter, install_httpx_log_redaction
+        from deerflow.logging_config import UrlRedactionFilter, install_url_log_redaction
 
         class _AsyncBody(httpx.AsyncByteStream):
             async def __aiter__(self):
@@ -871,7 +871,7 @@ class TestWecomMediaUrlGate:
         def handler(_request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, stream=_AsyncBody())
 
-        install_httpx_log_redaction()
+        install_url_log_redaction()
         url = "https://ww-aibot-img-1258476243.cos.ap-guangzhou.myqcloud.com/private/BearerSecret?token=QuerySecret"
 
         async def go():
@@ -888,7 +888,7 @@ class TestWecomMediaUrlGate:
         formatted = "\n".join(record.getMessage() for record in caplog.records)
         request_lines = [line for line in formatted.splitlines() if "HTTP Request" in line]
         assert request_lines, "the request record itself must survive redaction (not suppression)"
-        assert any(isinstance(f, HttpxUrlQueryRedactionFilter) for f in _logging.getLogger("httpx").filters)
+        assert any(isinstance(f, UrlRedactionFilter) for f in _logging.getLogger("httpx").filters)
         assert "BearerSecret" not in formatted
         assert "QuerySecret" not in formatted
         assert "/private/" not in formatted
@@ -901,7 +901,7 @@ class TestWecomMediaUrlGate:
         import httpx
 
         from app.channels.wechat import WechatChannel
-        from deerflow.logging_config import install_httpx_log_redaction
+        from deerflow.logging_config import install_url_log_redaction
 
         class _AsyncBody(httpx.AsyncByteStream):
             async def __aiter__(self):
@@ -910,7 +910,7 @@ class TestWecomMediaUrlGate:
         def handler(_request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, stream=_AsyncBody())
 
-        install_httpx_log_redaction()
+        install_url_log_redaction()
         channel = WechatChannel(MessageBus(), config={"bot_token": "test-token"})
         channel._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[assignment]
 

@@ -17,32 +17,39 @@ TRACE_TEXT_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - [trace_id=%(tr
 _TRACE_FILTER_NAME = "deerflow_trace_context_filter"
 
 # httpx logs ``HTTP Request: GET <full URL> HTTP/x.x <status> <duration>`` at
-# INFO before any response handling runs. Inbound-media URLs are signed — the
-# credentials live in the query string, and the repo-wide inbound-media rule
-# is that no part of a media URL beyond its host may reach the logs — so even
-# successful downloads would leak unless the record itself is rewritten.
-# The authority is split so userinfo (basic-auth ``user:pass@`` credentials,
-# accepted by httpx for MCP/extension/community-tool endpoints) is blanked
-# too, not just the path and query.
-_URL_REDACT_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s@]*@)?(?P<host>[^/?#\s]+)(?P<rest>[/?#]\S*)")
+# INFO before any response handling runs, and urllib3 logs
+# ``Redirecting <url> -> <url>`` at INFO when a redirect is followed. Inbound
+# media URLs are signed — the credentials live in the query string, and the
+# repo-wide inbound-media rule is that no part of a media URL beyond its host
+# may reach the logs — so even successful downloads would leak unless the
+# record itself is rewritten. The authority is split so userinfo (basic-auth
+# ``user:pass@`` credentials, accepted by httpx for MCP/extension/community-
+# tool endpoints) is blanked too, not just the path and query. ``rest`` is
+# optional so an authority-only URL (``scheme://user:pass@host`` — no path)
+# is still rewritten; a bare credential-free origin passes through as-is.
+_URL_REDACT_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s@]*@)?(?P<host>[^/?#\s]+)(?P<rest>[/?#]\S*)?")
 
 
-class HttpxUrlQueryRedactionFilter(logging.Filter):
-    """Redact inbound URLs in httpx request log records down to scheme + host.
+class UrlRedactionFilter(logging.Filter):
+    """Redact URLs in httpx/urllib3 request log records down to scheme + host.
 
     Path, query, fragment, and any userinfo credentials in the authority are
     replaced; the host (and port) stay for operator debuggability. The record
     is rewritten in place (``msg`` set to the redacted formatted message,
     ``args`` cleared) so every downstream handler and formatter — text or
     JSON — sees the same redacted line, while the method/status/duration
-    observability is preserved. Records whose message carries no
-    ``scheme://host/<anything>`` URL pass through untouched.
+    observability is preserved. A URL is rewritten only when it carries
+    something to hide (userinfo, path, query, or fragment); a bare
+    credential-free origin and records without any URL pass through
+    untouched.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
 
         def _redact(match: re.Match[str]) -> str:
+            if not (match.group("userinfo") or match.group("rest")):
+                return match.group(0)  # bare origin: nothing to redact
             userinfo = "<redacted>@" if match.group("userinfo") else ""
             return match.group("scheme") + userinfo + match.group("host") + "/<redacted>"
 
@@ -53,11 +60,21 @@ class HttpxUrlQueryRedactionFilter(logging.Filter):
         return True
 
 
-def install_httpx_log_redaction() -> None:
-    """Idempotently attach URL-query redaction to the ``httpx`` logger."""
-    httpx_logger = logging.getLogger("httpx")
-    if not any(isinstance(item, HttpxUrlQueryRedactionFilter) for item in httpx_logger.filters):
-        httpx_logger.addFilter(HttpxUrlQueryRedactionFilter())
+# The filter is generic over the formatted message, so it serves any HTTP
+# client library whose own INFO-level records embed full URLs. urllib3's
+# ``Redirecting <url> -> <url>`` is the one other such line reachable in this
+# process (requests-based flows); today no gateway path both uses requests
+# and redirects a signed URL, but the logger is covered so the class of leak
+# stays closed rather than dormant.
+_REDACTED_LOGGERS = ("httpx", "urllib3")
+
+
+def install_url_log_redaction() -> None:
+    """Idempotently attach URL redaction to the ``httpx`` and ``urllib3`` loggers."""
+    for logger_name in _REDACTED_LOGGERS:
+        target = logging.getLogger(logger_name)
+        if not any(isinstance(item, UrlRedactionFilter) for item in target.filters):
+            target.addFilter(UrlRedactionFilter())
 
 
 class TraceContextFilter(logging.Filter):
@@ -136,7 +153,7 @@ def configure_logging(config: object) -> None:
     only the additional ``trace_id`` field.
     """
     _ensure_root_handler()
-    install_httpx_log_redaction()
+    install_url_log_redaction()
 
     logging_config = getattr(config, "logging", None)
     enhance = getattr(logging_config, "enhance", None)
