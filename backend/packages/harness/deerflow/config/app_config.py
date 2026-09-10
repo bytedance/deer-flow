@@ -285,7 +285,7 @@ class AppConfig(BaseModel):
         default_factory=SchedulerConfig,
         description=format_field_description(
             "scheduler",
-            field_doc="Scheduled task runtime configuration (background poller for one-time and cron agent runs).",
+            field_doc="Scheduled task runtime configuration (background poller for one-time, cron, and interval agent runs).",
         ),
     )
     mcp_tasks: McpTasksConfig = Field(

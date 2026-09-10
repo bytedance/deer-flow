@@ -71,10 +71,11 @@ export type MockAPIOptions = {
     id: string;
     thread_id: string | null;
     context_mode?: "fresh_thread_per_run" | "reuse_thread";
+    assistant_id?: string | null;
     last_thread_id?: string | null;
     title: string;
     prompt: string;
-    schedule_type: "once" | "cron";
+    schedule_type: "once" | "cron" | "interval";
     schedule_spec: Record<string, unknown>;
     timezone: string;
     status:
@@ -484,10 +485,14 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         context_mode:
           (payload.context_mode as "fresh_thread_per_run" | "reuse_thread") ??
           "fresh_thread_per_run",
+        assistant_id:
+          typeof payload.assistant_id === "string"
+            ? payload.assistant_id
+            : "lead_agent",
         last_thread_id: null,
         title,
         prompt,
-        schedule_type: payload.schedule_type as "once" | "cron",
+        schedule_type: payload.schedule_type as "once" | "cron" | "interval",
         schedule_spec: (payload.schedule_spec as Record<string, unknown>) ?? {},
         timezone,
         status: "enabled" as const,

@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import SandboxRequestLease, require_permission, try_acquire_sandbox_for_request
 from app.gateway.deps import get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
-from app.gateway.path_utils import resolve_thread_virtual_path
+from app.gateway.path_utils import normalize_outputs_virtual_path, resolve_outputs_confined_path, resolve_thread_virtual_path
 from deerflow.authz.sandbox_authz import safe_app_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import ConflictError, ThreadOperationKind
@@ -40,7 +40,6 @@ ACTIVE_CONTENT_MIME_TYPES = {
 MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
 MAX_EDITABLE_ARTIFACT_BYTES = 2 * 1024 * 1024
-_EDITABLE_OUTPUTS_PREFIX = "mnt/user-data/outputs/"
 _ARTIFACT_EDIT_TEMP_PREFIX = ".artifact-edit-"
 
 
@@ -68,12 +67,15 @@ async def reserve_artifact_write(request: Request, thread_id: str, *, user_id: s
 
 
 def _normalize_editable_artifact_path(path: str) -> str:
-    stripped = path.lstrip("/")
-    if not stripped.startswith(_EDITABLE_OUTPUTS_PREFIX):
-        raise HTTPException(status_code=400, detail="Only files in /mnt/user-data/outputs can be edited")
-    if ".skill/" in stripped or stripped.endswith(".skill"):
+    # The outputs-only rule is shared with channel attachment delivery:
+    # ``normalize_outputs_virtual_path`` collapses ``..`` before its prefix check
+    # and ``resolve_outputs_confined_path`` re-checks the resolved host path, so
+    # neither an encoded ``..`` nor a symlink planted in ``outputs/`` can
+    # redirect the edit to a sibling ``user-data/`` directory.
+    virtual_path = normalize_outputs_virtual_path(path)
+    if ".skill/" in virtual_path or virtual_path.endswith(".skill"):
         raise HTTPException(status_code=415, detail="Skill archives cannot be edited in the artifacts panel")
-    return f"/{stripped}"
+    return virtual_path
 
 
 def _load_editable_artifact(actual_path: Path, path: str, expected_sha256: str) -> tuple[bytes, os.stat_result]:
@@ -516,7 +518,7 @@ async def update_artifact(
     try:
         async with reserve_artifact_write(request, thread_id, user_id=effective_user_id):
             actual_path = await asyncio.to_thread(
-                resolve_thread_virtual_path,
+                resolve_outputs_confined_path,
                 thread_id,
                 virtual_path,
                 user_id=effective_user_id,
