@@ -68,11 +68,11 @@ describe("formatToolDetail", () => {
     expect(preview.truncated).toBe(true);
     expect(JSON.parse(preview.text)).toEqual({ "…": "…" });
   });
-  it("formats JSON and preserves falsy results and plain text", () => {
+  it("preserves falsy results and plain text and formats structured values", () => {
     for (const text of ["null", "false", "0", "", "plain text"]) {
       expect(formatToolDetail(text)).toEqual({ text, truncated: false });
     }
-    expect(formatToolDetail('{"run_id":42}').text).toBe('{\n  "run_id": 42\n}');
+    expect(formatToolDetail({ run_id: 42 }).text).toBe('{\n  "run_id": 42\n}');
   });
   it("bounds long strings before parsing or serializing", () => {
     const result = formatToolDetail({ content: "x".repeat(1_000_000) });
@@ -174,4 +174,143 @@ it("preserves literal ellipsis array entries and the values after them", () => {
     text: JSON.stringify(["…", "…", { keep: 42 }], null, 2),
     truncated: false,
   });
+});
+
+// Text is already the tool's representation; parsing it again is lossy.
+it.each([
+  "9223372036854775807",
+  '{"run_id":9223372036854775807}',
+  '[{"nested":{"run_id":-9223372036854775808}}]',
+  "0.12345678901234567890123456789",
+  '{"values":[1e400,1e-400,-0,9007199254740993]}',
+  '{"run_id":1,"run_id":2}',
+  '"quoted text"',
+  '""',
+  '"\\u0061\\n"',
+  '  { "run_id": 42 }\n',
+  "   ",
+])("preserves received text verbatim: %s", (text) => {
+  expect(formatToolDetail(text)).toEqual({ text, truncated: false });
+});
+
+it("keeps later array values after a cycle or inaccessible entry", () => {
+  const cycle: unknown[] = [];
+  cycle.push(cycle, { keep: 42 });
+  expect(JSON.parse(formatToolDetail(cycle).text)).toEqual(["…", { keep: 42 }]);
+  const values = [0, { keep: 42 }];
+  Object.defineProperty(values, "0", {
+    get() {
+      throw new Error("must not read");
+    },
+  });
+  expect(JSON.parse(formatToolDetail(values).text)).toEqual([
+    "…",
+    { keep: 42 },
+  ]);
+});
+
+it("does not split surrogate pairs at raw or structured text limits", () => {
+  for (let padding = 0; padding < 24; padding++) {
+    const text = "x".repeat(padding) + "😀".repeat(12000);
+    for (const value of [text, { text }, [text]]) {
+      const preview = formatToolDetail(value);
+      const decoded =
+        typeof value === "string" ? preview.text : JSON.parse(preview.text);
+      const result =
+        typeof decoded === "string"
+          ? decoded
+          : Array.isArray(decoded)
+            ? decoded[0]
+            : decoded.text;
+      expect(result.isWellFormed()).toBe(true);
+      expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+      expect(preview.truncated).toBe(true);
+    }
+  }
+});
+
+it("preserves representable siblings next to a depth-limited value", () => {
+  let value: unknown = [{ deep: { tooDeep: true } }, 42];
+  for (let i = 0; i < 5; i++) value = { child: value };
+  let parsed = JSON.parse(formatToolDetail(value).text);
+  for (let i = 0; i < 5; i++) parsed = parsed.child;
+  expect(parsed).toEqual([{ deep: "…" }, 42]);
+});
+
+it("checks bounded JSON and data fidelity across a deterministic mixed corpus", () => {
+  let seed = 5309;
+  const random = (max: number) => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed % max;
+  };
+  const strings = ["", "…", "key…", "__proto__", '"\\\n\t', "😀中文"];
+  const generate = (depth: number): unknown => {
+    switch (random(depth < 4 ? 7 : 4)) {
+      case 0:
+        return null;
+      case 1:
+        return random(2) === 1;
+      case 2:
+        return random(200000) - 100000;
+      case 3:
+        return strings[random(strings.length)]!.repeat(random(20));
+      case 4:
+        return Array.from({ length: random(10) }, () => generate(depth + 1));
+      default:
+        return Object.fromEntries(
+          Array.from({ length: random(10) }, (_, i) => [
+            strings[random(strings.length)]! + i,
+            generate(depth + 1),
+          ]),
+        );
+    }
+  };
+  const check = (original: unknown, displayed: unknown) => {
+    if (displayed === "…") return;
+    if (typeof original === "string" && typeof displayed === "string") {
+      expect(
+        displayed === original ||
+          (displayed.endsWith("…") &&
+            original.startsWith(displayed.slice(0, -1))),
+      ).toBe(true);
+    } else if (Array.isArray(original)) {
+      expect(Array.isArray(displayed)).toBe(true);
+      (displayed as unknown[]).forEach((child, i) => check(original[i], child));
+    } else if (original !== null && typeof original === "object") {
+      expect(displayed).not.toBeNull();
+      for (const [key, child] of Object.entries(
+        displayed as Record<string, unknown>,
+      )) {
+        if (key === "…" && child === "…") continue;
+        expect(Object.prototype.hasOwnProperty.call(original, key)).toBe(true);
+        check((original as Record<string, unknown>)[key], child);
+      }
+    } else expect(displayed).toEqual(original);
+  };
+  for (let i = 0; i < 500; i++) {
+    const value = { data: generate(0) };
+    const preview = formatToolDetail(value);
+    expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+    const parsed = JSON.parse(preview.text);
+    check(value, parsed);
+    if (!preview.truncated) expect(parsed).toEqual(value);
+  }
+});
+
+it("keeps structure and accurate truncation flags around the text boundary", () => {
+  for (
+    let size = TOOL_PREVIEW_LIMIT - 100;
+    size <= TOOL_PREVIEW_LIMIT + 10;
+    size++
+  ) {
+    const raw = "x".repeat(size);
+    const preview = formatToolDetail(raw);
+    expect(preview.truncated).toBe(size > TOOL_PREVIEW_LIMIT);
+    expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+    for (const value of [{ text: raw }, [raw], { nested: [raw] }]) {
+      const structured = formatToolDetail(value);
+      expect(() => JSON.parse(structured.text)).not.toThrow();
+      expect(structured.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+    }
+  }
 });

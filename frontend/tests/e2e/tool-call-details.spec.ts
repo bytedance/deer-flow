@@ -4,10 +4,33 @@ import { mockLangGraphAPI } from "./utils/mock-api";
 
 const threadId = "00000000-0000-0000-0000-000000004389";
 
-for (const debug of [false, true]) {
-  test(`generic tool details with Debug ${debug ? "enabled" : "disabled"}`, async ({
-    page,
-  }) => {
+for (const { debug, content, status, label } of [
+  {
+    debug: false,
+    content: "denied: " + "x".repeat(20000),
+    status: "error",
+    label: "Debug disabled",
+  },
+  {
+    debug: true,
+    content: "denied: " + "x".repeat(20000),
+    status: "error",
+    label: "bounded error",
+  },
+  {
+    debug: true,
+    content: '{"run_id":9223372036854775807,"ratio":0.1234567890123456789}',
+    status: "success",
+    label: "nested numeric precision",
+  },
+  {
+    debug: true,
+    content: "9223372036854775807",
+    status: "success",
+    label: "top-level numeric precision",
+  },
+] as const) {
+  test(`generic tool details: ${label}`, async ({ page }) => {
     await page.addInitScript((enabled) => {
       localStorage.setItem(
         "deerflow.local-settings",
@@ -42,8 +65,8 @@ for (const debug of [false, true]) {
               type: "tool",
               id: "tool-result",
               tool_call_id: "call-4389",
-              status: "error",
-              content: "denied: " + "x".repeat(20000),
+              status,
+              content,
             },
             { type: "ai", id: "answer", content: "The lookup failed." },
           ],
@@ -77,7 +100,26 @@ for (const debug of [false, true]) {
     await expect(
       page.getByRole("region", { name: "Call ID", exact: true }),
     ).toContainText("call-4389");
-    const error = page.getByRole("region", { name: "Error", exact: true });
+    const error = page.getByRole("region", {
+      name: status === "error" ? "Error" : "Result",
+      exact: true,
+    });
+    if (status === "success") {
+      expect(await error.locator("pre").textContent()).toBe(content);
+      await expect(
+        error.getByText("Preview truncated", { exact: false }),
+      ).toHaveCount(0);
+      await page
+        .context()
+        .grantPermissions(["clipboard-read", "clipboard-write"]);
+      await error
+        .getByRole("button", { name: "Copy to clipboard: Result", exact: true })
+        .click();
+      await expect
+        .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+        .toBe(content);
+      return;
+    }
     await expect(error).toContainText("denied:");
     await expect(error).toContainText("Preview truncated");
     expect(

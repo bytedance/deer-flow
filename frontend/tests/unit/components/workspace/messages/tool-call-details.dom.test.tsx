@@ -221,3 +221,27 @@ describe("generic tool details", () => {
     ).toBeNull();
   });
 });
+
+it.each([
+  "9223372036854775807",
+  '{"run_id":9223372036854775807,"ratio":0.1234567890123456789}',
+  '{"run_id":1,"run_id":2}',
+  '""',
+])(
+  "displays and copies the exact received tool result: %s",
+  async (content) => {
+    const writeText = rs.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    render(group([call, tool(content)]));
+    expand();
+    const result = screen.getByRole("region", { name: "Result" });
+    expect(result.querySelector("pre")?.textContent).toBe(content);
+    expect(within(result).queryByText(enUS.toolCalls.truncated)).toBeNull();
+    expect(within(result).queryByText(enUS.toolCalls.emptyResult)).toBeNull();
+    fireEvent.click(within(result).getByRole("button"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(content));
+  },
+);

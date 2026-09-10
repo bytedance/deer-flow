@@ -501,7 +501,8 @@ Each **Tool details** panel starts collapsed and shows the tool name, call ID,
 input, and received result or explicit error. Large previews are truncated;
 fields whose names exceed the remaining preview budget are omitted rather than renamed.
 Structured previews retain complete JSON syntax, including escaped strings and closing delimiters.
-Array previews stop at a fully collapsed element with a single generated ellipsis; literal ellipsis values are preserved.
+Array previews stop when the text budget cannot display another element; literal ellipsis values are preserved.
+Text results retain their original representation, including large numeric IDs and duplicate JSON keys, without reparsing. Text exceeding the limit is shown as a prefix with a truncation notice; structured objects and arrays are formatted separately.
 Copy actions copy only the displayed preview. This is a frontend view of data
 already received by the browser, without an additional secret-redaction layer.
 

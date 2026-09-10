@@ -1063,7 +1063,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         if (toolCallId) {
           const toolCallResult = toolCallResults.get(toolCallId);
           step.resultMessage = resultMessages.get(toolCallId);
-          // 通用详情在展开后处理原始结果；专用工具保留原来的解析行为。
+          // Generic details preserve received text; specialized tools retain their parsing.
           if (toolCallResult && getToolCallKind(tool_call.name) !== "generic") {
             try {
               const json = JSON.parse(toolCallResult);
