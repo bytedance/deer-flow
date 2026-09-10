@@ -9,6 +9,7 @@ per-user layout.
 
 import logging
 import re
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -26,9 +27,12 @@ MAX_AGENT_OUTPUT_TOKENS = 200_000
 
 def _validate_display_name(value: object) -> object:
     # Check before trimming so leading/trailing controls cannot disappear.
-    # Keep ordinary RTL text and emoji joiners; only reject control ranges.
-    if isinstance(value, str) and re.search(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", value):
-        raise ValueError("Display name must not contain control characters or bidirectional formatting controls")
+    # Keep ordinary RTL text, ZWNJ in Persian/Indic text and ZWJ in emoji.
+    if isinstance(value, str):
+        if re.search(r"[\x00-\x1f\x7f-\x9f\u00ad\u061c\u200b\u200e-\u200f\u2028-\u202e\u2060-\u2069\ufeff]", value):
+            raise ValueError("Display name must not contain control characters or invisible formatting controls")
+        if value.strip() and all(unicodedata.category(char)[0] in {"C", "M", "Z"} for char in value):
+            raise ValueError("Display name must contain visible text")
     return value
 
 

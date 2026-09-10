@@ -3,12 +3,19 @@
 Custom Agent `AgentConfig.display_name` is an optional, whitespace-trimmed Unicode
 label of at most 100 Unicode code points. C0/C1 controls and bidirectional
 formatting controls (U+202A–U+202E, U+2066–U+2069) are rejected before trimming.
+Also reject soft hyphen, Arabic letter mark, U+200B, U+200E–U+200F,
+U+2028–U+2029, U+2060–U+2065 and U+FEFF. Labels consisting only of
+marks, separators or other invisible characters are invalid; ZWNJ/ZWJ remain
+supported inside ordinary text and emoji.
 It is stored in the existing config document by
 both agent stores; it never participates in paths, routing, or authorization.
 Gateway create/update/response models share its validation. It remains outside
 `MANAGED_AGENT_CONFIG_FIELDS` so `update_agent` preserves it. `setup_agent`
 explicitly carries forward the existing owner's display name when re-bootstrapping;
 the Gateway explicitly overrides it when supplied, including null to clear.
+Both stores use `parse_agent_config` to ignore only an invalid stored
+`display_name` on read, without rewriting storage. Other config errors still
+raise, and API create/update validation remains strict.
 
 **Main Configuration** (`config.yaml`):
 

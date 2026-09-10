@@ -581,7 +581,21 @@ def disabled_agent_client(tmp_path):
 
 
 class TestAgentsAPI:
-    @pytest.mark.parametrize("display_name", ["a\u202eb", "line1\nline2", "z\x00ero"])
+    @pytest.mark.parametrize("display_name", ["x" * 150, 123, "\u200b" * 3])
+    def test_invalid_stored_display_name_falls_back_in_api(self, agent_client, display_name):
+        from deerflow.persistence.agents.file import FileAgentStore
+
+        FileAgentStore().create("reviewer", {"display_name": display_name, "description": "healthy"}, "Soul")
+        response = agent_client.get("/api/agents/reviewer")
+        assert response.status_code == 200
+        assert response.json()["display_name"] is None
+        assert response.json()["description"] == "healthy"
+        assert agent_client.get("/api/agents").json()["agents"][0]["name"] == "reviewer"
+        response = agent_client.put("/api/agents/reviewer", json={"display_name": "已修复"})
+        assert response.status_code == 200
+        assert response.json()["display_name"] == "已修复"
+
+    @pytest.mark.parametrize("display_name", ["a\u202eb", "line1\nline2", "z\x00ero", "\u200b" * 3, "a\u200fb", "a\u2028b", "\u200c\u200d"])
     def test_invalid_display_name_cannot_be_persisted(self, agent_client, display_name):
         assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": display_name}).status_code == 422
         assert agent_client.get("/api/agents").json()["agents"] == []
