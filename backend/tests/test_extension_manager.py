@@ -265,7 +265,7 @@ def test_upgrade_replaces_local_snapshot_and_preserves_private_config(tmp_path: 
             "name": "demo",
             "package": "deerflow-extension-demo",
             "use": "demo_extension:install",
-            "enabled": True,
+            "enabled": False,
             "required": True,
             "config": {"label": "keep-this"},
         }
@@ -354,6 +354,124 @@ def test_upgrade_rejects_a_requirement_that_is_not_installed(tmp_path: Path) -> 
 
     with pytest.raises(ValueError, match="not installed"):
         ExtensionManager(root).upgrade("deerflow-extension-demo==2.0.0", yes=True)
+
+
+def test_upgrade_repins_an_installed_git_source_and_preserves_private_config(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-git-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v1'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+    first_revision = _commit_local_extension(source)
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v2'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+    test_hooks = source / ".git" / "test-hooks"
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    subprocess.run(
+        ["git", "-c", f"core.hooksPath={test_hooks}", "commit", "-qm", "upgrade pin"],
+        cwd=source,
+        check=True,
+    )
+    second_revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    bare_repository = tmp_path / "demo.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(source), str(bare_repository)], check=True)
+    subprocess.run(["git", "--git-dir", str(bare_repository), "update-server-info"], check=True)
+
+    with _serve_directory(tmp_path) as base_url:
+        manager = ExtensionManager(root)
+        manager.install(f"git+{base_url}/demo.git@{first_revision}", yes=True)
+        config_path = root / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["plugins"][0]["required"] = True
+        config["plugins"][0]["config"] = {"label": "keep-this"}
+        config["plugins"][0]["enabled"] = False
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+        result = manager.upgrade(f"git+{base_url}/demo.git@{second_revision}", yes=True)
+
+        _assert_demo_entry_point_loads(root / "backend")
+        marker = subprocess.run(
+            [
+                str(root / "backend" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")),
+                "-c",
+                "import demo_extension; print(demo_extension.MARKER)",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    assert result.name == "demo"
+    assert marker == "v2"
+    assert second_revision in (root / "backend" / "uv.lock").read_text(encoding="utf-8")
+    assert not (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo").exists()
+    plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
+    assert plugins == [
+        {
+            "name": "demo",
+            "package": "deerflow-extension-demo",
+            "use": "demo_extension:install",
+            "enabled": False,
+            "required": True,
+            "config": {"label": "keep-this"},
+        }
+    ]
+
+
+def test_failed_upgrade_leaves_snapshot_when_staging_rename_fails(tmp_path: Path, monkeypatch) -> None:
+    """A snapshot that cannot be moved must stay the live tree.
+
+    Path.rename can fail after mkdtemp (file held open, Windows AV). Treating
+    that like a failed install would rmtree the original snapshot that was
+    never replaced.
+    """
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    manager = ExtensionManager(root)
+    manager.install(str(source), yes=True)
+    config_path = root / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"][0]["config"] = {"label": "keep-this"}
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    managed = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
+    original_init = (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8")
+
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v2'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+    original_rename = Path.rename
+
+    def _rename(self, target):
+        if self.resolve() == managed.resolve():
+            raise OSError("snapshot file in use")
+        return original_rename(self, target)
+
+    monkeypatch.setattr("deerflow.extensions.manager.Path.rename", _rename)
+
+    with pytest.raises(OSError, match="snapshot file in use"):
+        manager.upgrade(str(source), yes=True)
+
+    assert (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8") == original_init
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["plugins"][0]["config"] == {"label": "keep-this"}
+    assert list((root / "backend" / "extensions" / "sources").glob(".*.upgrade-*")) == []
 
 
 def test_failed_upgrade_restores_snapshot_when_a_concurrent_dependency_edit_blocks_lock_rollback(

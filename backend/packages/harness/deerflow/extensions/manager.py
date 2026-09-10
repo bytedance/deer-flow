@@ -137,7 +137,7 @@ class ExtensionManager:
             return self._install(source, yes=yes, required=required, replace=replace)
 
     def upgrade(self, source: str, *, yes: bool = False) -> InstalledExtension:
-        """Replace an installed extension source without dropping its private config."""
+        """Replace an installed extension source without dropping its private config or enabled state."""
         return self.install(source, yes=yes, replace=True)
 
     def _install(self, source: str, *, yes: bool, required: bool, replace: bool) -> InstalledExtension:
@@ -183,14 +183,14 @@ class ExtensionManager:
         self._read_plugins()
         _require_supported_uv(self.backend_dir)
 
-        dependencies_before = _extension_dependency_names(self.pyproject_path)
+        specs_before = _extension_dependencies(self.pyproject_path)
+        sources_before = _uv_sources(self.pyproject_path)
         dependency_snapshots = (
             _FileSnapshot.capture(self.pyproject_path),
             _FileSnapshot.capture(self.backend_dir / "uv.lock"),
         )
         managed_dependency_contents: tuple[bytes | None, ...] | None = None
         uv_attempted = False
-        replacing_snapshot = False
         staging_root: Path | None = None
         staged_source: Path | None = None
         try:
@@ -205,7 +205,6 @@ class ExtensionManager:
                     )
                     staged_source = staging_root / "source"
                     managed_source.rename(staged_source)
-                    replacing_snapshot = True
                 shutil.copytree(
                     source_path,
                     managed_source,
@@ -238,10 +237,12 @@ class ExtensionManager:
             _validate_locked_local_sources(self.backend_dir / "uv.lock", self.backend_dir)
             _sync_environment(self.project_root, self.backend_dir, self.config_path)
             if metadata is None:
-                added = _extension_dependency_names(self.pyproject_path) - dependencies_before
-                if len(added) != 1:
-                    raise RuntimeError("could not identify the distribution added by uv")
-                distribution = next(iter(added))
+                distribution = _identify_uv_added_distribution(
+                    self.pyproject_path,
+                    specs_before=specs_before,
+                    sources_before=sources_before,
+                    replace=replace,
+                )
                 name, use = _discover_installed_entry_point(self.backend_dir, distribution)
                 metadata = (distribution, name, use)
             else:
@@ -257,7 +258,8 @@ class ExtensionManager:
                     "enabled": True,
                     "required": required,
                     "config": {},
-                }
+                },
+                preserve_enabled=replace,
             )
             if staging_root is not None:
                 shutil.rmtree(staging_root, ignore_errors=True)
@@ -274,12 +276,15 @@ class ExtensionManager:
                     strict=True,
                 )
             )
-            if replacing_snapshot and staged_source is not None and staged_source.exists():
-                if managed_source is not None:
-                    shutil.rmtree(managed_source, ignore_errors=True)
-                staged_source.rename(managed_source)
-                if staging_root is not None:
-                    shutil.rmtree(staging_root, ignore_errors=True)
+            if staging_root is not None:
+                # Key restore off staging, not a flag set after rename: a failed
+                # rename must leave the live snapshot in place and only remove
+                # the empty .*.upgrade-* directory.
+                if staged_source is not None and staged_source.exists():
+                    if managed_source is not None:
+                        shutil.rmtree(managed_source, ignore_errors=True)
+                    staged_source.rename(managed_source)
+                shutil.rmtree(staging_root, ignore_errors=True)
             elif managed_source is not None and not dependency_recovery_conflict:
                 shutil.rmtree(managed_source, ignore_errors=True)
             if dependency_recovery_conflict:
@@ -441,7 +446,7 @@ class ExtensionManager:
             )
         return tuple(configured)
 
-    def _enable_plugin(self, plugin: dict[str, Any]) -> None:
+    def _enable_plugin(self, plugin: dict[str, Any], *, preserve_enabled: bool = False) -> None:
         original, plugins = self._read_plugins()
         exact_use_matches = [item for item in plugins if isinstance(item, dict) and item.get("use") == plugin["use"]]
         identity_conflicts = [item for item in plugins if isinstance(item, dict) and item not in exact_use_matches and (item.get("name") == plugin["name"] or _same_distribution(item.get("package"), plugin["package"]))]
@@ -455,7 +460,8 @@ class ExtensionManager:
             existing["name"] = plugin["name"]
             existing["package"] = plugin["package"]
             existing["use"] = plugin["use"]
-            existing["enabled"] = True
+            if not preserve_enabled:
+                existing["enabled"] = True
             existing.setdefault("required", plugin["required"])
             existing.setdefault("config", {})
             _write_plugins_block(self.config_path, original, plugins)
@@ -674,17 +680,60 @@ def _normalize_query_key(key: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", camel_case_split).strip("-").lower()
 
 
-def _extension_dependency_names(pyproject: Path) -> set[str]:
+def _extension_dependencies(pyproject: Path) -> tuple[str, ...]:
     with pyproject.open("rb") as stream:
         document = tomllib.load(stream)
     dependencies = document.get("dependency-groups", {}).get("extensions", [])
+    return tuple(dependency for dependency in dependencies if isinstance(dependency, str))
+
+
+def _uv_sources(pyproject: Path) -> dict[str, Any]:
+    with pyproject.open("rb") as stream:
+        document = tomllib.load(stream)
+    sources = document.get("tool", {}).get("uv", {}).get("sources", {})
+    return sources if isinstance(sources, dict) else {}
+
+
+def _distribution_name_from_spec(spec: str) -> str | None:
+    match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", spec)
+    if match is None:
+        return None
+    return _normalize_distribution(match.group(1))
+
+
+def _identify_uv_added_distribution(
+    pyproject: Path,
+    *,
+    specs_before: tuple[str, ...],
+    sources_before: dict[str, Any],
+    replace: bool,
+) -> str:
+    names_before: set[str] = set()
+    for spec in specs_before:
+        name = _distribution_name_from_spec(spec)
+        if name is not None:
+            names_before.add(name)
+    added_names = _extension_dependency_names(pyproject) - names_before
+    if len(added_names) == 1:
+        return next(iter(added_names))
+    added_specs = [spec for spec in _extension_dependencies(pyproject) if spec not in specs_before]
+    if len(added_specs) == 1:
+        name = _distribution_name_from_spec(added_specs[0])
+        if name is not None:
+            return name
+    if replace:
+        changed_sources = [name for name, source in _uv_sources(pyproject).items() if isinstance(name, str) and sources_before.get(name) != source]
+        if len(changed_sources) == 1:
+            return _normalize_distribution(changed_sources[0])
+    raise RuntimeError("could not identify the distribution added by uv")
+
+
+def _extension_dependency_names(pyproject: Path) -> set[str]:
     names: set[str] = set()
-    for dependency in dependencies:
-        if not isinstance(dependency, str):
-            continue
-        match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", dependency)
-        if match:
-            names.add(_normalize_distribution(match.group(1)))
+    for dependency in _extension_dependencies(pyproject):
+        name = _distribution_name_from_spec(dependency)
+        if name is not None:
+            names.add(name)
     return names
 
 
