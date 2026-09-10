@@ -271,6 +271,13 @@ class ChannelService:
                     logger.info("Retrying channel startup after readiness check")
                 if await self._start_channel(name, channel_config):
                     return True
+                # A failed attempt whose cleanup retained the instance ends
+                # the loop for this round: the next attempt would be refused
+                # by _start_channel's retained-instance guard anyway, and the
+                # still-tracked channel must not be replaced one hop later.
+                if self._channels.get(name) is not None:
+                    logger.warning("Readiness retries deferred: %s channel failed to clean up after a failed start and remains tracked", name)
+                    return False
             return False
 
     async def stop(self) -> None:
@@ -419,7 +426,7 @@ class ChannelService:
             # that may still be in use (mirrors ChannelService.stop()).
             raise
         except Exception:
-            logger.exception("Error stopping channel after failed startup")
+            logger.exception("Error stopping channel %s during discard", name)
             return
         if self._channels.get(name) is channel:
             self._channels.pop(name, None)
@@ -429,6 +436,17 @@ class ChannelService:
         import_path = _CHANNEL_REGISTRY.get(name)
         if not import_path:
             logger.warning("Unknown channel type")
+            return False
+
+        # Never install a fresh instance over a retained one: a channel whose
+        # failed cleanup kept it tracked still holds a subscribed outbound
+        # listener, and overwriting the entry here is the one remaining way to
+        # orphan it (nothing would be able to stop it afterwards). Callers
+        # decline the operation when they see the name still tracked; this
+        # guard makes the invariant hold at the mechanism itself.
+        retained = self._channels.get(name)
+        if retained is not None:
+            logger.warning("Refusing to start %s: previous channel instance is still tracked after failed cleanup", name)
             return False
 
         try:
