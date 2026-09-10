@@ -104,7 +104,12 @@ Before changing a later authorization phase, read the [authorization RFC](../../
    hidden goal continuations). `after_agent` clears only transient pending
    warnings for its own scope, not those histories; the sync/async
    `before_agent` hooks remain topology-preserving no-ops and must not delete a
-   sibling run's pending warning. The compatibility-named
+   sibling run's pending warning. Direct LangGraph embedders may omit
+   `context.run_id`; that fallback is anchored to the invocation's shared
+   `Runtime.control` object and mapped to an opaque generated ID, because
+   LangGraph replaces `Runtime` per node and CPython can reuse freed object
+   addresses. `after_agent` releases the anchor mapping, while the bounded map
+   covers abnormal exits. The compatibility-named
    `max_tracked_threads` limit bounds run scopes, and `reset(thread_id)` clears
    every retained run scope for that thread.
    Loop decisions are severity-first across both detection layers: a warning

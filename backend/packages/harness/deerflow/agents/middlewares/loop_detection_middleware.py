@@ -42,7 +42,10 @@ Detection histories and warning-suppression state are scoped by
 the same conversation. They deliberately survive ``after_agent``: a
 single Gateway run may re-enter that graph for hidden goal continuations,
 and those continuations share one loop budget. A later user run receives a
-fresh budget even when it reuses the graph.
+fresh budget even when it reuses the graph. Standalone library invocations
+that omit ``run_id`` receive an opaque fallback ID anchored to LangGraph's
+run-scoped ``Runtime.control`` object, so replacement ``Runtime`` wrappers
+share one budget within an invocation while a later invocation starts fresh.
 
 Stop-reason surfacing (#3875 Phase 2):
   Like the token-budget guard, the loop hard stop does NOT raise — it
@@ -62,6 +65,7 @@ import hashlib
 import json
 import logging
 import threading
+import uuid
 from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
@@ -282,6 +286,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             *(hard for _, hard in self._tool_freq_overrides.values()),
         )
         self._lock = threading.Lock()
+        # LangGraph replaces Runtime per graph node but retains one RunControl
+        # object for the whole invocation. Map that stable anchor to an opaque
+        # token when embedders omit run_id. Keeping the anchor strongly referenced
+        # also prevents CPython from reusing its address while the mapping is live;
+        # after_agent releases normal invocations and the cap bounds abnormal ones.
+        self._fallback_run_ids: OrderedDict[int, tuple[object, str]] = OrderedDict()
+        self._max_fallback_run_ids = max(1, self.max_tracked_threads * 2)
         self._history: OrderedDict[_RunScopeKey, list[str]] = OrderedDict()
         self._warned: dict[_RunScopeKey, set[str]] = defaultdict(set)
         # Windowed per-tool-type frequency: recent tool names per run scope,
@@ -351,28 +362,62 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     def _get_run_id(self, runtime: Runtime) -> str | None:
         """Extract run_id from runtime context for per-run warning scoping.
 
-        Keyed by presence, not truthiness: ``SubagentExecutor`` sets
-        ``context["run_id"] = self.run_id`` unconditionally (no truthiness
-        guard), so an embedded/TUI-dispatched subagent — whose ``run_id`` is
-        never assigned per ``AGENTS.md``'s description of the embedded
-        ``DeerFlowClient`` — runs with a context that legitimately carries
-        ``run_id=None`` (the key is *present*, not absent). The executor
-        later reads the stop reason back with the raw attribute,
-        ``consume_stop_reason(self.run_id)``, so this must return exactly
-        that value (``None`` included) when the key is present, rather than
-        collapsing it to a shared fallback indistinguishable from an absent
-        key. A truthiness check (``if run_id:``) previously conflated
-        "present but None/falsy" with "absent", both mapping to the same
-        literal ``"default"`` — so a genuine ``run_id=None`` hard-stop was
-        recorded under ``"default"`` here but looked up under ``None`` by
-        the executor, silently losing the ``loop_capped`` stop reason.
-        Mirrors ``TokenBudgetMiddleware._get_run_id``.
+        Context presence is authoritative, including an explicit ``None``:
+        ``SubagentExecutor`` later consumes the stop reason with its raw,
+        possibly-None run_id, so normalizing that value would lose the signal.
+
+        A RunnableConfig run_id exposed through ``Runtime.execution_info`` is
+        the next-best stable identifier. If neither source provides one, use
+        LangGraph's run-scoped ``Runtime.control`` object as the invocation
+        anchor. LangGraph creates replacement Runtime wrappers per graph node,
+        but preserves that control object across the invocation. The anchor is
+        mapped to an opaque generated token instead of embedding ``id(anchor)``
+        in the key, because CPython may reuse an address after garbage
+        collection. The bounded map keeps a strong reference while active and
+        is released by ``after_agent`` on the normal completion path.
         """
         ctx = getattr(runtime, "context", None)
         if isinstance(ctx, dict) and "run_id" in ctx:
             return ctx["run_id"]
-        # Fallback to runtime object ID to prevent collisions across embedded client runs
-        return str(id(runtime))
+
+        execution_info = getattr(runtime, "execution_info", None)
+        execution_run_id = getattr(execution_info, "run_id", None)
+        if execution_run_id is not None:
+            return str(execution_run_id)
+
+        control = getattr(runtime, "control", None)
+        anchor = control if control is not None else runtime
+        anchor_id = id(anchor)
+        with self._lock:
+            existing = self._fallback_run_ids.get(anchor_id)
+            if existing is not None and existing[0] is anchor:
+                self._fallback_run_ids.move_to_end(anchor_id)
+                return existing[1]
+
+            fallback_run_id = f"__invocation__:{uuid.uuid4().hex}"
+            self._fallback_run_ids[anchor_id] = (anchor, fallback_run_id)
+            self._fallback_run_ids.move_to_end(anchor_id)
+            while len(self._fallback_run_ids) > self._max_fallback_run_ids:
+                self._fallback_run_ids.popitem(last=False)
+            return fallback_run_id
+
+    def _release_fallback_run_id(self, runtime: Runtime) -> None:
+        """Release a completed invocation's fallback anchor, if it used one."""
+        ctx = getattr(runtime, "context", None)
+        if isinstance(ctx, dict) and "run_id" in ctx:
+            return
+
+        execution_info = getattr(runtime, "execution_info", None)
+        if getattr(execution_info, "run_id", None) is not None:
+            return
+
+        control = getattr(runtime, "control", None)
+        anchor = control if control is not None else runtime
+        anchor_id = id(anchor)
+        with self._lock:
+            existing = self._fallback_run_ids.get(anchor_id)
+            if existing is not None and existing[0] is anchor:
+                self._fallback_run_ids.pop(anchor_id, None)
 
     def consume_stop_reason(self, run_id: str | None) -> str | None:
         """Pop and return the stop reason the hard-stop set for this run.
@@ -804,11 +849,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     @override
     def after_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
         self._clear_current_run_pending_warnings(runtime)
+        self._release_fallback_run_id(runtime)
         return None
 
     @override
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
         self._clear_current_run_pending_warnings(runtime)
+        self._release_fallback_run_id(runtime)
         return None
 
     def _drain_pending_warnings(self, runtime: Runtime) -> list[str]:
@@ -886,3 +933,4 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._pending_warning_touch_order.clear()
                 self._stop_reason.clear()
                 self._stop_reason_thread_id.clear()
+                self._fallback_run_ids.clear()

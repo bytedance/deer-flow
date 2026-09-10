@@ -14,6 +14,7 @@ from langchain_core.runnables import Runnable
 from langchain_core.tools import tool as as_tool
 from pydantic import PrivateAttr
 
+from deerflow.agents.middlewares import loop_detection_middleware as loop_detection_module
 from deerflow.agents.middlewares.loop_detection_middleware import (
     _HARD_STOP_MSG,
     _MAX_PENDING_WARNINGS_PER_RUN,
@@ -311,21 +312,20 @@ class TestLoopDetection:
 
     def test_missing_run_id_uses_per_runtime_pending_scope(self):
         """When runtime.context has no ``run_id`` key at all, warning handling
-        falls back to a key scoped to the runtime object's identity —
-        mirroring ``TokenBudgetMiddleware._get_run_id``'s fallback — instead
-        of a shared literal like the old ``"default"``, which would collide
-        across concurrent runs that both lack a run_id (the ``_stop_reason``
-        dict this same key derivation feeds is keyed by run_id alone, with
-        no thread scoping)."""
+        falls back to a key scoped to the LangGraph invocation instead of a
+        shared literal like the old ``"default"``."""
         mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
-        runtime = MagicMock()
-        runtime.context = {"thread_id": "test-thread"}
+        runtime = SimpleNamespace(
+            context={"thread_id": "test-thread"},
+            control=object(),
+            execution_info=None,
+        )
         call = [_bash_call("ls")]
 
         for _ in range(3):
             mw._apply(_make_state(tool_calls=call), runtime)
 
-        fallback_run_id = str(id(runtime))
+        fallback_run_id = mw._get_run_id(runtime)
         assert mw._pending_warnings.get(_pending_key(run_id=fallback_run_id))
 
         request = _make_request([AIMessage(content="hi")], runtime)
@@ -336,6 +336,57 @@ class TestLoopDetection:
         assert len(loop_warnings) == 1
         assert "LOOP DETECTED" in loop_warnings[0].content
         assert not mw._pending_warnings.get(_pending_key(run_id=fallback_run_id))
+
+    def test_missing_run_id_shares_scope_across_runtime_wrappers(self):
+        """LangGraph replaces ``Runtime`` per node but preserves ``control``."""
+        mw = LoopDetectionMiddleware()
+        invocation_control = object()
+        first_runtime = SimpleNamespace(
+            context={"thread_id": "test-thread"},
+            control=invocation_control,
+            execution_info=None,
+        )
+        later_runtime = SimpleNamespace(
+            context={"thread_id": "test-thread"},
+            control=invocation_control,
+            execution_info=None,
+        )
+
+        assert mw._get_run_id(first_runtime) == mw._get_run_id(later_runtime)
+
+    def test_missing_run_id_fallback_survives_reused_object_address(self, monkeypatch):
+        """A later invocation must not inherit a freed anchor's fallback key."""
+        mw = LoopDetectionMiddleware()
+        monkeypatch.setattr(loop_detection_module, "id", lambda _value: 42, raising=False)
+        first_runtime = SimpleNamespace(
+            context={"thread_id": "test-thread"},
+            control=object(),
+            execution_info=None,
+        )
+        first_run_id = mw._get_run_id(first_runtime)
+        mw.after_agent({"messages": []}, first_runtime)
+        assert not mw._fallback_run_ids
+
+        later_runtime = SimpleNamespace(
+            context={"thread_id": "test-thread"},
+            control=object(),
+            execution_info=None,
+        )
+
+        assert mw._get_run_id(later_runtime) != first_run_id
+
+    def test_missing_run_id_fallback_map_is_bounded_on_abnormal_exits(self):
+        mw = LoopDetectionMiddleware(max_tracked_threads=2)
+
+        for _ in range(10):
+            runtime = SimpleNamespace(
+                context={"thread_id": "test-thread"},
+                control=object(),
+                execution_info=None,
+            )
+            mw._get_run_id(runtime)
+
+        assert len(mw._fallback_run_ids) == mw._max_fallback_run_ids == 4
 
     def test_before_agent_preserves_pending_warning_for_sibling_run(self):
         """An overlapping run must not erase a warning owned by another run."""
@@ -655,12 +706,11 @@ class TestLoopDetection:
     def test_fallback_thread_id_when_missing(self):
         """When runtime context has no thread_id, should use 'default'."""
         mw = LoopDetectionMiddleware(warn_threshold=2)
-        runtime = MagicMock()
-        runtime.context = {}
+        runtime = SimpleNamespace(context={}, control=object(), execution_info=None)
         call = [_bash_call("ls")]
 
         mw._apply(_make_state(tool_calls=call), runtime)
-        assert ("default", str(id(runtime))) in mw._history
+        assert ("default", mw._get_run_id(runtime)) in mw._history
 
 
 class TestRunScopedTracking:
@@ -1054,6 +1104,50 @@ class TestLoopDetectionRunEvents:
 
 
 class TestLoopDetectionAgentGraphIntegration:
+    def test_reused_agent_graph_without_run_id_gets_one_budget_per_invocation(self):
+        """Library embedders may omit run_id while reusing one compiled graph."""
+
+        @as_tool
+        def bash(command: str) -> str:
+            """Run a fake shell command."""
+            return f"ran: {command}"
+
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=3,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                AIMessage(content="", tool_calls=[{"name": "bash", "id": "run-1-a", "args": {"command": "pwd"}}]),
+                AIMessage(content="", tool_calls=[{"name": "bash", "id": "run-1-b", "args": {"command": "pwd"}}]),
+                AIMessage(content="first final answer"),
+                AIMessage(content="", tool_calls=[{"name": "bash", "id": "run-2-a", "args": {"command": "pwd"}}]),
+                AIMessage(content="", tool_calls=[{"name": "bash", "id": "run-2-b", "args": {"command": "pwd"}}]),
+                AIMessage(content="second final answer"),
+            ],
+        )
+        graph = create_agent(model=model, tools=[bash], middleware=[mw])
+        shared_context = {"thread_id": "library-thread"}
+
+        first = graph.invoke(
+            {"messages": [("user", "where am I?")]},
+            context=shared_context,
+            config={"recursion_limit": 15},
+        )
+        second = graph.invoke(
+            {"messages": [("user", "where am I now?")]},
+            context=shared_context,
+            config={"recursion_limit": 15},
+        )
+
+        assert first["messages"][-1].content == "first final answer"
+        assert second["messages"][-1].content == "second final answer"
+        loop_warnings_by_call = [[message for message in messages if isinstance(message, HumanMessage) and message.name == "loop_warning"] for messages in model.seen_messages]
+        assert [len(warnings) for warnings in loop_warnings_by_call] == [0, 0, 1, 0, 0, 1]
+        assert not mw._fallback_run_ids
+
     def test_reused_agent_graph_isolates_loop_history_between_runs(self):
         """A cached graph must give each new run a fresh loop-detection budget."""
 
