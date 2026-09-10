@@ -131,14 +131,19 @@ class ExtensionManager:
             selected_config = root_config if root_config.is_file() or not legacy_config.is_file() else legacy_config
         self.config_path = selected_config.resolve()
 
-    def install(self, source: str, *, yes: bool = False, required: bool = False) -> InstalledExtension:
+    def install(self, source: str, *, yes: bool = False, required: bool = False, replace: bool = False) -> InstalledExtension:
         """Install an extension source and enable its packaging entry point."""
         with _manager_lock(self.project_root):
-            return self._install(source, yes=yes, required=required)
+            return self._install(source, yes=yes, required=required, replace=replace)
 
-    def _install(self, source: str, *, yes: bool, required: bool) -> InstalledExtension:
+    def upgrade(self, source: str, *, yes: bool = False) -> InstalledExtension:
+        """Replace an installed extension source without dropping its private config."""
+        return self.install(source, yes=yes, replace=True)
+
+    def _install(self, source: str, *, yes: bool, required: bool, replace: bool) -> InstalledExtension:
         if not yes:
-            raise PermissionError("installing an extension executes trusted third-party code; pass yes=True to continue")
+            action = "upgrading" if replace else "installing"
+            raise PermissionError(f"{action} an extension executes trusted third-party code; pass yes=True to continue")
 
         source_argument = Path(source).expanduser()
         if _is_link_like(source_argument):
@@ -156,13 +161,22 @@ class ExtensionManager:
             managed_source = (managed_root / normalized_distribution).resolve()
             if not managed_source.is_relative_to(managed_root):
                 raise ValueError(f"invalid extension distribution name: {distribution!r}")
-            if managed_source.exists():
+            if managed_source.exists() and not replace:
                 raise FileExistsError(f"extension source is already installed: {managed_source}")
+            if replace and not managed_source.exists():
+                raise ValueError(f"extension source is not installed: {managed_source}; use install")
             uv_source = str(managed_source.relative_to(self.backend_dir))
         else:
             if source_argument.exists():
                 raise ValueError("local extension sources must be directories so they can be snapshotted for deployment")
             _validate_remote_source(source)
+            if replace:
+                try:
+                    remote_distribution = _normalize_distribution(Requirement(source).name)
+                except InvalidRequirement:
+                    remote_distribution = None
+                if remote_distribution is not None and remote_distribution not in _extension_dependency_names(self.pyproject_path):
+                    raise ValueError(f"extension {remote_distribution!r} is not installed; use install")
         # uv add/sync execute the package's build backend. A config this manager
         # could never write to must fail before that code runs, not afterwards
         # through rollback.
@@ -176,9 +190,22 @@ class ExtensionManager:
         )
         managed_dependency_contents: tuple[bytes | None, ...] | None = None
         uv_attempted = False
+        replacing_snapshot = False
+        staging_root: Path | None = None
+        staged_source: Path | None = None
         try:
             if managed_source is not None:
                 managed_source.parent.mkdir(parents=True, exist_ok=True)
+                if replace and managed_source.exists():
+                    staging_root = Path(
+                        tempfile.mkdtemp(
+                            prefix=f".{managed_source.name}.upgrade-",
+                            dir=managed_source.parent,
+                        )
+                    )
+                    staged_source = staging_root / "source"
+                    managed_source.rename(staged_source)
+                    replacing_snapshot = True
                 shutil.copytree(
                     source_path,
                     managed_source,
@@ -232,6 +259,8 @@ class ExtensionManager:
                     "config": {},
                 }
             )
+            if staging_root is not None:
+                shutil.rmtree(staging_root, ignore_errors=True)
         except BaseException as operation_error:
             # _enable_plugin performs the only config mutation as the final,
             # atomic step. A failure before it must not roll back an operator
@@ -245,12 +274,18 @@ class ExtensionManager:
                     strict=True,
                 )
             )
+            if replacing_snapshot and staged_source is not None and staged_source.exists():
+                if managed_source is not None:
+                    shutil.rmtree(managed_source, ignore_errors=True)
+                staged_source.rename(managed_source)
+                if staging_root is not None:
+                    shutil.rmtree(staging_root, ignore_errors=True)
+            elif managed_source is not None and not dependency_recovery_conflict:
+                shutil.rmtree(managed_source, ignore_errors=True)
             if dependency_recovery_conflict:
                 raise RuntimeError("extension installation recovery preserved a concurrent dependency-file edit") from operation_error
             for snapshot in dependency_snapshots:
                 snapshot.restore()
-            if managed_source is not None:
-                shutil.rmtree(managed_source, ignore_errors=True)
             # The recovery sync itself may rewrite the dependency files, so the
             # second restore has to run even when that sync fails.
             try:

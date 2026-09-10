@@ -219,6 +219,181 @@ def test_install_local_directory_makes_it_deployable_and_enabled(tmp_path: Path)
     _assert_demo_entry_point_loads(root / "backend")
 
 
+def test_install_rejects_an_already_snapshotted_local_directory(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    manager = ExtensionManager(root)
+    manager.install(str(source), yes=True)
+
+    with pytest.raises(FileExistsError, match="already installed"):
+        manager.install(str(source), yes=True)
+
+
+def test_upgrade_replaces_local_snapshot_and_preserves_private_config(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    manager = ExtensionManager(root)
+    manager.install(str(source), yes=True)
+    config_path = root / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"][0]["required"] = True
+    config["plugins"][0]["config"] = {"label": "keep-this"}
+    config["plugins"][0]["enabled"] = False
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v2'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+
+    result = manager.upgrade(str(source), yes=True)
+
+    assert result.name == "demo"
+    managed = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
+    assert "MARKER = 'v2'" in (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8")
+    plugins = yaml.safe_load(config_path.read_text(encoding="utf-8"))["plugins"]
+    assert plugins == [
+        {
+            "name": "demo",
+            "package": "deerflow-extension-demo",
+            "use": "demo_extension:install",
+            "enabled": True,
+            "required": True,
+            "config": {"label": "keep-this"},
+        }
+    ]
+    _assert_demo_entry_point_loads(root / "backend")
+
+
+def test_failed_upgrade_restores_the_previous_snapshot_and_config(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    manager = ExtensionManager(root)
+    manager.install(str(source), yes=True)
+    config_path = root / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"][0]["config"] = {"label": "keep-this"}
+    original_config = yaml.safe_dump(config, sort_keys=False)
+    config_path.write_text(original_config, encoding="utf-8")
+    original_init = (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo" / "demo_extension" / "__init__.py").read_text(encoding="utf-8")
+    original_pyproject = (root / "backend" / "pyproject.toml").read_bytes()
+
+    broken = tmp_path / "broken-source"
+    broken.mkdir()
+    _write_local_extension(broken, entry_target="missing_demo_extension:install")
+
+    with pytest.raises(ValueError, match="could not be loaded"):
+        manager.upgrade(str(broken), yes=True)
+
+    managed = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
+    assert (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8") == original_init
+    assert (root / "backend" / "pyproject.toml").read_bytes() == original_pyproject
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["plugins"][0]["config"] == {"label": "keep-this"}
+    leftover = list((root / "backend" / "extensions" / "sources").glob(".*.upgrade-*"))
+    assert leftover == []
+
+
+def test_deerflow_extensions_upgrade_exposes_the_local_replace_flow(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(root))
+    assert deerflow_main(["extensions", "install", str(source), "--yes"]) == 0
+    capsys.readouterr()
+
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v2'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+    exit_code = deerflow_main(["extensions", "upgrade", str(source), "--yes"])
+
+    assert exit_code == 0
+    assert "Upgraded demo" in capsys.readouterr().out
+    managed = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
+    assert "MARKER = 'v2'" in (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8")
+
+
+def test_upgrade_rejects_a_local_source_that_is_not_installed(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+
+    with pytest.raises(ValueError, match="not installed"):
+        ExtensionManager(root).upgrade(str(source), yes=True)
+
+    assert not (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo").exists()
+    assert yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")).get("plugins") is None
+
+
+def test_upgrade_rejects_a_requirement_that_is_not_installed(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    root.mkdir()
+    _write_host_project(root)
+
+    with pytest.raises(ValueError, match="not installed"):
+        ExtensionManager(root).upgrade("deerflow-extension-demo==2.0.0", yes=True)
+
+
+def test_failed_upgrade_restores_snapshot_when_a_concurrent_dependency_edit_blocks_lock_rollback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    manager = ExtensionManager(root)
+    manager.install(str(source), yes=True)
+    original_init = (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo" / "demo_extension" / "__init__.py").read_text(encoding="utf-8")
+    pyproject_path = root / "backend" / "pyproject.toml"
+
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v2'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+
+    def _fail_after_operator_edit(*_args, **_kwargs):
+        pyproject_path.write_text(
+            pyproject_path.read_text(encoding="utf-8") + "\n# operator edit during upgrade\n",
+            encoding="utf-8",
+        )
+        raise RuntimeError("simulated dependency sync failure")
+
+    monkeypatch.setattr("deerflow.extensions.manager._sync_environment", _fail_after_operator_edit)
+
+    with pytest.raises(RuntimeError, match="recovery.*dependency"):
+        manager.upgrade(str(source), yes=True)
+
+    managed = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
+    assert (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8") == original_init
+    assert "# operator edit during upgrade" in pyproject_path.read_text(encoding="utf-8")
+    assert list((root / "backend" / "extensions" / "sources").glob(".*.upgrade-*")) == []
+
+
 def test_install_defaults_to_a_fail_open_plugin_record(tmp_path: Path) -> None:
     """A managed install must not silently choose the fail-closed side: with
     `required: true`, a later broken extension aborts Gateway startup entirely,
@@ -292,7 +467,7 @@ def test_mutating_operations_are_serialized_for_one_checkout(tmp_path: Path, mon
     release_first = threading.Event()
     second_entered = threading.Event()
 
-    def _fake_install(self, source: str, *, yes: bool, required: bool):
+    def _fake_install(self, source: str, *, yes: bool, required: bool, replace: bool = False):
         if source == "first":
             first_entered.set()
             assert release_first.wait(timeout=5)

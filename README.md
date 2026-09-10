@@ -1034,6 +1034,7 @@ make extension-install \
 make extension-install SOURCE="$PWD/examples/deerflow-extension-example"
 
 make extension-list
+make extension-upgrade SOURCE="$PWD/examples/deerflow-extension-example"
 make extension-disable NAME=acme
 make extension-enable NAME=acme
 make extension-remove NAME=acme
@@ -1045,7 +1046,7 @@ source, automation can acknowledge that boundary explicitly with
 `cd backend && uv run --frozen --no-group extensions deerflow extensions install <source> --yes`.
 The manager requires uv 0.8.0 or newer; the provided Docker images pin uv 0.11.1.
 The other direct
-commands are `deerflow extensions list`, `enable NAME`, `disable NAME`, and `remove NAME`;
+commands are `deerflow extensions upgrade SOURCE`, `list`, `enable NAME`, `disable NAME`, and `remove NAME`;
 `NAME` may be the extension name, Python distribution, or `module:install` value. Do not
 put credentials in a source URL — a URL carrying embedded userinfo or a credential-looking
 query parameter is rejected before uv runs. Remote Git sources must use public HTTPS; SSH

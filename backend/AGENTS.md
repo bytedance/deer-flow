@@ -150,6 +150,7 @@ uv run pytest tests/test_bench_concurrency.py tests/test_bench_worker.py -q
 make check      # Check system requirements
 make install    # Install all dependencies (frontend + backend)
 make extension-install SOURCE=...  # Install and enable a trusted Python extension
+make extension-upgrade SOURCE=...  # Replace an installed extension and keep its config
 make extension-list                # List configured Python extensions
 make extension-enable NAME=...     # Enable an installed extension
 make extension-disable NAME=...    # Disable an extension without uninstalling it
