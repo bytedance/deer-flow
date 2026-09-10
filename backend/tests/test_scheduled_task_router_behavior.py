@@ -986,9 +986,7 @@ async def _call_update(repo, task_id, body):
     try:
         scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
         scheduled_tasks.get_config = lambda: _Config()
-        scheduled_tasks.get_optional_user_from_request = AsyncMock(
-            return_value=SimpleNamespace(id="user-1")
-        )
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=SimpleNamespace(id="user-1"))
         return await call_unwrapped(
             scheduled_tasks.update_scheduled_task,
             task_id=task_id,
@@ -1029,9 +1027,7 @@ async def test_create_interval_task_rejects_below_minimum_delay():
 @pytest.mark.asyncio
 async def test_create_interval_task_rejects_above_maximum():
     with pytest.raises(HTTPException) as exc_info:
-        await _call_create(
-            _interval_create_request(schedule_spec={"every_seconds": 30 * 24 * 3600 + 1})
-        )
+        await _call_create(_interval_create_request(schedule_spec={"every_seconds": 30 * 24 * 3600 + 1}))
     assert exc_info.value.status_code == 422
     assert "at most" in exc_info.value.detail
 
