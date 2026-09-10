@@ -74,8 +74,10 @@ def _normalize_query(query: str | None) -> str | None:
 def _normalize_extensions(extensions: list[str] | None) -> frozenset[str] | None:
     """Normalize extension tokens to lowercase dotted suffixes.
 
-    Non-strings, blanks, and a non-list input are dropped. An empty result
-    means "no extension filter", matching the unfiltered historical behavior.
+    Non-strings, blanks, and a non-list input are dropped. A leading ``*`` is
+    stripped so model-supplied glob tokens like ``*.pdf`` still match
+    ``Path.suffix``. An empty result means "no extension filter", matching
+    the unfiltered historical behavior.
     """
     if not isinstance(extensions, list):
         return None
@@ -83,7 +85,7 @@ def _normalize_extensions(extensions: list[str] | None) -> frozenset[str] | None
     for item in extensions:
         if not isinstance(item, str):
             continue
-        token = item.strip().lower()
+        token = item.strip().lower().lstrip("*")
         if not token:
             continue
         if not token.startswith("."):
@@ -187,11 +189,7 @@ def _list_uploaded_files_impl(
     query_filter = _normalize_query(query)
     extension_filter = _normalize_extensions(extensions)
     if query_filter is not None or extension_filter is not None:
-        candidates = [
-            item
-            for item in candidates
-            if _matches_filters(item[1].name, item[1].suffix, query_filter, extension_filter)
-        ]
+        candidates = [item for item in candidates if _matches_filters(item[1].name, item[1].suffix, query_filter, extension_filter)]
         if not candidates:
             return {
                 "files": [],
@@ -260,14 +258,11 @@ def list_uploaded_files(
     ] = _DEFAULT_MAX_RESULTS,
     query: Annotated[
         str | None,
-        "Optional case-insensitive substring to match against the filename only "
-        "(not the virtual path). Omit or leave blank to skip name filtering.",
+        "Optional case-insensitive substring to match against the filename only (not the virtual path). Omit or leave blank to skip name filtering.",
     ] = None,
     extensions: Annotated[
         list[str] | None,
-        'Optional file extensions to keep, e.g. ["pdf", ".PNG"]. '
-        "With or without a leading dot; matching is case-insensitive. "
-        "Combined with query using AND. Omit to skip type filtering.",
+        'Optional file extensions to keep, e.g. ["pdf", ".PNG"]. With or without a leading dot; matching is case-insensitive. Combined with query using AND. Omit to skip type filtering.',
     ] = None,
 ) -> dict:
     """Discover historical uploaded files available in this thread.

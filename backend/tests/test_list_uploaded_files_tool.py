@@ -893,15 +893,31 @@ class TestListUploadedFilesFilters:
         assert result["total_count"] == 27
         assert result["truncated"] is True
 
+    def test_glob_star_extension_token_matches_suffix(self, tmp_path):
+        # Models often emit glob-style tokens like "*.pdf". If we only prefix a
+        # dot, that becomes ".*.pdf" and never matches Path.suffix, so the PDFs
+        # the user asked for disappear behind "no files matched".
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "old.pdf").write_bytes(b"%PDF")
+        (uploads_dir / "notes.PDF").write_bytes(b"%PDF")
+        (uploads_dir / "shot.png").write_bytes(b"png")
+
+        result = _list_uploaded_files_impl(
+            runtime=_runtime(),
+            extensions=["*.pdf", "*.PNG"],
+            _paths=_paths(tmp_path),
+        )
+
+        assert {f["filename"] for f in result["files"]} == {"old.pdf", "notes.PDF", "shot.png"}
+        assert result["total_count"] == 3
+
     def test_query_matches_filename_not_path(self, tmp_path):
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "quarterly-report.pdf").write_bytes(b"%PDF")
         (uploads_dir / "notes.txt").write_text("report in body", encoding="utf-8")
 
         result = _list_uploaded_files_impl(runtime=_runtime(), query="REPORT", _paths=_paths(tmp_path))
-        uploads_query = _list_uploaded_files_impl(
-            runtime=_runtime(), query="uploads", _paths=_paths(tmp_path)
-        )
+        uploads_query = _list_uploaded_files_impl(runtime=_runtime(), query="uploads", _paths=_paths(tmp_path))
 
         assert [f["filename"] for f in result["files"]] == ["quarterly-report.pdf"]
         assert uploads_query["files"] == []
@@ -941,9 +957,7 @@ class TestListUploadedFilesFilters:
 
     def test_empty_directory_keeps_unfiltered_message(self, tmp_path):
         _uploads_dir(tmp_path)
-        result = _list_uploaded_files_impl(
-            runtime=_runtime(), query="pdf", extensions=[".pdf"], _paths=_paths(tmp_path)
-        )
+        result = _list_uploaded_files_impl(runtime=_runtime(), query="pdf", extensions=[".pdf"], _paths=_paths(tmp_path))
         assert result["files"] == []
         assert "No historical uploaded files" in result["message"]
 
