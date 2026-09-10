@@ -1,7 +1,6 @@
 import base64
 import errno
 import logging
-import shlex
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -11,6 +10,7 @@ from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -59,25 +59,35 @@ class AioSandbox(Sandbox):
     #: the next — recorded bash evidence cannot prove a clean environment.
     persistent_shell_sessions = True
 
-    def __init__(self, id: str, base_url: str, home_dir: str | None = None):
+    def __init__(
+        self,
+        id: str,
+        base_url: str,
+        home_dir: str | None = None,
+        request_headers: dict[str, str] | None = None,
+    ):
         """Initialize the AIO sandbox.
 
         Args:
             id: Unique identifier for this sandbox instance.
             base_url: URL of the sandbox API (e.g., http://localhost:8080).
             home_dir: Home directory inside the sandbox. If None, will be fetched from the sandbox.
+            request_headers: Trusted control-plane headers required by a local
+                relay. These are never injected into sandbox commands.
         """
         super().__init__(id)
         self._base_url = base_url
+        client_kwargs = {
+            "base_url": base_url,
+            "timeout": 600,
+        }
+        if request_headers:
+            client_kwargs["headers"] = dict(request_headers)
         if sandbox_http_trust_env(base_url):
-            self._client = AioSandboxClient(base_url=base_url, timeout=600)
+            self._client = AioSandboxClient(**client_kwargs)
         else:
             direct_client = httpx.Client(timeout=600, follow_redirects=True, trust_env=False)
-            self._client = AioSandboxClient(
-                base_url=base_url,
-                timeout=600,
-                httpx_client=direct_client,
-            )
+            self._client = AioSandboxClient(**client_kwargs, httpx_client=direct_client)
         self._home_dir = home_dir
         self._lock = threading.Lock()
         self._scope_registry_lock = threading.Lock()
@@ -563,22 +573,23 @@ class AioSandbox(Sandbox):
         Returns:
             The contents of the directory.
         """
+        resolved = path
         with self._lock:
             try:
-                result = self._client.shell.exec_command(command=f"find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500", no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
-                output = result.data.output if result.data else ""
-                if output:
-                    # find delimits records with "\n" and nothing else, so split
-                    # on that alone: splitlines() would also break on \v, \f,
-                    # \x1c-\x1e and \x85, all of which are legal inside a Linux
-                    # filename. Do NOT strip entries either — a filename that
-                    # legitimately ends in whitespace would be corrupted and
-                    # never resolve again.
-                    return [line for line in output.split("\n") if line]
-                return []
+                result = self._client.shell.exec_command(
+                    command=remote_list_dir_command(resolved, max_depth),
+                    no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT,
+                )
             except Exception as e:
                 logger.error(f"Failed to list directory in sandbox: {e}")
-                return []
+                raise OSError(f"Failed to list directory '{resolved}' in sandbox: {e}") from e
+            if result.data is None:
+                raise OSError(f"Failed to list directory '{resolved}' in sandbox: empty response")
+            return parse_remote_list_dir_output(
+                result.data.output or "",
+                resolved,
+                pipeline_exit_code=getattr(result.data, "exit_code", None),
+            )
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         """Write content to a file in the sandbox.
@@ -591,10 +602,9 @@ class AioSandbox(Sandbox):
         with self._lock:
             try:
                 if append:
-                    existing = self.read_file(path)
-                    if not existing.startswith("Error:"):
-                        content = existing + content
-                self._client.file.write_file(file=path, content=content)
+                    self._client.file.write_file(file=path, content=content, append=True)
+                else:
+                    self._client.file.write_file(file=path, content=content)
             except Exception as e:
                 logger.error(f"Failed to write file in sandbox: {e}")
                 raise

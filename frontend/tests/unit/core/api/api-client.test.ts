@@ -84,76 +84,160 @@ test("ignores reconnect metadata storage access failures", () => {
   expect(() => clearReconnectRun("thread-1", "run-1")).not.toThrow();
 });
 
-test("does not retry run creation after an ambiguous gateway failure", async () => {
-  const sessionStorage = makeSessionStorage();
-  let attempts = 0;
-  const fetchFn = rs.fn(async () => {
-    attempts += 1;
-    const status = attempts === 1 ? 504 : 400;
-    return new Response(JSON.stringify({ detail: "request failed" }), {
-      status,
-    });
-  });
-  rs.stubGlobal("window", {
-    location: { origin: "http://localhost:2026" },
-    sessionStorage,
-  });
-  rs.stubGlobal("fetch", fetchFn);
-
-  const consume = async () => {
-    for await (const entry of getAPIClient(true).runs.stream(
-      "thread-no-retry",
-      "lead_agent",
-      { input: { messages: [] } },
-    )) {
-      void entry;
-    }
-  };
-
-  await expect(consume()).rejects.toThrow("HTTP 504");
-  expect(fetchFn).toHaveBeenCalledTimes(1);
-});
-
-test("reconnects an interrupted run stream with GET without recreating the run", async () => {
-  const sessionStorage = makeSessionStorage();
-  const encoder = new TextEncoder();
-  let interruptStream: (() => void) | undefined;
-  const interruptedBody = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(
-        encoder.encode('id: 1-0\nevent: custom\ndata: {"phase":"started"}\n\n'),
-      );
-      interruptStream = () => {
-        controller.error(new TypeError("connection interrupted"));
-      };
-    },
-  });
-  const requests: Array<{
-    method: string | undefined;
-    lastEventId: string | null;
-  }> = [];
-  const fetchFn = rs.fn(async (_url: string | URL, init?: RequestInit) => {
-    const headers = new Headers(init?.headers);
-    requests.push({
-      method: init?.method,
-      lastEventId: headers.get("Last-Event-ID"),
-    });
-    if (requests.length === 1) {
-      return new Response(interruptedBody, {
-        status: 200,
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Content-Location": "/threads/thread-reconnect/runs/run-reconnect",
-          Location:
-            "/threads/thread-reconnect/runs/run-reconnect/stream?stream_mode=custom",
-        },
+test.each(["http", "network"])(
+  "does not retry run creation after an ambiguous %s failure",
+  async (failure) => {
+    const sessionStorage = makeSessionStorage();
+    let attempts = 0;
+    const fetchFn = rs.fn(async () => {
+      attempts += 1;
+      if (failure === "network") {
+        throw new TypeError("connection interrupted");
+      }
+      const status = attempts === 1 ? 504 : 400;
+      return new Response(JSON.stringify({ detail: "request failed" }), {
+        status,
       });
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+
+    const consume = async () => {
+      for await (const entry of getAPIClient(true).runs.stream(
+        "thread-no-retry",
+        "lead_agent",
+        { input: { messages: [] } },
+      )) {
+        void entry;
+      }
+    };
+
+    await expect(consume()).rejects.toThrow(
+      failure === "http" ? "HTTP 504" : "connection interrupted",
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  },
+);
+
+test.each([0, 1, 4, 5])(
+  "preserves the recovery GET retry budget without recreating the run (%s failures)",
+  async (recoveryFailures) => {
+    const sessionStorage = makeSessionStorage();
+    const encoder = new TextEncoder();
+    let interruptStream: (() => void) | undefined;
+    const interruptedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'id: 1-0\nevent: custom\ndata: {"phase":"started"}\n\n',
+          ),
+        );
+        interruptStream = () => {
+          controller.error(new TypeError("connection interrupted"));
+        };
+      },
+    });
+    const requests: Array<{
+      url: string;
+      method: string | undefined;
+      lastEventId: string | null;
+    }> = [];
+    const fetchFn = rs.fn(async (_url: string | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      requests.push({
+        url: String(_url),
+        method: init?.method,
+        lastEventId: headers.get("Last-Event-ID"),
+      });
+      if (requests.length === 1) {
+        return new Response(interruptedBody, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Content-Location": "/threads/thread-reconnect/runs/run-reconnect",
+            Location:
+              "/threads/thread-reconnect/runs/run-reconnect/stream?stream_mode=custom",
+          },
+        });
+      }
+      if (requests.length <= recoveryFailures + 1) {
+        return new Response(JSON.stringify({ detail: "gateway timeout" }), {
+          status: 504,
+        });
+      }
+      return makeSSEResponse("id: 2-0\nevent: end\ndata: null\n\n");
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+    rs.stubGlobal("setTimeout", (callback: () => void) => {
+      callback();
+      return 0;
+    });
+
+    const received: Array<{ id?: string; event: string; data: unknown }> = [];
+    const consume = async () => {
+      for await (const entry of getAPIClient(true).runs.stream(
+        "thread-reconnect",
+        "lead_agent",
+        { input: { messages: [] } },
+      )) {
+        received.push(entry);
+        if ("id" in entry && entry.id === "1-0") {
+          interruptStream?.();
+        }
+      }
+    };
+    // The SDK retries four times after the initial HTTP attempt. Exhaustion
+    // must surface the error instead of starting a new run or retrying forever.
+    if (recoveryFailures === 5) {
+      await expect(consume()).rejects.toThrow("HTTP 504");
+    } else {
+      await consume();
     }
-    return makeSSEResponse("id: 2-0\nevent: end\ndata: null\n\n");
+
+    expect(received).toEqual([
+      { id: "1-0", event: "custom", data: { phase: "started" } },
+      ...(recoveryFailures === 5
+        ? []
+        : [{ id: "2-0", event: "end", data: null }]),
+    ]);
+    expect(requests).toEqual([
+      {
+        url: "http://localhost:2026/mock/api/threads/thread-reconnect/runs/stream",
+        method: "POST",
+        lastEventId: null,
+      },
+      ...Array.from({ length: Math.min(recoveryFailures + 1, 5) }, () => ({
+        url: "http://localhost:2026/mock/api/threads/thread-reconnect/runs/run-reconnect/stream?stream_mode=custom",
+        method: "GET",
+        lastEventId: "1-0",
+      })),
+    ]);
+  },
+);
+
+test("keeps retries for reads and explicit stream joins", async () => {
+  const attempts = new Map<string, number>();
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url).pathname;
+    const attempt = (attempts.get(path) ?? 0) + 1;
+    attempts.set(path, attempt);
+    if (attempt === 1) {
+      return new Response("gateway timeout", { status: 504 });
+    }
+    return path.endsWith("/stream")
+      ? makeSSEResponse("event: end\ndata: null\n\n")
+      : Response.json({ status: "running" });
   });
   rs.stubGlobal("window", {
     location: { origin: "http://localhost:2026" },
-    sessionStorage,
+    sessionStorage: makeSessionStorage(),
   });
   rs.stubGlobal("fetch", fetchFn);
   rs.stubGlobal("setTimeout", (callback: () => void) => {
@@ -161,25 +245,18 @@ test("reconnects an interrupted run stream with GET without recreating the run",
     return 0;
   });
 
-  const received: Array<{ id?: string; event: string; data: unknown }> = [];
-  for await (const entry of getAPIClient(true).runs.stream(
-    "thread-reconnect",
-    "lead_agent",
-    { input: { messages: [] } },
+  const received: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-read-retry",
+    "run-read-retry",
   )) {
     received.push(entry);
-    if ("id" in entry && entry.id === "1-0") {
-      interruptStream?.();
-    }
   }
 
-  expect(received).toEqual([
-    { id: "1-0", event: "custom", data: { phase: "started" } },
-    { id: "2-0", event: "end", data: null },
-  ]);
-  expect(requests).toEqual([
-    { method: "POST", lastEventId: null },
-    { method: "GET", lastEventId: "1-0" },
+  expect(received).toEqual([{ event: "end", data: null }]);
+  expect([...attempts.entries()]).toEqual([
+    ["/mock/api/threads/thread-read-retry/runs/run-read-retry", 2],
+    ["/mock/api/threads/thread-read-retry/runs/run-read-retry/stream", 2],
   ]);
 });
 
@@ -409,6 +486,116 @@ test("proceeds to join when the run is still active", async () => {
   // Two requests: preflight GET + the real join. A short-circuit would be one.
   expect(fetchFn).toHaveBeenCalledTimes(2);
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
+});
+
+test("requests incremental modes for initial and rejoined chat streams", async () => {
+  const sessionStorage = makeSessionStorage();
+  let initialStreamBody: Record<string, unknown> | undefined;
+  let joinedStreamModes: unknown;
+  const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+    const requestUrl = new URL(url.toString());
+    if (requestUrl.pathname.endsWith("/threads/thread-modes/runs/stream")) {
+      if (typeof init?.body !== "string") {
+        throw new Error("Expected a JSON request body for the initial stream");
+      }
+      initialStreamBody = JSON.parse(init.body);
+      return makeSSEResponse("event: end\ndata: null\n\n", {
+        "Content-Location": "/threads/thread-modes/runs/run-modes",
+      });
+    }
+    if (requestUrl.pathname.endsWith("/runs/run-modes")) {
+      return new Response(JSON.stringify({ status: "running" }), {
+        status: 200,
+      });
+    }
+    if (requestUrl.pathname.endsWith("/runs/run-modes/stream")) {
+      joinedStreamModes = JSON.parse(
+        requestUrl.searchParams.get("stream_mode") ?? "null",
+      );
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  for await (const _entry of getAPIClient(true).runs.stream(
+    "thread-modes",
+    "lead_agent",
+    { streamMode: ["values"] },
+  )) {
+    // Drain the initial stream so its lazy request is issued.
+    void _entry;
+  }
+  for await (const _entry of getAPIClient(true).runs.joinStream(
+    "thread-modes",
+    "run-modes",
+    { streamMode: ["values"] },
+  )) {
+    // Drain the rejoined stream so its lazy request is issued.
+    void _entry;
+  }
+
+  const incrementalModes = ["messages-tuple", "updates", "custom"];
+  expect(initialStreamBody?.stream_mode).toEqual(incrementalModes);
+  expect(joinedStreamModes).toEqual(incrementalModes);
+});
+
+test("passes AbortSignals through initial and directly-signalled join streams", async () => {
+  const sessionStorage = makeSessionStorage();
+  const initialController = new AbortController();
+  const joinController = new AbortController();
+  let initialSignal: AbortSignal | null | undefined;
+  let joinSignal: AbortSignal | null | undefined;
+  const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+    const requestUrl = new URL(url.toString());
+    if (requestUrl.pathname.endsWith("/threads/thread-signal/runs/stream")) {
+      initialSignal = init?.signal;
+      return makeSSEResponse("event: end\ndata: null\n\n", {
+        "Content-Location": "/threads/thread-signal/runs/run-signal",
+      });
+    }
+    if (requestUrl.pathname.endsWith("/runs/run-signal")) {
+      return new Response(JSON.stringify({ status: "running" }), {
+        status: 200,
+      });
+    }
+    if (requestUrl.pathname.endsWith("/runs/run-signal/stream")) {
+      joinSignal = init?.signal;
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  for await (const _entry of getAPIClient(true).runs.stream(
+    "thread-signal",
+    "lead_agent",
+    { signal: initialController.signal },
+  )) {
+    void _entry;
+  }
+  for await (const _entry of getAPIClient(true).runs.joinStream(
+    "thread-signal",
+    "run-signal",
+    joinController.signal,
+  )) {
+    void _entry;
+  }
+
+  expect(initialSignal).toBe(initialController.signal);
+  expect(joinSignal).toBe(joinController.signal);
 });
 
 test("recovers a join stream gap from durable state and resumes after the retained tail", async () => {

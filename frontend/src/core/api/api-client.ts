@@ -1,6 +1,9 @@
 "use client";
 
-import { Client as LangGraphClient } from "@langchain/langgraph-sdk/client";
+import {
+  Client as LangGraphClient,
+  RunsClient,
+} from "@langchain/langgraph-sdk/client";
 
 import { getLangGraphBaseURL } from "../config";
 import { isStaticWebsiteOnly } from "../static-mode";
@@ -12,7 +15,7 @@ import {
 import type { AgentThreadState } from "../threads/types";
 
 import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
-import { sanitizeRunStreamOptions } from "./stream-mode";
+import { forceChatRunStreamOptions } from "./stream-mode";
 
 /**
  * SDK ``onRequest`` hook that mints the ``X-CSRF-Token`` header from the
@@ -323,6 +326,14 @@ async function* handleInactiveRunStream({
   }
 }
 
+// Reuse the SDK's retry budget, backoff and HTTP error handling for recovery
+// requests that have already been prepared by the run-creation client.
+class StreamRecoveryClient extends RunsClient {
+  fetchWithRetries(...args: Parameters<typeof fetch>): Promise<Response> {
+    return this.asyncCaller.fetch(...args);
+  }
+}
+
 function createCompatibleClient(isMock?: boolean): LangGraphClient {
   if (isStaticWebsiteOnly() && !isMock) {
     return createStaticClient();
@@ -336,23 +347,27 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
 
   // Creating a run is not idempotent. Retrying an ambiguous gateway failure
   // can create the same run more than once after the backend accepted the
-  // original request. Disable request-level retries for this stream client;
-  // the SDK's independent SSE recovery still resumes established streams with
-  // GET requests to the server-provided Location.
-  const runCreationClient = new LangGraphClient({
+  // original request. The SDK also uses this client's transport for recovery
+  // GETs, which must retain normal HTTP retries (including transient 5xx).
+  const streamRecoveryClient = new StreamRecoveryClient({ apiUrl });
+  const runCreationClient = new RunsClient({
     apiUrl,
-    callerOptions: { maxRetries: 0 },
+    callerOptions: {
+      maxRetries: 0,
+      fetch: (...args: Parameters<typeof fetch>) =>
+        args[1]?.method === "GET"
+          ? streamRecoveryClient.fetchWithRetries(...args)
+          : fetch(...args),
+    },
     onRequest: injectCsrfHeader,
   });
-  const originalRunStream = runCreationClient.runs.stream.bind(
-    runCreationClient.runs,
-  );
+  const originalRunStream = runCreationClient.stream.bind(runCreationClient);
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
   // Preserve the SDK's lazy AsyncIterable contract. Its StreamManager consumes
   // this return value with `for await`, so run creation still starts on first
   // iteration rather than when `runs.stream()` is called.
   client.runs.stream = async function* (threadId, assistantId, payload) {
-    const sanitizedPayload = sanitizeRunStreamOptions(payload);
+    const sanitizedPayload = forceChatRunStreamOptions(payload);
     const originalOnRunCreated = sanitizedPayload?.onRunCreated;
     let runId: string | undefined;
     const initialStream = originalRunStream(threadId, assistantId, {
@@ -414,7 +429,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       clearReconnectRun(threadId, runId);
       return;
     }
-    const sanitizedOptions = sanitizeRunStreamOptions(options);
+    const sanitizedOptions = forceChatRunStreamOptions(options);
     yield* handleInactiveRunStream({
       threadId,
       expectedRunId: () => runId,

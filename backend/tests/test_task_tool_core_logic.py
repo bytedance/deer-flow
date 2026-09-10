@@ -58,6 +58,8 @@ def test_parent_loop_middleware_recorder_proxy_delivers_on_owner_loop():
             LoopPinnedJournal(),
             parent_loop,
         )
+        assert proxy.claim_tool_promotions(["mcp_b", "mcp_a", "mcp_a"]) == ["mcp_a", "mcp_b"]
+        assert proxy.claim_tool_promotions(["mcp_a"]) == []
         proxy.record_middleware(
             tag="loop_detection",
             name="LoopDetectionMiddleware",
@@ -74,6 +76,7 @@ def test_parent_loop_middleware_recorder_proxy_delivers_on_owner_loop():
         assert kwargs["action"] == "warn"
 
         asyncio.run_coroutine_threadsafe(proxy.aclose(), parent_loop).result(timeout=5)
+        assert proxy.claim_tool_promotions(["late_tool"]) == []
         proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="hard_stop", changes={})
         time.sleep(0.05)
         assert len(calls) == 1, "events emitted after the parent task boundary must be dropped"
@@ -429,7 +432,7 @@ def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
     assert captured["executor_kwargs"]["extensions"] is loaded
 
 
-def test_task_tool_installs_and_closes_narrow_loop_detection_recorder(monkeypatch):
+def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
     journal = MagicMock()
     runtime = _make_runtime()
     runtime.context["__run_journal"] = journal
@@ -458,6 +461,7 @@ def test_task_tool_installs_and_closes_narrow_loop_detection_recorder(monkeypatc
 
     kwargs = captured["executor_kwargs"]
     proxy = kwargs["loop_detection_recorder"]
+    assert kwargs["tool_promotion_recorder"] is proxy
     assert proxy.is_closed is True
     proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="warn", changes={})
     journal.record_middleware.assert_not_called()
@@ -776,6 +780,14 @@ def test_task_tool_threads_runtime_app_config_to_subagent_dependencies(monkeypat
 def test_task_tool_emits_running_and_completed_events(monkeypatch):
     config = _make_subagent_config()
     runtime = _make_runtime()
+    runtime.state["uploaded_files"] = [
+        {
+            "filename": "fresh.pdf",
+            "size": 128,
+            "path": "/mnt/user-data/uploads/fresh.pdf",
+            "extension": ".pdf",
+        }
+    ]
     runtime.context["deerflow_trace_id"] = "task-trace-1"
     events = []
     dispatched_events = []
@@ -839,12 +851,13 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert captured["executor_kwargs"]["thread_id"] == "thread-1"
     assert captured["executor_kwargs"]["parent_model"] == "ark-model"
     assert captured["executor_kwargs"]["deerflow_trace_id"] == "task-trace-1"
+    assert captured["executor_kwargs"]["uploaded_files"] == runtime.state["uploaded_files"]
     assert captured["executor_kwargs"]["config"].max_turns == config.max_turns
     # Skills are no longer appended to system_prompt; they are loaded per-session
     # by SubagentExecutor and injected as conversation items (Codex pattern).
     assert captured["executor_kwargs"]["config"].system_prompt == "Base system prompt"
 
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=False)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=True)
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
@@ -923,16 +936,20 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
         state={
             "sandbox": {"sandbox_id": "local"},
             "thread_data": {"workspace_path": "/tmp/workspace"},
+            # An empty current-run snapshot is valid and is the common case
+            # when the subagent needs to discover uploads from an earlier turn.
+            "uploaded_files": [],
         },
         context={"thread_id": "thread-1"},
         config={"metadata": {"model_name": "ark-model", "trace_id": "trace-1", "tool_groups": parent_tool_groups}},
     )
     events = []
+    captured = {}
     get_available_tools = MagicMock(return_value=["tool-a"])
 
     class DummyExecutor:
         def __init__(self, **kwargs):
-            pass
+            captured.update(kwargs)
 
         def execute_async(self, prompt, task_id=None):
             return task_id or "generated-task-id"
@@ -958,8 +975,9 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
     )
 
     assert _task_tool_message(output).content == "Task Succeeded. Result: done"
+    assert captured["uploaded_files"] == []
     # The key assertion: groups should be propagated from parent metadata
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=False)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=True)
 
 
 def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
@@ -974,6 +992,9 @@ def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
     )
     runtime = _make_runtime()
     runtime.config["metadata"]["model_name"] = "parent-text-model"
+    # Do not enable upload discovery when the parent boundary is malformed:
+    # doing so could expose a same-run upload as if it were historical.
+    runtime.state["uploaded_files"] = [{"filename": ""}]
     events = []
     get_available_tools = MagicMock(return_value=[])
 
