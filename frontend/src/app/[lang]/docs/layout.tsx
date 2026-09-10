@@ -3,8 +3,8 @@ import "katex/dist/katex.min.css";
 import { getPageMap } from "nextra/page-map";
 import { Layout } from "nextra-theme-docs";
 
-import { buildLocalizedDocsPageMap } from "@/components/docs/docs-page-map";
 import { DocsLanguageProvider } from "@/components/docs/docs-language-context";
+import { buildLocalizedDocsPageMap } from "@/components/docs/docs-page-map";
 import { Footer } from "@/components/landing/footer";
 import { Header } from "@/components/landing/header";
 import { getLocaleByLang } from "@/core/i18n/locale";
