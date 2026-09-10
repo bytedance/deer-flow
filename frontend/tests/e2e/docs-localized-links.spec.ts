@@ -55,10 +55,8 @@ test.describe("Localized documentation links", () => {
   test("localizes Chinese Markdown links in quick start", async ({ page }) => {
     await page.goto("/zh/docs/application/quick-start");
 
-    const link = page
-      .locator("main")
-      .getByRole("link", { name: "配置" })
-      .first();
+    const link = page.locator("main p").getByRole("link", { name: "配置" });
+    await expect(link).toHaveCount(1);
     await expect(link).toHaveAttribute(
       "href",
       "/zh/docs/application/configuration",
