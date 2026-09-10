@@ -80,3 +80,44 @@ def test_waiter_timeout_does_not_stop_started_sync_work():
             executor.shutdown(wait=True, cancel_futures=True)
 
     asyncio.run(scenario())
+
+
+def test_dedicated_file_io_pool_runs_while_default_executor_is_saturated():
+    async def scenario():
+        from deerflow.utils import file_io
+
+        loop = asyncio.get_running_loop()
+        default_executor = ThreadPoolExecutor(max_workers=1)
+        dedicated_executor = ThreadPoolExecutor(max_workers=1)
+        original_executor = file_io._FILE_IO_EXECUTOR
+        loop.set_default_executor(default_executor)
+        file_io._FILE_IO_EXECUTOR = dedicated_executor
+        release = threading.Event()
+        default_started = asyncio.Event()
+        dedicated_started = asyncio.Event()
+
+        def default_blocker():
+            loop.call_soon_threadsafe(default_started.set)
+            release.wait()
+
+        def dedicated_work():
+            loop.call_soon_threadsafe(dedicated_started.set)
+            return "file-io"
+
+        try:
+            default_task = asyncio.create_task(asyncio.to_thread(default_blocker))
+            await default_started.wait()
+
+            file_task = asyncio.create_task(file_io.run_file_io(dedicated_work))
+            await dedicated_started.wait()
+            assert await file_task == "file-io"
+
+            release.set()
+            await default_task
+        finally:
+            release.set()
+            file_io._FILE_IO_EXECUTOR = original_executor
+            dedicated_executor.shutdown(wait=True, cancel_futures=True)
+            default_executor.shutdown(wait=True, cancel_futures=True)
+
+    asyncio.run(scenario())
