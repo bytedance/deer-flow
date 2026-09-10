@@ -377,6 +377,7 @@ export interface Translations {
       cron: string;
       cronPlaceholder: string;
       runAt: string;
+      invalidRunAt: string;
       timezone: string;
       intervalAmount: string;
       intervalUnitSeconds: string;

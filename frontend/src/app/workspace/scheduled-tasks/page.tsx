@@ -654,6 +654,8 @@ export default function ScheduledTasksPage() {
                       <Button
                         size="sm"
                         onClick={() => {
+                          if (!hasScheduleSpec(editSchedule.schedule_spec))
+                            return;
                           const pinned =
                             selectedTask.assistant_id ?? DEFAULT_ASSISTANT_ID;
                           updateTask.mutate({
@@ -666,7 +668,10 @@ export default function ScheduledTasksPage() {
                             timezone: editSchedule.timezone || "UTC",
                           });
                         }}
-                        disabled={updateTask.isPending}
+                        disabled={
+                          updateTask.isPending ||
+                          !hasScheduleSpec(editSchedule.schedule_spec)
+                        }
                       >
                         {st.edit.submit}
                       </Button>
