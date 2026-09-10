@@ -1,8 +1,9 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { CopyIcon, TriangleAlertIcon } from "lucide-react";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   ScheduledTaskScheduleInput,
@@ -25,6 +33,8 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import { listAgents } from "@/core/agents/api";
+import { useAgentsApiEnabled } from "@/core/agents/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   useCreateScheduledTask,
@@ -82,6 +92,18 @@ function formatTimestamp(value: string | null, locale: string): string {
   }).format(date);
 }
 
+const DEFAULT_ASSISTANT_ID = "lead_agent";
+
+function agentDisplayName(
+  assistantId: string | null | undefined,
+  leadLabel: string,
+): string {
+  if (!assistantId || assistantId === DEFAULT_ASSISTANT_ID) {
+    return leadLabel;
+  }
+  return assistantId;
+}
+
 export default function ScheduledTasksPage() {
   const { t, locale } = useI18n();
   const st = t.scheduledTasks;
@@ -89,6 +111,14 @@ export default function ScheduledTasksPage() {
   const threadId = searchParams.get("thread_id");
   const allTasksQuery = useScheduledTasks();
   const threadTasksQuery = useThreadScheduledTasks(threadId);
+  const { enabled: agentsApiEnabled, isLoading: agentsApiLoading } =
+    useAgentsApiEnabled();
+  const agentsQuery = useQuery({
+    queryKey: ["agents"],
+    queryFn: listAgents,
+    enabled: !agentsApiLoading && agentsApiEnabled,
+    retry: false,
+  });
   const data = threadId ? threadTasksQuery.data : allTasksQuery.data;
   const queryError = threadId ? threadTasksQuery.error : allTasksQuery.error;
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -99,6 +129,8 @@ export default function ScheduledTasksPage() {
   const [targetThreadId, setTargetThreadId] = useState(threadId ?? "");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [createAssistantId, setCreateAssistantId] =
+    useState(DEFAULT_ASSISTANT_ID);
   const [createSchedule, setCreateSchedule] = useState<ScheduleValue>({
     schedule_type: "cron",
     schedule_spec: { cron: "0 9 * * *" },
@@ -112,6 +144,7 @@ export default function ScheduledTasksPage() {
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
+  const [editAssistantId, setEditAssistantId] = useState(DEFAULT_ASSISTANT_ID);
   const [editSchedule, setEditSchedule] = useState<ScheduleValue>({
     schedule_type: "cron",
     schedule_spec: { cron: "0 9 * * *" },
@@ -120,6 +153,30 @@ export default function ScheduledTasksPage() {
   const [createNonce, setCreateNonce] = useState(0);
   const createFormRef = useRef<HTMLDivElement>(null);
   const createTitleRef = useRef<HTMLInputElement>(null);
+  const agentOptions = useMemo(() => {
+    const names = new Set((agentsQuery.data ?? []).map((agent) => agent.name));
+    const options = [
+      {
+        value: DEFAULT_ASSISTANT_ID,
+        label: st.create.leadAgent,
+      },
+      ...(agentsQuery.data ?? [])
+        .filter((agent) => agent.name !== DEFAULT_ASSISTANT_ID)
+        .map((agent) => ({ value: agent.name, label: agent.name })),
+    ];
+    for (const extra of [createAssistantId, editAssistantId]) {
+      if (extra && extra !== DEFAULT_ASSISTANT_ID && !names.has(extra)) {
+        options.push({ value: extra, label: extra });
+        names.add(extra);
+      }
+    }
+    return options;
+  }, [
+    agentsQuery.data,
+    createAssistantId,
+    editAssistantId,
+    st.create.leadAgent,
+  ]);
   const filteredData = (data ?? []).filter((task) => {
     const statusPass = statusFilter === "all" || task.status === statusFilter;
     const typePass = typeFilter === "all" || task.schedule_type === typeFilter;
@@ -170,6 +227,7 @@ export default function ScheduledTasksPage() {
     setPrompt(task.prompt);
     setContextMode(task.context_mode);
     setTargetThreadId(task.thread_id ?? "");
+    setCreateAssistantId(task.assistant_id ?? DEFAULT_ASSISTANT_ID);
     setCreateSchedule({
       schedule_type: task.schedule_type,
       schedule_spec: { ...task.schedule_spec },
@@ -208,6 +266,7 @@ export default function ScheduledTasksPage() {
     }
     setEditTitle(selectedTask.title);
     setEditPrompt(selectedTask.prompt);
+    setEditAssistantId(selectedTask.assistant_id ?? DEFAULT_ASSISTANT_ID);
     const spec = selectedTask.schedule_spec as {
       cron?: string;
       run_at?: string;
@@ -287,6 +346,25 @@ export default function ScheduledTasksPage() {
                 />
               </>
             )}
+            <Select
+              value={createAssistantId}
+              onValueChange={setCreateAssistantId}
+            >
+              <SelectTrigger
+                className="w-full"
+                data-testid="scheduled-task-create-agent"
+                aria-label={st.create.agent}
+              >
+                <SelectValue placeholder={st.create.agent} />
+              </SelectTrigger>
+              <SelectContent>
+                {agentOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Input
               ref={createTitleRef}
               value={title}
@@ -327,6 +405,7 @@ export default function ScheduledTasksPage() {
                     context_mode: contextMode,
                     thread_id:
                       contextMode === "reuse_thread" ? targetThreadId : null,
+                    assistant_id: createAssistantId,
                     title,
                     prompt,
                     schedule_type: createSchedule.schedule_type,
@@ -339,6 +418,7 @@ export default function ScheduledTasksPage() {
                       setTitle("");
                       setPrompt("");
                       setTargetThreadId("");
+                      setCreateAssistantId(DEFAULT_ASSISTANT_ID);
                       setContextMode("fresh_thread_per_run");
                       setCreateSchedule({
                         schedule_type: "cron",
@@ -482,6 +562,13 @@ export default function ScheduledTasksPage() {
                     {contextModeLabel(selectedTask.context_mode)}
                   </div>
                   <div className="text-muted-foreground text-sm">
+                    {st.detail.agent}:{" "}
+                    {agentDisplayName(
+                      selectedTask.assistant_id,
+                      st.create.leadAgent,
+                    )}
+                  </div>
+                  <div className="text-muted-foreground text-sm">
                     {selectedTask.context_mode === "reuse_thread"
                       ? `${st.detail.thread}: ${selectedTask.thread_id ?? NONE}`
                       : `${st.detail.lastThread}: ${selectedTask.last_thread_id ?? NONE}`}
@@ -523,6 +610,25 @@ export default function ScheduledTasksPage() {
                         onChange={(event) => setEditPrompt(event.target.value)}
                         placeholder={st.edit.promptPlaceholder}
                       />
+                      <Select
+                        value={editAssistantId}
+                        onValueChange={setEditAssistantId}
+                      >
+                        <SelectTrigger
+                          className="w-full"
+                          data-testid="scheduled-task-edit-agent"
+                          aria-label={st.create.agent}
+                        >
+                          <SelectValue placeholder={st.create.agent} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {agentOptions.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                       <ScheduledTaskScheduleInput
                         key={selectedTask.id}
                         initial={editSchedule}
@@ -531,14 +637,19 @@ export default function ScheduledTasksPage() {
                       />
                       <Button
                         size="sm"
-                        onClick={() =>
+                        onClick={() => {
+                          const pinned =
+                            selectedTask.assistant_id ?? DEFAULT_ASSISTANT_ID;
                           updateTask.mutate({
                             title: editTitle,
                             prompt: editPrompt,
+                            ...(editAssistantId !== pinned
+                              ? { assistant_id: editAssistantId }
+                              : {}),
                             schedule_spec: editSchedule.schedule_spec,
                             timezone: editSchedule.timezone || "UTC",
-                          })
-                        }
+                          });
+                        }}
                         disabled={updateTask.isPending}
                       >
                         {st.edit.submit}

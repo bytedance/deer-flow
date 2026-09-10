@@ -118,6 +118,10 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Agents & runtime
 
+- **scheduler:** Scheduled tasks can pin `assistant_id` to `lead_agent` (the
+  default) or a custom agent the owner already has. Unknown or malformed names
+  return 422. The workspace create/edit form exposes the same choice.
+  ([#5286])
 - **gateway:** `GET /api/threads/{thread_id}/runs/page` walks thread run history
   with a `(created_at, run_id)` keyset cursor (`{data, has_more,
   next_before_created_at, next_before_run_id}`). `GET /api/threads/{thread_id}/runs`
