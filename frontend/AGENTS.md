@@ -15,6 +15,12 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 - **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
 - **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
 
+`pnpm-workspace.yaml` overrides vulnerable `@xmldom/xmldom` 0.9.x releases to
+0.9.12 for GHSA-965w-775f-mr7g. Nextra pulls it in through MathJax and
+`speech-rule-engine@4.1.2`, which pins 0.9.8. Keep the override until the
+upstream dependency chain resolves a patched version without it; regenerate
+`pnpm-lock.yaml` and verify the docs build when changing this constraint.
+
 ## Commands
 
 | Command          | Purpose                                       |
