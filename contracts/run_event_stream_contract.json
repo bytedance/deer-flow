@@ -1,7 +1,7 @@
 {
   "version": 1,
   "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
-  "description": "The current DeerFlow run event stream contract. It freezes existing names and categories, describes producer payloads, and records compatibility rules without changing runtime behavior.",
+  "description": "The current DeerFlow run event stream contract. It freezes existing names and categories, documents producer payloads and lifecycle semantics, and records compatibility rules.",
   "compatibility": {
     "current_event_names": "frozen",
     "consumer_rule": "Consumers must ignore unknown event types, unknown envelope fields, and unknown optional payload or metadata fields.",
@@ -63,7 +63,7 @@
   "categories": {
     "trace": "Execution evidence that is excluded from message projections.",
     "message": "A candidate message projection. Server and frontend visibility filters still apply.",
-    "outputs": "Root graph completion output; not an authoritative run lifecycle status.",
+    "outputs": "Authoritative run terminal evidence with opaque graph output.",
     "error": "Callback-observed run or chain failure evidence.",
     "middleware": "Middleware state-change audit evidence.",
     "context": "Identity-only evidence about effective hidden context.",
@@ -91,9 +91,10 @@
     {
       "event_type": "run.end",
       "category": "outputs",
-      "producer": "RunJournal.on_chain_end(parent_run_id=None)",
+      "producer": "Run worker finalization after durable RunRow status; RunManager orphan recovery after atomic takeover",
       "content_schema": true,
-      "content_description": "Opaque root graph outputs as supplied by LangGraph. Values nested inside the output may have backend-dependent representations when they are not directly JSON serializable.",
+      "content_description": "Opaque output from the latest completed root graph invocation in the Gateway run. Error, timeout, interrupted, preflight-failure, and recovered runs without a completed root output use an empty object. Values nested inside an output may have backend-dependent representations when they are not directly JSON serializable.",
+      "lifecycle_semantics": "At most one event per run. When present, metadata.status mirrors the authoritative terminal RunRow.status and is written only after that status is durable. Goal continuations update the captured output but do not emit additional events.",
       "storage_semantics": {
         "memory": "Retains the original Python container and nested values.",
         "jsonl": "Persists JSON with json.dumps(default=str), so nested non-JSON values are restored as strings.",
@@ -102,7 +103,10 @@
       "metadata_schema": {
         "type": "object",
         "required": ["status"],
-        "properties": {"status": {"const": "success"}},
+        "properties": {
+          "status": {"enum": ["success", "error", "timeout", "interrupted"]},
+          "recovered": {"const": true}
+        },
         "additionalProperties": true
       }
     },
@@ -431,9 +435,10 @@
       "notes": "Tool call requests are embedded in llm.ai.response content.tool_calls. llm.tool.result records returned messages, and a missing or timed-out result may leave no dedicated outcome event."
     },
     {
-      "id": "terminal-run-status",
-      "status": "split source of truth",
-      "notes": "run.end is only a root graph completion marker and always says success. RunRow.status is authoritative for success, error, interrupted, and timeout; worker loss may leave no terminal run event."
+      "id": "terminal-event-durability",
+      "status": "best-effort mirror after authoritative row",
+      "affected_event_types": ["run.end"],
+      "notes": "RunRow.status remains authoritative. A process crash or event-store outage after the terminal RunRow write but before run.end persistence can leave the event missing. Orphan takeover backfills run.end for rows it terminalizes, but does not scan historical terminal rows. Pre-existing run.end rows created by older runtimes remain legacy completion markers and are not rewritten."
     },
     {
       "id": "run-end-backend-serialization",

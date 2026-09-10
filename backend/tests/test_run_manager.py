@@ -525,6 +525,10 @@ async def test_reconcile_orphaned_run_backfills_delivery_after_atomic_takeover()
     delivery = await events.list_events("thread-1", "running-run", event_types=["run.delivery"])
     assert len(delivery) == 1
     assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    terminal = await events.list_events("thread-1", "running-run", event_types=["run.end"])
+    assert len(terminal) == 1
+    assert terminal[0]["content"] == {}
+    assert terminal[0]["metadata"] == {"status": "error", "recovered": True}
     assert (await store.get("running-run"))["status"] == "error"
 
 
@@ -552,16 +556,42 @@ async def test_reconcile_preserves_delivery_written_before_worker_crash():
 
 
 @pytest.mark.anyio
-async def test_reconcile_preserves_terminal_takeover_when_delivery_backfill_fails():
-    """A receipt-store outage must not undo an atomically claimed orphan."""
+async def test_reconcile_preserves_legacy_terminal_event_without_overwriting_its_status(caplog):
+    store = MemoryRunStore()
+    events = MemoryRunEventStore()
+    await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:00+00:00")
+    await events.put_if_absent(
+        thread_id="thread-1",
+        run_id="running-run",
+        event_type="run.end",
+        category="outputs",
+        content={"legacy": True},
+        metadata={"status": "success"},
+    )
+    manager = RunManager(store=store, event_store=events)
 
-    class FailingReceiptStore(MemoryRunEventStore):
+    recovered = await manager.reconcile_orphaned_inflight_runs(error="worker crashed", before="2026-01-01T00:00:01+00:00")
+
+    assert [record.run_id for record in recovered] == ["running-run"]
+    terminal = await events.list_events("thread-1", "running-run", event_types=["run.end"])
+    assert len(terminal) == 1
+    assert terminal[0]["content"] == {"legacy": True}
+    assert terminal[0]["metadata"] == {"status": "success"}
+    assert (await store.get("running-run"))["status"] == "error"
+    assert "authoritative RunRow status is 'error'" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_reconcile_preserves_terminal_takeover_when_event_backfill_fails():
+    """An event-store outage must not undo an atomically claimed orphan."""
+
+    class FailingEventStore(MemoryRunEventStore):
         async def put_if_absent(self, **kwargs):
             raise RuntimeError("event store unavailable")
 
     store = MemoryRunStore()
     await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:00+00:00")
-    manager = RunManager(store=store, event_store=FailingReceiptStore())
+    manager = RunManager(store=store, event_store=FailingEventStore())
 
     recovered = await manager.reconcile_orphaned_inflight_runs(error="worker crashed", before="2026-01-01T00:00:01+00:00")
 

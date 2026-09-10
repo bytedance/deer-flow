@@ -88,6 +88,7 @@ from deerflow.workspace_changes.types import WorkspaceSnapshot
 from .manager import RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
 from .schemas import RunStatus
+from .terminal_events import persist_run_terminal_event
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +290,48 @@ async def _persist_delivery_receipt(
             logger.warning(
                 "Failed to persist delivery receipt for run %s (attempt %d/%d); retrying in %.1fs",
                 run_id,
+                attempt + 1,
+                attempts,
+                delay,
+                exc_info=True,
+            )
+            await asyncio.sleep(delay)
+
+    return False  # pragma: no cover - loop always returns
+
+
+async def _persist_authoritative_terminal_event(
+    event_store: Any,
+    *,
+    record: RunRecord,
+    content: Any,
+) -> bool:
+    """Persist ``run.end`` after the RunRow outcome with bounded retries."""
+    attempts = len(_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(attempts):
+        try:
+            await persist_run_terminal_event(
+                event_store,
+                thread_id=record.thread_id,
+                run_id=record.run_id,
+                status=record.status,
+                content=content,
+                user_id=record.user_id,
+            )
+            return True
+        except Exception:
+            if attempt == attempts - 1:
+                logger.warning(
+                    "Failed to persist authoritative terminal event for run %s after %d attempts; RunRow remains authoritative",
+                    record.run_id,
+                    attempts,
+                    exc_info=True,
+                )
+                return False
+            delay = _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS[attempt]
+            logger.warning(
+                "Failed to persist authoritative terminal event for run %s (attempt %d/%d); retrying in %.1fs",
+                record.run_id,
                 attempt + 1,
                 attempts,
                 delay,
@@ -1438,9 +1481,8 @@ async def run_agent(
 
             # Flush buffered journal events before the terminal receipt. The
             # receipt uses a run-scoped idempotent write shared with recovery, then
-            # the staged terminal status is persisted. This ordering closes the
-            # crash window where a terminal run could otherwise outlive its receipt.
-            # A fenced worker leaves receipt recovery to the peer that claimed it.
+            # the staged terminal status is persisted. A fenced worker leaves both
+            # terminal singletons to the peer that claimed it.
             if not record.ownership_lost and journal is not None:
                 try:
                     await journal.flush()
@@ -1507,9 +1549,7 @@ async def run_agent(
                     # real worker outcome. Leaving a successful row inflight would
                     # let lease recovery rewrite it as an error with a synthetic
                     # zero receipt.
-                    if record.abort_event.is_set():
-                        await run_manager.persist_current_status(run_id)
-                    else:
+                    if not record.abort_event.is_set():
                         cancel_action = await run_manager.set_status_if_not_cancelled(
                             run_id,
                             record.status,
@@ -1518,9 +1558,15 @@ async def run_agent(
                         )
                         if cancel_action is not None:
                             await _finish_cancellation(cancel_action)
-                            await run_manager.persist_current_status(run_id)
+                    terminal_status_persisted = await run_manager.persist_current_status(run_id)
+                    if terminal_status_persisted and not record.ownership_lost:
+                        await _persist_authoritative_terminal_event(
+                            event_store,
+                            record=record,
+                            content=journal.get_root_chain_outputs() if journal is not None else {},
+                        )
                 except Exception:
-                    logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+                    logger.warning("Failed to persist terminal status or event for run %s after delivery receipt attempts", run_id, exc_info=True)
 
             if not record.ownership_lost and journal is not None and persist_completion:
                 try:

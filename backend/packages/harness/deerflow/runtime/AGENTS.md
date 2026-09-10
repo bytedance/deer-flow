@@ -124,6 +124,22 @@ one accumulated receipt across multiple goal-continuation `_stream_once` calls;
 journal tests drive LangChain's real async callback dispatcher against a single
 journal to pin serialized, deduplicated parallel tool callbacks.
 
+**Authoritative run terminal events** (`runtime/journal.py` +
+`runs/terminal_events.py` + `runs/worker.py`): root `on_chain_end()` captures
+the latest opaque graph output but never publishes `run.end`; one Gateway run
+may execute several root graphs while continuing a goal. After the worker has
+durably persisted its final `RunRow.status`, it writes exactly one run-scoped
+`run.end` with `put_if_absent`. Metadata contains only the terminal status
+(`success`, `error`, `timeout`, or `interrupted`); recovery additionally sets
+`recovered: true`, and error text, prompts, tool arguments, and tool results
+must not be added. Runs without a completed root output use `{}`. An ownership-
+lost worker writes neither the row nor the event; orphan recovery first wins
+the lease-aware takeover, then idempotently backfills the error event under the
+run owner's user context. Event-store failure never rolls back a terminal row,
+so `RunRow.status` remains authoritative when `run.end` is missing. Recovery
+does not scan already-terminal historical rows, and an older-runtime
+`run.end` is preserved rather than overwritten.
+
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
 `tool_search` Sends read the same pre-step state, so state diffing alone can

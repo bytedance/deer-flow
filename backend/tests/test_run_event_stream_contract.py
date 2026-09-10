@@ -22,12 +22,15 @@ from deerflow.runtime.events.catalog import (
     RUN_EVENT_CATEGORY_MAX_LENGTH,
     RUN_EVENT_TYPE_MAX_LENGTH,
     SUBAGENT_RUN_EVENT_DEFINITIONS,
+    WORKER_RUN_EVENT_DEFINITIONS,
     WORKSPACE_RUN_EVENT_DEFINITIONS,
     RunEventDefinition,
     RunEventPattern,
 )
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
+from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.terminal_events import persist_run_terminal_event
 from deerflow.subagents.step_events import SUBAGENT_STEP_MAX_CHARS, capture_step_message, subagent_run_event
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -95,12 +98,20 @@ async def _persist_subagent_batch(store) -> list[dict]:
 
 async def _record_run_end(store) -> dict:
     journal = RunJournal("run-output", "thread-output", store, flush_threshold=100)
+    outputs = {"messages": [AIMessage(content="final answer", id="final-message")]}
     journal.on_chain_end(
-        {"messages": [AIMessage(content="final answer", id="final-message")]},
+        outputs,
         run_id=uuid4(),
         parent_run_id=None,
     )
     await journal.flush()
+    await persist_run_terminal_event(
+        store,
+        thread_id="thread-output",
+        run_id="run-output",
+        status=RunStatus.success,
+        content=journal.get_root_chain_outputs(),
+    )
     events = await store.list_events("thread-output", "run-output", event_types=["run.end"])
     assert len(events) == 1
     return events[0]
@@ -325,6 +336,19 @@ async def test_run_journal_observed_events_exactly_match_its_catalog():
     assert {event["event_type"] for event in events} == expected_types
     for event in events:
         _assert_fixed_event_valid(event, persisted=True)
+
+
+def test_worker_terminal_event_catalog_has_one_authoritative_run_end():
+    assert {(definition.event_type, definition.category) for definition in WORKER_RUN_EVENT_DEFINITIONS} == {
+        ("run.end", "outputs")
+    }
+
+
+@pytest.mark.parametrize("status", ["success", "error", "timeout", "interrupted"])
+def test_run_end_contract_accepts_every_authoritative_terminal_status(status):
+    schema = _contract_events()["run.end"]["metadata_schema"]
+    _assert_schema_valid(schema, {"status": status})
+    _assert_schema_valid(schema, {"status": status, "recovered": True})
 
 
 @pytest.mark.anyio
@@ -555,5 +579,5 @@ def test_known_gaps_do_not_reclassify_current_events_as_missing():
     gap_ids = {gap["id"] for gap in contract["known_gaps"]}
     current_types = {definition.event_type for definition in FIXED_RUN_EVENT_DEFINITIONS}
 
-    assert {"tool-call-intent", "terminal-run-status"}.issubset(gap_ids)
+    assert {"tool-call-intent", "terminal-event-durability"}.issubset(gap_ids)
     assert all(gap.get("event_type") not in current_types for gap in contract["known_gaps"])

@@ -28,6 +28,7 @@ from .store.base import (
     run_is_before_cursor,
     run_sort_key,
 )
+from .terminal_events import persist_run_terminal_event
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -1107,6 +1108,29 @@ class RunManager:
             )
             return False
 
+    async def _ensure_terminal_event(self, record: RunRecord) -> bool:
+        """Idempotently backfill authoritative ``run.end`` after takeover."""
+        if self._event_store is None:
+            return True
+        try:
+            await persist_run_terminal_event(
+                self._event_store,
+                thread_id=record.thread_id,
+                run_id=record.run_id,
+                status=record.status,
+                content={},
+                recovered=True,
+                user_id=record.user_id,
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "Failed to backfill terminal event for recovered run %s; its RunRow remains authoritative",
+                record.run_id,
+                exc_info=True,
+            )
+            return False
+
     async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
         """Mark whether a run is performing post-cancel cleanup."""
         async with self._lock:
@@ -1914,6 +1938,7 @@ class RunManager:
                 # receipt remains best-effort, matching normal terminal delivery
                 # when its event store is unavailable.
                 await self._ensure_delivery_receipt(record)
+                await self._ensure_terminal_event(record)
                 recovered.append(record)
 
         if recovered:

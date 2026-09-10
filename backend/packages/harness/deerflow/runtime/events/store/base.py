@@ -95,8 +95,8 @@ class RunEventStore(abc.ABC):
 
         The check and write must be serialized with ordinary writers for the
         thread. Returns ``(record, created)``. This is the durability primitive
-        used by terminal run receipts, whose recovery path may safely retry
-        after a worker crash.
+        used by terminal run singletons such as ``run.delivery`` and
+        ``run.end``, whose recovery paths may safely retry after a worker crash.
         """
 
     @abc.abstractmethod

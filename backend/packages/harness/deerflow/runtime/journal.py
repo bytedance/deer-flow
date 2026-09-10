@@ -10,6 +10,7 @@ Key design decisions:
   extracts the first human message for run.input, because it is more reliable than
   on_chain_start (fires on every node) — messages here are fully structured.
 - on_chain_start with parent_run_id=None emits a run.start trace marking root invocation.
+- on_chain_end with parent_run_id=None captures the latest root output for worker-owned terminalization.
 - on_llm_end emits llm.ai.response in checkpoint-aligned AIMessage.model_dump() format
 - Token usage accumulated in memory, written to RunRow on run completion
 - Caller identification via tags injection (lead_agent / subagent:{name} / middleware:{name})
@@ -40,7 +41,6 @@ from deerflow.runtime.events.catalog import (
     LLM_TOOL_RESULT_EVENT,
     MEMORY_CONTEXT_EVENT,
     MIDDLEWARE_EVENT_PATTERN,
-    RUN_END_EVENT,
     RUN_ERROR_EVENT,
     RUN_START_EVENT,
 )
@@ -289,6 +289,7 @@ class RunJournal(BaseCallbackHandler):
         self._msg_count = 0
         self._had_llm_error_fallback = False
         self._llm_error_fallback_message: str | None = None
+        self._root_chain_outputs: Any | None = None
 
         # Latency tracking
         self._llm_start_times: dict[str, float] = {}  # langchain run_id -> start time
@@ -367,17 +368,12 @@ class RunJournal(BaseCallbackHandler):
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
-        # Nested chain ends fire for internal graph nodes; only the root chain
-        # represents the user-visible run lifecycle.
+        # Nested chain ends fire for internal graph nodes; only root output can
+        # become the worker-owned run.end payload after status finalization.
         if parent_run_id is not None:
             return
+        self._root_chain_outputs = outputs
         self._reconcile_final_tool_messages(outputs)
-        self._put(
-            event_type=RUN_END_EVENT.event_type,
-            category=RUN_END_EVENT.category,
-            content=outputs,
-            metadata={"status": "success"},
-        )
         self._flush_sync()
 
     def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
@@ -1037,6 +1033,10 @@ class RunJournal(BaseCallbackHandler):
             if key not in self._produced_artifact_keys:
                 self._produced_artifact_keys.add(key)
                 self._produced_artifacts.append(key)
+
+    def get_root_chain_outputs(self) -> Any:
+        """Return the latest root graph output captured for worker finalization."""
+        return {} if self._root_chain_outputs is None else self._root_chain_outputs
 
     def get_delivery_content(self) -> dict[str, Any]:
         """Return the terminal delivery fact accumulated for this run.
