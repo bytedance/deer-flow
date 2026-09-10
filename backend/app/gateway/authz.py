@@ -33,7 +33,9 @@ import asyncio
 import functools
 import inspect
 import logging
+import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
@@ -66,6 +68,10 @@ class Permissions:
     RUNS_CREATE = "runs:create"
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
+    # Projects
+    PROJECTS_READ = "projects:read"
+    PROJECTS_WRITE = "projects:write"
+    PROJECTS_DELETE = "projects:delete"
 
 
 class AuthContext:
@@ -147,6 +153,9 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.PROJECTS_READ,
+    Permissions.PROJECTS_WRITE,
+    Permissions.PROJECTS_DELETE,
 ]
 
 
@@ -286,6 +295,17 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
     return [p for p in results if p is not None]
 
 
+async def resolve_route_permissions_for_request(request: Request, user: Any) -> list[str]:
+    """Resolve the effective route permissions for a request's authenticated user.
+
+    Public wrapper pairing ``resolve_route_permissions`` with the internal-caller
+    heuristics of ``_is_internal_caller`` (auth source, synthetic internal role,
+    internal auth header), so middleware-less consumers resolve exactly what
+    ``_authenticate`` resolves and the two cannot drift apart.
+    """
+    return await resolve_route_permissions(user, is_internal=_is_internal_caller(request, user))
+
+
 class _AuthorizationUnavailable(Exception):
     """Raised internally when the provider cannot be resolved for a route check.
 
@@ -398,6 +418,27 @@ def authorize_sandbox_for_request(
             raise SandboxAuthorizationError(role=context.get("user_role")) from None
 
 
+@dataclass(slots=True)
+class SandboxRequestLease:
+    """One Gateway request's process-local use of a sandbox client."""
+
+    sandbox: object | None
+    sandbox_id: str | None
+    denied: bool
+    owner_id: str | None
+    provider: object | None
+
+    async def release(self) -> None:
+        """Drop the request holder without bypassing concurrent executions."""
+        if self.owner_id is None or self.provider is None:
+            return
+        from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+        owner_id = self.owner_id
+        self.owner_id = None
+        await get_sandbox_lease_manager(self.provider).release_async(owner_id)
+
+
 async def try_acquire_sandbox_for_request(
     request: Request,
     sandbox_provider,
@@ -405,19 +446,21 @@ async def try_acquire_sandbox_for_request(
     *,
     user_id: str,
     app_config: AppConfig | None,
-) -> tuple[object, str | None, bool]:
+    owner_prefix: str = "gateway",
+    release_on_last: bool = True,
+) -> SandboxRequestLease:
     """Gate + acquire the thread sandbox for a Gateway sync path.
 
     Single entry point for the uploads/artifacts sandbox-sync paths so the
     deny/skip semantics live in one place: runs the ``sandbox:execute`` gate
-    for the request's user, then acquires the sandbox. Returns
-    ``(sandbox, sandbox_id, denied)``:
+    for the request's user, then acquires the sandbox under a unique request
+    holder. Callers must await :meth:`SandboxRequestLease.release` after their
+    last client operation.
 
-    - denied role → ``(None, None, True)``: acquisition was skipped by policy;
+    - denied role → no sandbox/owner and ``denied=True``: acquisition was skipped by policy;
       the primary operation (upload / artifact edit) proceeds without the
       sandbox copy.
-    - allowed → ``(sandbox, sandbox_id, False)``: ``sandbox`` is the acquired
-      instance (``sandbox_id`` for later release), or ``sandbox is None`` when
+    - allowed → ``sandbox`` is the acquired instance, or ``sandbox is None`` when
       the provider lost it right after acquiring (infrastructure error —
       callers surface it as 500 / RuntimeError respectively, since that is
       not a policy decision).
@@ -434,9 +477,30 @@ async def try_acquire_sandbox_for_request(
             authorize_sandbox_for_request(user, is_internal=_is_internal_caller(request, user), app_config=app_config)
     except SandboxAuthorizationError:
         logger.info("Sandbox sync skipped: sandbox execution not permitted for this caller (thread_id=%s)", thread_id)
-        return None, None, True
-    sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=user_id)
-    return sandbox_provider.get(sandbox_id), sandbox_id, False
+        return SandboxRequestLease(
+            sandbox=None,
+            sandbox_id=None,
+            denied=True,
+            owner_id=None,
+            provider=None,
+        )
+
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    owner_id = f"{owner_prefix}:{uuid.uuid4()}"
+    sandbox_id = await get_sandbox_lease_manager(sandbox_provider).acquire_async(
+        owner_id,
+        thread_id,
+        user_id=user_id,
+        release_on_last=release_on_last,
+    )
+    return SandboxRequestLease(
+        sandbox=sandbox_provider.get(sandbox_id),
+        sandbox_id=sandbox_id,
+        denied=False,
+        owner_id=owner_id,
+        provider=sandbox_provider,
+    )
 
 
 async def _authenticate(request: Request) -> AuthContext:
@@ -451,8 +515,7 @@ async def _authenticate(request: Request) -> AuthContext:
     if user is None:
         return AuthContext(user=None, permissions=[])
 
-    is_internal = _is_internal_caller(request, user)
-    permissions = await resolve_route_permissions(user, is_internal=is_internal)
+    permissions = await resolve_route_permissions_for_request(request, user)
     return AuthContext(user=user, permissions=permissions)
 
 

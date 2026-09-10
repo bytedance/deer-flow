@@ -1,6 +1,7 @@
 """Tests for PR2 MCP routing auto-promotion."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from langchain.agents import create_agent
@@ -14,6 +15,14 @@ from deerflow.agents.thread_state import ThreadState, merge_promoted
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+
+class _Recorder:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def record_middleware(self, **kwargs):
+        self.calls.append(kwargs)
 
 
 @as_tool
@@ -135,6 +144,110 @@ def test_before_model_returns_minimal_promoted_update_and_reducer_unions():
         "catalog_hash": "hash1",
         "names": ["metrics_query", "postgres_query"],
     }
+
+
+def test_auto_promotion_records_only_new_names_without_sensitive_routing_data():
+    recorder = _Recorder()
+    runtime = SimpleNamespace(context={"__run_journal": recorder})
+    middleware = McpRoutingMiddleware(
+        {
+            "postgres_query": {"priority": 100, "keywords": ["secret-orders-keyword"]},
+            "metrics_query": {"priority": 90, "keywords": ["secret-metrics-keyword"]},
+        },
+        "private-catalog-hash",
+        3,
+    )
+    state = {
+        "messages": [HumanMessage(content="secret-orders-keyword secret-metrics-keyword")],
+        "promoted": {"catalog_hash": "private-catalog-hash", "names": ["metrics_query"]},
+    }
+
+    update = middleware.before_model(state, runtime)
+
+    assert update == {"promoted": {"catalog_hash": "private-catalog-hash", "names": ["postgres_query", "metrics_query"]}}
+    assert recorder.calls == [
+        {
+            "tag": "tool_promotion",
+            "name": "McpRoutingMiddleware",
+            "hook": "before_model",
+            "action": "promote",
+            "changes": {
+                "source": "routing_hint",
+                "tool_names": ["postgres_query"],
+                "count": 1,
+                "is_subagent": False,
+                "agent_id": None,
+            },
+        }
+    ]
+    persisted = repr(recorder.calls)
+    assert "secret-orders-keyword" not in persisted
+    assert "secret-metrics-keyword" not in persisted
+    assert "private-catalog-hash" not in persisted
+
+    state["promoted"] = update["promoted"]
+    middleware.before_model(state, runtime)
+    assert len(recorder.calls) == 1
+
+    # The same bare name under an old catalog does not prove a promotion in
+    # the active catalog, so catalog drift starts a new effective set.
+    state["promoted"] = {"catalog_hash": "stale-hash", "names": ["postgres_query"]}
+    middleware.before_model(state, runtime)
+    assert len(recorder.calls) == 2
+    assert recorder.calls[-1]["changes"]["tool_names"] == ["metrics_query", "postgres_query"]
+
+
+def test_auto_promotion_uses_narrow_subagent_recorder_and_is_fail_open(caplog):
+    recorder = _Recorder()
+
+    class BrokenJournal:
+        def record_middleware(self, **kwargs):
+            raise RuntimeError("event store unavailable")
+
+    middleware = McpRoutingMiddleware(
+        {"postgres_query": {"priority": 100, "keywords": ["orders"]}},
+        "hash1",
+        3,
+    )
+    runtime = SimpleNamespace(
+        context={
+            "is_subagent": True,
+            "agent_id": "researcher",
+            "__run_tool_promotion_recorder": recorder,
+            "__run_journal": BrokenJournal(),
+        }
+    )
+
+    update = middleware.before_model({"messages": [HumanMessage(content="orders")]}, runtime)
+
+    assert update == {"promoted": {"catalog_hash": "hash1", "names": ["postgres_query"]}}
+    assert recorder.calls[0]["changes"]["is_subagent"] is True
+    assert recorder.calls[0]["changes"]["agent_id"] == "researcher"
+
+    runtime.context["__run_tool_promotion_recorder"] = BrokenJournal()
+    with caplog.at_level("WARNING"):
+        assert middleware.before_model({"messages": [HumanMessage(content="orders")]}, runtime) == update
+    assert "Failed to record middleware:tool_promotion event" in caplog.text
+
+
+def test_malformed_existing_promotion_state_cannot_break_routing():
+    recorder = _Recorder()
+    middleware = McpRoutingMiddleware(
+        {"postgres_query": {"priority": 100, "keywords": ["orders"]}},
+        "hash1",
+        3,
+    )
+
+    update = middleware.before_model(
+        {
+            "messages": [HumanMessage(content="orders")],
+            "promoted": {"catalog_hash": "hash1", "names": [{"not": "a tool name"}]},
+        },
+        SimpleNamespace(context={"__run_journal": recorder}),
+    )
+
+    assert update == {"promoted": {"catalog_hash": "hash1", "names": ["postgres_query"]}}
+    assert recorder.calls[0]["changes"]["tool_names"] == ["postgres_query"]
 
 
 @pytest.mark.asyncio

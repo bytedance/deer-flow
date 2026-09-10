@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -25,6 +25,7 @@ from deerflow.runtime.runs.store.base import (
     RunIdempotencyConflict,
     RunStore,
     StatusFinalization,
+    normalize_run_created_at_iso,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -253,12 +254,30 @@ class RunRepository(RunStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
         limit=100,
+        before_created_at: str | None = None,
+        before_run_id: str | None = None,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_by_thread")
         stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run")
         if resolved_user_id is not None:
             stmt = stmt.where(RunRow.user_id == resolved_user_id)
-        stmt = stmt.order_by(RunRow.created_at.desc()).limit(limit)
+        if before_created_at and before_run_id:
+            cursor_dt = datetime.fromisoformat(normalize_run_created_at_iso(before_created_at))
+            if cursor_dt.tzinfo is None:
+                cursor_dt = cursor_dt.replace(tzinfo=UTC)
+            else:
+                cursor_dt = cursor_dt.astimezone(UTC)
+            stmt = stmt.where(
+                or_(
+                    RunRow.created_at < cursor_dt,
+                    and_(RunRow.created_at == cursor_dt, RunRow.run_id < before_run_id),
+                )
+            )
+        # Keyset pages filter on (created_at, run_id) after thread_id. Existing
+        # indexes are (thread_id) and (thread_id, status), so each page still
+        # sorts matching rows. A covering (thread_id, created_at, run_id) index
+        # is a follow-up if deep paging shows up in profiles.
+        stmt = stmt.order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]

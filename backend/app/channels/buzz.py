@@ -289,6 +289,12 @@ class BuzzChannel(Channel):
         self._session_started_at: int | None = None  # wall clock at which the CURRENT socket opened; anchors the live membership filter
         self._transport: Any = None
         self._task: asyncio.Task | None = None
+        # Transport admission and cleanup completion are separate lifecycle
+        # states: Gateway may cancel stop() after ``_running`` is cleared, and
+        # ChannelService retains this instance specifically so cleanup can be
+        # retried.
+        self._stop_complete = True
+        self._seen_events.quiesce()
         self._publish = self.bus.publish_inbound  # test seam (discord.py idiom)
 
     @property
@@ -308,9 +314,11 @@ class BuzzChannel(Channel):
             # message looks exactly like a broken relay to the operator. Say so
             # once, loudly, at the only point where it is actionable.
             logger.warning("[buzz] channels.buzz.allowed_users is empty: EVERY inbound chat message will be dropped (Buzz denies by default). Add member pubkeys (hex or npub) to enable the channel.")
+        self._stop_complete = False
         self.bus.subscribe_outbound(self._on_outbound)
         self._spawn_connection()
         self._running = True
+        self._seen_events.resume()
         logger.info("[buzz] channel started (relay=%s pubkey=%s allowed_users=%d)", self._relay_url, self._keys.pubkey_hex, len(self._allowed_users))
 
     def _spawn_connection(self) -> None:
@@ -343,9 +351,23 @@ class BuzzChannel(Channel):
         still subscribed to anything -- from a previous process lifetime. The
         per-channel replay cursors (``_seen_created_at``) deliberately survive, so
         a restart resumes where it left off instead of replaying every channel.
+
+        ``_running`` closes transport admission at the start of teardown, while
+        ``_stop_complete`` is set only after the final seen-event flush. Keeping
+        those states separate lets ChannelService retry this same instance when
+        its outer shutdown timeout cancels ``stop()`` mid-cleanup.
+
+        Seen-event scheduling is quiesced before even the already-stopped guard.
+        A relay task abandoned after the bounded wait can therefore record late
+        ids as dirty state, but cannot attach new callbacks to a channel the
+        service may remove. A repeated ``stop()`` drains that dirty state, while
+        ``start()`` explicitly resumes automatic scheduling.
         """
-        if not self._running:
+        self._seen_events.quiesce()
+        if not self._running and self._stop_complete:
+            await self._seen_events.aflush()
             return
+        self._stop_complete = False
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
         if self._task is not None:
@@ -380,7 +402,8 @@ class BuzzChannel(Channel):
         self._pending_auth_challenge = None
         # Seen-id persistence is coalesced (FLUSH_DELAY_SECONDS); a clean stop
         # must not lose records still inside that window to a replay on restart.
-        self._seen_events.flush()
+        await self._seen_events.aflush()
+        self._stop_complete = True
         logger.info("[buzz] channel stopped")
 
     # -- subscriptions ------------------------------------------------------
@@ -1255,7 +1278,7 @@ class BuzzChannel(Channel):
         # created_at — is never affected. Sits before the /connect branch
         # deliberately: a replayed /connect would otherwise be re-answered with
         # a spurious "code invalid or expired" reply on every reconnect.
-        if self._seen_events.seen(channel_id, event_id):
+        if await self._seen_events.aseen(channel_id, event_id):
             logger.debug("[buzz] dropped replayed event id=%s in channel %s", event_id, channel_id)
             return
 
@@ -1279,7 +1302,7 @@ class BuzzChannel(Channel):
             # cursor: leaving it behind would replay this /connect on every reconnect
             # and answer each replay with a spurious "code invalid or expired" reply.
             self._advance_watermark(channel_id, created_at)
-            self._seen_events.record(channel_id, event_id)
+            await self._seen_events.arecord(channel_id, event_id)
             return
         if author not in self._allowed_users:
             # Deny-by-default is intentional (see start()'s empty-allowlist warning),
@@ -1315,7 +1338,7 @@ class BuzzChannel(Channel):
         # same rule applies to the persistent seen-id record: recording before a
         # failed publish would turn "replayable" into "silently skipped".
         self._advance_watermark(channel_id, created_at)
-        self._seen_events.record(channel_id, event_id)
+        await self._seen_events.arecord(channel_id, event_id)
 
     # -- outbound --------------------------------------------------------------
 

@@ -8,6 +8,7 @@ persistence layer.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from deerflow.persistence.agents.base import (
@@ -60,10 +61,13 @@ def make_agent_store(config: AppConfig) -> AgentStore:
 def get_agent_store() -> AgentStore:
     """Return the store for the current process's configuration.
 
-    Defaults to the file backend when no app config can be resolved — the free
-    functions in ``agents_config`` must keep working in lightweight contexts
-    (CLI, tests, tools) that never load a full ``config.yaml``. Only an
-    explicit ``agent_storage.backend: db`` diverges from the file default.
+    Defaults to the file backend only when search mode cannot find the main app
+    config — the free functions in ``agents_config`` must keep working in
+    lightweight contexts (CLI, tests, tools) that never load a full
+    ``config.yaml``. A missing explicit ``DEER_FLOW_CONFIG_PATH`` or a missing
+    nested config is an operator error and propagates instead of falling back.
+    Only an explicit ``agent_storage.backend: db`` diverges from the file
+    default once configuration resolves successfully.
 
     Cross-process invariant (the ``db`` backend's whole point): the per-run
     agent build runs in the **graph subprocess**, a different process from the
@@ -76,12 +80,20 @@ def get_agent_store() -> AgentStore:
     downgraded to node-local ``file``. Pinned by
     ``test_get_agent_store_resolves_db_backend_from_on_disk_config``.
     """
-    from deerflow.config.app_config import get_app_config
+    from deerflow.config.app_config import AppConfig, get_app_config
 
     try:
         config = get_app_config()
-    except Exception:  # noqa: BLE001 — no resolvable config → file default
-        return _file_store()
+    except FileNotFoundError:
+        if os.getenv("DEER_FLOW_CONFIG_PATH"):
+            raise
+        # ``get_app_config()`` also loads optional nested config files. Only
+        # fall back when the main config itself is absent.
+        try:
+            AppConfig.resolve_config_path()
+        except FileNotFoundError:
+            return _file_store()
+        raise
     return make_agent_store(config)
 
 

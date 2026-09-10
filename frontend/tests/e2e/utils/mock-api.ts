@@ -20,6 +20,11 @@ export const MOCK_RUN_ID = "00000000-0000-0000-0000-000000000099";
 // constant; the mock must mirror the same metadata contract for pin ordering.
 export const THREAD_PINNED_METADATA_KEY = "deerflow_pinned";
 
+// Keep in sync with frontend runtime thread utils and the backend thread_meta
+// constant; the mock must mirror the same metadata contract for project
+// membership.
+export const THREAD_PROJECT_METADATA_KEY = "deerflow_project_id";
+
 const MOCK_AUTH_USER = {
   id: "default",
   email: "default@test.local",
@@ -375,6 +380,18 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return updated;
   };
 
+  const patchThreadTitle = (threadId: string, title: string) => {
+    let updated: MockThread | undefined;
+    threads = threads.map((thread) => {
+      if (thread.thread_id !== threadId) {
+        return thread;
+      }
+      updated = { ...thread, title };
+      return updated;
+    });
+    return updated;
+  };
+
   // Auth — keep workspace tests independent from a real gateway session.
   void page.route("**/api/v1/auth/me", (route) => {
     if (route.request().method() === "GET") {
@@ -668,18 +685,26 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   });
 
   // Thread search — sidebar thread list & chats list page
-  void page.route("**/api/langgraph/threads/search", async (route) => {
+  void page.route(/\/api\/(?:langgraph\/)?threads\/search$/, async (route) => {
     let body = sortThreadSearchResults(threads).map(threadSearchResult);
 
     let limit: number | undefined;
     let offset = 0;
     try {
       const postData = route.request().postDataJSON() as {
+        archived?: boolean;
         limit?: number;
         offset?: number;
         metadata?: Record<string, unknown>;
       } | null;
       if (postData) {
+        if (typeof postData.archived === "boolean") {
+          body = body.filter(
+            (thread) =>
+              (Reflect.get(thread.metadata, "deerflow_archived") === true) ===
+              postData.archived,
+          );
+        }
         if (typeof postData.limit === "number") {
           limit = postData.limit;
         }
@@ -789,13 +814,40 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       const body = route.request().postDataJSON() as {
         thread_id?: string;
         metadata?: Record<string, unknown>;
+        project_id?: string;
       };
       const threadId = body.thread_id ?? MOCK_SIDECAR_THREAD_ID;
+      // The backend stamps `metadata.deerflow_project_id` from the assigned
+      // project_id column; mirror that so project membership is readable.
+      const metadata = {
+        ...body.metadata,
+        ...(body.project_id
+          ? { [THREAD_PROJECT_METADATA_KEY]: body.project_id }
+          : {}),
+      };
+      // Mirror the backend idempotency contract: a repeat POST for an
+      // existing thread_id returns the record unchanged (goal and other
+      // state intact) instead of resetting it.
+      const existing = threads.find((thread) => thread.thread_id === threadId);
+      if (existing) {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            thread_id: threadId,
+            created_at: existing.updated_at ?? new Date().toISOString(),
+            updated_at: existing.updated_at ?? new Date().toISOString(),
+            metadata: existing.metadata ?? {},
+            status: "idle",
+            values: {},
+          }),
+        });
+      }
       upsertThread({
         thread_id: threadId,
         title: "Side chat",
         updated_at: new Date().toISOString(),
-        metadata: body.metadata ?? {},
+        metadata: metadata,
         messages: [],
       });
       return route.fulfill({
@@ -805,7 +857,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           thread_id: threadId,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-          metadata: body.metadata ?? {},
+          metadata: metadata,
           status: "idle",
           values: {},
         }),
@@ -860,6 +912,46 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       threads = threads.filter((thread) => thread.thread_id !== threadId);
       return route.fulfill({
         status: 204,
+      });
+    }
+    return route.fallback();
+  });
+
+  // Projects API — Phase 1 default-empty mocks so existing specs are
+  // unaffected; project-aware specs register their own routes on top.
+  void page.route(/\/api\/projects(\?|$)/, (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ projects: [] }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route(/\/api\/threads\/[^/]+\/move$/, (route) => {
+    if (route.request().method() === "POST") {
+      const threadId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
+      );
+      const body = route.request().postDataJSON() as {
+        project_id?: string | null;
+      };
+      const updated = patchThreadMetadata(threadId, {
+        [THREAD_PROJECT_METADATA_KEY]: body.project_id ?? null,
+      });
+      if (!updated) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: `Thread ${threadId} not found` }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(threadSearchResult(updated)),
       });
     }
     return route.fallback();
@@ -1006,6 +1098,71 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  // Token usage — the chat header polls this per thread. Without a mock the
+  // request falls through to a gateway that is not running under Playwright,
+  // and a 401 there redirects the whole page to /login mid-test.
+  void page.route("**/api/threads/*/token-usage", (route) => {
+    if (route.request().method() === "GET") {
+      const threadId = /\/api\/threads\/([^/]+)\/token-usage/.exec(
+        route.request().url(),
+      )?.[1];
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: threadId ?? "unknown",
+          total_tokens: 0,
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          total_runs: 0,
+          by_model: {},
+          by_caller: { lead_agent: 0, subagent: 0, middleware: 0 },
+          context_usage: null,
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // MCP background tasks — same fallthrough-to-401 problem as token-usage.
+  void page.route("**/api/threads/*/mcp-tasks*", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([]),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Workspace changes — the run-scoped badge query. Unmocked it 401s against
+  // the absent gateway and the fetcher redirects the page to /login.
+  void page.route("**/api/threads/*/runs/*/workspace-changes*", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          run_id: "mock-run",
+          thread_id: "mock-thread",
+          status: "success",
+          summary: {
+            created: 0,
+            modified: 0,
+            deleted: 0,
+            symlink_created: 0,
+            additions: 0,
+            deletions: 0,
+            truncated: false,
+          },
+          changes: [],
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
   // Thread history — useStream fetches state history on mount
   void page.route("**/api/langgraph/threads/*/history", (route) => {
     const url = route.request().url();
@@ -1054,9 +1211,13 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Thread state — getState for individual thread
   void page.route("**/api/langgraph/threads/*/state", (route) => {
+    const url = new URL(route.request().url());
+    const threadId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
+    const matchingThread = threads.find(
+      (thread) => thread.thread_id === threadId,
+    );
+
     if (route.request().method() === "GET") {
-      const url = route.request().url();
-      const matchingThread = threads.find((t) => url.includes(t.thread_id));
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1083,6 +1244,33 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           next: [],
           metadata: {},
           created_at: "2025-01-01T00:00:00Z",
+        }),
+      });
+    }
+    if (route.request().method() === "POST") {
+      const body = route.request().postDataJSON() as {
+        values?: { title?: unknown };
+      };
+      const updated =
+        typeof body.values?.title === "string"
+          ? patchThreadTitle(threadId, body.values.title)
+          : matchingThread;
+      if (!updated) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "Thread not found" }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          configurable: {
+            thread_id: threadId,
+            checkpoint_ns: "",
+            checkpoint_id: "mock-checkpoint",
+          },
         }),
       });
     }

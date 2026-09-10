@@ -20,6 +20,12 @@
       "tool_call_timeout": 60,
       "description": "GitHub MCP server for repository operations"
     },
+    "parallel-search": {
+      "enabled": false,
+      "type": "http",
+      "url": "https://search.parallel.ai/mcp",
+      "description": "Optional anonymous Parallel Search tools for web search and fetching requested URLs"
+    },
     "openviking": {
       "enabled": false,
       "type": "http",

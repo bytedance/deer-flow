@@ -508,6 +508,14 @@ Expected cost = delegation and startup overhead + duplicate context and reposito
 **Delegation workflow:**
 {workflow}
 
+**Act on ordinary `task` acceptance results:**
+- `completed` means execution ended, not that the task was accepted. Read the checklist criterion by criterion and retain useful work.
+- `does not hold`: inspect the recorded reason, repair or recheck the unmet condition, and reuse unaffected outputs. If another delegation is worthwhile, name the missing condition and scope it only to the remaining work.
+- `UNVERIFIED`: this is missing evidence, not a failed condition. Verify load-bearing criteria against actual artifacts or primary evidence; if confirmation is unavailable, preserve uncertainty in the final answer.
+- `holds`: reuse the checked outputs; the check proves only the stated execution condition. Still spot-check load-bearing claims beyond its scope. With no checklist, inspect the self-report and its handles before relying on it.
+- Mixed outcomes need both targeted repair and verification. Do not restart the whole task or repeat an unchanged attempt.
+- Follow-up work uses the remaining delegation and execution budget; when it is exhausted, deliver confirmed results with explicit gaps and uncertainty.
+
 **Examples:**
 {examples}
 
@@ -772,6 +780,8 @@ def _get_memory_context(
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
+    from deerflow.agents.memory import MemoryManagerError, MemoryReadError
+
     config = None
     try:
         from deerflow.agents.memory import get_memory_manager
@@ -799,12 +809,14 @@ def _get_memory_context(
 {memory_content}
 </memory>
 """
+    except MemoryReadError:
+        logger.exception("Required memory context could not be loaded")
+        raise
     except Exception as exc:
         logger.exception("Failed to load memory context")
-        from deerflow.agents.memory import MemoryManagerError
-
-        failure_policy = getattr(config, "backend_config", {}).get("failure_policy", {}) if config is not None else {}
-        if isinstance(exc, MemoryManagerError) and failure_policy.get("read") == "fail_closed":
+        backend_config = getattr(config, "backend_config", {}) if config is not None else {}
+        failure_policy = backend_config.get("failure_policy", {}) if isinstance(backend_config, dict) else {}
+        if isinstance(exc, MemoryManagerError) and isinstance(failure_policy, dict) and failure_policy.get("read") == "fail_closed":
             raise
         return ""
 

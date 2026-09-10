@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.schedules import next_run_at
+from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -218,6 +219,24 @@ class ScheduledTaskService:
         )
 
     async def _attempt_queued_run(
+        self,
+        task: dict[str, Any],
+        queued: dict[str, Any],
+        *,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Turn one queued occurrence into a live run under its own trace scope.
+
+        The poller is a non-HTTP entry point, so no ``TraceMiddleware`` has
+        bound anything: each occurrence opens its own scope rather than
+        sharing one id across a whole poll cycle. A manual trigger arrives
+        inside a Gateway request and keeps that request's trace instead, so
+        the launched run stays correlated with the call that asked for it.
+        """
+        with ensure_trace_context():
+            return await self._launch_queued_occurrence(task, queued, now=now)
+
+    async def _launch_queued_occurrence(
         self,
         task: dict[str, Any],
         queued: dict[str, Any],

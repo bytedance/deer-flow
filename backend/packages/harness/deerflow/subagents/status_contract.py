@@ -25,9 +25,17 @@ consumers read the structured facts carried inside
 - ``subagent_receipt_verdict`` (optional, ``completed`` only): the
   parent-side citation-check verdict — advisory execution evidence; the
   ``citation_resolved`` vocabulary never claims task acceptance.
+- ``subagent_acceptance_verdict`` (optional, ``completed`` only, RFC #4651
+  PR4): the deterministic acceptance-checklist verdict — per-criterion
+  ``checked``/``holds`` leaves; unchecked criteria render UNVERIFIED, never
+  silently passed.
 
 The shared fixture at ``contracts/subagent_status_contract.json`` pins
-the enum values across Python and TypeScript.
+the enum values (``valid_status_values`` / ``valid_stop_reason_values``)
+across Python and TypeScript. ``subagent_acceptance_verdict`` is
+deliberately outside that fixture: it is a validated JSON structure (see
+``validate_acceptance_verdict``), not an enum vocabulary, and no
+TypeScript consumer reads it.
 """
 
 from __future__ import annotations
@@ -39,6 +47,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from deerflow.agents.middlewares.receipt_verification import ReceiptVerdict, validate_receipt_verdict
 from deerflow.agents.middlewares.tool_receipt import is_valid_receipt
+from deerflow.subagents.acceptance_checks import AcceptanceVerdict, validate_acceptance_verdict
 
 SUBAGENT_STATUS_KEY = "subagent_status"
 SUBAGENT_STOP_REASON_KEY = "subagent_stop_reason"
@@ -49,6 +58,7 @@ SUBAGENT_MODEL_NAME_KEY = "subagent_model_name"
 SUBAGENT_TOKEN_USAGE_KEY = "subagent_token_usage"
 SUBAGENT_TOOL_RECEIPTS_KEY = "subagent_tool_receipts"
 SUBAGENT_RECEIPT_VERDICT_KEY = "subagent_receipt_verdict"
+SUBAGENT_ACCEPTANCE_VERDICT_KEY = "subagent_acceptance_verdict"
 SUBAGENT_METADATA_TEXT_MAX_CHARS = 2000
 
 #: The producer always emits ``hashlib.sha256(...).hexdigest()`` — 64
@@ -124,6 +134,7 @@ class StructuredSubagentResult(TypedDict):
     error: NotRequired[str]
     tool_receipts: NotRequired[list[dict[str, Any]]]
     receipt_verdict: NotRequired[ReceiptVerdict]
+    acceptance_verdict: NotRequired[AcceptanceVerdict]
 
 
 def _bound_metadata_text(text: str, cap: int = SUBAGENT_METADATA_TEXT_MAX_CHARS) -> str:
@@ -150,6 +161,7 @@ def make_subagent_additional_kwargs(
     token_usage: Mapping[str, object] | None = None,
     tool_receipts: list[dict[str, Any]] | None = None,
     receipt_verdict: Mapping[str, object] | None = None,
+    acceptance_verdict: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the ``additional_kwargs`` payload the middleware stamps.
 
@@ -190,6 +202,9 @@ def make_subagent_additional_kwargs(
     validated_verdict = validate_receipt_verdict(receipt_verdict)
     if validated_verdict is not None:
         payload[SUBAGENT_RECEIPT_VERDICT_KEY] = validated_verdict
+    validated_acceptance = validate_acceptance_verdict(acceptance_verdict)
+    if validated_acceptance is not None:
+        payload[SUBAGENT_ACCEPTANCE_VERDICT_KEY] = validated_acceptance
     return payload
 
 
@@ -313,4 +328,7 @@ def read_subagent_result_metadata(
     validated_verdict = validate_receipt_verdict(additional_kwargs.get(SUBAGENT_RECEIPT_VERDICT_KEY))
     if validated_verdict is not None:
         payload["receipt_verdict"] = validated_verdict
+    validated_acceptance = validate_acceptance_verdict(additional_kwargs.get(SUBAGENT_ACCEPTANCE_VERDICT_KEY))
+    if validated_acceptance is not None:
+        payload["acceptance_verdict"] = validated_acceptance
     return payload

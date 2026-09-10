@@ -125,6 +125,35 @@ export const zhCN: Translations = {
     missingTarget: "该链接没有指明要展示哪个文件。",
   },
 
+  artifactTable: {
+    title: "表格预览",
+    header: "首行作为表头",
+    column: (index) => `列 ${index}`,
+    total: (count) => `共 ${count} 行`,
+    sample: (count) => `预览前 ${count} 行`,
+    range: (start, end, limited) =>
+      `${limited ? "预览 " : ""}${start}–${end} 行`,
+    columnsLimited: "仅展示预览样本的前 50 列。",
+    uneven: "部分行的字段数量不同，缺失字段已标记。",
+    empty: "文件为空。",
+    incomplete: "当前预览范围内没有完整记录，请查看源码或下载文件。",
+    failed: "无法可靠预览此表格，请查看源码或下载文件。",
+    retry: "重新预览",
+    previous: "上一页",
+    next: "下一页",
+    cell: (row, column) => `查看第 ${row} 行、第 ${column} 列`,
+    cellValue: "单元格内容",
+    missing: "缺失",
+    savedVersion: "打开或下载的是已保存文件，当前草稿尚未保存。",
+  },
+
+  artifactArchive: {
+    downloadCurrent: (count) => `下载当前版本（${count} 个文件）`,
+    currentVersionNotice:
+      "文件列表来自此回复；内容为当前版本，可能已发生变化。",
+    downloadFailed: "文件压缩包下载失败。",
+  },
+
   // Citations
   citations: {
     sourcesSummary: (count) => `使用了 ${count} 个来源`,
@@ -288,6 +317,37 @@ export const zhCN: Translations = {
     agents: "智能体",
     scheduledTasks: "定时任务",
     agentsDisabledTooltip: "功能未启用",
+  },
+  // Sidebar projects section
+  projects: {
+    title: "项目",
+    newProject: "新建项目",
+    namePlaceholder: "项目名称",
+    moveToProject: "移动到项目",
+    moveToProjectHint: "移动对话不会移除其中已有的内容。",
+    removeFromProject: "移出项目",
+    archive: "归档",
+    restore: "恢复",
+    deleteProject: "删除项目",
+    deleteProjectConfirm:
+      "删除项目将解除其对话的关联。对话、历史记录及文件均不会被删除。",
+    archived: "已归档",
+    empty: "该项目下还没有对话。",
+    newChat: "新建对话",
+    create: "创建",
+    createFailed: "创建项目失败",
+    moveFailed: "移动对话失败",
+    archiveFailed: "归档项目失败",
+    restoreFailed: "恢复项目失败",
+    deleteFailed: "删除项目失败",
+    switchToGrouped: "按项目分组对话",
+    switchToFlat: "显示平铺对话列表",
+    threads: "对话",
+    threadsLoadFailed: "无法加载项目对话",
+    untitled: "未命名",
+    settings: "设置",
+    notFound: "项目不存在或已被删除。",
+    projectUnavailable: "无法关联到该项目，消息未发送。请重试。",
   },
 
   backgroundTasks: {
@@ -600,6 +660,21 @@ export const zhCN: Translations = {
 
   // Chats
   chats: {
+    noActiveChats: "暂无近期会话",
+    activeChats: "近期会话",
+    archivedChats: "已归档",
+    archiveChat: "归档",
+    restoreChat: "恢复",
+    archiveSuccess: "已归档",
+    restoreSuccess: "已恢复",
+    archiveFailed: "更新会话归档状态失败",
+    archiveDescription:
+      "归档会保留消息和文件，不会停止运行中的任务或暂停定时任务。",
+    undoArchive: "撤销",
+    noArchivedChats: "暂无已归档会话",
+    noMatchingChats: "已加载的会话中没有匹配结果",
+    loadChatsFailed: "加载会话失败",
+    retryLoadChats: "重试",
     searchChats: "搜索对话",
     branchLabel: (title, parentTitle) => `${title}，分叉自 ${parentTitle}`,
     loadMoreToSearch: "加载更多以搜索更早的对话",
@@ -908,6 +983,33 @@ export const zhCN: Translations = {
       description: "管理 MCP 工具的配置和启用状态。",
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
       empty: "暂无 MCP 工具。",
+      addServer: "添加服务器",
+      addServerDescription:
+        "粘贴 MCP 服务器提供的 JSON 定义。直接的服务器映射和带 `mcpServers` 外层的写法都可以。已有名称请通过“编辑”修改。",
+      addServerPlaceholder: `{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"]
+    }
+  }
+}`,
+      serverDefinitionLabel: "MCP 服务器 JSON 定义",
+      definitionEmpty: "请粘贴 MCP 服务器定义。",
+      definitionInvalidJson: "请输入有效的 JSON。",
+      definitionRootNotObject: "请输入描述一个或多个 MCP 服务器的 JSON 对象。",
+      definitionNoServers: "定义中未找到 MCP 服务器。",
+      definitionServerNotObject: "服务器“{name}”的配置必须是 JSON 对象。",
+      editServer: "编辑 MCP 服务器",
+      editServerDescription:
+        "编辑“{name}”的完整 JSON 定义。服务器名称不可修改；如需重命名，请添加新服务器后移除当前服务器。",
+      editSingleServer: "每次只能编辑一个 MCP 服务器。",
+      editServerNameMismatch: "编辑时请保留现有服务器名称“{name}”。",
+      serverAlreadyExists: "MCP 服务器“{name}”已存在，请使用“编辑”。",
+      removeServer: "移除 MCP 服务器",
+      removeServerDescription:
+        "确定从 MCP 配置中移除“{name}”吗？它的工具将不再提供给智能体。",
+      unnamedServer: "（空名称）",
     },
     subagents: {
       title: "子智能体",
@@ -1166,6 +1268,11 @@ export const zhCN: Translations = {
       emptyButton: "创建你的第一个技能",
       adminRequired: "需要管理员权限才能管理 Agent Skill。",
       installAdminRequired: "需要管理员权限才能安装 Agent Skill。",
+      installFromFile: "安装 .skill",
+      installingArchive: "正在安装…",
+      invalidArchive: "请选择扩展名为 .skill 的文件。",
+      archiveTooLarge: "技能包大小不能超过 100 MiB。",
+      installFailed: "安装技能包失败。",
     },
     notification: {
       title: "通知",

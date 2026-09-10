@@ -12,6 +12,20 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### ⚠ Breaking changes
 
+- **gateway:** Request trace ids are now issued unconditionally, and every
+  Gateway HTTP response carries an `X-Trace-Id` header. Previously both were
+  gated behind `logging.enhance.enabled`, which now controls **log output
+  only** — whether records carry a `trace_id` field, and in which format. The
+  header cannot be turned off; installations running the default
+  `enabled: false` will start seeing it after upgrading. Scheduled tasks, MCP
+  task notification runs, IM channel messages, and the embedded
+  `DeerFlowClient` bind an id per unit of work, so the id also reaches the run
+  record, the checkpoint metadata, and Langfuse traces that previously had
+  none. A `deerflow_trace_id` supplied in a run request's `metadata` or
+  `config.context` is now ignored and overwritten so the response header, the
+  logs, and the persisted run cannot disagree — send the `X-Trace-Id` request
+  header to pin a correlation id across services. `logging` remains
+  restart-required. No config keys were added or removed. ([#5119])
 - **skills:** Sandboxes now reserve `/mnt/skills` for managed enabled-only
   projections. `DEER_FLOW_HOST_SKILLS_PATH` and `SKILLS_HOST_PATH` are no longer
   used; Docker/AIO and hostPath deployments derive projection paths from
@@ -94,10 +108,21 @@ This section accumulates work toward the **2.1.0** milestone
   SHA-256 digests); a default-deny route policy admits only the thread/run
   lifecycle routes, narrowed further by the token's `threads`/`runs` scopes,
   and any request dimension that carries cancel capability (`?action=`,
-  `multitask_strategy`) additionally requires `runs:cancel`.
+  `multitask_strategy`) additionally requires `runs:cancel`. ([#5041])
+- **auth:** Login throttling parameters are configurable via
+  `auth.local.max_login_attempts` (default 5, min 2) and
+  `auth.local.lockout_seconds` (default 300), resolved live so a config reload
+  applies on the next login without a Gateway restart — the unblock path for
+  deployments behind corporate proxies/NAT where many users share one egress
+  IP. Defaults are unchanged. ([#5110])
 
 #### Agents & runtime
 
+- **gateway:** `GET /api/threads/{thread_id}/runs/page` walks thread run history
+  with a `(created_at, run_id)` keyset cursor (`{data, has_more,
+  next_before_created_at, next_before_run_id}`). `GET /api/threads/{thread_id}/runs`
+  still returns a bare array of the newest 100 runs so LangGraph SDK clients keep
+  working. ([#5282])
 - **middleware:** New `TokenBudgetMiddleware` enforces a per-run token budget,
   shared additively across the lead agent and subagents. ([#3412])
 - **middleware:** Structured tool-result metadata and a tool-progress state
@@ -121,6 +146,10 @@ This section accumulates work toward the **2.1.0** milestone
 - **gateway:** Cache-aware cost accounting attributes token costs to cached vs.
   uncached paths; a Redis stream bridge enables distributed event streaming; and
   manual context compaction is exposed to the user. ([#3920], [#3191], [#3969])
+- **gateway:** The stream-bridge heartbeat interval is configurable via
+  `stream_bridge.heartbeat_interval_seconds` (default 15s), so deployments
+  behind aggressive proxy idle timeouts can tune SSE, `/wait`, and internal
+  subscribers together. ([#5017])
 - **runtime:** Dual-mode checkpoint storage with LangGraph `DeltaChannel` cuts
   thread storage from O(N²) to near-linear for long research/coding runs.
   ([#4292])
@@ -142,6 +171,14 @@ This section accumulates work toward the **2.1.0** milestone
   tool receipt, and a bounded receipt ledger is injected into the model
   context so agents can cite execution evidence in their reports. Enabled
   by default via the new `verification` config section. ([#4659])
+- **subagents:** Subagent delegations are now verifiable, layering RFC #4651:
+  every subagent's report contract requires citing tool receipts (e.g.
+  `[r3 write_file]`) and attaching a verifiable handle to each deliverable,
+  the lead agent cross-checks those citations against the subagent's actual
+  execution record, and `acceptance_criteria` on a `task` delegation are
+  checked deterministically parent-side (file existence/non-emptiness,
+  recorded test-command exit status) with anything undecidable reported
+  UNVERIFIED instead of silently passed. ([#5076], [#5090], [#5109])
 - **clarification:** Human-input (clarification) cards support structured
   form fields, so an agent can request exactly the input it needs instead
   of free text only. ([#4406])
@@ -157,6 +194,16 @@ This section accumulates work toward the **2.1.0** milestone
   collections of independent items as durable, resumable SQL-backed batches
   with leases, bounded retries, pause/resume/cancel, and a chat panel for
   tracking progress. ([#4998])
+- **agents:** The current-date context injected into lead- and subagent
+  prompts honors the optional `DEER_FLOW_DATE_TIMEZONE` env var (IANA name,
+  e.g. `Asia/Shanghai`), so users in non-UTC deployments are no longer told
+  the wrong "today" around midnight; unset keeps server-local behavior.
+  ([#5154])
+- **subagents:** Delegated subagents can discover files uploaded in earlier
+  turns: the parent run's validated `uploaded_files` boundary seeds the
+  subagent's graph state, making `list_uploaded_files` eligible for normal
+  tool-policy filtering (durable `batch_task` workers keep it disabled).
+  ([#5170])
 
 #### Memory
 
@@ -191,6 +238,11 @@ This section accumulates work toward the **2.1.0** milestone
 - **skills:** Per-user custom skill isolation with sandbox mounting. ([#3889])
 - **skills:** The skill list reopens after a skill is selected, so several
   skills can be attached in a row. ([#4639])
+- **skills:** Install local `.skill` archives directly from the Skills
+  settings page, reusing the existing per-user installer and security scan.
+  ([#5039])
+- **skills:** Podcast-generation Volcengine voices are configurable per
+  speaker gender, with trimmed blank-safe defaults. ([#5156])
 
 #### Models & integrations
 
@@ -215,6 +267,27 @@ This section accumulates work toward the **2.1.0** milestone
 - **acp:** MiniMax Code (`mcode acp`) is supported and documented as a
   native external coding agent, and ACP thought chunks are no longer
   concatenated into tool results. ([#4846])
+- **models:** A Z.AI GLM-5.3-Flash profile keeps thinking permanently enabled
+  and stops generic reasoning-effort forwarding, since the model rejects
+  disabled thinking and only accepts its own effort values. ([#5074])
+- **community:** New web search providers - Serply (with news and scholar
+  verticals) and Tencent Cloud WSA - plus native recency filters
+  (day/week/month/year) shared across DDGS, Brave, Tavily, and SearXNG.
+  ([#5023], [#5057], [#5099])
+- **community:** New Sofya `web_search` and `web_fetch` provider - search
+  results carry the content of each page, capped per result so a default
+  search stays inline. ([#5239])
+- **knowledge:** Opt-in read-only RAGFlow retrieval exposes a
+  `knowledge_search(query)` agent tool over configured RAGFlow datasets, with
+  a dataset-ID allowlist and credential/dataset-id redaction on error paths.
+  ([#4955])
+- **knowledge:** Opt-in read-only LightRAG retrieval is an alternative
+  `knowledge_search(query)` provider for the same `knowledge` group —
+  operators pick RAGFlow or LightRAG by which entry is configured. It queries
+  LightRAG's structured `/query/data` endpoint (no LLM generation), formats
+  the ranked chunks as citation-numbered text, redacts the optional
+  `X-API-Key` on every model-visible path, and maps server error messages to
+  actionable tool errors. ([#5209])
 
 #### MCP
 
@@ -229,6 +302,18 @@ This section accumulates work toward the **2.1.0** milestone
 - **mcp:** Per-server `tool_name_prefix` option lets servers that already
   namespace their own tools keep their original tool names; the default
   behavior is unchanged. ([#4624])
+- **mcp:** Settings > Tools can add, edit, and delete MCP servers through
+  targeted Gateway endpoints, with a copy-paste JSON workflow that preserves
+  advanced fields and masked secret placeholders. ([#5022])
+- **mcp:** Shared HTTP/SSE servers can map request-scoped secrets to headers
+  via `headers_from_context`: callers supply per-request values in
+  `config.context.secrets`, the config stores only key names, and missing
+  values deny by default. ([#5010])
+- **mcp:** An optional `parallel-search` server entry
+  (`https://search.parallel.ai/mcp`, HTTP, no auth by default) ships in
+  `extensions_config.example.json`, disabled by default; enabling it exposes
+  `parallel-search_web_search` and `parallel-search_web_fetch`, with optional
+  Bearer authentication documented. ([#5028])
 
 #### Channels
 
@@ -243,6 +328,12 @@ This section accumulates work toward the **2.1.0** milestone
   attachments. ([#4423])
 - **channels:** New Buzz (Nostr) channel connector, including the frontend
   experience for the channel. ([#4649], [#4727])
+- **channels:** `/agent list` and `/agent use <name>` IM commands let a
+  conversation switch to the owner's Custom Agents: the selection is
+  persisted in thread metadata (restored after restart) and wins over stale
+  channel defaults, IM-created threads route through the same agent when
+  opened in the web UI, and `/agent` is reserved across the slash-skill
+  parser, frontend, and TUI so no skill can shadow the command. ([#5168])
 
 #### Auth & guardrails
 
@@ -263,6 +354,11 @@ This section accumulates work toward the **2.1.0** milestone
   the agent runtime, and `sandbox:execute` is checked when a sandbox is
   acquired - users can no longer reach models or sandboxes they are not
   authorized for. ([#4540], [#4911])
+- **authz:** `GET /auth/me` now surfaces the caller's effective route
+  permissions (RFC #4063 Phase 4), read from the `AuthContext` the auth
+  middleware already stamps on every authenticated request — no extra
+  provider evaluations — so the frontend can hide actions the caller's role
+  cannot perform. ([#5228])
 
 #### Sandbox & provisioner
 
@@ -276,6 +372,21 @@ This section accumulates work toward the **2.1.0** milestone
   provisioner mode) keeps Lark app secrets and OAuth tokens out of the
   sandbox filesystem entirely - the sandbox sees only a shim that forwards
   commands to a loopback broker in the pod. Off by default. ([#4501])
+- **sandbox:** The E2B mount-upload wall-clock deadline is configurable via
+  `mount_upload_deadline_seconds` (default 120s). ([#4876])
+- **sandbox:** An E2B sandbox carries a structured `MountUploadResult`
+  (`truncated`, `reason`, upload totals) after creation — preserved across
+  warm-pool reclaim within the process — so mount truncation by a resource
+  limit is observable in code instead of only in Gateway logs. ([#4884])
+- **sandbox:** Opt-in controlled egress for local Docker AIO sandboxes:
+  `sandbox.network.mode` supports `isolated` (per-sandbox internal bridge
+  with no outbound route) and `allowlist` (the same bridge plus a
+  domain-allowlist HTTP(S) policy sidecar that resolves destinations itself
+  and rejects IP literals and ECH); denied public domains can be approved
+  through the Human Input card (temporary grant or allow-for-this-sandbox),
+  non-interactive runs fail closed, and the sandbox API is no longer
+  published directly in restricted modes. Requires Docker Engine 28+;
+  `open` remains the default. ([#5152])
 
 #### Extensions & plugins
 
@@ -323,11 +434,37 @@ This section accumulates work toward the **2.1.0** milestone
   `suggestions.max_suggestions` (default 3). ([#4533])
 - **artifacts:** Text artifacts can be edited inline in the artifact panel.
   ([#4596])
+- **artifacts:** Markdown artifacts open rendered in a new-window reader (with
+  "View source" and "Download" fallbacks), and all files presented in a run
+  can be downloaded as one zip archive derived from the run's delivery
+  receipt. ([#5056], [#5117])
 - **frontend:** Browser Live is available in Custom Agent chats. ([#4719])
+- **frontend:** A conversation outline navigates long chats: past 5 user turns,
+  a compact side menu lists the conversation's questions and jumps between
+  them, tracking the current section. ([#5025])
+- **frontend:** Scheduled tasks can be duplicated into an editable draft that
+  carries over the configuration but not the run history. ([#5064])
 - **threads:** Branched conversations get distinguishing titles
   (automatic `Title (2)`, `Title (3)` sibling numbering) and the
   recent-chats list shows parent-child lineage with tree connectors.
   ([#4983])
+- **frontend:** Chats can be archived and restored: an Archive sidebar
+  action with an Undo toast, Recent chats / Archived tabs above search, and
+  per-chat restore controls; SQL and Memory stores apply the archive filter
+  before pagination while messages, files, links, pin state, and the current
+  URL are preserved. ([#5236])
+- **projects:** Project workspaces organize chats (Projects MVP Phase 1): a
+  sidebar Projects section with flat/grouped list modes, a project detail
+  page with a paginated thread list, project-scoped new chats whose threads
+  are pre-created with their project so a run can never land outside it,
+  branch membership inheritance, move-between-projects, and project
+  create/rename/archive/restore/delete. ([#5265])
+- **artifacts:** Completed CSV/TSV artifacts preview as bounded tables (up to
+  200 rows × 50 columns, 50 rows per page, sticky headers, optional
+  first-row header) parsed off the main thread over the existing 1 MiB
+  range loader — literal strings, leading zeros, and multiline quoted cells
+  survive, long cells open in a copyable dialog, and source view remains
+  one toggle away. ([#5284])
 
 #### Observability & tooling
 
@@ -341,6 +478,17 @@ This section accumulates work toward the **2.1.0** milestone
   ([#3428], [#4141])
 - **tui:** `clear` command. ([#4306])
 - **tui:** The TUI supports a transparent terminal background. ([#4631])
+- **gateway:** New `GET /health/ready` readiness probe runs a bounded
+  database `SELECT 1` and returns 503 while the database is unreachable
+  (200 `not_configured` for the memory backend); `/health` stays pure
+  liveness, and the production compose healthcheck now gates on readiness.
+  ([#5166])
+- **observability:** Deferred tool promotions — both routing-hint
+  auto-promotion and explicit `tool_search` — persist as privacy-minimal
+  `middleware:tool_promotion` run events (tool names, source, count, agent
+  attribution; no queries, schemas, or results), observed only after
+  skill-policy filtering so denied schemas are never reported as effective
+  promotions. ([#5183])
 
 ### Changed
 
@@ -400,6 +548,34 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **gateway:** Stop persisting a caller-supplied `deerflow_trace_id` on the run
+  record. `body.metadata` reaches both the live run config, which the run
+  worker restamps, and the run record echoed verbatim by the runs API; only the
+  first was covered, so a client could make the most durable surface of a run
+  disagree with the `X-Trace-Id` and the log lines from the same request. The
+  id is now stamped once at the trust boundary, `config.context` is closed off
+  the same way, and a thread's own metadata is no longer seeded with the
+  run-scoped id of whichever run created it. ([#5119])
+- **gateway:** Expose `X-Trace-Id` in `Access-Control-Expose-Headers`. It is not
+  CORS-safelisted, so split-origin browser clients — the ones that cannot read
+  the Gateway's logs either — could not read the correlation id they are meant
+  to quote in a bug report. ([#5119])
+- **gateway:** Keep `X-Trace-Id` on unhandled-exception 500s. Starlette's
+  `ServerErrorMiddleware` emits those through the raw send outside every user
+  middleware, so the 500 for a server bug — the response most in need of
+  correlation — was the only one shipped without the id. `TraceMiddleware` now
+  sends its own 500 carrying the header before re-raising; the server's
+  exception logging is untouched and mid-stream failures propagate unchanged.
+  This fallback is emitted outside `CORSMiddleware` and stays CORS-opaque, so
+  split-origin browser clients cannot read the id on this one response — same
+  as the `ServerErrorMiddleware` 500 it replaces. ([#5119])
+- **gateway:** Strip a forged `deerflow_trace_id` from the persisted request
+  echo. `body.config` is stored verbatim as `runs.kwargs_json` and served back
+  by the runs API, so a forged id in `config.metadata` or `config.context`
+  survived on that one surface while every other carried the real id.
+  `redact_config_secrets` now drops the key from both containers, and
+  `build_run_config` merges run metadata onto a copy so the server-stamped id
+  can no longer be written through into the caller's request body. ([#5119])
 - **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview. ([#4634])
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead
@@ -842,7 +1018,7 @@ This section accumulates work toward the **2.1.0** milestone
   submitted user message no longer renders twice or sinks below its own
   processing steps, and after a mid-run page reload a turn's steps can no
   longer appear above the user message that started the run. ([#4620],
-  [#4660])
+  [#4660], [#4834])
 - **frontend:** Stop matching `<header>` as `<head>` when injecting the base
   href into HTML artifact previews, so relative assets in report fragments
   that begin with `<header>` now load in the sandboxed preview iframe.
@@ -857,7 +1033,7 @@ This section accumulates work toward the **2.1.0** milestone
   panel, and restore the copy button for turns that contain only reasoning.
   ([#4647])
 - **frontend:** Surface model-loading failures with a workspace error banner
-  and retry action instead of a silently empty model list. ([#4840])
+  and retry action instead of a silently empty model list. ([#4840], [#5021])
 - **frontend:** Preserve copy and other actions on completed assistant
   messages while a later turn is still streaming. ([#4844])
 - **frontend:** Keep the browser live stream connected after a successful
@@ -933,6 +1109,228 @@ This section accumulates work toward the **2.1.0** milestone
   image build context, log commands resolve the checkout root correctly,
   and the default loopback origins are allowed so the dev setup page can
   hydrate. ([#4658], [#4806], [#4852], [#4853], [#4956], [#4959])
+- **gateway:** Stamp the server-authoritative feed position onto persisted
+  messages, so an early user message no longer vanishes or jumps into the
+  middle of the step stream once history exceeds one page and context
+  compaction has fired. ([#4696])
+- **lark:** Preserve the new app secret during managed credential switches by
+  clearing the previous app's OAuth data before the replacement is written,
+  so the subsequent browser authorization no longer resolves an empty
+  `client_secret`. ([#4820])
+- **messages:** Drop legacy `<uploaded_files>` tag handling: the backend treats
+  the pre-#4174 spelling as ordinary content and strips only
+  `<current_uploads>`, while the frontend keeps stripping the legacy tag so
+  old threads still render cleanly. ([#4826])
+- **skills:** Reject a blank `SKILL.md` description at the write gate, matching
+  what the loader already requires, so editing a custom skill with an empty
+  description no longer writes a file the loader then rejects - which
+  destroyed the skill on disk. ([#4867])
+- **sandbox:** Make the model-facing `description` argument optional (empty by
+  default) across `bash`, `ls`, `glob`, `grep`, `read_file`, `write_file`,
+  `str_replace`, and `task`, so providers that omit it are no longer rejected
+  before execution. ([#4878])
+- **sandbox:** Bound Windows command execution: host commands run in a new
+  process group killed via `taskkill /T /F` on timeout so a descendant cannot
+  hold the call open, and output flows through the existing bounded 10 MiB
+  capture. ([#4946])
+- **sandbox:** Scope the Windows MSYS path-conversion exclusion to safe virtual
+  path prefixes instead of disabling conversion globally, so host-native CLI
+  launchers that need normal conversion work again. ([#5003])
+- **skills:** Rebuild per-user skill storage after an app-config hot reload,
+  so it no longer stays bound to paths from the previous config instance.
+  ([#4972])
+- **skills:** Tokenize portable `allowed-tools` scalars with parenthesis
+  awareness, so `Bash(tvly *)`-style entries stay intact, unmatched
+  parentheses are rejected instead of silently fragmenting, and
+  argument-scoped entries remain literal rather than broadening access.
+  ([#4984])
+- **agents:** Normalize `ToolMessage`s returned inside `Command` results, so
+  error payloads no longer earn a default success receipt and tool-progress
+  tracking sees them. ([#4977])
+- **mcp:** Tear down the in-flight session owner when `get_session` is
+  cancelled during eviction, so a cancelled caller no longer leaks the owner
+  task or parks past its timeout. ([#5008])
+- **mcp:** Reconnect ordinary stdio tools after a transport disconnect: the
+  failed pooled session is evicted (only if still registered), the original
+  error surfaces without automatic replay, and a later retry starts a fresh
+  subprocess. ([#5018])
+- **mcp:** Preserve pooled stdio sessions after protocol timeouts during
+  durable MCP task polling - a 408 is not a disconnect - so task state
+  survives and the next poll no longer reports `task_not_found`. ([#5027])
+- **mcp:** Reject credentials that cannot travel as HTTP header values
+  (trailing newline or whitespace, non-ASCII) at the config boundary, so the
+  transport's exception - which echoes the full value - can no longer leak a
+  secret into model context, checkpoints, and traces. ([#5066])
+- **subagents:** Clean up the background-task entry when the poller exits
+  unexpectedly and drop a PENDING registry entry when submission fails, so a
+  failed or crashed poll no longer leaks the entry or leaves the subagent
+  running unattended. ([#5069])
+- **subagents:** Stop the zombie PENDING registry entry on the submit-failure
+  path, and derive the capacity snapshot's queued count from the waiters'
+  length instead of iterating a deque other threads mutate. ([#5086])
+- **channels:** Synchronize `ChannelStore` reads with mutations, so
+  `get_thread_id()`/`list_entries()` can no longer raise `dictionary changed
+  size during iteration`. ([#5083])
+- **discord:** Retain strong references to ack-reaction tasks and drain them
+  on shutdown, so a GC pass can no longer silently drop a reaction or pin the
+  channel across restart cycles. ([#5049])
+- **buzz:** Move seen-event persistence off the event loop with coalesced
+  atomic writes, preserving dirty generations when events arrive mid-write
+  and awaiting the final flush on shutdown. ([#5103])
+- **streaming:** Stop an `IndexError` in `MemoryStreamBridge._make_gap` when a
+  subscriber reconnects to an empty or drained stream with an expired cursor.
+  ([#5047])
+- **uploads:** Keep deduplicated filenames within the 255-byte limit by
+  truncating the stem on a UTF-8 code-point boundary, so two max-length files
+  that differ only by a dedupe suffix upload successfully instead of failing
+  the whole batch. ([#5059])
+- **frontend:** Format structured upload error details (FastAPI validation
+  issues, objects, arrays) instead of showing `[object Object]`. ([#5071])
+- **frontend:** Keep a renamed thread's title in sync across the active chat
+  header, document title, search results, and metadata caches without a
+  reload. ([#5045])
+- **frontend:** Truncate selected model names to the selector button width, so
+  long model names ellipsize in the composer and sidecar instead of
+  overflowing. ([#5050])
+- **frontend:** Truncate long subtask card titles to one line with a tooltip,
+  so a delegation whose model omitted `description` (falling back to the full
+  prompt) no longer overflows the chat layout. ([#5136])
+- **dev:** Default the frontend dev server to Webpack on all platforms
+  (`DEER_FLOW_DEV_BUNDLER=turbo` opts back into Turbopack), avoiding
+  Turbopack's macOS PostCSS worker leak and its Windows runtime panics.
+  ([#5036], [#5133])
+- **scripts:** Run repo shell scripts through an explicit interpreter
+  (`bash scripts/...`), so a lost executable bit - zip/tarball downloads,
+  `core.fileMode=false`, non-POSIX filesystems - no longer breaks
+  `make docker-start` and friends with `Permission denied`. ([#5031])
+- **deps:** Depend on the renamed `tenki` package instead of the PyPI-removed
+  `tenki-sandbox` (same `tenki_sandbox` import), so clean checkouts can
+  resolve dependencies again on `make dev`/`uv sync`. ([#5087])
+- **memory:** Memory reads configured to stop the turn now raise a
+  backend-neutral `MemoryReadError` that prompt assembly preserves instead
+  of swallowing: strict OpenViking (`read: raise`), Mem0, and Honcho reads
+  propagate, OpenViking scope-resolution failures follow the configured read
+  policy, and the 5-second injection deadline honors the same policy
+  (fail-open continues without the context; strict raises with the timeout
+  as its cause). ([#4726])
+- **memory:** Buffered memory extraction is cancelled when a custom agent is
+  deleted or cleared, so pending debounce timers can no longer resurrect the
+  deleted per-agent memory scope or overwrite a fresh clear with a stale
+  pending update. ([#5123])
+- **agents:** Conversation titles are generated from the user's original
+  message content when upload (or other) context wrappers have been injected
+  into the text, so titles no longer quote server-injected
+  `<current_uploads>` context; attachment-only messages keep the
+  `New Conversation` fallback. ([#4729])
+- **agents:** Fraction summarization triggers resolve against the model's
+  declared `context_window` (now translated into the LangChain profile), and
+  an unresolvable fraction clause degrades to a never-firing trigger with a
+  warning instead of crashing the whole agent build; percent-style and
+  non-finite trigger values are rejected at config load. ([#4901])
+- **agents:** Custom-agent storage falls back to file-backed storage only
+  when search mode cannot resolve the main application config — invalid
+  configuration and missing config paths surface instead of silently
+  switching storage backends — and store IO moves off the event loop in
+  async agent routes. ([#4952])
+- **middleware:** Loop-detection hard stops win across a whole tool-call
+  batch: selecting a soft warning no longer ends inspection, so a later call
+  in the same response that crosses an operator-configured hard limit is
+  rejected instead of riding along with the earlier warning. ([#5245])
+- **sandbox:** `list_dir` and `glob` in the five remote sandbox providers
+  (E2B, OpenSandbox, AIO, Tenki, BoxLite) return filenames verbatim instead
+  of stripping whitespace, so files whose names begin or end with spaces are
+  no longer listed under paths that then do not exist. ([#4980])
+- **sandbox:** Concurrent subagents sharing one thread sandbox run under
+  process-local execution leases with task-scoped AIO shell sessions, so one
+  sibling finishing can no longer release the shared sandbox underneath the
+  others or corrupt the implicit persistent session; a healthy replacement
+  session is promoted after corruption instead of returning to it. ([#5134])
+- **sandbox:** The Bash tool guides the agent to detect its execution
+  environment with evidence (`uname -s`, `sw_vers`, `uname -a`) instead of
+  model assumptions, and rejected host paths direct it to command-only
+  probes or allowed virtual paths rather than repeating the blocked command.
+  ([#5111])
+- **sandbox:** The Docker AIO compatibility capability allowlist gains
+  `FOWNER`, so AIO images whose startup `chmod`s `/run/user/1000` (e.g.
+  1.11.0) start again under the hardened default capabilities while
+  `no-new-privileges` stays on. ([#5163])
+- **sandbox:** File appends no longer destroy existing content when the
+  pre-read fails: E2B append treats only missing-file errors as an empty
+  file and re-raises anything else instead of overwriting the file with just
+  the appended tail, and AIO appends use the server's native append mode
+  without a pre-read at all. ([#5261], [#5278])
+- **skills:** Skill markdown is read explicitly as UTF-8, so localized skills
+  validate on Windows hosts whose default code page is not UTF-8 instead of
+  failing with `UnicodeDecodeError`. ([#4995])
+- **mcp:** The MCP tools cache re-initializes after a runtime config change:
+  a module-level `asyncio.Lock` bound to a closed event loop and an
+  unsynchronized initialized flag had left every post-update call failing
+  with `Lock is bound to a different event loop` or racing across worker
+  threads. ([#5062])
+- **mcp:** Sync-wrapped MCP tools keep LangGraph `ToolRuntime` injection (the
+  annotation-less sync wrapper is now `functools.wraps`-transparent), so
+  per-user scope resolution and durable task submission no longer run with
+  `runtime=None` — which had routed completion-notification runs under the
+  default lead agent instead of the thread's custom agent. ([#5164])
+- **auth:** A duplicate OAuth identity no longer reports "Email already
+  registered" — the two integrity violations are distinguished — and the
+  partial OAuth-identity index now declares `postgresql_where` so Postgres
+  builds the intended partial index instead of a full one. ([#5026])
+- **frontend:** The mobile sidebar trigger stays clickable on regular and
+  custom-agent welcome pages, where multi-line (longer localized) welcome
+  text in a same-`z-index` overlay could cover the header's tappable area.
+  ([#5149])
+- **subagents:** `SubagentResult` lifecycle timestamps are UTC-aware on
+  every writer, matching the repo-wide convention instead of stamping local
+  wall-clock time on non-UTC hosts. ([#5153])
+- **browser:** Background live-frame scheduler tasks retain strong
+  references, so garbage collection can no longer silently stop the Browser
+  Live view from refreshing by stranding a pending guard that was cleared
+  only in a collected task's `finally`. ([#5155])
+- **runtime:** Duplicate `on_llm_end` callbacks for the same LangChain run id
+  persist one durable `llm.ai.response` event (replayed usage merged by
+  generation position, first callback canonical), so append-only message
+  APIs no longer return duplicate responses from providers that re-fire the
+  callback with usage populated. ([#5187])
+- **runtime:** Terminal finalization completes after a cancellation raised
+  inside the completion hook or task-stop fan-out, so extension observers
+  run and the stream END marker is published before the interruption is
+  re-raised; the finalization tail stays interruptible. ([#5191])
+- **models:** A cancelled LLM call releases its owned circuit-breaker
+  recovery probe across provider execution, concurrency admission, and
+  backoff, so subsequent calls no longer see `CircuitBreakerOpen` after a
+  cancellation; probe ownership is fenced by a per-call token so cancelling
+  an older call cannot release another call's probe. ([#5197])
+- **runtime:** The embedded `DeerFlowClient` keys its graph cache by
+  effective user in every authorization mode and materializes the same user
+  in runtime context, so sequential reuse for different users can no longer
+  serve a graph assembled with another user's prompt and workspace state.
+  ([#5206])
+- **runtime:** Cancelled workspace-change snapshot captures drain their
+  already-running scan and clean up the per-run text cache instead of
+  leaking `deerflow-workspace-changes-*` directories, while metadata-only
+  captures propagate cancellation promptly without waiting on the scan.
+  ([#5232], [#5234])
+- **persistence:** Gateway startup tolerates a database already migrated to
+  the explicitly-reviewed newer revision (`0019_thread_incarnations`), so
+  rolling back to this image after a newer deployment stays possible; other
+  unknown revisions, an empty version table, and multiple version rows
+  still fail closed. ([#5219])
+- **community:** Tavily Extract results without a `title` fall back to the
+  result or requested URL as the display heading instead of raising
+  `KeyError` and discarding usable page content. ([#5280])
+- **uploads:** Fenced code blocks are excluded from uploaded-document
+  outlines, so code comments and bold examples inside fences no longer
+  crowd real sections out of the 50-entry heading budget. ([#5281])
+- **subagents:** After compaction, the delegation ledger distinguishes
+  execution completion from task acceptance and preserves bounded examples
+  of a completed subagent's unmet and unverified acceptance criteria, so the
+  lead agent repairs the remaining gaps instead of treating the completed
+  result as fully done. ([#5287])
+- **dev:** `_pick_python()` validates interpreter candidates through
+  `/usr/bin/env`, mirroring how the frontend is launched, so `make dev`
+  starts the frontend on Windows where Microsoft Store Python stubs satisfy
+  Bash-side probes but not `env`. ([#5181])
 
 ### Performance
 
@@ -952,6 +1350,20 @@ This section accumulates work toward the **2.1.0** milestone
   sandbox instead of fetching the whole file first. ([#3824])
 - **browser:** Encode Browser Live progress frames as JPEG to cut progress
   payload size. ([#4836])
+- **middleware:** Inject `view_image` content via `wrap_model_call` instead of
+  a checkpointed hidden message, so up to 20 MB of base64 no longer sits in
+  two checkpoints per viewed image and an interrupted run can no longer leave
+  the payload behind. ([#5014])
+- **frontend:** Cache settled copy-data derivation across streaming chunks, so
+  each chunk no longer re-derives toolbar/copy text for every settled
+  message. ([#5095])
+- **runtime:** Bound gateway memory after terminal runs, stopping the post-GC
+  low-water mark from creeping upward across completed sessions. ([#5112])
+- **frontend:** Chat streams request `messages-tuple` + `updates` + `custom`
+  instead of full `values` state snapshots — the retransmitted historical
+  `values` messages were ~75% of SSE payload — folding reducer events into
+  rendered state locally while keeping full snapshots only for replay-gap
+  recovery. ([#5159])
 
 ### Security
 
@@ -1000,6 +1412,42 @@ This section accumulates work toward the **2.1.0** milestone
 - **scripts:** Redact secret-shaped keys (`db_pass`, `signing_key`, ...)
   wherever they appear in bundled config, not only under well-known key
   names. ([#4242])
+- **sandbox:** Sanitize MCP-sourced tool results through the same trust
+  boundary as the built-in web tools, so a hostile or compromised MCP server
+  can no longer hand the model forged `<system-reminder>` or user-input
+  boundary tags. ([#4839])
+- **sandbox:** Harden local Docker sandbox containers: published ports bind
+  the Docker bridge gateway instead of `0.0.0.0` when the sandbox host is
+  non-loopback (`DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0` restores the broad
+  bind), Docker's default seccomp profile replaces unconditional
+  `seccomp=unconfined` (opt back in with `DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED=1`),
+  and containers drop all capabilities, get `no-new-privileges`, and run with
+  bounded resources. ([#4986])
+- **authz:** Enforce run-create authorization on stateless stream/wait
+  endpoints (`runs:create`), and require both `threads:write` and
+  `runs:create` for scheduled-task create, update, resume, and manual-trigger
+  mutations. ([#5030])
+- **authz:** Re-check the authorization policy before reusing a persisted
+  sandbox, so a revoked `sandbox:execute` grant takes effect on the next
+  sandbox-backed turn instead of outliving the policy in the cached sandbox.
+  ([#5006])
+- **skills:** Enforce custom-Agent skill allowlists at the sandbox filesystem
+  level: an explicit `skills` policy materializes a signed per-user/thread
+  skills view, so a custom agent with shell or file tools can no longer read
+  skills its policy excludes. ([#5077])
+- **runs:** Reject cancel/rollback actions on GET stream joins with
+  `405 Method Not Allowed` - cancel-then-stream is a POST operation - closing
+  a state change that CSRF middleware deliberately exempted on safe methods;
+  action-less GET joins are unchanged. ([#5092])
+- **lark:** Lark CLI credential trees on Windows enforce private ACLs
+  (gateway-SID-only protected DACL, reparse-point rejection, handle-relative
+  traversal), extending the POSIX `0700`/`0600` confidentiality contract
+  against inherited grants, junction redirection, hard-link aliasing, and
+  TOCTOU replacement. ([#5141])
+- **sandbox:** `SSH_AUTH_SOCK` is scrubbed from the sandbox subprocess
+  environment — inheriting the host ssh-agent socket lets sandboxed code
+  sign and authenticate with every key the agent holds — unless a skill
+  explicitly declares it via required-secrets. ([#5145])
 
 ### Documentation
 
@@ -1011,6 +1459,10 @@ This section accumulates work toward the **2.1.0** milestone
 - **docs:** Update the agent AGENTS.md and ARCHITECTURE.md guides. ([#4817])
 - **docs:** Document the Honcho memory backend with a dedicated guide and a
   long-term memory section entry in the README. ([#4822])
+- **docs:** Align custom-agent documentation with the API across the English
+  and Chinese agents/threads/lead-agent pages: the required ASCII `name`
+  request field, lowercase storage, `/api/agents/check` name-availability
+  behavior, and no auto-derived slug from `display_name`. ([#4944])
 
 ### Internal
 
@@ -1049,6 +1501,30 @@ This section accumulates work toward the **2.1.0** milestone
   `h2` 4.3.0 -> 4.4.1, `langgraph-checkpoint-sqlite` and
   `langgraph-checkpoint-postgres` 3.1.0 -> 3.1.1, and `nanoid` 5.1.6 -> 5.1.16.
   ([#4681], [#4683], [#4737], [#4738], [#4747], [#4748])
+- **bench:** Add a reproducible hybrid memory-eviction evaluation under
+  `backend/scripts/benchmark/deermem_eviction/` with a deterministic,
+  blind-by-construction grader for the #4789 policy. ([#4810])
+- **bench:** Measure Postgres checkpoint/blob/write storage growth in the
+  checkpoint benchmark alongside memory and SQLite. ([#5051])
+- **tests:** Exclude `tests/blocking_io/` from `make test`; the dedicated
+  `make test-blocking-io` suite (and its CI workflow) remains the owner.
+  ([#5105])
+- **refactor:** Share sandbox identity derivation and acquire serialization
+  across the five remote sandbox providers (RFC #4741), replacing five
+  per-provider lock tables that grew unboundedly with process lifetime;
+  derived ids are pinned byte-identical by per-provider golden vectors.
+  ([#5089])
+- **ci:** Split the backend unit-test workflow into four parallel shards —
+  each on its own runner with isolated Postgres/Redis — using `pytest-split`
+  with a committed duration baseline and failing closed when the baseline is
+  missing; `make test` remains the canonical full offline suite.
+  ([#5137])
+- **dev:** Launch the Playwright `webServer`'s Next.js through `pnpm exec`,
+  so Windows E2E runs resolve the platform package binary instead of failing
+  on the extensionless POSIX shim. ([#5185])
+- **tests:** Skip the POSIX mode-bit skill-permission assertions on Windows,
+  where the `chmod` contract is unobservable, so Windows contributors can
+  reach a green backend-suite baseline. ([#5244])
 
 ## [2.0.0] — 2026-06-15
 
@@ -2085,3 +2561,120 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4983]: https://github.com/bytedance/deer-flow/pull/4983
 [#4987]: https://github.com/bytedance/deer-flow/pull/4987
 [#4998]: https://github.com/bytedance/deer-flow/pull/4998
+[#4696]: https://github.com/bytedance/deer-flow/pull/4696
+[#4810]: https://github.com/bytedance/deer-flow/pull/4810
+[#4820]: https://github.com/bytedance/deer-flow/pull/4820
+[#4826]: https://github.com/bytedance/deer-flow/pull/4826
+[#4834]: https://github.com/bytedance/deer-flow/pull/4834
+[#4839]: https://github.com/bytedance/deer-flow/pull/4839
+[#4867]: https://github.com/bytedance/deer-flow/pull/4867
+[#4876]: https://github.com/bytedance/deer-flow/pull/4876
+[#4878]: https://github.com/bytedance/deer-flow/pull/4878
+[#4946]: https://github.com/bytedance/deer-flow/pull/4946
+[#4955]: https://github.com/bytedance/deer-flow/pull/4955
+[#4972]: https://github.com/bytedance/deer-flow/pull/4972
+[#4977]: https://github.com/bytedance/deer-flow/pull/4977
+[#4984]: https://github.com/bytedance/deer-flow/pull/4984
+[#4986]: https://github.com/bytedance/deer-flow/pull/4986
+[#5003]: https://github.com/bytedance/deer-flow/pull/5003
+[#5006]: https://github.com/bytedance/deer-flow/pull/5006
+[#5008]: https://github.com/bytedance/deer-flow/pull/5008
+[#5010]: https://github.com/bytedance/deer-flow/pull/5010
+[#5014]: https://github.com/bytedance/deer-flow/pull/5014
+[#5017]: https://github.com/bytedance/deer-flow/pull/5017
+[#5018]: https://github.com/bytedance/deer-flow/pull/5018
+[#5021]: https://github.com/bytedance/deer-flow/pull/5021
+[#5022]: https://github.com/bytedance/deer-flow/pull/5022
+[#5023]: https://github.com/bytedance/deer-flow/pull/5023
+[#5025]: https://github.com/bytedance/deer-flow/pull/5025
+[#5027]: https://github.com/bytedance/deer-flow/pull/5027
+[#5030]: https://github.com/bytedance/deer-flow/pull/5030
+[#5031]: https://github.com/bytedance/deer-flow/pull/5031
+[#5036]: https://github.com/bytedance/deer-flow/pull/5036
+[#5039]: https://github.com/bytedance/deer-flow/pull/5039
+[#5041]: https://github.com/bytedance/deer-flow/pull/5041
+[#5045]: https://github.com/bytedance/deer-flow/pull/5045
+[#5047]: https://github.com/bytedance/deer-flow/pull/5047
+[#5049]: https://github.com/bytedance/deer-flow/pull/5049
+[#5050]: https://github.com/bytedance/deer-flow/pull/5050
+[#5051]: https://github.com/bytedance/deer-flow/pull/5051
+[#5056]: https://github.com/bytedance/deer-flow/pull/5056
+[#5057]: https://github.com/bytedance/deer-flow/pull/5057
+[#5059]: https://github.com/bytedance/deer-flow/pull/5059
+[#5064]: https://github.com/bytedance/deer-flow/pull/5064
+[#5066]: https://github.com/bytedance/deer-flow/pull/5066
+[#5069]: https://github.com/bytedance/deer-flow/pull/5069
+[#5071]: https://github.com/bytedance/deer-flow/pull/5071
+[#5074]: https://github.com/bytedance/deer-flow/pull/5074
+[#5076]: https://github.com/bytedance/deer-flow/pull/5076
+[#5077]: https://github.com/bytedance/deer-flow/pull/5077
+[#5083]: https://github.com/bytedance/deer-flow/pull/5083
+[#5086]: https://github.com/bytedance/deer-flow/pull/5086
+[#5087]: https://github.com/bytedance/deer-flow/pull/5087
+[#5089]: https://github.com/bytedance/deer-flow/pull/5089
+[#5090]: https://github.com/bytedance/deer-flow/pull/5090
+[#5092]: https://github.com/bytedance/deer-flow/pull/5092
+[#5095]: https://github.com/bytedance/deer-flow/pull/5095
+[#5099]: https://github.com/bytedance/deer-flow/pull/5099
+[#5103]: https://github.com/bytedance/deer-flow/pull/5103
+[#5105]: https://github.com/bytedance/deer-flow/pull/5105
+[#5109]: https://github.com/bytedance/deer-flow/pull/5109
+[#5112]: https://github.com/bytedance/deer-flow/pull/5112
+[#5117]: https://github.com/bytedance/deer-flow/pull/5117
+[#5133]: https://github.com/bytedance/deer-flow/pull/5133
+[#5136]: https://github.com/bytedance/deer-flow/pull/5136
+[#5239]: https://github.com/bytedance/deer-flow/pull/5239
+[#5119]: https://github.com/bytedance/deer-flow/pull/5119
+[#4726]: https://github.com/bytedance/deer-flow/pull/4726
+[#4729]: https://github.com/bytedance/deer-flow/pull/4729
+[#4884]: https://github.com/bytedance/deer-flow/pull/4884
+[#4901]: https://github.com/bytedance/deer-flow/pull/4901
+[#4944]: https://github.com/bytedance/deer-flow/pull/4944
+[#4952]: https://github.com/bytedance/deer-flow/pull/4952
+[#4980]: https://github.com/bytedance/deer-flow/pull/4980
+[#4995]: https://github.com/bytedance/deer-flow/pull/4995
+[#5026]: https://github.com/bytedance/deer-flow/pull/5026
+[#5028]: https://github.com/bytedance/deer-flow/pull/5028
+[#5062]: https://github.com/bytedance/deer-flow/pull/5062
+[#5110]: https://github.com/bytedance/deer-flow/pull/5110
+[#5111]: https://github.com/bytedance/deer-flow/pull/5111
+[#5123]: https://github.com/bytedance/deer-flow/pull/5123
+[#5134]: https://github.com/bytedance/deer-flow/pull/5134
+[#5137]: https://github.com/bytedance/deer-flow/pull/5137
+[#5141]: https://github.com/bytedance/deer-flow/pull/5141
+[#5145]: https://github.com/bytedance/deer-flow/pull/5145
+[#5149]: https://github.com/bytedance/deer-flow/pull/5149
+[#5152]: https://github.com/bytedance/deer-flow/pull/5152
+[#5153]: https://github.com/bytedance/deer-flow/pull/5153
+[#5154]: https://github.com/bytedance/deer-flow/pull/5154
+[#5155]: https://github.com/bytedance/deer-flow/pull/5155
+[#5156]: https://github.com/bytedance/deer-flow/pull/5156
+[#5159]: https://github.com/bytedance/deer-flow/pull/5159
+[#5163]: https://github.com/bytedance/deer-flow/pull/5163
+[#5164]: https://github.com/bytedance/deer-flow/pull/5164
+[#5166]: https://github.com/bytedance/deer-flow/pull/5166
+[#5168]: https://github.com/bytedance/deer-flow/pull/5168
+[#5170]: https://github.com/bytedance/deer-flow/pull/5170
+[#5181]: https://github.com/bytedance/deer-flow/pull/5181
+[#5183]: https://github.com/bytedance/deer-flow/pull/5183
+[#5185]: https://github.com/bytedance/deer-flow/pull/5185
+[#5187]: https://github.com/bytedance/deer-flow/pull/5187
+[#5191]: https://github.com/bytedance/deer-flow/pull/5191
+[#5197]: https://github.com/bytedance/deer-flow/pull/5197
+[#5206]: https://github.com/bytedance/deer-flow/pull/5206
+[#5209]: https://github.com/bytedance/deer-flow/pull/5209
+[#5219]: https://github.com/bytedance/deer-flow/pull/5219
+[#5228]: https://github.com/bytedance/deer-flow/pull/5228
+[#5232]: https://github.com/bytedance/deer-flow/pull/5232
+[#5234]: https://github.com/bytedance/deer-flow/pull/5234
+[#5236]: https://github.com/bytedance/deer-flow/pull/5236
+[#5244]: https://github.com/bytedance/deer-flow/pull/5244
+[#5245]: https://github.com/bytedance/deer-flow/pull/5245
+[#5261]: https://github.com/bytedance/deer-flow/pull/5261
+[#5265]: https://github.com/bytedance/deer-flow/pull/5265
+[#5278]: https://github.com/bytedance/deer-flow/pull/5278
+[#5280]: https://github.com/bytedance/deer-flow/pull/5280
+[#5281]: https://github.com/bytedance/deer-flow/pull/5281
+[#5282]: https://github.com/bytedance/deer-flow/pull/5282
+[#5284]: https://github.com/bytedance/deer-flow/pull/5284
+[#5287]: https://github.com/bytedance/deer-flow/pull/5287

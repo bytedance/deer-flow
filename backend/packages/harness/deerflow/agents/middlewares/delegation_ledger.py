@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
 from deerflow.agents.middlewares.receipt_verification import render_citation_verdict, validate_receipt_verdict
 from deerflow.agents.thread_state import DelegationEntry
+from deerflow.subagents.acceptance_checks import AcceptanceVerdict, render_acceptance_segment, validate_acceptance_verdict
 from deerflow.subagents.status_contract import (
     read_subagent_result_metadata,
 )
@@ -51,7 +52,7 @@ def _escape_context_text(value: object) -> str:
     return escape(" ".join(str(value).split()), quote=False)
 
 
-def _status_guidance(status: str, stop_reason: str | None = None) -> str:
+def _status_guidance(status: str, stop_reason: str | None = None, acceptance_verdict: AcceptanceVerdict | None = None) -> str:
     if stop_reason:
         # A guardrail cap ended this run early (#3875 Phase 2): the status is
         # still completed/failed, and ``stop_reason`` carries *why* it stopped
@@ -64,7 +65,17 @@ def _status_guidance(status: str, stop_reason: str | None = None) -> str:
     if status == "in_progress":
         return "already delegated; do NOT delegate again; wait for or build on the result"
     if status == "completed":
-        return "completed result; do NOT delegate again; reuse this result"
+        leaves = acceptance_verdict["leaves"] if acceptance_verdict is not None else []
+        if not leaves:
+            return "execution finished; inspect self-report before reuse; avoid duplicate work"
+        actions = ["execution finished; retain useful work"]
+        if any(leaf["checked"] and not leaf["holds"] for leaf in leaves):
+            actions.append("repair/recheck unmet criteria")
+        if any(not leaf["checked"] for leaf in leaves):
+            actions.append("verify load-bearing UNVERIFIED criteria or preserve uncertainty")
+        if len(actions) == 1:
+            actions.append("reuse checked outputs; validate load-bearing claims")
+        return "; ".join(actions)
     if status == "failed":
         return "failed attempt; may retry with a changed plan"
     if status == "cancelled":
@@ -139,6 +150,9 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
         receipt_verdict = structured.get("receipt_verdict")
         if receipt_verdict:
             entry["receipt_verdict"] = receipt_verdict
+        acceptance_verdict = structured.get("acceptance_verdict")
+        if acceptance_verdict:
+            entry["acceptance_verdict"] = acceptance_verdict
         result_text = structured.get("result_brief") or structured.get("error") or _STATUS_ONLY_RESULT_BRIEFS.get(structured["status"])
         if result_text:
             result_sha256 = structured.get("result_sha256") or hashlib.sha256(result_text.encode("utf-8")).hexdigest()
@@ -156,11 +170,33 @@ def _fits_budget(lines: list[str], candidate: str, max_chars: int) -> bool:
     return len("\n".join([*lines, candidate])) <= max_chars
 
 
+def _render_acceptance_gaps(verdict: AcceptanceVerdict) -> str:
+    """Keep one actionable example of each unresolved kind after compaction.
+
+    Criteria and details are untrusted durable data. Bound and escape each
+    field separately, and keep both kinds even when failures fill the list.
+    The complete verdict stays in the ledger state.
+    """
+    gaps = [leaf for leaf in verdict["leaves"] if not leaf["checked"] or not leaf["holds"]]
+    rendered = []
+    for checked, marker in ((True, "does not hold"), (False, "UNVERIFIED")):
+        leaf = next((leaf for leaf in gaps if leaf["checked"] == checked), None)
+        if leaf is not None:
+            criterion = _escape_context_text(_bound_text(leaf["criterion"], 160))
+            detail = _escape_context_text(_bound_text(leaf["detail"], 120))
+            rendered.append(f"[{marker}] {criterion} — {detail}")
+    omitted = len(gaps) - len(rendered)
+    if omitted:
+        rendered.append(f"{omitted} more unresolved criteria (not shown)")
+    return "; ".join(rendered)
+
+
 def _render_entry_line(entry: DelegationEntry) -> str:
     status = _escape_context_text(entry["status"])
     description = _escape_context_text(entry["description"])
     subagent_type = _escape_context_text(entry["subagent_type"])
-    guidance = _status_guidance(entry["status"], entry.get("stop_reason"))
+    acceptance_verdict = validate_acceptance_verdict(entry.get("acceptance_verdict"))
+    guidance = _status_guidance(entry["status"], entry.get("stop_reason"), acceptance_verdict)
     line = f"- [{status}] {description} (via {subagent_type}; {guidance})"
     result_brief = entry.get("result_brief")
     if result_brief:
@@ -170,17 +206,24 @@ def _render_entry_line(entry: DelegationEntry) -> str:
         segment = render_citation_verdict(receipt_verdict)
         if segment:
             line += f" · {segment}"
+    if acceptance_verdict is not None:
+        segment = render_acceptance_segment(acceptance_verdict)
+        if segment:
+            line += f" · {segment}"
+        gaps = _render_acceptance_gaps(acceptance_verdict)
+        if gaps:
+            line += f" · {gaps}"
     return line
 
 
 def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int = _LEDGER_RENDER_CHAR_BUDGET) -> str:
-    """Render the delegation ledger as model-visible system context."""
+    """Render the delegation ledger as model-visible durable context data."""
     if not entries:
         return ""
 
     lines = [
         "## Work already delegated",
-        "Newest entries are shown first. In-progress entries are already delegated. Completed entries are reusable results. Failed, cancelled, or timed-out entries are prior attempts.",
+        "Newest entries first. In-progress work is already delegated. Completed means execution ended, not task acceptance. Retain useful work and address remaining gaps within the current budget.",
     ]
     omitted = 0
     for index, entry in enumerate(reversed(entries)):

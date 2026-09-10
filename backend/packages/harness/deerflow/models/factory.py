@@ -308,9 +308,28 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         if "stream_usage" in getattr(model_class, "model_fields", {}):
             model_settings_from_config["stream_usage"] = True
 
+    # Translate the declared context window into the langchain profile so
+    # profile-dependent features (e.g. SummarizationMiddleware fraction triggers,
+    # which resolve thresholds from profile["max_input_tokens"]) work for
+    # third-party OpenAI-compatible models whose SDK ships no profile of its
+    # own (#3103). ``profile`` is a metadata-only BaseChatModel field
+    # (exclude=True) and never reaches the provider request payload. An
+    # explicit profile from a caller or model_overrides is never clobbered.
+    translate_context_window = bool(model_config.context_window) and "profile" not in kwargs and "profile" not in model_settings_from_config
+
     _warn_unknown_model_settings(model_class, name, model_settings_from_config)
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
+
+    if translate_context_window:
+        # Applied *after* construction and merged into the provider's inferred
+        # profile: passing ``profile`` to the constructor would REPLACE the whole
+        # inferred metadata (tool_calling, structured_output, io capabilities,
+        # output limits) with just this one key. The declared window wins on
+        # max_input_tokens itself — the operator set it precisely because the
+        # inferred (or absent) value doesn't match their gateway.
+        inferred_profile = getattr(model_instance, "profile", None)
+        model_instance.profile = {**(inferred_profile or {}), "max_input_tokens": model_config.context_window}
 
     if attach_tracing:
         callbacks = build_tracing_callbacks()

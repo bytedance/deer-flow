@@ -10,6 +10,7 @@ import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -22,7 +23,14 @@ from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
-from .store.base import EditReplayVisibility, RunIdempotencyConflict, StatusFinalization
+from .store.base import (
+    EditReplayVisibility,
+    RunIdempotencyConflict,
+    StatusFinalization,
+    normalize_run_created_at_iso,
+    run_is_before_cursor,
+    run_sort_key,
+)
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -85,6 +93,14 @@ _SQLITE_UNIQUE_ERRORCODE = sqlite3.SQLITE_CONSTRAINT_UNIQUE
 def _generate_worker_id() -> str:
     """Generate a unique worker identifier: ``hostname:hex_uuid``."""
     return f"{socket.gethostname()}:{uuid.uuid4().hex}"
+
+
+def _cursor_part(value: str | None) -> str | None:
+    """Treat missing/blank cursor fields as absent so a one-sided empty string fails."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _is_unique_violation(exc: BaseException) -> bool:
@@ -881,22 +897,58 @@ class RunManager:
             raise_on_store_error=raise_on_store_error,
         )
 
-    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100) -> list[RunRecord]:
+    async def list_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+        limit: int = 100,
+        before_created_at: str | None = None,
+        before_run_id: str | None = None,
+    ) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
 
         In-memory runs take precedence only when the same ``run_id`` exists in both
         memory and the backing store. The merged result is then sorted newest-first
-        by ``created_at`` and trimmed to ``limit`` (default 100).
+        by ``(created_at, run_id)`` and trimmed to ``limit`` (default 100).
+        Optional ``before_created_at`` + ``before_run_id`` is a keyset cursor for
+        walking older pages; both must be provided together.
 
         Args:
             thread_id: The thread ID to filter by.
             user_id: Optional user ID for permission filtering when hydrating from store.
             limit: Maximum number of runs to return.
+            before_created_at: ISO timestamp of the last run on the previous page.
+            before_run_id: Run id of the last run on the previous page.
         """
+        before_created_at = _cursor_part(before_created_at)
+        before_run_id = _cursor_part(before_run_id)
+        if (before_created_at is None) != (before_run_id is None):
+            raise ValueError("before_created_at and before_run_id must be provided together")
+        if before_created_at is not None:
+            try:
+                before_created_at = normalize_run_created_at_iso(before_created_at)
+                datetime.fromisoformat(before_created_at)
+            except ValueError:
+                raise ValueError("before_created_at must be an ISO-8601 timestamp") from None
+
+        def _page(records: list[RunRecord]) -> list[RunRecord]:
+            return sorted(records, key=lambda record: run_sort_key(record.created_at, record.run_id), reverse=True)[:limit]
+
         async with self._lock:
-            memory_records = [record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run]
+            memory_records = [
+                record
+                for record in self._thread_records_locked(thread_id)
+                if record.operation_kind == ThreadOperationKind.run
+                and run_is_before_cursor(
+                    record.created_at,
+                    record.run_id,
+                    before_created_at=before_created_at,
+                    before_run_id=before_run_id,
+                )
+            ]
         if self._store is None:
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+            return _page(memory_records)
         records_by_id = {record.run_id: record for record in memory_records}
         # Query enough rows to cover both the requested page and every possible
         # in-memory/store duplicate. Local records can be older than persisted
@@ -904,11 +956,15 @@ class RunManager:
         # newest run before the merge; querying only ``limit`` can still lose a
         # distinct row when that page is occupied by duplicate local records.
         store_limit = limit + len(memory_records)
+        store_kwargs: dict[str, Any] = {"user_id": user_id, "limit": store_limit}
+        if before_created_at is not None and before_run_id is not None:
+            store_kwargs["before_created_at"] = before_created_at
+            store_kwargs["before_run_id"] = before_run_id
         try:
-            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=store_limit)
+            rows = await self._store.list_by_thread(thread_id, **store_kwargs)
         except Exception:
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+            return _page(memory_records)
         for row in rows:
             run_id = row.get("run_id")
             if run_id and run_id not in records_by_id:
@@ -916,7 +972,7 @@ class RunManager:
                     records_by_id[run_id] = self._record_from_store(row)
                 except Exception:
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
-        return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
+        return _page(list(records_by_id.values()))
 
     async def list_successful_regenerate_sources(
         self,
@@ -1570,7 +1626,10 @@ class RunManager:
     @staticmethod
     def _has_live_finalizer(record: RunRecord) -> bool:
         """Return whether ``record`` still has a worker holding its barrier."""
-        return bool(record.finalizing and record.task is not None and not record.task.done())
+        # Admission can observe the barrier between setting ``finalizing`` and
+        # attaching the worker task. Treat that short task-less state as live;
+        # only a task known to have exited proves the barrier is stranded.
+        return bool(record.finalizing and (record.task is None or not record.task.done()))
 
     async def wait_for_prior_finalizing(
         self,
@@ -3458,6 +3517,7 @@ class RunManager:
         task = asyncio.create_task(
             self._evict_terminal_when_safe(run_id, delay=delay, retry_delay=retry_delay),
             name=f"run-terminal-eviction-{run_id}",
+            context=Context(),
         )
         self._terminal_eviction_tasks[run_id] = task
         task.add_done_callback(lambda done, run_id=run_id: self._terminal_eviction_done(run_id, done))

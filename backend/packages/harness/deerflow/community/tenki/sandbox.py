@@ -29,6 +29,7 @@ import threading
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -88,6 +89,10 @@ class TenkiSandbox(Sandbox):
             when an operation fails with a terminal Tenki error, so the provider
             can evict the dead sandbox.
     """
+
+    #: Every call is a fresh ``sh -lc`` exec in the sandbox — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
 
     def __init__(
         self,
@@ -268,8 +273,10 @@ class TenkiSandbox(Sandbox):
             output = f"{stdout}\n{stderr}"
         else:
             output = stdout or stderr
-        if result.exit_code not in (0, None) and not output:
-            output = f"Command exited with code {result.exit_code}"
+        if result.exit_code not in (0, None):
+            # Mirror LocalSandbox: preserve a nonzero exit in the output text
+            # even when the command produced output (see e2b_sandbox).
+            output = f"{output}\nExit Code: {result.exit_code}" if output else f"Command exited with code {result.exit_code}"
         return output if output else "(no output)"
 
     # ── file operations ─────────────────────────────────────────────────
@@ -362,8 +369,13 @@ class TenkiSandbox(Sandbox):
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
-        r = self._sh(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        return [self._virtual_path(line.strip()) for line in (r.stdout_text or "").splitlines() if line.strip()]
+        r = self._sh(remote_list_dir_command(resolved, max_depth))
+        entries = parse_remote_list_dir_output(
+            r.stdout_text or "",
+            resolved,
+            pipeline_exit_code=getattr(r, "exit_code", None),
+        )
+        return [self._virtual_path(line) for line in entries]
 
     def glob(
         self,
@@ -383,7 +395,7 @@ class TenkiSandbox(Sandbox):
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
         for entry in (r.stdout_text or "").splitlines():
-            entry = entry.strip()
+            # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
             if should_ignore_path(entry):

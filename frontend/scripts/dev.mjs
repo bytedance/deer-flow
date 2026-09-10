@@ -5,10 +5,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * @param {string} platform
+ * @param {string} _platform
  * @param {Record<string, string | undefined>} env
  */
-export function getDevBundler(platform = process.platform, env = process.env) {
+export function getDevBundler(_platform = process.platform, env = process.env) {
   const override = env.DEER_FLOW_DEV_BUNDLER?.trim();
   if (override) {
     if (override !== "turbo" && override !== "webpack") {
@@ -18,7 +18,11 @@ export function getDevBundler(platform = process.platform, env = process.env) {
     }
     return override;
   }
-  return platform === "win32" ? "webpack" : "turbo";
+  // Keep Webpack as the cross-platform default while #5132's Turbopack
+  // PostCSS worker leak remains unfixed in a stable Next.js release. Retain
+  // the platform parameter so restoring the platform-aware default stays a
+  // small change once the upstream fix is stable and verified on macOS/Linux.
+  return "webpack";
 }
 
 /**
