@@ -142,3 +142,36 @@ it("accounts for quotes, escapes and indentation before accepting keys", () => {
   expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
   expect(preview.truncated).toBe(true);
 });
+
+it("stops arrays after a child collapses even if an earlier field was truncated", () => {
+  const items = Array.from({ length: 4000 }, (_, i) => ({
+    i,
+    deep: { a: { b: i } },
+  }));
+  for (const value of [
+    items,
+    {
+      earlier: {
+        get hidden() {
+          throw new Error("must not read");
+        },
+      },
+      items,
+    },
+  ]) {
+    const preview = formatToolDetail(value);
+    const parsed = JSON.parse(preview.text);
+    const result = (Array.isArray(parsed) ? parsed : parsed.items) as unknown[];
+    expect(preview.truncated).toBe(true);
+    expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+    expect(result.at(-1)).toBe("…");
+    expect(result.at(-2)).not.toBe("…");
+  }
+});
+
+it("preserves literal ellipsis array entries and the values after them", () => {
+  expect(formatToolDetail(["…", "…", { keep: 42 }])).toEqual({
+    text: JSON.stringify(["…", "…", { keep: 42 }], null, 2),
+    truncated: false,
+  });
+});

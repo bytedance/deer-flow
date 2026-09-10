@@ -9,9 +9,11 @@ export function formatToolDetail(value: unknown): {
 } {
   let truncated = false;
   let nodes = 0;
+  let truncations = 0;
   const seen = new WeakSet<object>();
   const marker = () => {
     truncated = true;
+    truncations++;
     return JSON.stringify("…");
   };
   const quote = (text: string, budget: number): string => {
@@ -19,6 +21,7 @@ export function formatToolDetail(value: unknown): {
     const candidate = JSON.stringify(text.slice(0, budget));
     if (text.length <= budget && candidate.length <= budget) return candidate;
     truncated = true;
+    truncations++;
     let low = 0;
     let high = Math.min(text.length, budget);
     while (low < high) {
@@ -70,14 +73,22 @@ export function formatToolDetail(value: unknown): {
         available - encodedKey.length < 3
       ) {
         truncated = true;
+        truncations++;
         if (array || !hasEllipsis) output += prefix + notice;
         break;
       }
       const descriptor = Object.getOwnPropertyDescriptor(item, key);
+      const previousTruncations = truncations;
       const child =
         descriptor && "value" in descriptor
           ? visit(descriptor.value, depth + 1, available - encodedKey.length)
           : marker();
+      // A generated marker ends the array preview; literal ellipsis values do not.
+      // Count new truncations because an earlier sibling may already be truncated.
+      if (array && truncations > previousTruncations && child === notice) {
+        output += prefix + notice;
+        break;
+      }
       output += prefix + encodedKey + child;
       count++;
       if (key === "…") hasEllipsis = true;
