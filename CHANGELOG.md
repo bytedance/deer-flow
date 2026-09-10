@@ -548,6 +548,20 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **gateway:** Honor `disable_clarification` and `github_token` only for
+  internally-authenticated callers, the way `non_interactive` already was.
+  Both keys were forwarded from `body.context` regardless of the caller and
+  were not scrubbed from the free-form `body.config` that the run config
+  copies verbatim, so any session or PAT caller could set them.
+  `disable_clarification` is the stronger of the two: `ClarificationMiddleware`
+  answers every clarification — `risk_confirmation` included — with "proceed
+  without asking", and `SandboxMiddleware` reads it as the same
+  non-interactive signal as `non_interactive`. `github_token` reached
+  `runtime.context`, where the bash tool exports it as `GH_TOKEN`/`GITHUB_TOKEN`,
+  and a copy smuggled through `body.config['configurable']` was persisted in
+  the checkpoint store. The scheduler, IM channels, and the GitHub webhook
+  channel authenticate over the internal request channel and are unaffected.
+  ([#5338])
 - **artifacts:** Keep `PUT /api/threads/{id}/artifacts/{path}` confined to
   `/mnt/user-data/outputs`. The outputs-only guard was a string-prefix check on
   the raw path, so a percent-encoded `..` (`outputs/%2e%2e/uploads/x.txt`) —
@@ -2689,3 +2703,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5284]: https://github.com/bytedance/deer-flow/pull/5284
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
 [#5321]: https://github.com/bytedance/deer-flow/pull/5321
+[#5338]: https://github.com/bytedance/deer-flow/pull/5338
