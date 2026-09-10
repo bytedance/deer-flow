@@ -28,10 +28,16 @@ export const SLASH_SKILL_RE = /^\/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+|$)/;
 // The runtime skill parser accepts any non-empty metadata name, so custom
 // and archive-installed skills can carry uppercase or whitespace the
 // lowercase-only grammar can never parse.
-const ACTIVATABLE_SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
+//
+// Derived from SLASH_SKILL_RE itself rather than restated as a second
+// literal: a name is activatable exactly when the pinned grammar, run over
+// the name as a complete activation, captures the full name back. The
+// contract test pins SLASH_SKILL_RE to the shared fixture and
+// slash.test.ts pins this predicate to the parser, so there is no separate
+// grammar that can silently drift out of agreement.
 export function isActivatableSkillName(name: string): boolean {
-  return ACTIVATABLE_SKILL_NAME_RE.test(name);
+  const match = SLASH_SKILL_RE.exec(`/${name} `);
+  return match !== null && match[1] === name;
 }
 
 /**

@@ -121,4 +121,93 @@ test.describe("Composer skill picker", () => {
       // pipeline, covered by chat.spec.
     });
   }
+
+  test("picking supersedes a draft that is a bare slash query", async ({
+    page,
+  }) => {
+    // Drives the wired pick handler (not the helper): a partial activation
+    // typed into the textarea must be superseded by the explicit pick. If the
+    // draft were re-seeded, it would land in the chip editor as literal text,
+    // reopen the suggestion catalog over the composer, and submit
+    // `/data-analysis /data-an` with the stale partial as the message body.
+    let sentInput: unknown;
+    const captureStream = async (route: Route) => {
+      const body = route.request().postDataJSON() as { input?: unknown };
+      sentInput = body?.input;
+      return handleRunStream(route, {}, undefined, {
+        responseMessage: {
+          type: "ai",
+          id: "skill-picker-ai-2",
+          content: "Skill activated",
+        },
+        messageMetadata: {
+          langgraph_node: "agent",
+          langgraph_step: 1,
+        },
+      });
+    };
+    mockLangGraphAPI(page, {
+      createdThreadMessages: [],
+      runStreamHandler: captureStream,
+    });
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    // Start an activation by typing, then browse instead of finishing it.
+    // Escape first dismisses the suggestion catalog (the draft stays) so the
+    // follow-up chips mount before the click — the catalog's blur-time close
+    // otherwise shifts the toolbar between mousedown and mouseup and the
+    // click lands off the trigger.
+    await textarea.fill("/data-an");
+    await textarea.press("Escape");
+
+    await page.getByTestId("skill-picker-button").click();
+    const search = page.getByPlaceholder(/search skills/i);
+    await expect(search).toBeVisible();
+    await search.fill("data");
+    await page.getByRole("option", { name: /data-analysis/ }).click();
+    await expect(search).toBeHidden();
+    await expect(
+      page.getByRole("button", { name: "Remove /data-analysis" }),
+    ).toBeVisible();
+
+    // Chip mode swaps in the inline editor; it must start empty — the stale
+    // partial is gone, not re-seeded — and own the focus for the next typing.
+    const composer = page.getByRole("textbox", {
+      name: /how can i assist you/i,
+    });
+    await expect(composer).toHaveText("");
+    await expect(composer).toBeFocused();
+
+    await composer.fill("summarize the csv");
+    await composer.press("Enter");
+
+    await expect.poll(() => sentInput).toBeTruthy();
+    const messages = (
+      sentInput as { messages?: Array<Record<string, unknown>> }
+    )?.messages;
+    const humanContent = (messages ?? []).find(
+      (message) => message.type === "human",
+    )?.content;
+    const text =
+      typeof humanContent === "string"
+        ? humanContent
+        : Array.isArray(humanContent)
+          ? humanContent
+              .map((block) =>
+                block && typeof block === "object" && "text" in block
+                  ? String(block.text)
+                  : "",
+              )
+              .join("")
+          : "";
+    expect(text.startsWith("/data-analysis ")).toBe(true);
+    expect(text).toContain("summarize the csv");
+    // The stale partial never reaches the wire: the composed message is
+    // exactly the chip prefix plus the new text. (A not.toContain("/data-an")
+    // would be vacuous — "/data-analysis" starts with that partial.)
+    expect(text).toBe("/data-analysis summarize the csv");
+  });
 });

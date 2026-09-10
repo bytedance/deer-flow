@@ -358,6 +358,39 @@ describe("getMatchingSkillSuggestions", () => {
     expect(result).toEqual([]);
   });
 
+  it("rejects names the slash parser can never activate", () => {
+    // The picker and this catalog are the two surfaces that offer skills;
+    // both must only offer names that can actually activate. A grammar-
+    // violating name here is worse than useless: picking it sends literal
+    // text to the model with nothing loaded, and `parseSlashSkillReference`
+    // confirms it — `/DataTools x` is null.
+    const skills = [
+      makeSkill("DataTools"),
+      makeSkill("data tools"),
+      makeSkill("data_tools"),
+      makeSkill("data.tools"),
+      makeSkill("data--analysis"),
+      makeSkill("-data"),
+      makeSkill("data-"),
+      makeSkill("data-analysis"),
+    ];
+    const result = getMatchingSkillSuggestions(skills, "", builtins);
+    expect(
+      result.filter((s) => s.kind === "skill").map((s) => s.name),
+    ).toEqual(["data-analysis"]);
+  });
+
+  it("agrees with the picker catalog on grammar-violating names", () => {
+    // Both entry points must apply one rule: offered ⇒ activatable.
+    const skills = [makeSkill("DataTools"), makeSkill("data-analysis")];
+    const selectable = getSelectableSkills(skills).map((skill) => skill.name);
+    const slashOffered = getMatchingSkillSuggestions(skills, "", builtins)
+      .filter((s) => s.kind === "skill")
+      .map((s) => s.name);
+    expect(selectable).toEqual(["data-analysis"]);
+    expect(slashOffered).toEqual(selectable);
+  });
+
   it("caps the number of suggestions", () => {
     const skills = Array.from({ length: 10 }, (_, i) =>
       makeSkill(`skill-${i}`),

@@ -257,6 +257,13 @@ export function getMatchingSkillSuggestions(
       if (!skill.enabled) {
         return false;
       }
+      // Grammar before shadowing, mirroring getSelectableSkills: a name the
+      // slash parser can never match (uppercase, whitespace, underscores,
+      // leading/trailing hyphens) must not be offered even when no reserved
+      // word shadows it.
+      if (!isActivatableSkillName(skill.name)) {
+        return false;
+      }
       if (reservedNames.has(name)) {
         return false;
       }
