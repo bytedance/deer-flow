@@ -144,8 +144,7 @@ export default function ScheduledTasksPage() {
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
-  const [editAssistantId, setEditAssistantId] =
-    useState(DEFAULT_ASSISTANT_ID);
+  const [editAssistantId, setEditAssistantId] = useState(DEFAULT_ASSISTANT_ID);
   const [editSchedule, setEditSchedule] = useState<ScheduleValue>({
     schedule_type: "cron",
     schedule_spec: { cron: "0 9 * * *" },
@@ -172,7 +171,12 @@ export default function ScheduledTasksPage() {
       }
     }
     return options;
-  }, [agentsQuery.data, createAssistantId, editAssistantId, st.create.leadAgent]);
+  }, [
+    agentsQuery.data,
+    createAssistantId,
+    editAssistantId,
+    st.create.leadAgent,
+  ]);
   const filteredData = (data ?? []).filter((task) => {
     const statusPass = statusFilter === "all" || task.status === statusFilter;
     const typePass = typeFilter === "all" || task.schedule_type === typeFilter;

@@ -352,9 +352,9 @@ test("create posts the default lead_agent assistant_id", async ({ page }) => {
 
   await page.goto("/workspace/scheduled-tasks");
   const createForm = page.getByTestId("scheduled-task-create-form");
-  await expect(createForm.getByTestId("scheduled-task-create-agent")).toContainText(
-    /Default agent \(lead_agent\)/i,
-  );
+  await expect(
+    createForm.getByTestId("scheduled-task-create-agent"),
+  ).toContainText(/Default agent \(lead_agent\)/i);
   await createForm.getByRole("button", { name: "One-time" }).click();
   await createForm.getByLabel("Run at").fill("2026-07-02T09:00");
   await createForm.getByPlaceholder("Task title").fill("Agent pin");
@@ -403,9 +403,9 @@ test("duplicate copies the source task assistant into the create form", async ({
     .getByTestId("scheduled-task-detail")
     .getByRole("button", { name: "Duplicate" })
     .click();
-  await expect(
-    page.getByTestId("scheduled-task-create-agent"),
-  ).toContainText("research-bot");
+  await expect(page.getByTestId("scheduled-task-create-agent")).toContainText(
+    "research-bot",
+  );
 });
 
 test("edit omits assistant_id when the agent is unchanged", async ({
