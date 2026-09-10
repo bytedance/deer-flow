@@ -83,6 +83,13 @@ do not use HTML `maxLength`, which counts UTF-16 code units instead.
 
 ## Environment
 
+Scheduled-task interval forms preserve the initial `every_seconds` on mount,
+timezone changes, and untouched blur. The backend's configurable interval minimum
+can be lower than the UI's default 60-second floor. Apply that UI floor only after
+an explicit amount/unit edit so editing metadata or duplicating a task cannot
+silently change its cadence. Component regressions live in
+`tests/unit/components/workspace/scheduled-task-schedule-input.dom.test.tsx`.
+
 Backend API URLs are optional; an nginx proxy is used by default:
 
 ```
