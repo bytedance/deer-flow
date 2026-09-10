@@ -25,7 +25,7 @@ test.each([
         <ScheduledTaskScheduleInput
           initial={{
             schedule_type: "once",
-            schedule_spec: { run_at: "2027-03-14T06:30:00Z" },
+            schedule_spec: { run_at: "2027-03-14T06:30:00+00:00" },
             timezone: "America/New_York",
           }}
           onChange={(value) => emitted.push(value)}
