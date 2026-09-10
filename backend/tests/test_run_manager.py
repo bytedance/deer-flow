@@ -643,14 +643,14 @@ async def test_list_by_thread(manager: RunManager, monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.anyio
 async def test_list_by_thread_is_stable_when_timestamps_tie(manager: RunManager, monkeypatch: pytest.MonkeyPatch):
-    """Ordering should be stable (insertion order) even when timestamps tie."""
+    """Timestamp ties break on run_id so keyset pagination has a total order."""
     monkeypatch.setattr("deerflow.runtime.runs.manager._now_iso", lambda: "2026-01-01T00:00:00+00:00")
 
     r1 = await manager.create("thread-1")
     r2 = await manager.create("thread-1")
 
     runs = await manager.list_by_thread("thread-1")
-    assert [run.run_id for run in runs] == [r1.run_id, r2.run_id]
+    assert [run.run_id for run in runs] == sorted([r1.run_id, r2.run_id], reverse=True)
 
 
 @pytest.mark.anyio
@@ -899,6 +899,108 @@ async def test_list_by_thread_limit_does_not_let_old_memory_hide_new_store_run()
     runs = await manager.list_by_thread("thread-1", limit=1)
 
     assert [run.run_id for run in runs] == ["new-store"]
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_keyset_returns_older_page():
+    """A (created_at, run_id) cursor walks past the newest page."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    for run_id, created_at in (
+        ("r1", "2026-01-01T00:00:00+00:00"),
+        ("r2", "2026-01-02T00:00:00+00:00"),
+        ("r3", "2026-01-03T00:00:00+00:00"),
+    ):
+        await store.put(run_id, thread_id="thread-1", status="success", created_at=created_at)
+
+    first = await manager.list_by_thread("thread-1", limit=2)
+    assert [run.run_id for run in first] == ["r3", "r2"]
+
+    second = await manager.list_by_thread(
+        "thread-1",
+        limit=2,
+        before_created_at=first[-1].created_at,
+        before_run_id=first[-1].run_id,
+    )
+    assert [run.run_id for run in second] == ["r1"]
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_keyset_is_stable_when_timestamps_tie():
+    """Tied created_at values must not skip or duplicate across pages."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    tied = "2026-01-01T00:00:00+00:00"
+    for run_id in ("a", "b", "c"):
+        await store.put(run_id, thread_id="thread-1", status="success", created_at=tied)
+
+    first = await manager.list_by_thread("thread-1", limit=2)
+    assert [run.run_id for run in first] == ["c", "b"]
+    second = await manager.list_by_thread(
+        "thread-1",
+        limit=2,
+        before_created_at=first[-1].created_at,
+        before_run_id=first[-1].run_id,
+    )
+    assert [run.run_id for run in second] == ["a"]
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_rejects_one_sided_keyset_cursor():
+    """A one-sided cursor would silently drop the bound; fail instead of paging from the start."""
+    manager = RunManager()
+    with pytest.raises(
+        ValueError,
+        match="before_created_at and before_run_id must be provided together",
+    ):
+        await manager.list_by_thread(
+            "thread-1",
+            before_created_at="2026-01-02T00:00:00+00:00",
+        )
+    with pytest.raises(
+        ValueError,
+        match="before_created_at and before_run_id must be provided together",
+    ):
+        await manager.list_by_thread("thread-1", before_run_id="r2")
+    with pytest.raises(
+        ValueError,
+        match="before_created_at and before_run_id must be provided together",
+    ):
+        await manager.list_by_thread(
+            "thread-1",
+            before_created_at="2026-01-02T00:00:00+00:00",
+            before_run_id="",
+        )
+    with pytest.raises(
+        ValueError,
+        match="before_created_at must be an ISO-8601 timestamp",
+    ):
+        await manager.list_by_thread(
+            "thread-1",
+            before_created_at="not-a-timestamp",
+            before_run_id="r2",
+        )
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_keyset_accepts_space_decoded_offset():
+    """Query-decoded '+00:00' (a space) must still walk to the older page."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    for run_id, created_at in (
+        ("r1", "2026-01-01T00:00:00+00:00"),
+        ("r2", "2026-01-02T00:00:00+00:00"),
+        ("r3", "2026-01-03T00:00:00+00:00"),
+    ):
+        await store.put(run_id, thread_id="thread-1", status="success", created_at=created_at)
+
+    older = await manager.list_by_thread(
+        "thread-1",
+        limit=2,
+        before_created_at="2026-01-02T00:00:00 00:00",
+        before_run_id="r2",
+    )
+    assert [run.run_id for run in older] == ["r1"]
 
 
 @pytest.mark.anyio

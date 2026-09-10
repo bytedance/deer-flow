@@ -52,6 +52,10 @@ class InvalidMetadataFilterError(ValueError):
     """Raised when all client-supplied metadata filter keys are rejected."""
 
 
+class ThreadOwnershipConflictError(Exception):
+    """Raised when create would overwrite a thread owned by another user."""
+
+
 class ThreadMetaStore(abc.ABC):
     @abc.abstractmethod
     async def create(
@@ -67,6 +71,14 @@ class ThreadMetaStore(abc.ABC):
         """Create a thread row; when ``project_id`` is set, validate the
         project inside the insert transaction and raise
         ``ProjectNotAssignableError`` on failure (no partial row)."""
+
+    @abc.abstractmethod
+    async def claim_unowned(self, thread_id: str, owner: str) -> bool:
+        """Atomically claim a legacy row whose owner is ``None``.
+
+        Returns ``True`` only when this call changed ``user_id`` from ``None``
+        to ``owner``. Missing and already-owned rows return ``False``.
+        """
 
     @abc.abstractmethod
     async def set_project(self, thread_id: str, project_id: str | None, *, user_id: str | None | _AutoSentinel = AUTO) -> bool:
