@@ -843,6 +843,112 @@ def test_all_string_fields_in_result_are_neutralized(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# query / extensions filters
+# ---------------------------------------------------------------------------
+class TestListUploadedFilesFilters:
+    """Filters must run before truncation so 'those PDFs' remain reachable."""
+
+    def test_unfiltered_call_is_unchanged(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        for i in range(25):
+            p = uploads_dir / f"file_{i:02}.txt"
+            p.write_text(f"content {i}", encoding="utf-8")
+            os.utime(p, (i, i))
+
+        result = _list_uploaded_files_impl(max_results=10, runtime=_runtime(), _paths=_paths(tmp_path))
+
+        assert len(result["files"]) == 10
+        assert result["total_count"] == 25
+        assert result["truncated"] is True
+
+    def test_extensions_filter_before_truncation(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        for i in range(25):
+            p = uploads_dir / f"shot_{i:02}.png"
+            p.write_bytes(b"png")
+            os.utime(p, (100 + i, 100 + i))
+        for i, name in enumerate(("old.pdf", "notes.PDF")):
+            p = uploads_dir / name
+            p.write_bytes(b"%PDF")
+            os.utime(p, (i, i))
+
+        result = _list_uploaded_files_impl(
+            max_results=10,
+            runtime=_runtime(),
+            extensions=["pdf", ".PNG"],
+            _paths=_paths(tmp_path),
+        )
+
+        pdf_only = _list_uploaded_files_impl(
+            max_results=10,
+            runtime=_runtime(),
+            extensions=["pdf"],
+            _paths=_paths(tmp_path),
+        )
+
+        assert {f["filename"] for f in pdf_only["files"]} == {"old.pdf", "notes.PDF"}
+        assert pdf_only["total_count"] == 2
+        assert "truncated" not in pdf_only
+        assert len(result["files"]) == 10
+        assert result["total_count"] == 27
+        assert result["truncated"] is True
+
+    def test_query_matches_filename_not_path(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "quarterly-report.pdf").write_bytes(b"%PDF")
+        (uploads_dir / "notes.txt").write_text("report in body", encoding="utf-8")
+
+        result = _list_uploaded_files_impl(runtime=_runtime(), query="REPORT", _paths=_paths(tmp_path))
+        uploads_query = _list_uploaded_files_impl(
+            runtime=_runtime(), query="uploads", _paths=_paths(tmp_path)
+        )
+
+        assert [f["filename"] for f in result["files"]] == ["quarterly-report.pdf"]
+        assert uploads_query["files"] == []
+        assert uploads_query["total_count"] == 0
+        assert uploads_query["message"] == "No uploaded files matched the given filters."
+        assert "truncated" not in uploads_query
+
+    def test_query_and_extensions_are_and(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"%PDF")
+        (uploads_dir / "report.txt").write_text("txt", encoding="utf-8")
+        (uploads_dir / "other.pdf").write_bytes(b"%PDF")
+
+        result = _list_uploaded_files_impl(
+            runtime=_runtime(),
+            query="report",
+            extensions=[".pdf"],
+            _paths=_paths(tmp_path),
+        )
+
+        assert [f["filename"] for f in result["files"]] == ["report.pdf"]
+        assert result["total_count"] == 1
+
+    def test_blank_and_invalid_filters_are_noop(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.txt").write_text("a", encoding="utf-8")
+
+        result = _list_uploaded_files_impl(
+            runtime=_runtime(),
+            query="   ",
+            extensions=["", "  ", 1, None],  # type: ignore[list-item]
+            _paths=_paths(tmp_path),
+        )
+
+        assert [f["filename"] for f in result["files"]] == ["a.txt"]
+        assert result["message"] == "Found 1 historical file(s)."
+
+    def test_empty_directory_keeps_unfiltered_message(self, tmp_path):
+        _uploads_dir(tmp_path)
+        result = _list_uploaded_files_impl(
+            runtime=_runtime(), query="pdf", extensions=[".pdf"], _paths=_paths(tmp_path)
+        )
+        assert result["files"] == []
+        assert "No historical uploaded files" in result["message"]
+
+
+# ---------------------------------------------------------------------------
 # @tool schema — regression for #4375
 # ---------------------------------------------------------------------------
 class TestToolSchema:
@@ -858,7 +964,7 @@ class TestToolSchema:
     def test_runtime_excluded_from_model_facing_args(self):
         from deerflow.tools.builtins.list_uploaded_files_tool import list_uploaded_files
 
-        assert set(list_uploaded_files.args) == {"include_outline", "max_results"}
+        assert set(list_uploaded_files.args) == {"include_outline", "max_results", "query", "extensions"}
         assert "runtime" not in list_uploaded_files.args
 
     def test_openai_schema_generation_succeeds(self):
@@ -869,4 +975,4 @@ class TestToolSchema:
         # This raised PydanticInvalidForJsonSchema before the fix.
         oai = convert_to_openai_tool(list_uploaded_files)
         params = oai["function"]["parameters"]["properties"]
-        assert set(params) == {"include_outline", "max_results"}
+        assert set(params) == {"include_outline", "max_results", "query", "extensions"}

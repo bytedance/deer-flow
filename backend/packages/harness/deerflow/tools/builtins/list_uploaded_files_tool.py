@@ -63,11 +63,55 @@ def _resolve_user_id(runtime: Runtime) -> str:
     return resolve_runtime_user_id(runtime) or get_effective_user_id()
 
 
+def _normalize_query(query: str | None) -> str | None:
+    """Return a stripped query, or None when filtering should be skipped."""
+    if not isinstance(query, str):
+        return None
+    stripped = query.strip()
+    return stripped or None
+
+
+def _normalize_extensions(extensions: list[str] | None) -> frozenset[str] | None:
+    """Normalize extension tokens to lowercase dotted suffixes.
+
+    Non-strings, blanks, and a non-list input are dropped. An empty result
+    means "no extension filter", matching the unfiltered historical behavior.
+    """
+    if not isinstance(extensions, list):
+        return None
+    normalized: set[str] = set()
+    for item in extensions:
+        if not isinstance(item, str):
+            continue
+        token = item.strip().lower()
+        if not token:
+            continue
+        if not token.startswith("."):
+            token = f".{token}"
+        normalized.add(token)
+    return frozenset(normalized) or None
+
+
+def _matches_filters(
+    filename: str,
+    suffix: str,
+    query: str | None,
+    extensions: frozenset[str] | None,
+) -> bool:
+    if extensions is not None and suffix.lower() not in extensions:
+        return False
+    if query is not None and query.casefold() not in filename.casefold():
+        return False
+    return True
+
+
 def _list_uploaded_files_impl(
     include_outline: bool | list[str] = False,
     max_results: int = _DEFAULT_MAX_RESULTS,
     runtime: Runtime | None = None,
     *,
+    query: str | None = None,
+    extensions: list[str] | None = None,
     _paths: Any | None = None,
 ) -> dict:
     """Core implementation — testable without the @tool wrapper."""
@@ -140,6 +184,21 @@ def _list_uploaded_files_impl(
     if not candidates:
         return {"files": [], "message": "No historical uploaded files in this thread."}
 
+    query_filter = _normalize_query(query)
+    extension_filter = _normalize_extensions(extensions)
+    if query_filter is not None or extension_filter is not None:
+        candidates = [
+            item
+            for item in candidates
+            if _matches_filters(item[1].name, item[1].suffix, query_filter, extension_filter)
+        ]
+        if not candidates:
+            return {
+                "files": [],
+                "total_count": 0,
+                "message": "No uploaded files matched the given filters.",
+            }
+
     # Sort by mtime descending (most recent first)
     candidates.sort(key=lambda item: item[0], reverse=True)
 
@@ -199,6 +258,17 @@ def list_uploaded_files(
         int,
         "Maximum number of files to return (default 20, max 100).",
     ] = _DEFAULT_MAX_RESULTS,
+    query: Annotated[
+        str | None,
+        "Optional case-insensitive substring to match against the filename only "
+        "(not the virtual path). Omit or leave blank to skip name filtering.",
+    ] = None,
+    extensions: Annotated[
+        list[str] | None,
+        'Optional file extensions to keep, e.g. ["pdf", ".PNG"]. '
+        "With or without a leading dot; matching is case-insensitive. "
+        "Combined with query using AND. Omit to skip type filtering.",
+    ] = None,
 ) -> dict:
     """Discover historical uploaded files available in this thread.
 
@@ -213,9 +283,14 @@ def list_uploaded_files(
     Skip this tool when:
     - The user names a specific file — use read_file or grep directly with the path
     - The file was uploaded in the current run — it's already in <current_uploads>
+
+    Optional filters (`query`, `extensions`) run before the max_results cap, so
+    older matching files are not displaced by newer unrelated uploads.
     """
     return _list_uploaded_files_impl(
         include_outline=include_outline,
         max_results=max_results,
         runtime=runtime,
+        query=query,
+        extensions=extensions,
     )
