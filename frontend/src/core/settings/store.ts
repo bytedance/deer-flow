@@ -52,13 +52,25 @@ function mergeSettingsSection<K extends keyof LocalSettings>(
   key: K,
   value: Partial<LocalSettings[K]>,
 ): LocalSettings {
+  const current = settings[key];
+  if (
+    current !== null &&
+    typeof current === "object" &&
+    value !== null &&
+    typeof value === "object"
+  ) {
+    return {
+      ...settings,
+      [key]: {
+        ...current,
+        ...value,
+      },
+    } as LocalSettings;
+  }
   return {
     ...settings,
-    [key]: {
-      ...settings[key],
-      ...value,
-    },
-  } as LocalSettings;
+    [key]: value,
+  };
 }
 
 function handleStorage(event: StorageEvent) {

@@ -2380,7 +2380,9 @@ class TestThreadSafety:
         asyncio.run(schedule_from_caller())
 
         assert completed.wait(timeout=10), "work pinned to the persistent subagent loop must run after caller-loop teardown"
-        assert handles[0].done()
+        # `completed` is set from inside the coroutine, so it can fire before
+        # the loop marks the future done. Blocking on the result covers both:
+        # it returns only once the coroutine ran and the future resolved.
         assert handles[0].result(timeout=10) is None
 
     def test_multiple_executors_in_parallel(self, classes, base_config, msg):
