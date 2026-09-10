@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.search_time_range import BRAVE_FRESHNESS_BY_TIME_RANGE, SearchTimeRange
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -230,12 +231,13 @@ def _brave_get(
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str, max_results: int = 5) -> str:
+def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRange | None = None) -> str:
     """Search the web for information using Brave Search.
 
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
         max_results: Maximum number of search results to return. Default is 5.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     config = get_app_config().get_tool_config("web_search")
     if config is not None and "max_results" in (config.model_extra or {}):
@@ -249,6 +251,8 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
         return _missing_key_error(query, "web_search")
 
     params = {"q": query, "count": count, "text_decorations": False}
+    if time_range is not None:
+        params["freshness"] = BRAVE_FRESHNESS_BY_TIME_RANGE[time_range]
 
     data, error_json = _brave_get(_BRAVE_WEB_ENDPOINT, api_key, query, params, service_name="Brave Search")
     if error_json is not None:

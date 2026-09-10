@@ -16,6 +16,13 @@ A user-owned IM channel connection is a **per-DeerFlow-user bind layer** layered
 2. **One-time bind codes** — the browser Connect flow mints a short-lived `secrets.token_urlsafe(16)` code (600 s TTL, single-use) and surfaces it only in the initiating user's browser. The platform worker consumes `/connect <code>` (Telegram uses `/start <code>` over a deep link) before applying any `allowed_users` filter, so a not-yet-allowlisted user can complete their first bind.
 3. **Strict ownership transfer** — the latest successful bind wins; `upsert_connection` revokes other owners' active rows for the same external identity. The DB-enforced partial unique index `uq_channel_connection_active_identity` (`WHERE status != 'revoked'`) makes the invariant race-free across concurrent writers.
 
+### Conversation-scoped Custom Agents
+
+Connected users can run `/agent list` to inspect the Custom Agents in their own DeerFlow user bucket, then `/agent use <name>` to start a new conversation with one.
+The selection is written to the new Gateway thread's channel metadata and, for a Custom Agent, to the canonical `agent_name` routing metadata used by the Web UI. It is cached by `ChannelManager` for subsequent turns; on restart, the manager reads the channel metadata before the first resumed turn. Opening that thread from Web search therefore continues under the same Custom Agent instead of falling back to the default runtime.
+Because selecting an agent always creates a new thread instead of mutating the current one, an existing conversation keeps its original runtime, prompt, skills, and checkpoint lineage.
+`/agent use lead_agent` starts a new conversation with the default agent.
+
 Connect codes are deliberately **bind-time defenses**, not chat-time defenses. After binding, ordinary `allowed_users` continue to gate regular messages exactly as before.
 
 ## Connect-code Flow
@@ -97,14 +104,14 @@ sequenceDiagram
     autonumber
     participant Platform as Provider<br/>(Slack/Telegram/...)
     participant Worker as Provider worker
-    participant Bus as MessageBus<br/>InboundMessage queue
-    participant Mgr as ChannelManager
+    participant Bus as MessageBus<br/>bounded admission + queue
+    participant Mgr as ChannelManager<br/>fixed worker pool
     participant Client as langgraph_sdk<br/>async client
     participant Gateway as Gateway<br/>/api/* routers
 
     Platform->>Worker: inbound chat message<br/>(resolved to connection_id + owner_user_id)
-    Worker->>Bus: publish_inbound(InboundMessage)
-    Bus->>Mgr: msg = get_inbound()
+    Worker->>Bus: reserve by Gateway handoff, then commit InboundMessage
+    Bus->>Mgr: fixed worker gets msg and awaits handler inline
     Mgr->>Mgr: _channel_storage_user_id(msg)<br/>→ owner-bound user_id
     Mgr->>Mgr: _get_bound_identity_rejection()<br/>(re-check identity by provider+ext+ws)
     Mgr->>Client: _get_or_create_thread(thread_id or new)
@@ -128,6 +135,18 @@ sequenceDiagram
     Bus->>Worker: outbound callback
     Worker->>Platform: post reply (Telegram editMessageText,<br/>Feishu patch card, etc.)
 ```
+
+### Inbound capacity and overload behavior
+
+Three top-level `channels` settings control the MessageBus/manager lifecycle: `inbound_queue_maxsize` (default `1000`) covers queued messages plus provider-side reservations that may still be doing final identity/ack preparation, `max_concurrency` (default `5`) is the exact number of long-lived `ChannelManager` workers, and `shutdown_grace_period_seconds` (default `3`) bounds graceful draining before active handlers are cancelled. Active handlers run inline in those workers, so a burst cannot create a task per message. The maximum manager-owned live intake is therefore the pending capacity plus the fixed worker count.
+
+Admission never waits for queue space, because waiting producer coroutines would simply move the unbounded backlog outside the queue. At capacity:
+
+- Slack, Discord, Feishu/Lark, DingTalk, Telegram, WeChat, and WeCom drop the new message before DeerFlow sends its working acknowledgment. `MessageBus` emits a rate-limited warning with a cumulative rejection count.
+- Buzz leaves the per-channel replay watermark unchanged and reconnects, allowing relay history to replay the event.
+- GitHub webhook fan-out returns `503`. GitHub records the delivery as failed; an operator or recovery job can retry it through the Recent Deliveries UI or REST redelivery API (GitHub does not retry failed deliveries automatically).
+
+Shutdown first closes admission and cancels follow-up watchers, but keeps provider transports alive while workers drain accepted messages for up to `shutdown_grace_period_seconds`. Once that grace expires, it cancels active handlers, discards queue entries that never began, and awaits every manager-owned worker and watcher. Provider coroutines submitted from SDK threads are likewise retained, cancelled, and awaited before their channel tears down SDK resources. A successful stop therefore leaves no owned handler able to use a closed transport. The Gateway's outer shutdown timeout remains the process-level bound; if it cancels cleanup, the service retains its transports and singleton instead of reporting a successful stop or hiding unfinished ownership.
 
 ## Sync vs Streaming Channels
 
@@ -218,6 +237,11 @@ the resulting virtual path (or a failure notice). Historical uploads are not
 automatically injected on later turns; the agent discovers them with
 `list_uploaded_files`.
 
+Feishu/Lark inbound resource streams are read with a 20,000,000-byte cap before
+they are persisted or synced into a non-local sandbox. Oversized resources and
+per-file path failures are surfaced as a failure placeholder in the message text
+without aborting later attachments in the same inbound message.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -262,6 +286,10 @@ Configure the actual IM bots under the existing `channels` block:
 
 ```yaml
 channels:
+  inbound_queue_maxsize: 1000
+  max_concurrency: 5
+  shutdown_grace_period_seconds: 3
+
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN

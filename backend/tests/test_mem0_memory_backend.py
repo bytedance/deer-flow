@@ -77,6 +77,9 @@ class TestMem0Config:
             ("score_threshold", 1.5),
             ("max_injection_chars", 0),
             ("timeout_seconds", 0),
+            ("timeout_seconds", float("nan")),
+            ("timeout_seconds", float("inf")),
+            ("timeout_seconds", float("-inf")),
         ],
     )
     def test_invalid_values_rejected(self, key: str, value: object) -> None:
@@ -252,7 +255,7 @@ class TestMessageFiltering:
         assert filter_messages_for_memory([hidden, clarification]) == [clarification]
 
     def test_upload_only_human_drops_it_and_following_ai(self) -> None:
-        upload_only = HumanMessage(content="<uploaded_files>\nfile.pdf\n</uploaded_files>")
+        upload_only = HumanMessage(content="<current_uploads>\nfile.pdf\n</current_uploads>")
         ack = AIMessage(content="I see your file")
         followup = HumanMessage(content="what is in it?")
         assert filter_messages_for_memory([upload_only, ack, followup]) == [followup]
@@ -438,6 +441,22 @@ class TestMem0ManagerAdd:
 
 
 class TestMem0ManagerGetContext:
+    @pytest.mark.parametrize(
+        ("read_policy", "expected"),
+        [
+            pytest.param("fail_open", False, id="fail_open"),
+            pytest.param("fail_closed", True, id="fail_closed"),
+        ],
+    )
+    def test_read_failure_capability_matches_policy(
+        self,
+        read_policy: str,
+        expected: bool,
+    ) -> None:
+        mgr, _fake = _manager({"failure_policy": {"read": read_policy}})
+
+        assert mgr.read_failures_are_fatal is expected
+
     def test_formats_dedupes_and_scopes(self) -> None:
         mgr, fake = _manager()
         fake.list_results = [
@@ -463,11 +482,11 @@ class TestMem0ManagerGetContext:
         assert mgr.get_context("u1") == ""
 
     def test_read_error_fail_closed_raises(self) -> None:
-        from deerflow.agents.memory.manager import MemoryManagerError
+        from deerflow.agents.memory.manager import MemoryReadError
 
         mgr, fake = _manager({"failure_policy": {"read": "fail_closed"}})
         fake.error = Mem0APIError("down")
-        with pytest.raises(MemoryManagerError):
+        with pytest.raises(MemoryReadError):
             mgr.get_context("u1")
 
     def test_truncates_to_max_injection_chars(self) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from langchain.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
@@ -154,6 +155,85 @@ def test_context_window_never_reaches_the_provider_client(monkeypatch):
     assert "context_window" not in FakeChatModel.captured_kwargs
 
 
+def test_context_window_attaches_langchain_profile(monkeypatch):
+    """The declared context window is translated into the langchain ``profile``
+    so profile-dependent features (e.g. SummarizationMiddleware fraction triggers,
+    which resolve thresholds from ``profile["max_input_tokens"]``) work for
+    third-party OpenAI-compatible models whose SDK ships no profile of its own
+    (#3103: `trigger: fraction` used to crash the whole agent build)."""
+    model = _make_model("windowed")
+    model.context_window = 200_000
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    created = factory_module.create_chat_model(name="windowed")
+
+    assert "profile" not in FakeChatModel.captured_kwargs
+    assert created.profile == {"max_input_tokens": 200_000}
+
+
+def test_context_window_merges_into_inferred_profile(monkeypatch):
+    """A provider-inferred profile must survive the context_window translation:
+    passing ``profile`` to the constructor would REPLACE the whole inferred
+    metadata (tool_calling, structured_output, output limits) with the single
+    key, changing LangChain feature selection. The declared window wins on
+    ``max_input_tokens`` itself — the operator declared it because the inferred
+    value doesn't match their gateway."""
+    inferred = {
+        "tool_calling": True,
+        "structured_output": True,
+        "max_output_tokens": 16_384,
+        "max_input_tokens": 999_999,
+    }
+
+    class _InferredProfileChatModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.profile = dict(inferred)
+
+    model = _make_model("windowed")
+    model.context_window = 200_000
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg, model_class=_InferredProfileChatModel)
+
+    created = factory_module.create_chat_model(name="windowed")
+
+    assert created.profile == {
+        "tool_calling": True,
+        "structured_output": True,
+        "max_output_tokens": 16_384,
+        "max_input_tokens": 200_000,
+    }
+
+
+def test_unset_context_window_leaves_profile_unset(monkeypatch):
+    """No declared window -> no invented profile; fraction triggers degrade
+    with a warning instead of silently assuming a capacity."""
+    cfg = _make_app_config([_make_model("opaque")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    created = factory_module.create_chat_model(name="opaque")
+
+    assert "profile" not in FakeChatModel.captured_kwargs
+    assert created.profile is None
+
+
+def test_context_window_does_not_clobber_explicit_profile(monkeypatch):
+    """A caller-supplied profile wins over the context_window translation."""
+    model = _make_model("windowed")
+    model.context_window = 200_000
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    created = factory_module.create_chat_model(name="windowed", profile={"max_input_tokens": 100})
+
+    assert FakeChatModel.captured_kwargs.get("profile") == {"max_input_tokens": 100}
+    assert created.profile == {"max_input_tokens": 100}
+
+
 def test_appends_all_tracing_callbacks(monkeypatch):
     cfg = _make_app_config([_make_model("alpha")])
     _patch_factory(monkeypatch, cfg)
@@ -295,6 +375,49 @@ def test_thinking_disabled_no_when_thinking_enabled_does_nothing(monkeypatch):
     assert "thinking" not in captured
     # reasoning_effort not forced (supports_reasoning_effort defaults to False → cleared)
     assert captured.get("reasoning_effort") is None
+
+
+def test_required_thinking_profile_keeps_base_payload_when_runtime_requests_disabled():
+    """Always-thinking models keep their base payload on every call.
+
+    Required-thinking models such as GLM-5.3-Flash intentionally declare no
+    conditional thinking settings.  A runtime ``thinking_enabled=False`` must
+    therefore leave the profile's unconditional ``extra_body.thinking`` block
+    untouched, while the capability guard drops DeerFlow's generic effort value.
+    """
+    model = ModelConfig(
+        name="glm-5.3-flash",
+        display_name="GLM-5.3-Flash",
+        description=None,
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        model="glm-5.3-flash",
+        api_base="https://api.z.ai/api/paas/v4",
+        api_key="test-key",
+        supports_thinking=True,
+        supports_reasoning_effort=False,
+        supports_vision=True,
+        stream_usage=False,
+        extra_body={
+            "thinking": {"type": "enabled", "clear_thinking": True},
+            "tool_stream": True,
+        },
+    )
+    cfg = _make_app_config([model])
+    chat_model = factory_module.create_chat_model(
+        name="glm-5.3-flash",
+        thinking_enabled=False,
+        reasoning_effort="medium",
+        app_config=cfg,
+        attach_tracing=False,
+    )
+    payload = chat_model._get_request_payload([HumanMessage(content="ping")])
+
+    assert payload["extra_body"] == {
+        "thinking": {"type": "enabled", "clear_thinking": True},
+        "tool_stream": True,
+    }
+    assert "reasoning_effort" not in payload
+    assert chat_model.stream_usage is False
 
 
 # ---------------------------------------------------------------------------

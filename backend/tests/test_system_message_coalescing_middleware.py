@@ -196,6 +196,8 @@ class TestCoalesceRequest:
             "source": "prompt",
             "hide_from_ui": True,
             "dynamic_context_reminder": True,
+            "deerflow_content_kind": "middleware_injection",
+            "deerflow_producer_kind": "system_coalescing",
         }
 
     def test_merged_kwargs_later_parts_override(self):

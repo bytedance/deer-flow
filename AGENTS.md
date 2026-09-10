@@ -100,10 +100,24 @@ Skill quality review note:
   tag-neutralized; full raw payloads stay in tool artifacts. See
   [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
   `skill-creator` ownership boundaries.
+- CI waivers live in `.github/skill-review-waivers.v1.json` and are enforced by
+  `scripts/review_changed_public_skills.py`. Pull requests may validate waiver
+  edits from their head revision, but only the manifest from the trusted base
+  revision can suppress that run. Entries match one error finding exactly,
+  include the reviewed file's SHA-256 and an expiry date, remain visible in CI
+  output, and can never waive blocker findings. An entry may also preapprove a
+  bounded list of future full-file SHA-256 values. Those hashes become effective
+  only after the manifest change lands in the trusted base. Adding or changing a
+  waiver and relying on it therefore requires two steps: merge the reviewed
+  manifest change first, then update the affected public skill in a later pull
+  request. After that skill change lands, promote its hash to `file_sha256` and
+  remove the consumed preapproval in a follow-up manifest cleanup.
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
 - Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.
+- Busy scheduled occurrences are persisted as `queued`; `launching` is a short lease-fenced claim, `running` remains the normal Gateway run lifecycle, and `scheduler.queue_timeout_seconds` bounds the durable wait. Do not reintroduce skip-on-overlap or count waiting rows against `max_concurrent_runs`.
+- Scheduled launches use `scheduler.recursion_limit` (default 1000, matching the web UI's `recursion_limit: 1000`, clamped by `max_recursion_limit`). The value is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
 
 ## Commands: Root vs. Module
 
@@ -122,7 +136,7 @@ make extension-enable NAME=...     # Enable an installed extension (restart requ
 make extension-disable NAME=...    # Disable without uninstalling (restart required)
 make extension-remove NAME=...     # Remove package and config entry (restart required)
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
-make start       # Start all services in production mode (local, optimized)
+make start       # Start all services in production mode (local, optimized); SKIP_FRONTEND_BUILD=1 reuses the last frontend build
 make stop        # Stop all running services
 make up / down   # Build/stop the production Docker stack (browser at localhost:2026)
 make docker-start / docker-stop / docker-logs   # Docker development environment
@@ -144,12 +158,13 @@ Run `make help` for the full list.
 ```bash
 # Backend (see backend/AGENTS.md for the full set)
 cd backend && make dev        # Gateway API with reload (port 8001)
-cd backend && make test       # Backend test suite
+cd backend && make test       # Default backend suite; excludes live and blocking-I/O tests
+cd backend && make test-blocking-io  # Strict blocking-I/O suite
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
 # Frontend (see frontend/AGENTS.md for the full set)
-cd frontend && pnpm dev       # Dev server with Turbopack (port 3000)
+cd frontend && pnpm dev       # Dev server: Webpack by default (override with DEER_FLOW_DEV_BUNDLER=turbo)
 cd frontend && pnpm check     # Lint + type check (run before committing)
 cd frontend && pnpm test      # Unit tests
 ```
@@ -158,6 +173,37 @@ Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and 
 (`pnpm`) = per-module work.**
 
 Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. Diagnostic scripts resolve the runner and frontend directory to absolute paths before changing the child process working directory, so they remain independent of the caller's current directory. The runner preserves direct `pnpm`/`pnpm.cmd` priority, falls back to `corepack pnpm`, and is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
+
+### Prerequisites before `make dev`
+
+`make dev` does **not** generate config files. First-time setup order:
+
+```bash
+make config      # copy config.example.yaml -> config.yaml and extensions_config.example.json -> extensions_config.json (both gitignored)
+make install     # install frontend + backend deps and pre-commit hooks
+make dev         # then start everything
+```
+
+Without `config.yaml` present, services fail to boot. `config.yaml` / `extensions_config.json`
+may be edited at runtime via the Gateway API but are gitignored, so never commit them.
+
+### Run a single test
+
+```bash
+# Backend (pytest); run one file or one test function
+cd backend && python -m pytest tests/test_compose_default_bind_host.py -q
+cd backend && python -m pytest tests/path/to/test.py::test_func -q
+
+# Frontend (rstest)
+cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
+```
+
+### Logs
+
+- Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
+- Local `make dev`: each service logs to its own terminal pane. Frontend dev-server
+  errors surface in the browser console at `localhost:3000`; backend tracebacks appear
+  in the Gateway terminal.
 
 ## Where to Go Next
 
@@ -182,3 +228,14 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
+- **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
+  Python utilities that read or write them must pass `encoding="utf-8"` rather than
+  relying on the platform locale.
+- **Version sources must stay in lockstep** — a release version must match identically in
+  `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
+  (`version` + `appVersion`). Pushing a `v*` git tag triggers CI that runs
+  `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts. Before
+  bumping a version, run `scripts/bump_version.sh <ver>` (aligns all four at once) and
+  `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
+- **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
+  belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.

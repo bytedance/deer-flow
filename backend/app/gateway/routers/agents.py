@@ -8,6 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from deerflow.agents.memory.manager import get_memory_manager
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import (
     AgentConfig,
@@ -19,7 +20,7 @@ from deerflow.config.agents_config import (
 )
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
-from deerflow.persistence.agents import AgentExistsError, get_agent_store
+from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class AgentResponse(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
+    allowed_subagents: list[str] | None = Field(default=None, description="Subagent allowlist (None=all enabled, []=none)")
     model_settings: AgentModelSettings | None = Field(default=None, description="Per-agent sampling overrides (temperature / max_tokens)")
     thinking_enabled: bool | None = Field(default=None, description="Per-agent thinking-mode default (None = runtime default)")
     reasoning_effort: ReasoningEffort | None = Field(default=None, description="Per-agent reasoning-effort default (None = runtime default)")
@@ -63,6 +65,7 @@ class AgentCreateRequest(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all enabled, []=none)")
+    allowed_subagents: list[str] | None = Field(default=None, description="Subagent allowlist (None=all enabled, []=none)")
     model_settings: AgentModelSettings | None = Field(default=None, description="Per-agent sampling overrides (temperature / max_tokens)")
     thinking_enabled: bool | None = Field(default=None, description="Per-agent thinking-mode default (None = runtime default)")
     reasoning_effort: ReasoningEffort | None = Field(default=None, description="Per-agent reasoning-effort default (None = runtime default)")
@@ -76,6 +79,7 @@ class AgentUpdateRequest(BaseModel):
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Updated skill whitelist (None=all, []=none)")
+    allowed_subagents: list[str] | None = Field(default=None, description="Updated subagent allowlist (None=all, []=none)")
     model_settings: AgentModelSettings | None = Field(default=None, description="Updated per-agent sampling overrides")
     thinking_enabled: bool | None = Field(default=None, description="Updated per-agent thinking-mode default")
     reasoning_effort: ReasoningEffort | None = Field(default=None, description="Updated per-agent reasoning-effort default")
@@ -189,6 +193,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
         skills=agent_cfg.skills,
+        allowed_subagents=agent_cfg.allowed_subagents,
         model_settings=agent_cfg.model_settings,
         thinking_enabled=agent_cfg.thinking_enabled,
         reasoning_effort=agent_cfg.reasoning_effort,
@@ -247,10 +252,14 @@ async def check_agent_name(name: str) -> dict:
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
     user_id = get_effective_user_id()
+
     # Availability is defined by the active backend and stays consistent with
     # create()'s conflict rule (file: per-user or legacy dir; db: a row). The
     # exists() probe is filesystem IO / a DB round trip, so keep it off the loop.
-    exists = await asyncio.to_thread(get_agent_store().exists, normalized, user_id=user_id)
+    def _exists() -> bool:
+        return get_agent_store().exists(normalized, user_id=user_id)
+
+    exists = await asyncio.to_thread(_exists)
     return {"available": not exists, "name": normalized}
 
 
@@ -325,14 +334,15 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         config_data["tool_groups"] = request.tool_groups
     if request.skills is not None:
         config_data["skills"] = request.skills
+    if request.allowed_subagents is not None:
+        config_data["allowed_subagents"] = request.allowed_subagents
     # model / model_settings / thinking_enabled / reasoning_effort (issue #4336).
     _apply_model_behavior(config_data, request)
-
-    store = get_agent_store()
 
     def _create_agent() -> AgentResponse:
         # Worker thread: existence checks + persistence (file IO or a DB round
         # trip) must stay off the event loop.
+        store = get_agent_store()
         store.create(normalized_name, config_data, request.soul, user_id=user_id)
         logger.info("Created agent '%s'", normalized_name)
         agent_cfg = load_agent_config(normalized_name, user_id=user_id)
@@ -405,7 +415,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
         # This is critical for skills where None means "inherit all" (not "don't change").
         fields_set = request.model_fields_set
-        config_changed = bool(fields_set & ({"description", "tool_groups", "skills"} | set(_MODEL_BEHAVIOR_FIELDS)))
+        config_changed = bool(fields_set & ({"description", "tool_groups", "skills", "allowed_subagents"} | set(_MODEL_BEHAVIOR_FIELDS)))
 
         updated: dict | None = None
         if config_changed:
@@ -426,6 +436,11 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
             if new_skills is not None:
                 updated["skills"] = new_skills
 
+            # allowed_subagents: None = all, [] = hard deny, list = whitelist.
+            new_allowed_subagents = request.allowed_subagents if "allowed_subagents" in fields_set else agent_cfg.allowed_subagents
+            if new_allowed_subagents is not None:
+                updated["allowed_subagents"] = new_allowed_subagents
+
             # model / model_settings / thinking_enabled / reasoning_effort:
             # take explicitly-set request fields, else preserve the existing
             # value (issue #4336).
@@ -442,11 +457,14 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
             for key, value in preserve_non_managed_fields(agent_cfg).items():
                 updated.setdefault(key, value)
 
-        store = get_agent_store()
         # Persist config (when changed) and/or soul (when provided) off the
         # event loop. A no-change PATCH commits nothing and re-reads current state.
         if updated is not None or request.soul is not None:
-            await asyncio.to_thread(store.update, name, updated, request.soul, user_id=user_id)
+
+            def _update_agent() -> None:
+                get_agent_store().update(name, updated, request.soul, user_id=user_id)
+
+            await asyncio.to_thread(_update_agent)
 
         logger.info(f"Updated agent '{name}'")
 
@@ -549,11 +567,11 @@ async def delete_agent(name: str) -> None:
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
-    store = get_agent_store()
 
     try:
-        # Off the event loop: file rmtree or a DB delete plus memory cleanup.
-        outcome = await asyncio.to_thread(store.delete, name, user_id=user_id)
+        # Off the event loop: resolve store + cancel → delete → cancel-on-success
+        # (get_agent_store / memory manager do blocking config and FS I/O).
+        outcome = await asyncio.to_thread(_delete_agent_with_memory_cancel, name, user_id)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
@@ -572,3 +590,45 @@ async def delete_agent(name: str) -> None:
         )
 
     logger.info(f"Deleted agent '{name}'")
+
+
+def _delete_agent_with_memory_cancel(name: str, user_id: str | None) -> AgentDeleteOutcome:
+    """Cancel buffered memory, delete the agent, then cancel again on success.
+
+    Runs entirely in a worker thread so blocking store/memory/config I/O stays
+    off the event loop. Pre-delete cancel closes the debounce-timer race during
+    rmtree; post-success cancel covers work enqueued mid-delete. A rejected
+    delete may still drop buffered work; that update is re-fed on the next turn.
+    """
+    store = get_agent_store()
+    _cancel_pending_memory_for_agent(name, user_id)
+    outcome = store.delete(name, user_id=user_id)
+    if outcome == "deleted":
+        _cancel_pending_memory_for_agent(name, user_id)
+    return outcome
+
+
+def _cancel_pending_memory_for_agent(name: str, user_id: str | None) -> None:
+    """Best-effort cancel of buffered memory extraction for one agent scope.
+
+    Always attempts cancellation even if memory is currently disabled: settings
+    are hot-reloadable and disabling does not destroy an already-live queue.
+    Failure must never fail agent deletion: a dropped update is re-fed on the
+    next conversation turn per the queue contract.
+
+    Callers must run this off the event loop (blocking config/manager I/O).
+    """
+    try:
+        cancelled = get_memory_manager().cancel_by_agent(name, user_id=user_id)
+        if cancelled:
+            logger.info(
+                "Cancelled %d pending memory update(s) for agent '%s'",
+                cancelled,
+                name,
+            )
+    except Exception:
+        logger.warning(
+            "Failed to cancel pending memory updates for agent '%s' (non-fatal)",
+            name,
+            exc_info=True,
+        )

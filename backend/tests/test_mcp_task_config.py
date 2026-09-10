@@ -12,11 +12,18 @@ def test_mcp_task_runtime_is_disabled_by_default_and_bounded():
     assert config.poll_interval_seconds == 5
     assert config.lease_seconds == 120
     assert config.max_concurrent_polls == 8
+    assert config.max_poll_backoff_seconds == 300
+    assert config.input_required_poll_interval_seconds == 60
+    assert config.tracking_degraded_after_errors == 3
+    assert config.max_result_bytes == 65_536
+    assert config.result_preview_max_chars == 2_000
 
     with pytest.raises(ValidationError):
         McpTasksConfig(poll_interval_seconds=0)
     with pytest.raises(ValidationError):
         McpTasksConfig(max_concurrent_polls=0)
+    with pytest.raises(ValidationError):
+        McpTasksConfig(max_result_bytes=10)
 
 
 def test_mcp_task_runtime_is_registered_as_startup_only():

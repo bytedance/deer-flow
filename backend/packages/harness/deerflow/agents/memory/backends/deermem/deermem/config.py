@@ -18,6 +18,7 @@ DeerMem default); tracing is via the base ``MemoryManager.callbacks`` field
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Any, Literal
 
@@ -86,6 +87,27 @@ class DeerMemConfig(BaseModel):
     )
     # ── Facts ────────────────────────────────────────────────────────────
     max_facts: int = Field(default=100, ge=10, le=500, description="Maximum number of facts to store.")
+    fact_eviction_policy: Literal["confidence", "hybrid-v1"] = Field(
+        default="confidence",
+        description=("Capacity-eviction policy. 'confidence' preserves the historical behavior; 'hybrid-v1' combines confidence, explicit-confirmation freshness, and query-driven access heat with bounded correction slots."),
+    )
+    fact_eviction_shadow_enabled: bool = Field(
+        default=False,
+        description=("When true, also compute hybrid-v1 during confidence-policy trims and include its disagreement in the metadata-only eviction audit."),
+    )
+    eviction_confidence_weight: float = Field(default=0.65, ge=0.0, le=1.0)
+    eviction_confirmation_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    eviction_access_weight: float = Field(default=0.10, ge=0.0, le=1.0)
+    eviction_confirmation_half_life_days: int = Field(default=90, ge=1, le=3650)
+    eviction_access_half_life_days: int = Field(default=30, ge=1, le=3650)
+    eviction_correction_reserved_fraction: float = Field(default=0.10, ge=0.0, le=1.0)
+    eviction_correction_reserved_max: int = Field(default=10, ge=0, le=100)
+    eviction_audit_max_entries: int = Field(
+        default=200,
+        ge=0,
+        le=10000,
+        description="Maximum metadata-only capacity-eviction audit events per user/agent scope; 0 disables the audit.",
+    )
     fact_confidence_threshold: float = Field(
         default=0.7,
         ge=0.0,
@@ -298,6 +320,9 @@ class DeerMemConfig(BaseModel):
                     f"storage_path as a root DIRECTORY (per-user memory under "
                     f"{{storage_path}}/users/{{uid}}/memory.json). Point it at a directory."
                 )
+        weight_sum = self.eviction_confidence_weight + self.eviction_confirmation_weight + self.eviction_access_weight
+        if not math.isclose(weight_sum, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("DeerMem eviction weights must sum to 1.0")
         return self
 
     @classmethod

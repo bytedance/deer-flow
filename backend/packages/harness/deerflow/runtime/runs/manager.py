@@ -21,7 +21,13 @@ from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
-from .store.base import EditReplayVisibility
+from .store.base import (
+    EditReplayVisibility,
+    RunIdempotencyConflict,
+    normalize_run_created_at_iso,
+    run_is_before_cursor,
+    run_sort_key,
+)
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -55,6 +61,14 @@ _SQLITE_UNIQUE_ERRORCODE = sqlite3.SQLITE_CONSTRAINT_UNIQUE
 def _generate_worker_id() -> str:
     """Generate a unique worker identifier: ``hostname:hex_uuid``."""
     return f"{socket.gethostname()}:{uuid.uuid4().hex}"
+
+
+def _cursor_part(value: str | None) -> str | None:
+    """Treat missing/blank cursor fields as absent so a one-sided empty string fails."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _is_unique_violation(exc: BaseException) -> bool:
@@ -196,6 +210,10 @@ class RunRecord:
     # either known to be lost or could not be confirmed before expiry.
     ownership_lost: bool = False
     stop_reason: str | None = None
+    idempotency_key: str | None = None
+    # True only on the caller that recovered an existing idempotent admission;
+    # that caller must not attach a second worker to the durable run.
+    idempotency_reused: bool = False
 
 
 class RunStartOutcome(StrEnum):
@@ -292,6 +310,7 @@ class RunManager:
             "model_name": record.model_name,
             "owner_worker_id": record.owner_worker_id,
             "lease_expires_at": record.lease_expires_at,
+            "idempotency_key": record.idempotency_key,
         }
         if record.user_id is not None:
             payload["user_id"] = record.user_id
@@ -466,6 +485,7 @@ class RunManager:
             owner_worker_id=row.get("owner_worker_id"),
             lease_expires_at=row.get("lease_expires_at"),
             stop_reason=row.get("stop_reason"),
+            idempotency_key=row.get("idempotency_key"),
         )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
@@ -543,6 +563,26 @@ class RunManager:
             except Exception:
                 logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
 
+    async def update_finalizing_progress(self, run_id: str, **kwargs) -> None:
+        """Persist final fields while the durable row is deliberately active."""
+        should_persist = False
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is not None and not record.ownership_lost:
+                should_persist = record.status not in (RunStatus.pending, RunStatus.running)
+                if should_persist:
+                    for key, value in kwargs.items():
+                        if hasattr(record, key) and value is not None:
+                            setattr(record, key, value)
+                    record.updated_at = _now_iso()
+        if should_persist and self._store is not None:
+            try:
+                # The local status is already staged as terminal, but the store
+                # row intentionally remains running until checkpoint finalization.
+                await self._store.update_run_progress(run_id, **kwargs)
+            except Exception:
+                logger.warning("Failed to persist finalizing progress for %s", run_id, exc_info=True)
+
     async def create(
         self,
         thread_id: str,
@@ -599,12 +639,20 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
-    async def get(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+    async def get(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        raise_on_store_error: bool = False,
+    ) -> RunRecord | None:
         """Return a run record by ID, or ``None``.
 
         Args:
             run_id: The run ID to look up.
             user_id: Optional user ID for permission filtering when hydrating from store.
+            raise_on_store_error: Propagate store hydration/mapping failures so
+                lifecycle callers can distinguish them from a missing run.
         """
         async with self._lock:
             record = self._runs.get(run_id)
@@ -615,6 +663,8 @@ class RunManager:
         try:
             row = await self._store.get(run_id, user_id=user_id)
         except Exception:
+            if raise_on_store_error:
+                raise
             logger.warning("Failed to hydrate run %s from store", run_id, exc_info=True)
             return None
         # Re-check after store await: a concurrent create() may have inserted the
@@ -628,32 +678,80 @@ class RunManager:
         try:
             return self._record_from_store(row)
         except Exception:
+            if raise_on_store_error:
+                raise
             logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
             return None
 
-    async def aget(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+    async def aget(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        raise_on_store_error: bool = False,
+    ) -> RunRecord | None:
         """Return a run record by ID, checking the persistent store as fallback.
 
         Alias for :meth:`get` for backward compatibility.
         """
-        return await self.get(run_id, user_id=user_id)
+        return await self.get(
+            run_id,
+            user_id=user_id,
+            raise_on_store_error=raise_on_store_error,
+        )
 
-    async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100) -> list[RunRecord]:
+    async def list_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+        limit: int = 100,
+        before_created_at: str | None = None,
+        before_run_id: str | None = None,
+    ) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
 
         In-memory runs take precedence only when the same ``run_id`` exists in both
         memory and the backing store. The merged result is then sorted newest-first
-        by ``created_at`` and trimmed to ``limit`` (default 100).
+        by ``(created_at, run_id)`` and trimmed to ``limit`` (default 100).
+        Optional ``before_created_at`` + ``before_run_id`` is a keyset cursor for
+        walking older pages; both must be provided together.
 
         Args:
             thread_id: The thread ID to filter by.
             user_id: Optional user ID for permission filtering when hydrating from store.
             limit: Maximum number of runs to return.
+            before_created_at: ISO timestamp of the last run on the previous page.
+            before_run_id: Run id of the last run on the previous page.
         """
+        before_created_at = _cursor_part(before_created_at)
+        before_run_id = _cursor_part(before_run_id)
+        if (before_created_at is None) != (before_run_id is None):
+            raise ValueError("before_created_at and before_run_id must be provided together")
+        if before_created_at is not None:
+            try:
+                before_created_at = normalize_run_created_at_iso(before_created_at)
+                datetime.fromisoformat(before_created_at)
+            except ValueError:
+                raise ValueError("before_created_at must be an ISO-8601 timestamp") from None
+
+        def _page(records: list[RunRecord]) -> list[RunRecord]:
+            return sorted(records, key=lambda record: run_sort_key(record.created_at, record.run_id), reverse=True)[:limit]
+
         async with self._lock:
-            memory_records = [record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run]
+            memory_records = [
+                record
+                for record in self._thread_records_locked(thread_id)
+                if record.operation_kind == ThreadOperationKind.run
+                and run_is_before_cursor(
+                    record.created_at,
+                    record.run_id,
+                    before_created_at=before_created_at,
+                    before_run_id=before_run_id,
+                )
+            ]
         if self._store is None:
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+            return _page(memory_records)
         records_by_id = {record.run_id: record for record in memory_records}
         # Query enough rows to cover both the requested page and every possible
         # in-memory/store duplicate. Local records can be older than persisted
@@ -661,11 +759,15 @@ class RunManager:
         # newest run before the merge; querying only ``limit`` can still lose a
         # distinct row when that page is occupied by duplicate local records.
         store_limit = limit + len(memory_records)
+        store_kwargs: dict[str, Any] = {"user_id": user_id, "limit": store_limit}
+        if before_created_at is not None and before_run_id is not None:
+            store_kwargs["before_created_at"] = before_created_at
+            store_kwargs["before_run_id"] = before_run_id
         try:
-            rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=store_limit)
+            rows = await self._store.list_by_thread(thread_id, **store_kwargs)
         except Exception:
             logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
-            return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
+            return _page(memory_records)
         for row in rows:
             run_id = row.get("run_id")
             if run_id and run_id not in records_by_id:
@@ -673,7 +775,7 @@ class RunManager:
                     records_by_id[run_id] = self._record_from_store(row)
                 except Exception:
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
-        return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
+        return _page(list(records_by_id.values()))
 
     async def list_successful_regenerate_sources(
         self,
@@ -1384,6 +1486,7 @@ class RunManager:
         multitask_strategy: str = "reject",
         model_name: str | None = None,
         user_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -1396,6 +1499,7 @@ class RunManager:
             multitask_strategy=multitask_strategy,
             model_name=model_name,
             user_id=user_id,
+            idempotency_key=idempotency_key,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -1455,6 +1559,7 @@ class RunManager:
         multitask_strategy: str = "reject",
         model_name: str | None = None,
         user_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -1497,9 +1602,31 @@ class RunManager:
             model_name=model_name,
             owner_worker_id=self._worker_id,
             lease_expires_at=lease_expires_at,
+            idempotency_key=idempotency_key,
         )
 
         async with self._lock:
+            if idempotency_key is not None:
+                for existing in self._runs.values():
+                    if existing.idempotency_key != idempotency_key:
+                        continue
+                    if existing.thread_id != thread_id or existing.user_id != user_id:
+                        raise RuntimeError("Run idempotency key resolved to a different thread or user")
+                    existing.idempotency_reused = True
+                    return existing
+
+            def reuse_idempotent_run(conflict: RunIdempotencyConflict) -> RunRecord:
+                existing = self._record_from_store(conflict.existing)
+                if existing.thread_id != thread_id or existing.user_id != user_id:
+                    raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
+                current = self._runs.get(existing.run_id)
+                if current is None:
+                    self._runs[existing.run_id] = existing
+                    self._index_run_locked(existing)
+                    current = existing
+                current.idempotency_reused = True
+                return current
+
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
             local_inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing]
@@ -1522,26 +1649,31 @@ class RunManager:
             #    store is the source of truth for cross-process atomicity.
             if self._store is not None:
                 if multitask_strategy == "reject":
+                    create_kwargs = {
+                        "run_id": run_id,
+                        "thread_id": thread_id,
+                        "owner_worker_id": self._worker_id,
+                        "lease_expires_at": lease_expires_at,
+                        "operation_kind": operation_kind.value,
+                        "multitask_strategy": "reject",
+                        "assistant_id": assistant_id,
+                        "user_id": user_id,
+                        "model_name": model_name,
+                        "metadata": metadata,
+                        "kwargs": kwargs,
+                        "created_at": now,
+                        "grace_seconds": grace_seconds,
+                    }
+                    if idempotency_key is not None:
+                        create_kwargs["idempotency_key"] = idempotency_key
                     try:
                         await self._call_store_with_retry(
                             "create_thread_operation_atomic",
                             run_id,
-                            lambda: self._store.create_thread_operation_atomic(
-                                run_id=run_id,
-                                thread_id=thread_id,
-                                owner_worker_id=self._worker_id,
-                                lease_expires_at=lease_expires_at,
-                                operation_kind=operation_kind.value,
-                                multitask_strategy="reject",
-                                assistant_id=assistant_id,
-                                user_id=user_id,
-                                model_name=model_name,
-                                metadata=metadata,
-                                kwargs=kwargs,
-                                created_at=now,
-                                grace_seconds=grace_seconds,
-                            ),
+                            lambda: self._store.create_thread_operation_atomic(**create_kwargs),
                         )
+                    except RunIdempotencyConflict as exc:
+                        return reuse_idempotent_run(exc)
                     except ConflictError:
                         raise
                     except Exception as exc:
@@ -1549,6 +1681,23 @@ class RunManager:
                             raise ConflictError(f"Thread {thread_id} already has an active run") from exc
                         raise
                 else:
+                    create_kwargs = {
+                        "run_id": run_id,
+                        "thread_id": thread_id,
+                        "owner_worker_id": self._worker_id,
+                        "lease_expires_at": lease_expires_at,
+                        "operation_kind": operation_kind.value,
+                        "multitask_strategy": multitask_strategy,
+                        "assistant_id": assistant_id,
+                        "user_id": user_id,
+                        "model_name": model_name,
+                        "metadata": metadata,
+                        "kwargs": kwargs,
+                        "created_at": now,
+                        "grace_seconds": grace_seconds,
+                    }
+                    if idempotency_key is not None:
+                        create_kwargs["idempotency_key"] = idempotency_key
                     # Interrupt / rollback: store-side claim + insert in one
                     # transaction. Retry on IntegrityError in case another
                     # worker races us between our SELECT FOR UPDATE and INSERT.
@@ -1558,23 +1707,11 @@ class RunManager:
                             await self._call_store_with_retry(
                                 "create_thread_operation_atomic",
                                 run_id,
-                                lambda: self._store.create_thread_operation_atomic(
-                                    run_id=run_id,
-                                    thread_id=thread_id,
-                                    owner_worker_id=self._worker_id,
-                                    lease_expires_at=lease_expires_at,
-                                    operation_kind=operation_kind.value,
-                                    multitask_strategy=multitask_strategy,
-                                    assistant_id=assistant_id,
-                                    user_id=user_id,
-                                    model_name=model_name,
-                                    metadata=metadata,
-                                    kwargs=kwargs,
-                                    created_at=now,
-                                    grace_seconds=grace_seconds,
-                                ),
+                                lambda: self._store.create_thread_operation_atomic(**create_kwargs),
                             )
                             break
+                        except RunIdempotencyConflict as exc:
+                            return reuse_idempotent_run(exc)
                         except Exception as exc:
                             is_unique = _is_unique_violation(exc)
                             if is_unique and attempt + 1 < max_retries:

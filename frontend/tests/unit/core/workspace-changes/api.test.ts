@@ -47,4 +47,8 @@ test("fetchWorkspaceChanges can request file metadata without diffs", async () =
   const url = new URL(requestedUrl, "http://localhost");
   expect(url.searchParams.get("include_files")).toBe("true");
   expect(url.searchParams.get("include_diff")).toBe("false");
+  expect(fetchMock).toHaveBeenCalledWith(
+    expect.any(String),
+    expect.objectContaining({ credentials: "include" }),
+  );
 });

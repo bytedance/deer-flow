@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
+
+from deerflow.utils.time import coerce_iso
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,71 @@ class StatusFinalization:
     cancel_action: str | None = None
 
 
+class RunIdempotencyConflict(RuntimeError):
+    """A run with the requested process-wide idempotency key already exists."""
+
+    def __init__(self, existing: dict[str, Any]) -> None:
+        super().__init__(f"Run idempotency key already belongs to {existing.get('run_id')}")
+        self.existing = existing
+
+
+def normalize_run_created_at_iso(value: str) -> str:
+    """Make a run timestamp parseable as ISO-8601.
+
+    ``Z`` becomes ``+00:00``. An unencoded ``+`` in a query string arrives as a
+    space (``...T00:00:00 00:00``); restore the offset ``+``.
+    """
+    value = value.strip().replace("Z", "+00:00")
+    if "T" in value and " " in value and "+" not in value.split("T", 1)[1]:
+        date, _, rest = value.partition("T")
+        time_part, sep, offset = rest.rpartition(" ")
+        if sep and offset.replace(":", "").isdigit():
+            value = f"{date}T{time_part}+{offset}"
+    return value
+
+
+def format_run_cursor_created_at(value: str) -> str:
+    """UTC keyset cursor using ``Z`` so ``+`` is not decoded as space in query strings."""
+    dt = datetime.fromisoformat(normalize_run_created_at_iso(value))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    else:
+        dt = dt.astimezone(UTC)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def parse_run_created_at(value: object) -> datetime:
+    """Parse a stored run timestamp into an aware UTC datetime for keyset order."""
+    iso = coerce_iso(value)
+    if not iso:
+        return datetime.min.replace(tzinfo=UTC)
+    try:
+        dt = datetime.fromisoformat(normalize_run_created_at_iso(iso))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def run_sort_key(created_at: object, run_id: str) -> tuple[datetime, str]:
+    """Total order for newest-first run listings: ``created_at`` then ``run_id``."""
+    return (parse_run_created_at(created_at), run_id)
+
+
+def run_is_before_cursor(
+    created_at: object,
+    run_id: str,
+    *,
+    before_created_at: str | None,
+    before_run_id: str | None,
+) -> bool:
+    """Return True when ``(created_at, run_id)`` is older than the keyset cursor."""
+    if not before_created_at or not before_run_id:
+        return True
+    return run_sort_key(created_at, run_id) < run_sort_key(before_created_at, before_run_id)
+
+
 class RunStore(abc.ABC):
     @abc.abstractmethod
     async def put(
@@ -61,6 +129,7 @@ class RunStore(abc.ABC):
         created_at: str | None = None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         pass
 
@@ -80,6 +149,8 @@ class RunStore(abc.ABC):
         *,
         user_id: str | None = None,
         limit: int = 100,
+        before_created_at: str | None = None,
+        before_run_id: str | None = None,
     ) -> list[dict[str, Any]]:
         pass
 
@@ -338,6 +409,7 @@ class RunStore(abc.ABC):
         kwargs: dict[str, Any] | None = None,
         created_at: str | None = None,
         grace_seconds: int = 10,
+        idempotency_key: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -354,6 +426,8 @@ class RunStore(abc.ABC):
             raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")
         if operation_kind != "run":
             raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot create non-run thread operations")
+        if idempotency_key is not None:
+            raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot guarantee idempotent admission")
         return await self.create_run_atomic(
             run_id,
             thread_id=thread_id,

@@ -77,6 +77,9 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         # after the run returns; bounded so abandoned runs cannot leak.
         self._stop_reason: BoundedDict[str, str] = BoundedDict(1000)
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {"config": self._config.model_dump(mode="python")}
+
     @classmethod
     def from_config(cls, config: TokenBudgetConfig) -> TokenBudgetMiddleware:
         return cls(config=config)

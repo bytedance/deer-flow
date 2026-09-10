@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import mimetypes
 import re
 import time
@@ -39,7 +40,7 @@ from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, gene
 # ChannelManager construction sees the same policy map as gateway bootstrap.
 from app.gateway.github import run_policy as _github_run_policy  # noqa: F401
 from app.gateway.internal_auth import create_internal_auth_headers
-from deerflow.config.agents_config import load_agent_config
+from deerflow.config.agents_config import list_custom_agents, load_agent_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
 from deerflow.runtime.goal import parse_goal_command
@@ -47,6 +48,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
+from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
@@ -54,7 +56,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_LANGGRAPH_URL = "http://localhost:8001/api"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
+DEFAULT_CHANNEL_MAX_CONCURRENCY = 5
+DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS = 3.0
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+CHANNEL_AGENT_METADATA_KEY = "channel_agent_name"
+THREAD_AGENT_METADATA_KEY = "agent_name"
+MAX_CHANNEL_AGENT_LIST_ITEMS = 50
+MAX_CHANNEL_AGENT_DESCRIPTION_CHARS = 120
 
 # Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
 # This is independent of subagent depth: a `task()` dispatch runs the whole
@@ -335,6 +343,37 @@ def _normalize_custom_agent_name(raw_value: str) -> str:
     if not CUSTOM_AGENT_NAME_PATTERN.fullmatch(normalized):
         raise InvalidChannelSessionConfigError(f"Invalid channel session assistant_id {raw_value!r}. Use 'lead_agent' or a custom agent name containing only letters, digits, and hyphens.")
     return normalized
+
+
+def _apply_explicit_agent_choice(
+    run_config: dict[str, Any],
+    run_context: dict[str, Any],
+    agent_name: str | None,
+) -> None:
+    """Pin or clear an explicit channel agent in every runtime carrier.
+
+    Gateway accepts ``agent_name`` from the request's top-level context and
+    from either RunnableConfig container. Its compatibility merge preserves
+    existing values with ``setdefault``, so an explicit ``/agent use`` choice
+    must normalize all three carriers before the request crosses that boundary.
+    ``None`` represents an explicit reset to the default lead agent.
+    """
+    carriers = [run_context]
+    for section in ("configurable", "context"):
+        value = run_config.get(section)
+        if isinstance(value, Mapping):
+            # Session layers own their nested dictionaries. Copy before changing
+            # one so selecting an agent for a conversation cannot mutate the
+            # manager's reusable channel configuration.
+            copied = dict(value)
+            run_config[section] = copied
+            carriers.append(copied)
+
+    for carrier in carriers:
+        if agent_name is None:
+            carrier.pop("agent_name", None)
+        else:
+            carrier["agent_name"] = agent_name
 
 
 def _extract_response_text(result: dict | list) -> str:
@@ -984,7 +1023,8 @@ class ChannelManager:
         bus: MessageBus,
         store: ChannelStore,
         *,
-        max_concurrency: int = 5,
+        max_concurrency: int = DEFAULT_CHANNEL_MAX_CONCURRENCY,
+        shutdown_grace_period_seconds: float = DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS,
         langgraph_url: str = DEFAULT_LANGGRAPH_URL,
         gateway_url: str = DEFAULT_GATEWAY_URL,
         assistant_id: str = DEFAULT_ASSISTANT_ID,
@@ -995,9 +1035,14 @@ class ChannelManager:
         inbound_dedupe_store: InboundDedupeStore | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
     ) -> None:
+        if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency <= 0:
+            raise ValueError("max_concurrency must be a positive integer")
+        if isinstance(shutdown_grace_period_seconds, bool) or not isinstance(shutdown_grace_period_seconds, (int, float)) or not math.isfinite(shutdown_grace_period_seconds) or shutdown_grace_period_seconds < 0:
+            raise ValueError("shutdown_grace_period_seconds must be a non-negative finite number")
         self.bus = bus
         self.store = store
         self._max_concurrency = max_concurrency
+        self._shutdown_grace_period_seconds = float(shutdown_grace_period_seconds)
         self._langgraph_url = langgraph_url
         self._gateway_url = gateway_url
         self._assistant_id = assistant_id
@@ -1015,6 +1060,11 @@ class ChannelManager:
         self._get_stream_bridge = get_stream_bridge
         self._client = None  # lazy init — langgraph_sdk async client
         self._channel_metadata_synced: set[str] = set()
+        # Explicit /agent selections are pinned to the newly-created thread.
+        # Cache the durable thread metadata so the hot path does not GET the
+        # same thread before every turn; None distinguishes a checked default
+        # thread from a thread that has not been inspected yet.
+        self._thread_agent_names: dict[str, str | None] = {}
         # Per-conversation locks so concurrent inbound messages for the same
         # chat don't race to create duplicate threads (see _get_or_create_thread).
         self._thread_create_locks: dict[tuple[str, str, str | None], asyncio.Lock] = {}
@@ -1023,7 +1073,6 @@ class ChannelManager:
         self._serialized_thread_runs: dict[tuple[str, str], _SerializedThreadRunState] = {}
         self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
-        self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         # Distinct from self._running: that flag is also False before the
         # very first start() (so tests that call internal drain/handler
@@ -1031,7 +1080,11 @@ class ChannelManager:
         # working unchanged). self._stopped tracks specifically whether
         # stop() has run, for the follow-up drain guard below.
         self._stopped = False
-        self._task: asyncio.Task | None = None
+        # Fixed, long-lived workers own message handling end to end. The pool
+        # size is the only number of handler coroutines that can exist; inbound
+        # bursts remain as bounded queue entries instead of semaphore-waiting
+        # task-per-message fan-out.
+        self._worker_tasks: set[asyncio.Task[None]] = set()
         # Inbound webhook dedupe store. Defaults to the in-process Memory store
         # (pre-#4120 behavior). Multi-pod deployments inject a shared store so
         # duplicate deliveries landing on different pods are collapsed.
@@ -1211,7 +1264,7 @@ class ChannelManager:
         threaded in — e.g. a ``ChannelManager`` constructed directly without
         going through ``start_channel_service()`` — so tests and any
         not-yet-wired deployment never see a dangling background task for
-        this. When wired, mirrors the existing ``_dispatch_loop`` pattern:
+        this. When wired, mirrors the worker-task error-reporting pattern:
         ``asyncio.create_task`` + ``add_done_callback(self._log_task_error)``
         so an unexpected watcher failure is surfaced in the logs instead of
         silently vanishing. The task is also tracked in
@@ -1219,7 +1272,7 @@ class ChannelManager:
         so ``stop()`` can cancel+await any watcher still in flight instead of
         leaving it to fire a follow-up run after shutdown.
         """
-        if self._get_stream_bridge is None:
+        if self._get_stream_bridge is None or self._stopped:
             return
 
         run_id = run_result.get("run_id") if isinstance(run_result, dict) else None
@@ -1397,7 +1450,8 @@ class ChannelManager:
         if isinstance(meta_assistant_id, str) and meta_assistant_id.strip():
             message_assistant_id = meta_assistant_id
 
-        assistant_id = message_assistant_id or user_layer.get("assistant_id") or channel_layer.get("assistant_id") or self._default_session.get("assistant_id") or self._assistant_id
+        thread_assistant_id = self._thread_agent_names.get(thread_id)
+        assistant_id = message_assistant_id or thread_assistant_id or user_layer.get("assistant_id") or channel_layer.get("assistant_id") or self._default_session.get("assistant_id") or self._assistant_id
         if not isinstance(assistant_id, str) or not assistant_id.strip():
             assistant_id = self._assistant_id
 
@@ -1448,12 +1502,23 @@ class ChannelManager:
             run_context_identity,
         )
 
+        explicit_agent_choice = message_assistant_id is not None or thread_assistant_id is not None
         # Custom agents are implemented as lead_agent + agent_name context.
         # Keep backward compatibility for channel configs that set
         # assistant_id: <custom-agent-name> by routing through lead_agent.
         if assistant_id != DEFAULT_ASSISTANT_ID:
-            run_context.setdefault("agent_name", _normalize_custom_agent_name(assistant_id))
+            normalized_agent_name = _normalize_custom_agent_name(assistant_id)
+            if explicit_agent_choice:
+                _apply_explicit_agent_choice(run_config, run_context, normalized_agent_name)
+            else:
+                run_context.setdefault("agent_name", normalized_agent_name)
             assistant_id = DEFAULT_ASSISTANT_ID
+        elif explicit_agent_choice:
+            # An explicit lead_agent selection is also a real pin: discard a
+            # configured agent in every Gateway-supported carrier so
+            # /agent use lead_agent cannot claim to reset the conversation
+            # while silently routing elsewhere.
+            _apply_explicit_agent_choice(run_config, run_context, None)
 
         # Apply per-channel run policy (recursion_limit bump for webhook
         # channels, etc.). Looking the policy up by channel_name keeps
@@ -1522,8 +1587,13 @@ class ChannelManager:
                 )
         return policy
 
-    def _resolve_available_skill_names(self, msg: InboundMessage) -> set[str] | None:
-        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
+    def _resolve_available_skill_names(
+        self,
+        msg: InboundMessage,
+        thread_id: str | None = None,
+    ) -> set[str] | None:
+        if thread_id is None:
+            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
         _, _, run_context = self._resolve_run_params(msg, thread_id)
         if run_context.get("is_bootstrap"):
             return {"bootstrap"}
@@ -1566,77 +1636,180 @@ class ChannelManager:
     # -- lifecycle ---------------------------------------------------------
 
     async def start(self) -> None:
-        """Start the dispatch loop."""
+        """Open inbound admission and start the fixed message-worker pool."""
         if self._running:
             return
+        unfinished_workers = {task for task in self._worker_tasks if not task.done()}
+        if unfinished_workers:
+            raise RuntimeError("cannot restart ChannelManager while workers are still running")
+        self._worker_tasks.clear()
         self._running = True
         self._stopped = False
-        self._semaphore = asyncio.Semaphore(self._max_concurrency)
-        self._task = asyncio.create_task(self._dispatch_loop())
-        logger.info("ChannelManager started (max_concurrency=%d)", self._max_concurrency)
+        self.bus.open_inbound()
+        self._worker_tasks = {
+            asyncio.create_task(
+                self._worker_loop(worker_index),
+                name=f"deerflow-channel-worker-{worker_index}",
+            )
+            for worker_index in range(self._max_concurrency)
+        }
+        for task in self._worker_tasks:
+            task.add_done_callback(self._log_task_error)
+            task.add_done_callback(self._worker_tasks.discard)
+        logger.info(
+            "ChannelManager started (workers=%d, inbound_queue_maxsize=%d, shutdown_grace=%.1fs)",
+            self._max_concurrency,
+            self.bus.inbound_queue_maxsize,
+            self._shutdown_grace_period_seconds,
+        )
 
-    async def stop(self) -> None:
-        """Stop the dispatch loop."""
+    def begin_shutdown(self) -> int:
+        """Close admission while leaving workers alive to drain accepted work."""
         self._running = False
         self._stopped = True
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        return self.bus.close_inbound()
 
-        # Follow-up watchers are long-lived background tasks (they await a
-        # run's full stream, which can take minutes) started outside the
-        # dispatch loop, so cancelling self._task above does not touch them.
-        # Left unmanaged, one still subscribed to a run that ends AFTER this
-        # point would drain its buffer and fire a brand new runs.create()
-        # into a manager that has already been stopped.
+    async def stop(self) -> None:
+        """Drain accepted work, then cancel and await every owned task.
+
+        Admission closes immediately, but workers keep processing the accepted
+        queue for ``shutdown_grace_period_seconds`` so provider acknowledgments
+        are normally followed by a final response. Once that grace expires,
+        workers are cancelled. A successful return means no worker or follow-up
+        watcher can continue using channel resources. The Gateway lifespan owns
+        the process-level timeout; if it cancels this coroutine, transports stay
+        attached to the service and shutdown can be retried.
+        """
+        invalidated_reservations = self.begin_shutdown()
+        loop = asyncio.get_running_loop()
+        grace_deadline = loop.time() + self._shutdown_grace_period_seconds
+        worker_tasks = list(self._worker_tasks)
         watcher_tasks = list(self._followup_watcher_tasks)
+
+        # Watchers can create follow-up runs and are not acknowledgments for
+        # this accepted queue. Stop them immediately; active workers are still
+        # allowed to finish their current/queued messages during the grace.
         for task in watcher_tasks:
             task.cancel()
-        for task in watcher_tasks:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("[Manager] follow-up watcher task raised during stop()")
-        self._followup_watcher_tasks.clear()
+
+        join_task = asyncio.create_task(self.bus.join_inbound(), name="deerflow-channel-inbound-drain")
+        drained = False
+        try:
+            done, _ = await asyncio.wait({join_task}, timeout=max(0.0, grace_deadline - loop.time()))
+            drained = join_task in done and not join_task.cancelled() and join_task.exception() is None
+        except asyncio.CancelledError:
+            for task in worker_tasks:
+                task.cancel()
+            discarded_messages = self.bus.discard_pending_inbound()
+            if not join_task.done():
+                join_task.cancel()
+            if invalidated_reservations or discarded_messages:
+                logger.warning(
+                    "[Manager] cancelled shutdown rejected pending inbound work: reservations=%d, queued_messages=%d",
+                    invalidated_reservations,
+                    discarded_messages,
+                )
+            raise
+
+        if not drained:
+            logger.warning(
+                "[Manager] graceful shutdown period expired after %.1fs; cancelling active handlers",
+                self._shutdown_grace_period_seconds,
+            )
+
+        for task in worker_tasks:
+            task.cancel()
+
+        # Anything still queued never started and must not keep Queue.join()
+        # pending after its workers have been cancelled.
+        discarded_messages = self.bus.discard_pending_inbound()
+        if not join_task.done():
+            join_task.cancel()
+
+        owned_tasks = {task for task in (*worker_tasks, *watcher_tasks, join_task) if not task.done()}
+        if owned_tasks:
+            await asyncio.gather(*owned_tasks, return_exceptions=True)
+
+        for task in tuple(self._worker_tasks):
+            if task.done():
+                self._worker_tasks.discard(task)
+        for task in tuple(self._followup_watcher_tasks):
+            if task.done():
+                self._followup_watcher_tasks.discard(task)
+
+        if invalidated_reservations or discarded_messages:
+            logger.warning(
+                "[Manager] shutdown rejected pending inbound work: reservations=%d, queued_messages=%d",
+                invalidated_reservations,
+                discarded_messages,
+            )
 
         logger.info("ChannelManager stopped")
 
-    # -- dispatch loop -----------------------------------------------------
+    # -- worker pool -------------------------------------------------------
 
-    async def _dispatch_loop(self) -> None:
-        logger.info("[Manager] dispatch loop started, waiting for inbound messages")
-        while self._running:
+    async def _worker_loop(self, worker_index: int) -> None:
+        logger.info("[Manager] inbound worker %d started", worker_index)
+        # Closing admission flips ``_running`` to False, but queued messages
+        # were already accepted (and providers may already have acknowledged
+        # them). Keep draining until the queue is empty; stop() then cancels
+        # workers that are idle in get_inbound().
+        while self._running or not self.bus.inbound_queue.empty():
             try:
-                msg = await asyncio.wait_for(self.bus.get_inbound(), timeout=1.0)
-            except TimeoutError:
-                continue
+                msg = await self.bus.get_inbound()
             except asyncio.CancelledError:
-                break
+                raise
 
-            # Dedupe before logging "received" so a provider retrying an event N
-            # times does not log N accepts; duplicates are logged once as ignored.
-            # Note: this manager-level dedupe only guards the agent run / final
-            # answer. Provider adapters may emit ack side-effects (a "Working on
-            # it…" reply, an "eyes" reaction) before publish_inbound, so those are
-            # intentionally not deduped here.
-            if await self._is_duplicate_inbound(msg):
-                continue
-            logger.info(
-                "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
-                msg.channel_name,
-                msg.chat_id,
-                msg.msg_type.value,
-                len(msg.text or ""),
-                len(msg.files),
-            )
-            task = asyncio.create_task(self._handle_message(msg))
-            task.add_done_callback(self._log_task_error)
+            # Inbound IM messages are a non-HTTP entry point: channels hold
+            # long-lived provider connections, so no ASGI middleware ever runs
+            # for them. Scope one trace id per message here -- the worker task
+            # is long-lived and reused, so the scope must close with the
+            # message rather than leak into the next one.
+            with ensure_trace_context():
+                dedupe_recorded = False
+                try:
+                    # Dedupe before logging "received" so a provider retrying an
+                    # event N times does not log N accepts. Provider ack side
+                    # effects may still happen before this manager-level dedupe.
+                    if await self._is_duplicate_inbound(msg):
+                        continue
+                    dedupe_recorded = self._inbound_dedupe_key(msg) is not None
+                    logger.info(
+                        "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
+                        msg.channel_name,
+                        msg.chat_id,
+                        msg.msg_type.value,
+                        len(msg.text or ""),
+                        len(msg.files),
+                    )
+                    # Deliberately awaited inline: never create a task per message.
+                    await self._handle_message(msg)
+                except asyncio.CancelledError:
+                    # A cancellation after dedupe admission must make provider
+                    # redelivery retryable rather than retaining a TTL-long key for
+                    # work that never completed.
+                    if dedupe_recorded:
+                        try:
+                            await self._release_inbound_dedupe_key(msg)
+                        except Exception:
+                            logger.exception("[Manager] failed to release inbound dedupe key during worker cancellation")
+                    raise
+                except Exception:
+                    logger.exception(
+                        "[Manager] inbound worker %d failed handling channel=%s chat_id=%s",
+                        worker_index,
+                        msg.channel_name,
+                        msg.chat_id,
+                    )
+                    if dedupe_recorded:
+                        try:
+                            await self._release_inbound_dedupe_key(msg)
+                        except Exception:
+                            # A dedupe backend outage must not shrink the fixed
+                            # worker pool by letting cleanup escape this loop.
+                            logger.exception("[Manager] failed to release inbound dedupe key after worker error")
+                finally:
+                    self.bus.inbound_task_done()
 
     @staticmethod
     def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
@@ -1716,8 +1889,7 @@ class ChannelManager:
     async def _handle_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
         try:
-            # Non-command chat can be rejected before it consumes a semaphore
-            # slot. Commands are handled below because provider adapters consume
+            # Commands are handled below because provider adapters consume
             # binding commands before manager dispatch, and _handle_command()
             # applies its own admission gate for manager-level commands.
             bound_identity_rejection = None
@@ -1727,11 +1899,10 @@ class ChannelManager:
                 await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
                 return
 
-            async with self._semaphore:
-                if msg.msg_type == InboundMessageType.COMMAND:
-                    await self._handle_command(msg)
-                else:
-                    await self._handle_chat(msg, bound_identity_checked=True)
+            if msg.msg_type == InboundMessageType.COMMAND:
+                await self._handle_command(msg)
+            else:
+                await self._handle_chat(msg, bound_identity_checked=True)
         except InvalidChannelSessionConfigError as exc:
             logger.warning(
                 "Invalid channel session config for %s (chat=%s): %s",
@@ -1862,9 +2033,52 @@ class ChannelManager:
             user_id=msg.user_id,
         )
 
-    async def _create_thread(self, client, msg: InboundMessage) -> str:
+    def _remember_thread_agent(self, thread_id: str, agent_name: str | None) -> None:
+        if len(self._thread_agent_names) > 4096:
+            self._thread_agent_names.clear()
+        self._thread_agent_names[thread_id] = agent_name
+
+    async def _load_thread_agent(self, client, msg: InboundMessage, thread_id: str) -> str | None:
+        """Load an explicit channel agent selection from durable thread metadata."""
+        if thread_id in self._thread_agent_names:
+            return self._thread_agent_names[thread_id]
+
+        get_kwargs: dict[str, Any] = {}
+        if owner_headers := _owner_headers(msg):
+            get_kwargs["headers"] = owner_headers
+        thread = await client.threads.get(thread_id, **get_kwargs)
+        metadata = thread.get("metadata") if isinstance(thread, Mapping) else None
+        raw_agent_name = metadata.get(CHANNEL_AGENT_METADATA_KEY) if isinstance(metadata, Mapping) else None
+        agent_name: str | None = None
+        if isinstance(raw_agent_name, str) and raw_agent_name.strip():
+            if raw_agent_name.strip().lower() == DEFAULT_ASSISTANT_ID:
+                agent_name = DEFAULT_ASSISTANT_ID
+            else:
+                try:
+                    agent_name = _normalize_custom_agent_name(raw_agent_name)
+                except InvalidChannelSessionConfigError as exc:
+                    raise InvalidChannelSessionConfigError("This conversation has an invalid stored agent selection. Use /agent use <name> to start a valid conversation.") from exc
+        self._remember_thread_agent(thread_id, agent_name)
+        return agent_name
+
+    async def _create_thread(
+        self,
+        client,
+        msg: InboundMessage,
+        *,
+        agent_name: str | None = None,
+    ) -> str:
         """Create a new thread through Gateway and store the mapping."""
         metadata = _thread_channel_metadata(msg)
+        if agent_name is not None:
+            metadata[CHANNEL_AGENT_METADATA_KEY] = agent_name
+            # Web thread search returns metadata but no run context. Persist the
+            # canonical key consumed by ``pathOfThread`` so opening this IM
+            # conversation in the browser keeps the same custom agent. The lead
+            # agent deliberately has no canonical key: it uses the ordinary chat
+            # route rather than a non-existent custom-agent route.
+            if agent_name != DEFAULT_ASSISTANT_ID:
+                metadata[THREAD_AGENT_METADATA_KEY] = agent_name
         owner_headers = _owner_headers(msg)
         # Some channels (notably GitHub) supply a deterministic preferred
         # thread id so a (repo, PR/issue number) always lands on the same
@@ -1921,9 +2135,11 @@ class ChannelManager:
                 exc.__class__.__name__,
             )
             await self._store_thread_id(msg, preferred_thread_id)
+            self._remember_thread_agent(preferred_thread_id, agent_name)
             return preferred_thread_id
         thread_id = thread["thread_id"]
         await self._store_thread_id(msg, thread_id)
+        self._remember_thread_agent(thread_id, agent_name)
         logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
@@ -2002,6 +2218,7 @@ class ChannelManager:
         if not created:
             logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
             await self._update_thread_channel_metadata(client, msg, thread_id)
+            await self._load_thread_agent(client, msg, thread_id)
 
         serial_state, queued = self._begin_serialized_thread_run(
             channel_name=msg.channel_name,
@@ -2376,6 +2593,8 @@ class ChannelManager:
             reply = await self._fetch_gateway("/api/models", "models", msg=msg)
         elif reply is None and command == "memory":
             reply = await self._fetch_gateway("/api/memory", "memory", msg=msg)
+        elif reply is None and command == "agent":
+            reply = await self._handle_agent_command(msg, parts[1] if len(parts) > 1 else "")
         elif reply is None and command == "goal":
             reply = await self._handle_goal_command(msg, parts[1] if len(parts) > 1 else "")
             if reply is None:
@@ -2389,14 +2608,19 @@ class ChannelManager:
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
                 "/memory — Show memory status\n"
+                "/agent list — List your Custom Agents\n"
+                "/agent use <name> — Start a new conversation with an agent\n"
                 "/<skill-name> <task> — Activate an enabled skill for one turn\n"
                 "/help — Show this help"
             )
         elif reply is None:
+            thread_id = await self._lookup_thread_id(msg)
+            if thread_id:
+                await self._load_thread_agent(self._get_client(), msg, thread_id)
             slash_resolution = await asyncio.to_thread(
                 lambda: _resolve_slash_skill_command(
                     raw_text,
-                    self._resolve_available_skill_names(msg),
+                    self._resolve_available_skill_names(msg, thread_id),
                     self._get_skill_storage,
                 )
             )
@@ -2422,6 +2646,54 @@ class ChannelManager:
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
+
+    async def _handle_agent_command(self, msg: InboundMessage, args: str) -> str:
+        """List owner-scoped agents or pin one to a fresh conversation."""
+        parts = args.split()
+        if len(parts) == 1 and parts[0].lower() == "list":
+            user_id = _channel_storage_user_id(msg)
+            try:
+                agents = await asyncio.to_thread(list_custom_agents, user_id=user_id)
+            except Exception:
+                logger.exception("Failed to list custom agents for channel command")
+                return "Failed to list agents."
+
+            rows = ["• lead_agent — Default agent"]
+            sorted_agents = sorted(agents, key=lambda agent: agent.name)
+            for agent in sorted_agents[:MAX_CHANNEL_AGENT_LIST_ITEMS]:
+                description = " ".join((agent.description or "").split())[:MAX_CHANNEL_AGENT_DESCRIPTION_CHARS]
+                rows.append(f"• {agent.name} — {description}" if description else f"• {agent.name}")
+            if len(sorted_agents) > MAX_CHANNEL_AGENT_LIST_ITEMS:
+                rows.append(f"… and {len(sorted_agents) - MAX_CHANNEL_AGENT_LIST_ITEMS} more")
+            return "Available agents:\n" + "\n".join(rows)
+
+        if len(parts) == 2 and parts[0].lower() == "use":
+            raw_name = parts[1]
+            if raw_name.lower() == DEFAULT_ASSISTANT_ID:
+                agent_name = DEFAULT_ASSISTANT_ID
+                display_name = DEFAULT_ASSISTANT_ID
+            else:
+                try:
+                    agent_name = _normalize_custom_agent_name(raw_name)
+                except InvalidChannelSessionConfigError:
+                    return "Invalid agent name. Use letters, digits, and hyphens only."
+                try:
+                    await asyncio.to_thread(
+                        load_agent_config,
+                        agent_name,
+                        user_id=_channel_storage_user_id(msg),
+                    )
+                except FileNotFoundError:
+                    return f"Agent '{agent_name}' was not found. Use /agent list to see available agents."
+                except Exception:
+                    logger.exception("Failed to load custom agent for channel command")
+                    return f"Failed to select agent '{agent_name}'."
+                display_name = agent_name
+
+            await self._create_thread(self._get_client(), msg, agent_name=agent_name)
+            return f"Agent '{display_name}' selected. New conversation started."
+
+        return "Usage: /agent list or /agent use <name>"
 
     async def _goal_request(
         self,

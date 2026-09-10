@@ -32,6 +32,7 @@ from pydantic import PrivateAttr
 from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager
 
 from .deermem.config import DeerMemConfig
+from .deermem.core.eviction import EVICTION_POLICY_HYBRID_V1
 from .deermem.core.llm import build_llm
 from .deermem.core.message_processing import (
     SIGNAL_NAMES,
@@ -340,9 +341,25 @@ class DeerMem(MemoryManager):
             return []
         resolved_agent_name = _resolve_agent_name(agent_name)
         indexed = self._fts5_search(query, top_k=top_k, user_id=user_id, agent_name=resolved_agent_name, category=category)
-        if indexed:
-            return indexed
-        return self._substring_search(query, top_k=top_k, user_id=user_id, agent_name=resolved_agent_name, category=category)
+        results = indexed or self._substring_search(
+            query,
+            top_k=top_k,
+            user_id=user_id,
+            agent_name=resolved_agent_name,
+            category=category,
+        )
+        if results and (self._config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or self._config.fact_eviction_shadow_enabled):
+            try:
+                self._storage.record_fact_accesses(
+                    [str(fact["id"]) for fact in results if fact.get("id")],
+                    agent_name=resolved_agent_name,
+                    user_id=user_id,
+                )
+            except Exception:
+                # Usage is an eviction hint, never canonical memory. A sidecar
+                # write failure must not make memory_search lose its results.
+                logger.warning("Failed to record memory-search access heat", exc_info=True)
+        return results
 
     def _fts5_search(
         self,
@@ -437,16 +454,39 @@ class DeerMem(MemoryManager):
     # NotImplementedError) -- they are dead contract (zero callers; /memory/export
     # routes via get_memory), so DeerMem no longer repeats the raise.
 
+    def cancel_by_agent(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> int:
+        """Drop pending debounce-queue contexts for a deleted or cleared scope.
+
+        ``user_id=None`` matches the legacy no-user storage root only (same as
+        ``clear_memory`` / ``clear_*_memory_data``), not every queued user.
+        """
+        if agent_name is None:
+            return self._queue.cancel_by_agent(user_id=user_id, all_agents=True)
+        return self._queue.cancel_by_agent(
+            _resolve_agent_name(agent_name),
+            user_id=user_id,
+            all_agents=False,
+        )
+
     def clear_memory(
         self,
         *,
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
+        # Cancel same-scope pending extraction before and after clearing so a
+        # stale debounce timer cannot rewrite facts during/after the clear.
+        self.cancel_by_agent(agent_name, user_id=user_id)
         if agent_name is None:
             memory_data = _call_backend(lambda: self._updater.clear_all_memory_data(user_id=user_id))
         else:
             memory_data = _call_backend(lambda: self._updater.clear_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
+        self.cancel_by_agent(agent_name, user_id=user_id)
         return _compat_document(memory_data)
 
     def import_memory(

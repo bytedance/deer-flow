@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,11 @@ from deerflow.workspace_changes import (
     scan_workspace_roots,
 )
 from deerflow.workspace_changes.api import get_workspace_changes_response
-from deerflow.workspace_changes.scanner import SAMPLE_BYTES, is_sensitive_workspace_path
+from deerflow.workspace_changes.scanner import (
+    SAMPLE_BYTES,
+    _normalize_symlink_target,
+    is_sensitive_workspace_path,
+)
 
 
 def _roots(tmp_path):
@@ -245,6 +250,27 @@ def test_scan_workspace_roots_skips_excluded_directories(tmp_path):
 
     assert "/mnt/user-data/workspace/visible.txt" in snapshot.files
     assert "/mnt/user-data/workspace/node_modules/ignored.js" not in snapshot.files
+
+
+def test_scan_workspace_roots_skips_stdio_mcp_temp_files(tmp_path):
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+    (workspace / "report.md").write_text("keep", encoding="utf-8")
+    mcp_tmp = workspace / ".mcp" / "tmp"
+    mcp_tmp.mkdir(parents=True)
+    (mcp_tmp / "debug.json").write_text("internal", encoding="utf-8")
+    # `.mcp` is excluded by directory name at any depth, matching the other
+    # entries in EXCLUDED_DIR_NAMES and staying robust if a server ever
+    # creates a relative `.mcp` from a cwd below the workspace root.
+    nested_mcp = workspace / "project" / ".mcp"
+    nested_mcp.mkdir(parents=True)
+    (nested_mcp / "nested.json").write_text("internal", encoding="utf-8")
+
+    snapshot = scan_workspace_roots(roots)
+
+    assert "/mnt/user-data/workspace/report.md" in snapshot.files
+    assert "/mnt/user-data/workspace/.mcp/tmp/debug.json" not in snapshot.files
+    assert "/mnt/user-data/workspace/project/.mcp/nested.json" not in snapshot.files
 
 
 def test_scan_workspace_roots_skips_browser_frames(tmp_path):
@@ -720,3 +746,46 @@ async def test_workspace_changes_route_forwards_include_files_flag():
     assert response["available"] is True
     assert response["files"] == []
     assert calls["event_types"] == ["workspace_changes"]
+
+
+def test_normalize_symlink_target_strips_extended_length_drive_prefix(monkeypatch):
+    # The strip only applies on Windows hosts, so force the platform here;
+    # this test runs on the ubuntu-only CI too.
+    monkeypatch.setattr(os, "name", "nt")
+    assert _normalize_symlink_target(r"\\?\C:\Users\u1\target.txt") == r"C:\Users\u1\target.txt"
+
+
+def test_normalize_symlink_target_strips_extended_length_unc_prefix(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    assert _normalize_symlink_target(r"\\?\UNC\server\share\a.txt") == r"\\server\share\a.txt"
+
+
+def test_normalize_symlink_target_preserves_volume_guid_and_degenerate_prefixes(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    # Volume-GUID paths are absolute Windows targets in their own namespace;
+    # stripping the prefix would leave a relative-looking path.
+    target = r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\folder\target.txt"
+    assert _normalize_symlink_target(target) == target
+    # Only a drive letter followed by a colon and a separator is a drive path.
+    for degenerate in (r"\\?\C:", r"\\?\1:\x", r"\\?\:"):
+        assert _normalize_symlink_target(degenerate) == degenerate
+
+
+def test_normalize_symlink_target_leaves_relative_and_plain_posix_targets_verbatim():
+    assert _normalize_symlink_target("relative/target.txt") == "relative/target.txt"
+    assert _normalize_symlink_target("/tmp/target.txt") == "/tmp/target.txt"
+
+
+def test_normalize_symlink_target_leaves_mid_string_prefix_verbatim():
+    # Backslash is a legal filename byte on POSIX, so only a *leading*
+    # extended-length prefix may ever be stripped.
+    for target in (r"/data/\\?\weird-target.txt", r"C:\data\\?\nested.txt"):
+        assert _normalize_symlink_target(target) == target
+
+
+def test_normalize_symlink_target_is_identity_off_windows(monkeypatch):
+    # The strip is gated on Windows hosts: readlink(2) on POSIX returns the
+    # literal string the link was created with, so a target that starts with
+    # "\\?\" there must be recorded verbatim.
+    monkeypatch.setattr(os, "name", "posix")
+    assert _normalize_symlink_target(r"\\?\C:\Users\u1\target.txt") == r"\\?\C:\Users\u1\target.txt"

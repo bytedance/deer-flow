@@ -78,6 +78,23 @@ class SkillStorage(ABC):
             if parsed_name != name:
                 raise ValueError(f"Frontmatter name '{parsed_name}' must match requested skill name '{name}'.")
 
+    @staticmethod
+    def _is_external_skill_directory_symlink(skill_file: Path, custom_root: Path) -> bool:
+        """Allow one-level package-directory links without allowing file links.
+
+        The storage contract permits an externally managed skill package to be
+        linked directly below the supplied custom-skill category root. Preserve
+        that compatibility while rejecting arbitrary path escapes and symlinked
+        ``SKILL.md`` files.
+        """
+        if skill_file.is_symlink() or not skill_file.parent.is_symlink():
+            return False
+        try:
+            relative_parent = skill_file.parent.relative_to(custom_root)
+        except ValueError:
+            return False
+        return len(relative_parent.parts) == 1 and skill_file.parent.resolve().is_dir()
+
     def ensure_safe_support_path(self, name: str, relative_path: str) -> Path:
         """Validate and return the resolved absolute path for a support file."""
         _ALLOWED_SUPPORT_SUBDIRS = {"references", "templates", "scripts", "assets"}
@@ -122,14 +139,23 @@ class SkillStorage(ABC):
         under the per-user custom root, because custom skills are stored in a
         separate directory tree that is not a sub-path of the global root.
 
+        A one-level symlinked package directory directly below the configured
+        custom-skill category root is also accepted for operator-managed
+        external skills; the final ``SKILL.md`` file itself must not be a
+        symlink.
+
         Raises:
             ValueError: if the resolved path escapes all allowed roots.
         """
+        if skill_file.is_symlink():
+            raise ValueError("Resolved skill file must stay within the configured skills root.")
         resolved_file = skill_file.resolve()
         resolved_root = self.get_skills_root_path().resolve()
         try:
             resolved_file.relative_to(resolved_root)
         except ValueError as exc:
+            if self._is_external_skill_directory_symlink(skill_file, self.get_skills_root_path() / SkillCategory.CUSTOM.value):
+                return resolved_file
             raise ValueError("Resolved skill file must stay within the configured skills root.") from exc
         return resolved_file
 

@@ -20,6 +20,12 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 Découvrez-en plus et regardez des **démos réelles** sur notre [**site officiel**](https://deerflow.tech).
 
+## Projets associés
+
+<img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />
+
+- [**LLM Space**](https://github.com/deer-flow/llm-space) - Découvrez notre arme secrète derrière DeerFlow — un outil de bureau pour prototyper des idées d'agents, inspecter chaque étape du harness, rejouer les échecs et tester les performances.
+
 ## Coding Plan de ByteDance Volcengine
 
 - Nous recommandons fortement d'utiliser Doubao-Seed-2.0-Code, DeepSeek v3.2 et Kimi 2.5 pour exécuter DeerFlow
@@ -495,7 +501,7 @@ Si vous utilisez une instance Langfuse auto-hébergée, définissez `LANGFUSE_BA
 - `user_id` = utilisateur effectif issu de `get_effective_user_id()` (revient à `default` en mode sans authentification)
 - `trace_name` = assistant id (par défaut `lead-agent`)
 - `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (omis lorsqu'ils ne sont pas définis)
-- `metadata.deerflow_trace_id` = id de corrélation de requête DeerFlow, identique à `X-Trace-Id` lorsque la corrélation de trace des requêtes est activée
+- `metadata.deerflow_trace_id` = id de corrélation de requête DeerFlow, toujours identique à l'en-tête de réponse `X-Trace-Id` renvoyé par la même requête (`logging.enhance.enabled` contrôle uniquement si cet id est écrit dans les logs)
 
 Ces champs sont injectés dans `RunnableConfig.metadata` à la racine de l'invocation du graphe, à la fois pour le chemin gateway (`runtime/runs/worker.py::run_agent`) et le chemin embarqué (`client.py::DeerFlowClient.stream`), de sorte que tout callback compatible LangChain puisse les lire. Définissez `DEER_FLOW_ENV` (ou `ENVIRONMENT`) pour étiqueter les traces par environnement de déploiement.
 
@@ -769,4 +775,4 @@ Votre engagement sans faille et votre expertise sont le moteur du succès de Dee
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.com/#bytedance/deer-flow&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)

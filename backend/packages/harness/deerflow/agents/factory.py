@@ -1,13 +1,14 @@
 """Pure-argument factory for DeerFlow agents.
 
-``create_deerflow_agent`` accepts plain Python arguments — no YAML files, no
-global singletons.  It is the SDK-level entry point sitting between the raw
+``create_deerflow_agent`` accepts plain Python arguments — it does not load
+YAML or install process-global runtime dependencies. It is the SDK-level entry
+point sitting between the raw
 ``langchain.agents.create_agent`` primitive and the config-driven
 ``make_lead_agent`` application factory.
 
-Note: the factory assembly itself is config-free, but some injected runtime
-components (e.g. ``task_tool`` for subagent) may still read global config at
-invocation time.  Full config-free runtime is a Phase 2 goal.
+Direct callers that need an isolated native-subagent capacity or a durable
+batch worker pass a caller-owned ``SubagentRuntime`` explicitly. When omitted,
+subagent tools retain their application-compatible process-global fallback.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
     from deerflow.config.memory_config import MemoryConfig
+    from deerflow.subagents.runtime import SubagentRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +77,13 @@ def create_deerflow_agent(
     checkpoint_snapshot_frequency: int | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     name: str = "default",
+    subagent_runtime: SubagentRuntime | None = None,
 ) -> CompiledStateGraph:
     """Create a DeerFlow agent from plain Python arguments.
 
-    The factory assembly itself reads no config files.  Some injected runtime
-    components (e.g. ``task_tool``) may still depend on global config at
-    invocation time — see Phase 2 roadmap for full config-free runtime.
+    The factory assembly itself reads no config files. Pass ``subagent_runtime``
+    when direct SDK-created graphs must share an explicit native-subagent
+    capacity or caller-managed durable batch worker.
 
     Parameters
     ----------
@@ -116,6 +119,11 @@ def create_deerflow_agent(
         Optional persistence backend.
     name:
         Agent name (passed to middleware that cares, e.g. ``MemoryMiddleware``).
+    subagent_runtime:
+        Explicit process runtime shared by direct SDK-created graphs. Required
+        only when the caller needs non-default native-subagent capacity or a
+        caller-managed durable batch worker without Gateway/DeerFlowClient
+        startup. Requires ``features.subagent`` to be enabled.
 
     Raises
     ------
@@ -134,6 +142,10 @@ def create_deerflow_agent(
         )
     if middleware is not None and extra_middleware:
         raise ValueError("Cannot use 'extra_middleware' with 'middleware' (full takeover).")
+    if subagent_runtime is not None and (middleware is not None or features is None or features.subagent is False):
+        raise ValueError("subagent_runtime requires features.subagent to be enabled; it cannot be used with middleware full takeover")
+    if subagent_runtime is not None and subagent_runtime.batch_config is not None and subagent_runtime.batch_submitter is None:
+        raise RuntimeError("The explicit durable batch worker is not running; await subagent_runtime.start() or enter it with 'async with' before calling create_deerflow_agent")
     if extra_middleware:
         for mw in extra_middleware:
             if not isinstance(mw, AgentMiddleware):
@@ -151,6 +163,7 @@ def create_deerflow_agent(
             name=name,
             plan_mode=plan_mode,
             extra_middleware=extra_middleware or [],
+            subagent_runtime=subagent_runtime,
         )
         # Deduplicate by tool name — user-provided tools take priority.
         existing_names = {t.name for t in effective_tools}
@@ -187,6 +200,7 @@ def _assemble_from_features(
     name: str = "default",
     plan_mode: bool = False,
     extra_middleware: list[AgentMiddleware] | None = None,
+    subagent_runtime: SubagentRuntime | None = None,
 ) -> tuple[list[AgentMiddleware], list[BaseTool]]:
     """Build an ordered middleware chain + extra tools from *feat*.
 
@@ -316,11 +330,47 @@ def _assemble_from_features(
             chain.append(feat.subagent)
         else:
             from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+            from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
+            from deerflow.subagents.capacity import configured_subagent_max_running
 
-            chain.append(SubagentLimitMiddleware())
+            max_concurrent = subagent_runtime.config.max_running if subagent_runtime is not None else configured_subagent_max_running()
+            max_total = subagent_runtime.max_total_per_run if subagent_runtime is not None else DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
+            chain.append(
+                SubagentLimitMiddleware(
+                    max_concurrent=max_concurrent,
+                    max_total=max_total,
+                )
+            )
         from deerflow.tools.builtins import task_tool
 
-        extra_tools.append(task_tool)
+        if subagent_runtime is None:
+            extra_tools.append(task_tool)
+        else:
+            from deerflow.tools.builtins.task_tool import bind_task_tool
+
+            extra_tools.append(
+                bind_task_tool(
+                    subagent_runtime.execution_capacity,
+                    app_config=subagent_runtime.app_config,
+                )
+            )
+
+        if subagent_runtime is not None and subagent_runtime.batch_submitter is not None:
+            from deerflow.tools.builtins.batch_task_tool import bind_batch_tools
+
+            extra_tools.extend(
+                bind_batch_tools(
+                    submitter_provider=lambda: subagent_runtime.batch_submitter,
+                    app_config=subagent_runtime.app_config,
+                )
+            )
+        elif subagent_runtime is None:
+            from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
+
+            if is_subagent_batch_runtime_available():
+                from deerflow.tools.builtins import batch_status, batch_task, cancel_batch
+
+                extra_tools.extend((batch_task, batch_status, cancel_batch))
 
     # --- [12] LoopDetection ---
     if feat.loop_detection is not False:

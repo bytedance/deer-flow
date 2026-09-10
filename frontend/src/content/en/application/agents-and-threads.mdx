@@ -19,7 +19,7 @@ The default agent is the Lead Agent with no custom configuration. It loads all g
 
 Custom agents are named variants of the Lead Agent. Each one can have:
 
-- a **display name** and an auto-derived ASCII slug (the `name` used internally)
+- a unique ASCII **name** used by the API, routes, and storage
 - a specific **model** to use by default
 - a restricted set of **skills** (or all globally enabled skills if unspecified)
 - a restricted set of **tool groups**
@@ -30,18 +30,21 @@ Custom agents are created and managed through:
 - **The App UI**: open the Agents section in the settings panel.
 - **The Gateway API**: `POST /api/agents` with the agent definition.
 
-The slug (`name`) is automatically derived from the `display_name` and must be unique. The system checks for conflicts and appends a suffix if needed (`/api/agents/check`).
+Both paths require `agents_api.enabled: true` in `config.yaml`. The management API is disabled by default and should be exposed only within a trusted boundary.
 
-Agent configuration is stored in `agents/{name}/config.yaml` relative to the backend directory.
+The `name` must match `^[A-Za-z0-9-]+$` and be unique per user. The backend stores it in lowercase. Use `/api/agents/check?name={name}` to validate a name and check whether it is available before creating the agent.
+
+With the default `agent_storage.backend: file`, agent configuration is stored per user at `{base_dir}/users/{user_id}/agents/{name}/config.yaml`, where `{base_dir}` is `DEER_FLOW_HOME` (default: `backend/.deer-flow`). The older `{base_dir}/agents/{name}/` layout remains a read-only fallback for installations that have not yet run `backend/scripts/migrate_user_isolation.py`. With `agent_storage.backend: db`, definitions are stored in the shared SQL database instead; it requires `database.backend: sqlite` or `database.backend: postgres`. Use `backend/scripts/migrate_agents_to_db.py` to migrate existing file-backed definitions.
+
+For the file backend, you can edit these files directly; changes are picked up on the agent's next invocation, with no restart needed.
 
 ### Restricting agent capabilities
 
 To restrict a custom agent to specific skills:
 
 ```yaml
-# agents/my-researcher/config.yaml
+# {base_dir}/users/{user_id}/agents/my-researcher/config.yaml
 name: my-researcher
-display_name: My Researcher
 skills:
   - deep-research
   - academic-paper-review

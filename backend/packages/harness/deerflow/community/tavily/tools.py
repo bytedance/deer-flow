@@ -3,6 +3,7 @@ import json
 from langchain.tools import tool
 from tavily import TavilyClient
 
+from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.config import get_app_config
 
 
@@ -15,11 +16,12 @@ def _get_tavily_client() -> TavilyClient:
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str) -> str:
+def web_search_tool(query: str, time_range: SearchTimeRange | None = None) -> str:
     """Search the web.
 
     Args:
         query: The query to search for.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     config = get_app_config().get_tool_config("web_search")
     max_results = 5
@@ -27,7 +29,10 @@ def web_search_tool(query: str) -> str:
         max_results = config.model_extra.get("max_results")
 
     client = _get_tavily_client()
-    res = client.search(query, max_results=max_results)
+    search_kwargs: dict[str, object] = {"max_results": max_results}
+    if time_range is not None:
+        search_kwargs["time_range"] = time_range
+    res = client.search(query, **search_kwargs)
     normalized_results = [
         {
             "title": result["title"],
@@ -57,6 +62,8 @@ def web_fetch_tool(url: str) -> str:
         return f"Error: {res['failed_results'][0]['error']}"
     elif "results" in res and len(res["results"]) > 0:
         result = res["results"][0]
-        return f"# {result['title']}\n\n{result['raw_content'][:4096]}"
+        # Extract results guarantee a URL and content, but not a page title.
+        title = result.get("title") or result.get("url") or url
+        return f"# {title}\n\n{result['raw_content'][:4096]}"
     else:
         return "Error: No results found"

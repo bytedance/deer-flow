@@ -112,6 +112,15 @@ class TodoMiddleware(TodoListMiddleware):
 
     state_schema = ThreadState
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        from deerflow_extension_api import canonical_hash
+
+        return {
+            "system_prompt_hash": canonical_hash(self.system_prompt),
+            "tool_description_hash": canonical_hash(self.tool_description),
+            "state_channel": "todos",
+        }
+
     @override
     def before_model(
         self,

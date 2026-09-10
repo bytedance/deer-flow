@@ -1417,7 +1417,8 @@ class TestBudgetContentSandboxDispatch:
             sandbox=sb,
         )
         assert result is not None
-        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result[0]
+        assert result[1] == "externalized"
         # Mounted path must NOT touch the sandbox.
         assert sb.commands == []
         assert sb.writes == []
@@ -1445,7 +1446,8 @@ class TestBudgetContentSandboxDispatch:
             sandbox=sb,
         )
         assert result is not None
-        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result[0]
+        assert result[1] == "externalized"
         # Non-mounted path MUST write into the sandbox.
         assert sb.writes and sb.writes[0][1] == "x" * 500
         # And MUST NOT touch the host.
@@ -1474,7 +1476,8 @@ class TestBudgetContentSandboxDispatch:
             sandbox=None,
         )
         assert result is not None
-        assert "Persistent storage unavailable" in result
+        assert "Persistent storage unavailable" in result[0]
+        assert result[1] == "truncated"
 
 
 class TestResolveSandbox:
@@ -1586,6 +1589,7 @@ class TestBudgetContentNoSandboxNoProviderCall:
             sandbox=None,
         )
         assert result is not None
-        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result[0]
+        assert result[1] == "externalized"
         assert called["n"] == 0
         assert (tmp_path / ".tool-results").is_dir()

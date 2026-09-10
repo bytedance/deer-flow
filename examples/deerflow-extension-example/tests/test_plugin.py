@@ -29,6 +29,8 @@ class FakeRegistry:
         self.middleware_contributors: list[Any] = []
         self.task_lifecycle_contributors: list[Any] = []
         self.system_model_observers: list[Any] = []
+        self.agent_assembly_observers: list[Any] = []
+        self.context_compaction_observers: list[Any] = []
         self.services: list[Any] = []
         self.contributed_routers: list[Any] = []
 
@@ -40,6 +42,12 @@ class FakeRegistry:
 
     def system_model_observer(self, observer: Any) -> None:
         self.system_model_observers.append(observer)
+
+    def agent_assembly_observer(self, observer: Any) -> None:
+        self.agent_assembly_observers.append(observer)
+
+    def context_compaction_observer(self, observer: Any) -> None:
+        self.context_compaction_observers.append(observer)
 
     def service(self, service: Any) -> None:
         self.services.append(service)
@@ -70,7 +78,7 @@ def test_install_registers_all_five_contribution_kinds() -> None:
     assert len(registry.services) == 1
     assert len(registry.contributed_routers) == 1
     assert [route.path for route in registry.contributed_routers[0].routes] == ["/api/extension-example/stats"]
-    assert install.__deerflow_api__ == "0.1.2"
+    assert install.__deerflow_api__ == "0.2.0"
     assert install.__deerflow_name__ == "example"
 
 

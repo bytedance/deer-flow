@@ -8,6 +8,7 @@ skipped automatically when Playwright (or its browser binary) is unavailable.
 from __future__ import annotations
 
 import asyncio
+import gc
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -90,7 +91,7 @@ class TestBrowserTools:
         outputs.mkdir()
         session = MagicMock()
         session.navigate = AsyncMock(return_value=_snapshot())
-        session.screenshot_bytes = AsyncMock(return_value=b"\x89PNG\r\n\x1a\nshot")
+        session.screenshot_bytes = AsyncMock(return_value=b"\xff\xd8jpeg-shot")
         session.schedule_live_frames = MagicMock()
         ctx, _ = await self._patch_session(session)
         with ctx, patch.object(tools, "_get_tool_config", return_value={}):
@@ -100,13 +101,13 @@ class TestBrowserTools:
                 tool_call_id="t1",
             )
         # Screenshot is captured, saved, exposed as an artifact + inline browser_view.
-        session.screenshot_bytes.assert_awaited_once()
+        session.screenshot_bytes.assert_awaited_once_with(full_page=False, image_type="jpeg", quality=80)
         session.schedule_live_frames.assert_called_once()
         artifact = result.update["artifacts"][0]
         assert artifact.startswith("/mnt/user-data/outputs/.browser-frames/browser-navigate-")
-        assert artifact.endswith(".png")
-        saved = list((outputs / ".browser-frames").glob("browser-navigate-*.png"))
-        assert saved and saved[0].read_bytes() == b"\x89PNG\r\n\x1a\nshot"
+        assert artifact.endswith(".jpg")
+        saved = list((outputs / ".browser-frames").glob("browser-navigate-*.jpg"))
+        assert saved and saved[0].read_bytes() == b"\xff\xd8jpeg-shot"
         meta = result.update["messages"][0].additional_kwargs["browser_view"]
         assert meta["screenshot"] == artifact
         assert meta["url"] == "https://example.com/"
@@ -129,6 +130,29 @@ class TestBrowserTools:
         assert "Navigated to https://example.com." in result.update["messages"][0].content
         assert "artifacts" not in result.update
         assert result.update["messages"][0].additional_kwargs == {}
+
+    async def test_gateway_navigate_and_capture_uses_jpeg_progress_frame(self, tmp_path):
+        session = MagicMock()
+        session.navigate = AsyncMock(return_value=_snapshot())
+        session.screenshot_bytes = AsyncMock(return_value=b"\xff\xd8gateway-jpeg")
+        lease = MagicMock()
+        lease.__enter__.return_value = session
+        manager = MagicMock()
+        manager.acquire_session.return_value = lease
+
+        with (
+            patch.object(tools, "_validate_url", return_value=None),
+            patch.object(tools, "_get_tool_config", return_value={}),
+            patch.object(tools, "get_browser_session_manager", return_value=manager),
+        ):
+            result = await tools.navigate_and_capture(
+                thread_id="thread-1",
+                url="https://example.com",
+                outputs_path=tmp_path,
+            )
+
+        session.screenshot_bytes.assert_awaited_once_with(full_page=False, image_type="jpeg", quality=80)
+        assert result["screenshot"].endswith(".jpg")
 
     async def test_navigate_blocks_private_url(self):
         session = MagicMock()
@@ -212,6 +236,7 @@ class TestBrowserTools:
         artifact = result.update["artifacts"][0]
         assert artifact == "/mnt/user-data/outputs/Login_Page.png"
         assert (outputs / "Login_Page.png").read_bytes() == b"\x89PNG\r\n\x1a\npng-bytes"
+        session.screenshot_bytes.assert_awaited_once_with(full_page=False)
 
     async def test_screenshot_errors_without_outputs_path(self):
         session = MagicMock()
@@ -316,6 +341,42 @@ async def test_live_frame_returns_jpeg_bytes_without_base64_expansion():
 
     assert frame == b"\xff\xd8jpeg-bytes"
     page.screenshot.assert_awaited_once_with(type="jpeg", quality=_LIVE_FRAME_JPEG_QUALITY)
+
+
+@pytest.mark.asyncio
+async def test_screenshot_bytes_defaults_to_png_without_quality():
+    session = BrowserSession(
+        MagicMock(),
+        headless=True,
+        timeout_ms=1000,
+        viewport={"width": 1000, "height": 500},
+    )
+    page = MagicMock()
+    page.screenshot = AsyncMock(return_value=b"png")
+    session._ensure_page = AsyncMock(return_value=page)
+
+    shot = await session._screenshot_bytes(full_page=False, image_type="png", quality=None)
+
+    assert shot == b"png"
+    page.screenshot.assert_awaited_once_with(full_page=False, type="png")
+
+
+@pytest.mark.asyncio
+async def test_screenshot_bytes_forwards_jpeg_quality():
+    session = BrowserSession(
+        MagicMock(),
+        headless=True,
+        timeout_ms=1000,
+        viewport={"width": 1000, "height": 500},
+    )
+    page = MagicMock()
+    page.screenshot = AsyncMock(return_value=b"jpeg")
+    session._ensure_page = AsyncMock(return_value=page)
+
+    shot = await session._screenshot_bytes(full_page=False, image_type="jpeg", quality=80)
+
+    assert shot == b"jpeg"
+    page.screenshot.assert_awaited_once_with(full_page=False, type="jpeg", quality=80)
 
 
 @pytest.mark.asyncio
@@ -1064,3 +1125,51 @@ async def test_request_guard_not_installed_for_cdp_sessions():
     await session._install_request_guard()
     assert context.routed is False
     assert session._request_guard_bound is False
+
+
+@pytest.mark.parametrize(
+    ("schedule_attr", "coro_attr", "pending_attr"),
+    [
+        ("_schedule_settle_live_frames", "_settle_live_frames", "_settle_live_frames_pending"),
+        ("_schedule_input_live_frame", "_flush_input_live_frames", "_input_live_frame_pending"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_live_frame_schedulers_retain_task_reference(schedule_attr, coro_attr, pending_attr):
+    """Detached live-frame tasks must stay referenced until they finish.
+
+    The event loop only holds weak references to tasks, so an unreferenced task
+    can be collected before it runs. Both schedulers clear their ``*_pending``
+    guard in a ``finally`` block, so losing the task would strand the guard at
+    ``True`` and silently stop every later refresh for the session.
+    """
+    session = BrowserSession(
+        MagicMock(),
+        headless=True,
+        timeout_ms=1000,
+        viewport={"width": 1000, "height": 500},
+    )
+    release = asyncio.Event()
+
+    async def _blocked() -> None:
+        try:
+            await release.wait()
+        finally:
+            setattr(session, pending_attr, False)
+
+    setattr(session, coro_attr, _blocked)
+
+    getattr(session, schedule_attr)()
+    assert getattr(session, pending_attr) is True
+    assert len(session._background_tasks) == 1
+
+    # A weakly-referenced task would be collectable at this point.
+    gc.collect()
+    assert len(session._background_tasks) == 1
+
+    release.set()
+    await asyncio.gather(*session._background_tasks)
+    await asyncio.sleep(0)  # let the done callback run
+
+    assert session._background_tasks == set()
+    assert getattr(session, pending_attr) is False

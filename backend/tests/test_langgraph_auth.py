@@ -177,8 +177,17 @@ class _FakeUser:
         self.display_name = identity
 
 
-def _make_ctx(user_id):
-    return Auth.types.AuthContext(resource="threads", action="create", user=_FakeUser(user_id), permissions=[])
+def _make_ctx(user_id, *, resource="threads", action="create", user=None):
+    return Auth.types.AuthContext(resource=resource, action=action, user=user or _FakeUser(user_id), permissions=[])
+
+
+def _studio_ctx(*, resource="assistants", action="search"):
+    return _make_ctx(
+        "langgraph-studio-user",
+        resource=resource,
+        action=action,
+        user=Auth.types.StudioUser("langgraph-studio-user"),
+    )
 
 
 def test_filter_injects_user_id():
@@ -224,6 +233,121 @@ def test_filter_with_empty_metadata():
     result = asyncio.run(add_owner_filter(_make_ctx("user-z"), value))
     assert value["metadata"]["user_id"] == "user-z"
     assert result == {"user_id": "user-z"}
+
+
+@pytest.mark.parametrize("action", ["read", "search"])
+def test_studio_user_assistant_discovery_includes_system_and_studio_owned_assistants(action):
+    value = {}
+    result = asyncio.run(add_owner_filter(_studio_ctx(action=action), value))
+
+    assert result == {
+        "$or": [
+            {"created_by": "system"},
+            {"user_id": "langgraph-studio-user"},
+        ]
+    }
+    assert value == {}
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_studio_assistant_writes_stamp_server_owned_provenance(action):
+    value = {"metadata": {"created_by": "system"}}
+    result = asyncio.run(add_owner_filter(_studio_ctx(action=action), value))
+
+    assert value["metadata"] == {
+        "created_by": "user",
+        "user_id": "langgraph-studio-user",
+    }
+    assert result == {"user_id": "langgraph-studio-user"}
+
+
+def test_studio_user_non_assistant_operations_remain_owner_scoped():
+    value = {}
+    result = asyncio.run(
+        add_owner_filter(
+            _studio_ctx(resource="threads", action="search"),
+            value,
+        )
+    )
+
+    assert value["metadata"]["user_id"] == "langgraph-studio-user"
+    assert result == {"user_id": "langgraph-studio-user"}
+
+
+def test_identity_string_does_not_impersonate_studio_user():
+    value = {}
+    result = asyncio.run(
+        add_owner_filter(
+            _make_ctx(
+                "langgraph-studio-user",
+                resource="assistants",
+                action="search",
+            ),
+            value,
+        )
+    )
+
+    assert value["metadata"]["user_id"] == "langgraph-studio-user"
+    assert result == {"user_id": "langgraph-studio-user"}
+
+
+def test_missing_studio_user_type_degrades_to_owner_scoped_behavior():
+    value = {}
+    with patch("app.gateway.langgraph_auth._STUDIO_USER_TYPE", None):
+        result = asyncio.run(add_owner_filter(_studio_ctx(), value))
+
+    assert value["metadata"]["user_id"] == "langgraph-studio-user"
+    assert result == {"user_id": "langgraph-studio-user"}
+
+
+def test_regular_user_assistant_search_remains_owner_scoped():
+    value = {}
+    result = asyncio.run(
+        add_owner_filter(
+            _make_ctx("user-a", resource="assistants", action="search"),
+            value,
+        )
+    )
+
+    assert value["metadata"]["user_id"] == "user-a"
+    assert result == {"user_id": "user-a"}
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_regular_user_cannot_forge_system_assistant_provenance(action):
+    value = {"metadata": {"created_by": "system", "label": "forged"}}
+    result = asyncio.run(
+        add_owner_filter(
+            _make_ctx("user-a", resource="assistants", action=action),
+            value,
+        )
+    )
+
+    assert value["metadata"] == {
+        "created_by": "user",
+        "label": "forged",
+        "user_id": "user-a",
+    }
+    assert result == {"user_id": "user-a"}
+
+
+@pytest.mark.parametrize(
+    "ctx,user_id",
+    [
+        (_studio_ctx(action="update"), "langgraph-studio-user"),
+        (_make_ctx("user-a", resource="assistants", action="update"), "user-a"),
+    ],
+)
+def test_assistant_version_selection_remains_owner_scoped(ctx, user_id):
+    value = {"assistant_id": uuid4(), "version": 1}
+
+    result = asyncio.run(add_owner_filter(ctx, value))
+
+    assert value["metadata"] == {
+        "created_by": "user",
+        "user_id": user_id,
+    }
+    assert result == {"user_id": user_id}
 
 
 # ── Gateway parity ───────────────────────────────────────────────────────

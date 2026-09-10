@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import pytest
+
 from deerflow.skills.parser import parse_skill_file
 
 # ---------------------------------------------------------------------------
@@ -108,8 +110,113 @@ def test_parse_empty_allowed_tools_list(tmp_path):
     assert skill.allowed_tools == ()
 
 
+def test_parse_allowed_tools_string(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Bash WebFetch Read Write Edit Bash(git:*)",
+    )
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert skill.allowed_tools == (
+        "bash",
+        "web_fetch",
+        "read_file",
+        "write_file",
+        "str_replace",
+        "Bash(git:*)",
+    )
+
+
+def test_parse_allowed_tools_string_preserves_parenthesized_spaces(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Bash(tvly *) Bash(playwright-cli:*) Bash(npx:*) Bash(npm:*)",
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == (
+        "Bash(tvly *)",
+        "Bash(playwright-cli:*)",
+        "Bash(npx:*)",
+        "Bash(npm:*)",
+    )
+
+
+def test_parse_allowed_tools_string_preserves_scalar_custom_tool_names(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: mcp__arxiv__SearchPapers MyCustomTool write",
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == ("mcp__arxiv__SearchPapers", "MyCustomTool", "write")
+
+
+def test_parse_allowed_tools_string_normalizes_glob_and_grep_aliases(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Glob Grep",
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == ("glob", "grep")
+
+
+@pytest.mark.parametrize(
+    "allowed_tools",
+    [
+        'Bash("echo )")',
+        "Bash('echo )')",
+        r"Bash(echo \) literal)",
+    ],
+)
+def test_parse_allowed_tools_string_preserves_quoted_and_escaped_parentheses(tmp_path, allowed_tools):
+    skill_file = _write_skill(tmp_path, f"name: my-skill\ndescription: Test\nallowed-tools: {allowed_tools}")
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == (allowed_tools,)
+
+
+def test_parse_allowed_tools_list_preserves_exact_runtime_names(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: [mcp__arxiv__SearchPapers, Read, 'Bash(tvly *)']\n",
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == ("mcp__arxiv__SearchPapers", "Read", "Bash(tvly *)")
+
+
+def test_parse_allowed_tools_string_rejects_unbalanced_parentheses(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Bash(tvly *",
+    )
+
+    assert parse_skill_file(skill_file, category="custom") is None
+
+
+def test_parse_allowed_tools_string_rejects_unmatched_closing_parenthesis(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Bash(tvly *) )",
+    )
+
+    assert parse_skill_file(skill_file, category="custom") is None
+
+
 def test_parse_invalid_allowed_tools_returns_none(tmp_path):
-    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Test\nallowed-tools: bash")
+    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Test\nallowed-tools: {bash: true}")
     skill = parse_skill_file(skill_file, category="custom")
     assert skill is None
 

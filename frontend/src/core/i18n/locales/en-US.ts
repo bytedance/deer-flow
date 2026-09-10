@@ -124,6 +124,42 @@ export const enUS: Translations = {
     loadingFullFile: "Loading full file...",
     previewFailed:
       "This file could not be previewed. You can still download it.",
+    viewSource: "View source",
+    missingTarget: "This link does not say which artifact to display.",
+  },
+
+  artifactTable: {
+    title: "Table preview",
+    header: "First row as header",
+    column: (index) => `Column ${index}`,
+    total: (count) => `${count} rows`,
+    sample: (count) => `Preview of first ${count} rows`,
+    range: (start, end, limited) =>
+      `${start}–${end}${limited ? " of preview" : ""}`,
+    columnsLimited: "Showing the first 50 columns of the preview.",
+    uneven:
+      "Some rows have different numbers of fields. Missing fields are marked.",
+    empty: "This file is empty.",
+    incomplete:
+      "No complete records fit in this preview. View the source or download the file.",
+    failed:
+      "Unable to preview this table reliably. View the source or download the file.",
+    retry: "Retry preview",
+    previous: "Previous page",
+    next: "Next page",
+    cell: (row, column) => `View cell: row ${row}, column ${column}`,
+    cellValue: "Cell value",
+    missing: "Missing",
+    savedVersion:
+      "Opens or downloads the saved file. Your draft has not been saved.",
+  },
+
+  artifactArchive: {
+    downloadCurrent: (count) =>
+      `Download current versions (${count} ${count === 1 ? "file" : "files"})`,
+    currentVersionNotice:
+      "The file list comes from this response. Contents are the current versions and may have changed.",
+    downloadFailed: "Failed to download artifact archive.",
   },
 
   // Citations
@@ -160,7 +196,7 @@ export const enUS: Translations = {
   // Input Box
   inputBox: {
     placeholder: "How can I assist you today?",
-    disclaimer: "Deerflow is AI and can make mistakes",
+    disclaimer: "DeerFlow is AI and can make mistakes",
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
@@ -303,6 +339,111 @@ export const enUS: Translations = {
     scheduledTasks: "Scheduled tasks",
     agentsDisabledTooltip: "Feature not enabled",
   },
+  // Sidebar projects section
+  projects: {
+    title: "Projects",
+    newProject: "New project",
+    namePlaceholder: "Project name",
+    moveToProject: "Move to project",
+    moveToProjectHint:
+      "Moving a chat doesn't remove the content already in it.",
+    removeFromProject: "Remove from project",
+    archive: "Archive",
+    restore: "Restore",
+    deleteProject: "Delete project",
+    deleteProjectConfirm:
+      "Deleting this project unlinks its chats. Chats, their history, and their files are not deleted.",
+    archived: "Archived",
+    empty: "No chats in this project yet.",
+    newChat: "New chat",
+    create: "Create",
+    createFailed: "Failed to create project",
+    moveFailed: "Failed to move chat",
+    archiveFailed: "Failed to archive project",
+    restoreFailed: "Failed to restore project",
+    deleteFailed: "Failed to delete project",
+    switchToGrouped: "Group chats by project",
+    switchToFlat: "Show flat chat list",
+    threads: "Chats",
+    threadsLoadFailed: "Couldn't load project chats",
+    untitled: "Untitled",
+    settings: "Settings",
+    notFound: "Project not found or deleted.",
+    projectUnavailable:
+      "Couldn't link the chat to the project. Your message was not sent — try again.",
+  },
+
+  backgroundTasks: {
+    label: "Background tasks",
+    title: "Background tasks",
+    description: "Long-running MCP work for this chat.",
+    active: "Active",
+    recent: "Recent",
+    empty: "No background tasks yet",
+    emptyHint: "Long-running MCP tasks started in this chat will appear here.",
+    loadFailed: "Couldn't load background tasks",
+    retry: "Try again",
+    cancel: "Cancel task",
+    cancelling: "Cancelling…",
+    cancelFailed: "Failed to cancel task",
+    cancellationRetrying: (attempt) =>
+      `Cancellation attempt ${attempt} failed; DeerFlow will keep retrying.`,
+    notificationRetrying: (attempt) =>
+      `Chat notification attempt ${attempt} failed; DeerFlow will retry with backoff.`,
+    notificationStopped:
+      "Chat notification delivery stopped after repeated or permanent failures.",
+    trackingDegraded: "Status checks are delayed; DeerFlow is still retrying.",
+    viewDetails: "View details",
+    hideDetails: "Hide details",
+    detailsFailed: "Couldn't load task details",
+    result: "Result",
+    resultArtifact: "Result artifact",
+    inputRequired: "Input required",
+    inputUnavailable:
+      "This integration cannot send your response back to the remote task yet.",
+    lastPollError: "Latest status error",
+    created: (time) => `Started ${time}`,
+    updated: (time) => `Updated ${time}`,
+    status: {
+      submitted: "Submitted",
+      working: "Working",
+      inputRequired: "Input needed",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+  },
+
+  subagentBatches: {
+    label: "Batches",
+    title: "Subagent batches",
+    description: "Durable, restart-safe work for many independent items.",
+    workerUnavailable:
+      "The batch worker is not running. Historical batches remain available in read-only mode.",
+    empty: "No subagent batches yet",
+    emptyHint: "Explicit batch_task submissions in this chat will appear here.",
+    loadFailed: "Couldn't load subagent batches",
+    active: "Active",
+    recent: "Recent",
+    pause: "Pause",
+    resume: "Resume",
+    cancel: "Cancel",
+    retryItem: "Retry",
+    exportResults: "Export JSONL",
+    viewItems: "View items",
+    hideItems: "Hide items",
+    itemsFailed: "Couldn't load batch items",
+    progress: (completed, total) => `${completed} of ${total} terminal`,
+    limits: (live, running) => `Live ${live} · running ${running}`,
+    status: {
+      queued: "Queued",
+      running: "Running",
+      paused: "Paused",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+  },
 
   // Scheduled tasks
   scheduledTasks: {
@@ -350,6 +491,9 @@ export const enUS: Translations = {
       fresh: "Fresh thread",
       reuse: "Reuse thread",
       threadIdPlaceholder: "Thread ID",
+      reuseNoticeTitle: "Uses this thread's conversation history",
+      reuseNoticeDescription:
+        "If this thread has an active run at the scheduled time, DeerFlow queues this occurrence and starts it when the thread is available. It fails if the configured queue wait limit is exceeded.",
     },
     filters: {
       allStatuses: "All statuses",
@@ -383,6 +527,8 @@ export const enUS: Translations = {
       pause: "Pause",
       resume: "Resume",
       trigger: "Trigger now",
+      duplicate: "Duplicate",
+      duplicateTitleSuffix: " (Copy)",
       delete: "Delete",
     },
     deleteConfirm:
@@ -411,6 +557,7 @@ export const enUS: Translations = {
     runTrigger: { scheduled: "scheduled", manual: "manual" },
     runStatus: {
       queued: "Queued",
+      launching: "Launching",
       running: "Running",
       success: "Success",
       failed: "Failed",
@@ -528,6 +675,10 @@ export const enUS: Translations = {
     logout: "Log out",
     gatewayUnavailable: "Gateway is temporarily unavailable.",
     gatewayUnavailableRetrying: "Retrying in the background…",
+    modelLoadFailed:
+      "Models couldn't be loaded. Model selection and token usage may be unavailable.",
+    modelLoadRetry: "Retry",
+    modelLoadRetrying: "Retrying…",
   },
 
   // Conversation
@@ -538,11 +689,29 @@ export const enUS: Translations = {
     branchFailed: "Failed to branch conversation.",
     streamReplayGap:
       "Some live updates expired. The conversation was restored from saved state.",
+    outlineLabel: "Conversation outline",
+    outlineAttachmentFallback: "Image or file message",
   },
 
   // Chats
   chats: {
+    noActiveChats: "No recent chats",
+    activeChats: "Recent chats",
+    archivedChats: "Archived",
+    archiveChat: "Archive chat",
+    restoreChat: "Restore chat",
+    archiveSuccess: "Chat archived",
+    restoreSuccess: "Chat restored",
+    archiveFailed: "Failed to update archived chat",
+    archiveDescription:
+      "Archiving keeps messages and files. Running and scheduled tasks continue.",
+    undoArchive: "Undo",
+    noArchivedChats: "No archived chats",
+    noMatchingChats: "No matching chats in the loaded conversations",
+    loadChatsFailed: "Failed to load conversations",
+    retryLoadChats: "Retry",
     searchChats: "Search chats",
+    branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
@@ -755,6 +924,7 @@ export const enUS: Translations = {
       integrations: "Integrations",
       memory: "Memory",
       tools: "Tools",
+      subagents: "Subagents",
       skills: "Skills",
       notification: "Notification",
       about: "About",
@@ -856,6 +1026,82 @@ export const enUS: Translations = {
       description: "Manage the configuration and enabled status of MCP tools.",
       adminRequired: "Admin privileges are required to manage MCP tools.",
       empty: "No MCP tools configured.",
+      addServer: "Add server",
+      addServerDescription:
+        "Paste the JSON definition published by the MCP server. Both a bare server map and one wrapped in `mcpServers` are accepted. Existing names must be changed through Edit.",
+      addServerPlaceholder: `{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"]
+    }
+  }
+}`,
+      serverDefinitionLabel: "MCP server JSON definition",
+      definitionEmpty: "Paste an MCP server definition.",
+      definitionInvalidJson: "Enter valid JSON.",
+      definitionRootNotObject:
+        "Enter a JSON object describing one or more MCP servers.",
+      definitionNoServers: "No MCP server was found in the definition.",
+      definitionServerNotObject:
+        'The configuration for server "{name}" must be a JSON object.',
+      editServer: "Edit MCP server",
+      editServerDescription:
+        'Edit the complete JSON definition for "{name}". The server name is fixed; add a new server and remove this one to rename it.',
+      editSingleServer: "Edit exactly one MCP server at a time.",
+      editServerNameMismatch:
+        'Keep the existing server name "{name}" while editing.',
+      serverAlreadyExists:
+        'MCP server "{name}" already exists. Use Edit instead.',
+      removeServer: "Remove MCP server",
+      removeServerDescription:
+        'Remove "{name}" from the MCP configuration? Its tools stop being available to agents.',
+      unnamedServer: "(empty name)",
+    },
+    subagents: {
+      title: "Subagents",
+      description:
+        "Reusable workers that the Lead Agent and permitted Custom Agents can delegate bounded tasks to.",
+      executionNote:
+        "Each invocation starts a fresh temporary context with no persistent chat or memory and cannot ask the user follow-up questions. A system prompt changes behavior; tools and skills grant actual capabilities.",
+      adminNote:
+        "You can view the catalog. Only administrators can add, edit, enable, or delete subagents.",
+      create: "Add subagent",
+      empty: "No subagents are available.",
+      sourceBuiltin: "Built-in",
+      sourceConfig: "config.yaml",
+      sourceManaged: "Managed",
+      conflict: "Name conflict — excluded from runtime",
+      overridden: "Some runtime values are overridden by config.yaml",
+      createTitle: "Add managed subagent",
+      editTitle: "Edit managed subagent",
+      name: "Name",
+      nameHint: "Use letters, numbers, and hyphens only.",
+      displayName: "Display name",
+      descriptionLabel: "Delegation description",
+      systemPrompt: "System prompt",
+      model: "Model",
+      inheritModel: "Inherit from caller",
+      tools: "Allowed tools (comma-separated)",
+      skills: "Skills (comma-separated)",
+      listModeAll: "Inherit all available",
+      listModeNone: "Allow none",
+      listModeSelected: "Allow selected names",
+      listNamesPlaceholder: "Comma-separated names",
+      maxTurns: "Maximum turns",
+      timeout: "Timeout (seconds)",
+      created: "Subagent created",
+      saved: "Subagent saved",
+      deleted: "Subagent deleted",
+      deleteConfirm:
+        "Delete this managed subagent? Custom Agents may keep referencing its name, and recreating the same name will reconnect those bindings. This cannot be undone.",
+      bindingTitle: "Subagent access",
+      bindingDescription:
+        "Choose which subagents this Custom Agent may invoke. This is enforced by the server.",
+      allAllowed: "All enabled subagents",
+      noneAllowed: "No subagents",
+      selectedAllowed: "Selected subagents",
+      missing: "Missing or unavailable; deselect to remove",
     },
     channels: {
       title: "Channels",
@@ -1088,6 +1334,11 @@ export const enUS: Translations = {
       adminRequired: "Admin privileges are required to manage agent skills.",
       installAdminRequired:
         "Admin privileges are required to install agent skills.",
+      installFromFile: "Install .skill",
+      installingArchive: "Installing...",
+      invalidArchive: "Choose a file with the .skill extension.",
+      archiveTooLarge: "The skill archive must be 100 MiB or smaller.",
+      installFailed: "Failed to install the skill archive.",
     },
     notification: {
       title: "Notification",

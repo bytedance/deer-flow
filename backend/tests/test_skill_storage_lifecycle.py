@@ -284,6 +284,25 @@ def test_different_users_get_different_storages(monkeypatch):
         skill_storage.reset_skill_storage()
 
 
+def test_user_storage_is_rebuilt_when_app_config_changes(monkeypatch):
+    """A hot-reloaded config must not reuse storage bound to the old paths."""
+    skill_storage.reset_skill_storage()
+    SlowUserSkillStorage.instances_created = 0
+    _patch_user_storage_resolution(monkeypatch)
+
+    first_config = _AppConfig()
+    second_config = _AppConfig()
+    first = skill_storage.get_or_new_user_skill_storage("alice", app_config=first_config)
+    second = skill_storage.get_or_new_user_skill_storage("alice", app_config=second_config)
+
+    try:
+        assert second is not first
+        assert skill_storage.get_or_new_user_skill_storage("alice", app_config=second_config) is second
+        assert SlowUserSkillStorage.instances_created == 2
+    finally:
+        skill_storage.reset_skill_storage()
+
+
 def test_reset_user_skill_storage_only_clears_target_user(monkeypatch):
     """Resetting alice's storage must not invalidate bob's."""
     skill_storage.reset_skill_storage()

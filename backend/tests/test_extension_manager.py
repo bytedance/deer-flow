@@ -95,10 +95,16 @@ default-groups = ["extensions"]
 
 def _commit_local_extension(source: Path) -> str:
     subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    test_hooks = source / ".git" / "test-hooks"
+    test_hooks.mkdir()
     subprocess.run(["git", "config", "user.name", "Extension Test"], cwd=source, check=True)
     subprocess.run(["git", "config", "user.email", "extension-test@example.com"], cwd=source, check=True)
     subprocess.run(["git", "add", "."], cwd=source, check=True)
-    subprocess.run(["git", "commit", "-qm", "initial extension"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "-c", f"core.hooksPath={test_hooks}", "commit", "-qm", "initial extension"],
+        cwd=source,
+        check=True,
+    )
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=source,
@@ -106,6 +112,24 @@ def _commit_local_extension(source: Path) -> str:
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+def test_commit_local_extension_ignores_inherited_git_hooks(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "extension"
+    source.mkdir()
+    _write_local_extension(source)
+    inherited_hooks = tmp_path / "inherited-hooks"
+    inherited_hooks.mkdir()
+    commit_hook = inherited_hooks / "commit-msg"
+    commit_hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    commit_hook.chmod(0o755)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(inherited_hooks))
+
+    revision = _commit_local_extension(source)
+
+    assert revision
 
 
 class _QuietFileHandler(http.server.SimpleHTTPRequestHandler):

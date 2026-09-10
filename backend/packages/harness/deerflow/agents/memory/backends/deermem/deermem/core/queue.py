@@ -400,6 +400,51 @@ class MemoryUpdateQueue:
             # before _process_queue completes. Acceptable for best-effort memory updates.
             self._schedule_timer(0)
 
+    def cancel_by_agent(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+        all_agents: bool = False,
+    ) -> int:
+        """Drop pending contexts for a scope without processing them.
+
+        Matches ``(agent_name, user_id)`` against items still sitting in
+        ``_items``. Contexts already pulled out by an in-flight
+        :meth:`_process_queue` worker are deliberately left alone -- interrupting
+        mid-LLM-call belongs to a durable outbox, not this in-memory debounce
+        queue.
+
+        Args:
+            agent_name: Canonical agent bucket to cancel. Ignored when
+                ``all_agents`` is True.
+            user_id: When set, only that user's pending contexts are eligible.
+                When omitted, only the legacy ``user_id is None`` root is
+                cancelled (mirrors storage), whether ``all_agents`` is set or not.
+            all_agents: When True, ignore ``agent_name`` and cancel every agent
+                bucket in the matched user scope (used by ``clear_memory`` with
+                ``agent_name=None``).
+
+        Returns:
+            Number of pending contexts removed.
+        """
+        with self._lock:
+            before = len(self._items)
+
+            def _keep(context: ConversationContext) -> bool:
+                # Scope matches storage: user_id=None is the legacy no-user root
+                # only (None == None), never "every user".
+                if not all_agents and context.agent_name != agent_name:
+                    return True
+                return context.user_id != user_id
+
+            self._items = [context for context in self._items if _keep(context)]
+            removed = before - len(self._items)
+            if removed and not self._items and self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            return removed
+
     def clear(self) -> None:
         """Clear the queue without processing.
 

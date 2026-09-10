@@ -30,12 +30,16 @@ describe("layout performance boundaries", () => {
     expect(source("src/app/blog/layout.tsx")).toContain(
       'import "katex/dist/katex.min.css"',
     );
+    const artifactViewerLayout = source("src/app/artifacts/view/layout.tsx");
+    expect(artifactViewerLayout).toContain('import "streamdown/styles.css"');
+    expect(artifactViewerLayout).toContain('import "katex/dist/katex.min.css"');
   });
 
   it("passes only serializable locale state through server layouts", () => {
     for (const layout of [
       source("src/app/(auth)/layout.tsx"),
       source("src/app/workspace/layout.tsx"),
+      source("src/app/artifacts/view/layout.tsx"),
     ]) {
       expect(layout).toContain("detectLocaleServer");
       expect(layout).not.toContain("initialTranslations");

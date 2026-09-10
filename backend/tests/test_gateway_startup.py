@@ -50,7 +50,7 @@ def test_local_frontend_ignores_public_docker_port() -> None:
 
     assert "env PORT=3000" in serve
     assert 'run_service "Frontend"' in serve
-    assert "3000 120" in serve
+    assert "3000 300" in serve
 
 
 def test_production_gateway_has_a_real_readiness_probe() -> None:

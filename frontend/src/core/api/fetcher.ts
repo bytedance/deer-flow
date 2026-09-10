@@ -1,4 +1,8 @@
 import { buildLoginUrl } from "@/core/auth/types";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
+
+import { UnauthorizedError } from "./errors";
+import { staticApiResponse } from "./static-response";
 
 /** HTTP methods that the gateway's CSRFMiddleware checks. */
 export type StateChangingMethod = "POST" | "PUT" | "DELETE" | "PATCH";
@@ -59,6 +63,17 @@ export async function fetch(
 ): Promise<Response> {
   const url = typeof input === "string" ? input : input.url;
 
+  // Static demos have no Gateway. Resolve REST calls before credentials,
+  // CSRF, or redirects; demo assets and explicit mock routes still use HTTP.
+  if (isStaticWebsiteOnly()) {
+    const response = await staticApiResponse(url, {
+      ...init,
+      method:
+        init?.method ?? (typeof input === "string" ? "GET" : input.method),
+    });
+    if (response) return response;
+  }
+
   // Inject CSRF for state-changing methods. GET/HEAD/OPTIONS/TRACE skip
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.
   let headers = init?.headers;
@@ -81,8 +96,13 @@ export async function fetch(
   });
 
   if (res.status === 401) {
-    window.location.href = buildLoginUrl(window.location.pathname);
-    throw new Error("Unauthorized");
+    // Include the search string: routes that carry their target in the query
+    // (e.g. the standalone artifact viewer) are otherwise unrecoverable after
+    // login, which lands on the default workspace instead.
+    window.location.href = buildLoginUrl(
+      `${window.location.pathname}${window.location.search}`,
+    );
+    throw new UnauthorizedError();
   }
 
   return res;

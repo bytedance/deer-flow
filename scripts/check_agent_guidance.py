@@ -10,9 +10,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple
 
-ROOT_SOFT = 12 * 1024
-ROOT_HARD = 16 * 1024
-MODULE_SOFT = 24 * 1024
+ROOT_SOFT = 16 * 1024
+ROOT_HARD = 20 * 1024
+MODULE_SOFT = 28 * 1024
 MODULE_HARD = 32 * 1024
 LOCAL_SOFT = 40 * 1024
 LOCAL_HARD = 48 * 1024

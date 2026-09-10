@@ -80,6 +80,43 @@ For Docker, point `url` at the OpenViking address reachable from the Gateway
 container, such as `http://openviking:1933/mcp` for a shared Compose network or
 `http://host.docker.internal:1933/mcp` for a host-installed server.
 
+## Parallel Search (optional)
+
+The `parallel-search` entry in `extensions_config.example.json` is disabled by
+default. To opt in, copy that entry into `mcpServers` in your root
+`extensions_config.json`, set `"enabled": true`, and restart DeerFlow. It connects
+to `https://search.parallel.ai/mcp` over HTTP and adds Parallel's search and fetch
+tools. With DeerFlow's default tool-name prefix, the agent sees
+`parallel-search_web_search` and `parallel-search_web_fetch`. Existing search
+providers and defaults stay unchanged.
+
+This is a third-party service operated by Parallel.ai. Search calls send
+objectives and queries to Parallel; fetch calls send requested page URLs and
+any extraction objective. These inputs can contain information from your
+conversation, so enable it only if you are comfortable sending that data to
+Parallel.
+
+Access is anonymous by default: no API key or authentication headers are needed.
+For higher rate limits, optionally add this `headers` field to the
+`parallel-search` entry in your local `extensions_config.json`:
+
+```json
+{
+  "headers": {
+    "Authorization": "$PARALLEL_AUTHORIZATION"
+  }
+}
+```
+
+Set `PARALLEL_AUTHORIZATION` in the DeerFlow backend's environment to the full
+value `Bearer <your-parallel-api-key>`, then restart DeerFlow. Include `Bearer `
+in the environment variable because DeerFlow expands only whole-string
+`$ENV_VAR` references, not `Bearer $ENV_VAR`. Keep the actual key out of committed
+files. Remove the `headers` field and restart DeerFlow to return to anonymous
+access. See the
+[Parallel Search MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp)
+for details.
+
 ## Routing Hints
 
 Use `routing` when an MCP server should be preferred for specific requests, such
@@ -162,14 +199,15 @@ backward compatibility. Disable it only when every resulting tool name remains
 unique across the enabled servers. Stdio tools continue to use DeerFlow's
 persistent per-thread session pool regardless of this setting.
 
-## Server Timeouts (Stdio MCP Servers)
+## Server Timeouts
 
-Two independent timeouts bound stdio MCP servers. `session_init_timeout` covers
-server bring-up — tool discovery (subprocess spawn + `initialize` +
-`tools/list`) and persistent-session initialization — and defaults to 60s so a
-hung server (e.g. `npx` blocked on a package download, or a server that never
-answers `initialize`) cannot block agent construction indefinitely. Set it to
-`null` to disable:
+Two independent settings bound stdio MCP servers and durable HTTP/SSE task
+calls. `session_init_timeout` covers server bring-up — tool discovery
+(subprocess spawn + `initialize` + `tools/list`) and persistent-session
+initialization — plus ephemeral HTTP/SSE task-session initialization. It
+defaults to 60s so a hung server (e.g. `npx` blocked on a package download, or
+a server that never answers `initialize`) cannot block agent construction or
+the task poller indefinitely. Set it to `null` to disable:
 
 ```json
 {
@@ -189,10 +227,11 @@ answers `initialize`) cannot block agent construction indefinitely. Set it to
 }
 ```
 
-`tool_call_timeout` limits each individual tool call in seconds and applies only
-to `stdio` servers; `http` and `sse` servers use transport-level timeouts, and
-DeerFlow logs a warning if `tool_call_timeout` is configured for those
-transports.
+`tool_call_timeout` limits each individual stdio tool call in seconds. Ordinary
+durable-task submit/status/cancel calls also honor it for `http` and `sse`
+servers, independently of transport idle timeouts, so a live connection that
+never returns the matching MCP response cannot stall the task poller. Other
+`http` and `sse` tools continue to use transport-level timeouts.
 
 ## Filesystem MCP Servers
 
@@ -206,6 +245,114 @@ particular, it does not publish per-thread MCP roots or map DeerFlow sandbox
 paths such as `/mnt/user-data/...` to paths accepted by
 `@modelcontextprotocol/server-filesystem`. Use DeerFlow's built-in file tools
 for DeerFlow workspace files.
+
+## Durable Background Tasks with Ordinary MCP Tools
+
+An MCP server can expose a fast `submit` tool plus `status` and `cancel` tools
+for long-running work. DeerFlow keeps the remote task ID in SQL and polls it
+outside the Agent run, so the model does not have to remember or repeatedly
+send that ID.
+
+Enable the restart-required runtime in `config.yaml`:
+
+```yaml
+mcp_tasks:
+  enabled: true
+  poll_interval_seconds: 5
+  lease_seconds: 120
+  max_concurrent_polls: 8
+```
+
+Then bind exact remote tool names in `extensions_config.json`. These names are
+the server's raw names, before DeerFlow adds any `<server_name>_` prefix:
+
+```json
+{
+  "mcpServers": {
+    "report-service": {
+      "enabled": true,
+      "type": "http",
+      "url": "https://reports.example.com/mcp",
+      "session_init_timeout": 60,
+      "tool_call_timeout": 60,
+      "task_toolsets": [
+        {
+          "name": "report-generation",
+          "submit_tool": "submit_report",
+          "status_tool": "get_report_status",
+          "cancel_tool": "cancel_report"
+        }
+      ]
+    }
+  }
+}
+```
+
+The three remote tools must use MCP `structuredContent`; ordinary text blocks
+are never parsed as a task protocol:
+
+- `submit_report(<business arguments>)` returns
+  `{"task_id":"remote-123","status":"running"}` quickly.
+- `get_report_status({"task_id":"remote-123"})` returns a status from
+  `running`, `input_required`, `completed`, `failed`, or `cancelled`. It may
+  also return `result`, `result_artifact` (`uri` plus `mime_type`), `error`,
+  `error_code`, `input_required`, and a finite positive
+  `poll_after_seconds`. DeerFlow caps that remote scheduling hint at 24 hours.
+- `cancel_report({"task_id":"remote-123"})` is idempotent and returns the
+  actual terminal status: `cancelled`, `completed`, or `failed`.
+
+For the status tool, `isError: true` means that the status call itself failed;
+DeerFlow records a bounded snippet of its first text content block and retries
+with capped exponential backoff. It does not infer that the remote task failed,
+because MCP tool errors do not distinguish transient from permanent conditions.
+A server must report a permanent remote-task failure through a normal tool
+result (`isError: false` or omitted) whose `structuredContent` contains
+`status: "failed"` and an optional `error`. This distinction lets a temporary
+server or network outage recover without terminalizing work that may still be
+running remotely.
+
+Persisted task errors are capped at 4,000 characters. An `input_required`
+payload must be valid JSON no larger than 64 KiB; an oversized or invalid
+payload is treated as a permanent protocol failure instead of being truncated
+into a different question. `result_artifact` must likewise serialize as JSON
+within 64 KiB; it is a small external reference, not a second result channel.
+Remote task IDs and task names are limited to 255 characters, and a task-enabled
+server name is limited to 128 characters, matching the durable SQL schema on
+both SQLite and PostgreSQL.
+
+`error_code: "task_not_found"` is a permanent failure. Network and transport
+errors remain retryable with capped exponential backoff; the query API reports
+`tracking_degraded` after repeated failures. Oversized JSON results are not
+cut into invalid JSON: DeerFlow stores a text preview, marks
+`result_truncated`, and preserves any external `result_artifact` reference.
+
+Only submit remains in the Agent's normal tool list. Status and cancel are
+runtime-internal. Query the current thread through:
+
+- `GET /api/threads/{thread_id}/mcp-tasks`
+- `GET /api/threads/{thread_id}/mcp-tasks/{task_id}`
+
+Task toolsets require `database.backend: sqlite` or `postgres`; startup fails
+instead of falling back to a synchronous submit when persistence or the task
+runtime is disabled. Restart recovery also requires the remote service to keep
+the task alive and recognize its ID after DeerFlow reconnects. A stdio server
+must therefore persist its own tasks; multi-instance deployments should
+normally use an independently running HTTP/SSE service.
+
+Server-level OAuth works during background polling and refreshes normally.
+Request-scoped secrets from a particular Agent run are not durable task
+credentials and are unavailable to later background polls; use server-level
+authentication for a task toolset. `headers_from_context` follows the same
+rule: submit is awaited inside the Agent run and carries the mapped headers,
+while status and cancel polls skip them and authenticate with the server's
+static or OAuth credentials — so `on_missing: "deny"` guards the submit but not
+those polls. Declaring both on one server logs a warning at startup. Restart DeerFlow after changing
+`mcp_tasks`, `task_toolsets`, `mcpInterceptors`, or any connection,
+authentication, transport, or timeout setting on a task-enabled server.
+DeerFlow rejects task-tool reloads that no longer match the Gateway's startup
+snapshot instead of discovering tools with new settings while the background
+poller still calls the old endpoint. Agent-facing description/routing changes
+and changes to servers without task toolsets remain hot-reloadable.
 
 ## OAuth Support (HTTP/SSE MCP Servers)
 
@@ -238,6 +385,89 @@ Example:
 }
 ```
 
+## Request-Scoped Headers (HTTP/SSE MCP Servers)
+
+When the credential is chosen by the *caller* rather than by the operator —
+multi-tenant gateways, per-run API keys, one shared MCP server fronting several
+environments — declare a `headers_from_context` block instead of registering one
+MCP server per credential.
+
+Each entry maps an HTTP header name to a key of the run request's
+`config.context.secrets` carrier:
+
+```json
+{
+   "mcpServers": {
+      "shared-api": {
+         "enabled": true,
+         "type": "http",
+         "url": "https://mcp.example.com/mcp",
+         "headers": { "Authorization": "Bearer $MCP_DISCOVERY_TOKEN" },
+         "headers_from_context": {
+            "enabled": true,
+            "headers": {
+               "X-Tenant-Id": "tenant_id",
+               "Authorization": "tenant_token"
+            },
+            "on_missing": "deny"
+         }
+      }
+   }
+}
+```
+
+The caller supplies the values on each run request:
+
+```json
+{
+  "config": {
+    "context": {
+      "secrets": {
+        "tenant_id": "acme",
+        "tenant_token": "Bearer <request-scoped credential>"
+      }
+    }
+  }
+}
+```
+
+- The config file stores **names only**, never a credential, so the block is
+  returned unmasked by `GET /api/mcp/config`. The values travel out-of-band with
+  each run and are stripped from persisted run configuration, API responses, and
+  trace payloads.
+- The server's static `headers` are used for startup tool discovery. A mapped
+  header replaces the static one for that tool call, as shown above for
+  `Authorization`. Header names are matched case-insensitively, so a mapped
+  `Authorization` still replaces a static `authorization` instead of putting a
+  second copy of the field on the wire. Mapping one header under two spellings
+  is rejected at config load.
+- `on_missing` defaults to `"deny"`: if the run carries no value for a mapped
+  key, the tool call fails with an actionable error rather than falling back to
+  the discovery credential — which in a multi-tenant deployment would send one
+  tenant's request under another tenant's authority. Set `"passthrough"` to opt
+  out and forward the static headers instead.
+- A value that cannot be sent as an HTTP header — a stray newline picked up
+  when reading a token from a file, leading/trailing whitespace, characters
+  outside ASCII — is always denied, regardless of `on_missing`. The error
+  names the offending key but never repeats the value; without this check a
+  newline or stray whitespace would reach h11, whose rejection echoes the full
+  credential into a model-visible tool error. The same check covers every other
+  way a value reaches these headers: `user_auth`, the OAuth token returned by
+  the token endpoint, and the static `headers` in the config file.
+- Precedence for a server declaring several sources: static `headers` <
+  `oauth` < `user_auth` < `headers_from_context`. The value chosen for this one
+  request is the most specific, so it wins.
+- `sse`/`http` only. A stdio server has no HTTP headers; declaring the block
+  there logs a warning and is ignored.
+- Durable background tasks are the one exception, and only half of one: a
+  `task_toolsets` submit is awaited inside the Agent run and carries these
+  headers, but the status and cancel polls run after that run ends, so they skip
+  them and use the server's static/OAuth credentials. See *Durable Background
+  Tasks* above.
+
+Use `user_auth` instead when the credential belongs to a configured DeerFlow
+user rather than to the individual request.
+
 ## Custom Tool Interceptors
 
 You can register custom interceptors that run before every MCP tool call. This is useful for injecting per-request headers (e.g., user auth tokens from the LangGraph execution context), logging, or metrics.
@@ -256,16 +486,19 @@ Declare interceptors in `extensions_config.json` using the `mcpInterceptors` fie
 Each entry is a Python import path in `module:variable` format (resolved via `resolve_variable`). The variable must be a **no-arg builder function** that returns an async interceptor compatible with `MultiServerMCPClient`’s `tool_interceptors` interface, or `None` to skip.
 
 Example interceptor that injects an authorization header from the request-scoped
-LangGraph secret context:
+LangGraph secret context. For a plain header mapping prefer the declarative
+`headers_from_context` block above; write an interceptor when the header value
+needs logic (signing, exchanging the secret for another token, routing on the
+tool name):
 
 ```python
-from langgraph.config import get_config
+from deerflow.runtime.secret_context import extract_request_secrets
 
 
 def build_auth_interceptor():
     async def interceptor(request, handler):
-        config = get_config()
-        secrets = (config.get("context") or {}).get("secrets") or {}
+        runtime = getattr(request, "runtime", None)
+        secrets = extract_request_secrets(getattr(runtime, "context", None))
         token = secrets.get("MCP_AUTH_TOKEN")
         if token:
             request = request.override(
@@ -275,6 +508,16 @@ def build_auth_interceptor():
 
     return interceptor
 ```
+
+Read the run context from `request.runtime`, not from
+`langgraph.config.get_config()`. The context is carried on the LangGraph
+runtime, not on the `RunnableConfig` propagated to child runnables, so
+`get_config().get("context")` is `None` inside a tool call. LangGraph's tool
+node injects the runtime into any tool parameter named `runtime`, which is how
+both the pooled stdio wrapper and `langchain-mcp-adapters`' HTTP/SSE tool
+receive it. When the call originates outside a tool node, fall back to
+`langgraph.runtime.get_runtime()` (see
+`deerflow/mcp/context_headers.py::_current_runtime`).
 
 Supply the credential on each run request through `config.context.secrets`:
 

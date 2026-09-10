@@ -20,6 +20,12 @@
       "tool_call_timeout": 60,
       "description": "GitHub MCP server for repository operations"
     },
+    "parallel-search": {
+      "enabled": false,
+      "type": "http",
+      "url": "https://search.parallel.ai/mcp",
+      "description": "Optional anonymous Parallel Search tools for web search and fetching requested URLs"
+    },
     "openviking": {
       "enabled": false,
       "type": "http",
@@ -64,6 +70,22 @@
           }
         }
       }
+    },
+    "long-running-reports": {
+      "enabled": false,
+      "type": "http",
+      "url": "https://reports.example.com/mcp",
+      "description": "Example ordinary MCP background-task contract",
+      "session_init_timeout": 60,
+      "tool_call_timeout": 60,
+      "task_toolsets": [
+        {
+          "name": "report-generation",
+          "submit_tool": "submit_report",
+          "status_tool": "get_report_status",
+          "cancel_tool": "cancel_report"
+        }
+      ]
     }
   },
   "skills": {}

@@ -80,6 +80,14 @@ def test_bind_address_remains_overridable(variant: str):
     assert _bind_address(mapping) == "${BIND_HOST:-127.0.0.1}", f"{variant} compose must keep the bind address overridable via BIND_HOST; got: {mapping!r}"
 
 
+def test_dev_frontend_allows_default_loopback_origins():
+    """The Docker dev frontend must hydrate on its default published hosts."""
+    compose = yaml.safe_load(COMPOSE_PATHS["dev"].read_text(encoding="utf-8"))
+    environment = compose["services"]["frontend"]["environment"]
+
+    assert "DEER_FLOW_DEV_ALLOWED_ORIGINS=${DEER_FLOW_DEV_ALLOWED_ORIGINS:-127.0.0.1,::1}" in environment
+
+
 def _bind_address(mapping: str) -> str | None:
     """Return the bind-address segment of a compose port mapping, if any.
 
@@ -110,3 +118,16 @@ def _bind_address(mapping: str) -> str | None:
 
     # ADDR:HOST:CONTAINER -> bound; HOST:CONTAINER or CONTAINER -> unbound.
     return segments[0] if len(segments) >= 3 else None
+
+
+def test_dev_compose_env_files_are_optional():
+    """Missing .env files must not fail `docker compose -f docker/docker-compose-dev.yaml`."""
+    compose = yaml.safe_load(COMPOSE_PATHS["dev"].read_text(encoding="utf-8"))
+    expected = {
+        "provisioner": "../.env",
+        "frontend": "../frontend/.env",
+        "gateway": "../.env",
+    }
+    for service_name, path in expected.items():
+        entries = compose["services"][service_name]["env_file"]
+        assert entries == [{"path": path, "required": False}], f"{service_name} env_file must be optional; got: {entries!r}"

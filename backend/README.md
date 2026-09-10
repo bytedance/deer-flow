@@ -61,10 +61,16 @@ Middlewares execute in strict order, each handling a specific concern:
 | 3 | **SandboxMiddleware** | Acquires sandbox environment for code execution |
 | 4 | **SummarizationMiddleware** | Reduces context when approaching token limits (optional) |
 | 5 | **TodoListMiddleware** | Tracks multi-step tasks in plan mode (optional) |
-| 6 | **TitleMiddleware** | Auto-generates conversation titles after first exchange |
+| 6 | **TitleMiddleware** | Auto-generates conversation titles from the original user request after first exchange; attachment-only messages fall back to `New Conversation` |
 | 7 | **MemoryMiddleware** | Queues conversations for async memory extraction |
 | 8 | **ViewImageMiddleware** | Injects image data for vision-capable models (conditional) |
 | 9 | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
+
+When `loop_detection.enabled` is set, loop detection checks both repeated
+tool-call sets and per-tool frequency. Warnings do not skip the rest of a
+tool-call batch: any hard limit reached takes precedence and stops the entire
+batch before tool execution. Warning-only batches remain fully counted and
+receive a transient hint on the next model request.
 
 ### Sandbox System
 
@@ -100,6 +106,7 @@ LLM-powered persistent context retention across conversations:
 - **Debounced updates**: Batches updates to minimize LLM calls (configurable wait time)
 - **System prompt injection**: Top facts + context injected into agent prompts
 - **Run-level memory identity**: `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory` returns the SHA-256 identity of the effective hidden memory block without copying memory text into the event store
+- **Read failures**: Strict backend policies (including legacy `fail_closed`) stop the turn, including at the 5-second async injection deadline. Fail-open reads continue without new context. Timeout handling does not wait for a free worker; a timed-out read may still occupy its worker until the backend returns.
 - **Storage**: JSON file with mtime-based cache invalidation
 
 ### Tool Ecosystem
@@ -278,6 +285,29 @@ backend/
 `langgraph.json` is not the default service entrypoint.  The scripts and Docker
 deployments run the Gateway embedded runtime; the file is kept for LangGraph
 tooling, Studio, or direct LangGraph Server compatibility.
+
+To start the optional standalone development server and open its Studio URL:
+
+```bash
+cd backend
+uv run langgraph dev --allow-blocking
+```
+
+Run it from `backend/` so the CLI discovers `langgraph.json`. The in-memory
+server is intended for development and testing, not production deployment. The
+flag permits DeerFlow's synchronous configuration and graph-factory setup
+during local Studio requests; it is not a production-server setting. Its local
+Studio authentication and registered graph discovery are handled automatically;
+no custom connection headers are required. Assistant ownership/provenance is
+stamped by the server, and normal assistant-version selection remains available.
+Before the locked local runtime loads its persisted development store, DeerFlow
+repairs legacy assistant rows and version history so older metadata cannot
+reactivate server-only privileges or be discarded by runtime startup cleanup.
+Run `uv sync` after dependency changes; this compatibility path requires the
+declared LangGraph runtime versions and warns when the persisted-store contract
+does not match its expectations.
+The same file-based custom-app loading path used by this command is covered by
+the backend regression suite.
 
 ---
 
@@ -468,8 +498,11 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-# Offline backend suite (live external-API tests are excluded)
+# Default offline backend suite (live external-API and blocking-I/O tests are excluded)
 make test
+
+# Strict blocking-I/O suite
+make test-blocking-io
 
 # Explicit real-API DeerFlowClient integration suite
 make test-live
