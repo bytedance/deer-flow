@@ -1236,6 +1236,7 @@ loop_detection:
   warn_threshold: 3
   hard_limit: 5
   window_size: 20
+  # Compatibility name: bounds retained (thread_id, run_id) histories, not whole threads.
   max_tracked_threads: 100
   tool_freq_warn: 30
   tool_freq_hard_limit: 50
