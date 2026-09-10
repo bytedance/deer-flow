@@ -2320,7 +2320,7 @@ agent_storage:
 # ============================================================================
 # Scheduled Tasks Configuration
 # ============================================================================
-# Background scheduler for one-time and recurring (cron) agent runs.
+# Background scheduler for one-time, cron, and interval agent runs.
 # Poller fields (enabled, multi_instance, poll_interval_seconds, lease_seconds,
 # max_concurrent_runs, min_once_delay_seconds) are restart-required.
 # recursion_limit is read at dispatch and applies to the next scheduled run
@@ -2339,7 +2339,7 @@ agent_storage:
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
 #   max_concurrent_runs: 3       # Global cap on launching/running scheduled runs across multi-instance Pods
 #   queue_timeout_seconds: 3600  # Maximum durable queue wait before an occurrence fails
-#   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
+#   min_once_delay_seconds: 60   # Floor for one-time run_at offset and interval every_seconds
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
