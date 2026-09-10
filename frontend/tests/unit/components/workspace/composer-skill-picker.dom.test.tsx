@@ -112,4 +112,17 @@ describe("ComposerSkillPicker", () => {
     });
     expect(noSkillsButton.getAttribute("disabled")).not.toBeNull();
   });
+
+  it("prevents mousedown focus theft so the toolbar cannot shift mid-press", () => {
+    // Pressing the trigger while the slash suggestion catalog is open must
+    // not blur the composer textarea: the blur closes the catalog, the
+    // welcome chips mount, and the toolbar shifts between mousedown and
+    // mouseup so the click misses the trigger. The catalog's own option
+    // buttons prevent the same blur; this pins the trigger to the same rule
+    // at the mechanism level (the e2e pins the resulting click end to end).
+    render(<ComposerSkillPicker skills={skills} onPick={rs.fn()} />);
+    const trigger = screen.getByRole("button", { name: "Skills" });
+    // fireEvent returns false exactly when a handler called preventDefault.
+    expect(fireEvent.mouseDown(trigger)).toBe(false);
+  });
 });

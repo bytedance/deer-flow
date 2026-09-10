@@ -60,6 +60,13 @@ export function ComposerSkillPicker({
             className="px-2!"
             data-testid="skill-picker-button"
             disabled={(disabled ?? false) || selectableSkills.length === 0}
+            // Pressing the trigger with the slash suggestion catalog open
+            // must not blur the textarea on mousedown: the blur closes the
+            // catalog, the welcome suggestion chips then mount and shift the
+            // toolbar between mousedown and mouseup, and the click misses the
+            // trigger entirely. The catalog's own option buttons prevent the
+            // same blur for the same reason.
+            onMouseDown={(event) => event.preventDefault()}
           >
             <BlocksIcon className="size-3" />
           </PromptInputButton>

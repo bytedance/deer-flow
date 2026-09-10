@@ -155,13 +155,10 @@ test.describe("Composer skill picker", () => {
     const textarea = page.getByPlaceholder(/how can i assist you/i);
     await expect(textarea).toBeVisible({ timeout: 15_000 });
 
-    // Start an activation by typing, then browse instead of finishing it.
-    // Escape first dismisses the suggestion catalog (the draft stays) so the
-    // follow-up chips mount before the click — the catalog's blur-time close
-    // otherwise shifts the toolbar between mousedown and mouseup and the
-    // click lands off the trigger.
+    // Start an activation by typing, then browse instead of finishing it —
+    // the suggestion catalog is open over the composer at click time, the
+    // exact shape a user hits when abandoning a partial for the picker.
     await textarea.fill("/data-an");
-    await textarea.press("Escape");
 
     await page.getByTestId("skill-picker-button").click();
     const search = page.getByPlaceholder(/search skills/i);
