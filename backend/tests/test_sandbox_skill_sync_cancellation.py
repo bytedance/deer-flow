@@ -127,8 +127,13 @@ async def test_cancelled_policy_sync_keeps_lease_until_sync_worker_finishes(
         assert await asyncio.to_thread(provider.sync_started.wait, 2), "skill sync did not start"
 
         task.cancel()
-        task.cancel()
         await asyncio.sleep(0)
+
+        assert not task.done()
+        assert provider.release_calls == []
+        assert not provider.sync_finished.is_set()
+
+        task.cancel()
         await asyncio.sleep(0)
 
         assert not task.done()
