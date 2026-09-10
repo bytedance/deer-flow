@@ -231,6 +231,19 @@ def test_detect_from_config_ignores_commented_ollama_block(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
+def test_detect_from_config_ignores_use_in_nested_model_mapping(tmp_path):
+    """A `use` inside a sub-mapping is not the model's own provider.
+
+    `when_thinking_enabled` / `when_thinking_disabled` blocks are common in
+    config.example.yaml, so matching `use:` at any depth would misread them.
+    """
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: doubao\n    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek\n    when_thinking_enabled:\n      use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
 def test_detect_from_config_non_ollama_model_returns_no_extras(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("models:\n  - name: gpt\n    use: langchain_openai:ChatOpenAI\n    model: gpt-4o\n")

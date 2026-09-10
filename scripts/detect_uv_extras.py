@@ -80,9 +80,12 @@ _SECTION_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*$")
 _INDENTED_SECTION_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*$")
 _KEY_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*(\S.*?)\s*$")
 _LIST_ITEM_NAME_RE = re.compile(r"^\s*-\s+name\s*:\s*(\S.*?)\s*$")
-# `use:` inside a models list item, whether it is the first key (`- use: X`)
-# or a later one (`    use: X`).
+# `use:` on a models list item, whether it is the first key (`- use: X`) or a
+# later one (`    use: X`). Matching is pinned to the item's own key indent by
+# the caller, so a `use` nested in a sub-mapping (e.g. `when_thinking_enabled`)
+# is not mistaken for the model's provider.
 _MODEL_USE_RE = re.compile(r"^\s+(?:-\s+)?use\s*:\s*(\S.*?)\s*$")
+_LIST_ITEM_RE = re.compile(r"^(\s*)-\s+\S")
 
 # Provider module (the part before `:` in `models[].use`) -> uv extra that
 # ships it. Mirrors `[project.optional-dependencies]` in the harness package.
@@ -268,6 +271,7 @@ def models_use_providers(lines: list[str]) -> set[str]:
     `models:` section shipped in config.example.yaml from enabling an extra.
     """
     inside = False
+    key_indent: int | None = None
     providers: set[str] = set()
     for raw in lines:
         line = _strip_comment(raw)
@@ -276,6 +280,7 @@ def models_use_providers(lines: list[str]) -> set[str]:
         sect_match = _SECTION_RE.match(line)
         if sect_match:
             inside = sect_match.group(1) == "models"
+            key_indent = None
             continue
         if not inside:
             continue
@@ -283,6 +288,15 @@ def models_use_providers(lines: list[str]) -> set[str]:
         indent = len(line) - len(stripped)
         if indent == 0:
             inside = False
+            key_indent = None
+            continue
+        item_match = _LIST_ITEM_RE.match(line)
+        if item_match:
+            # `- name: x` puts the item's keys at the dash's indent + 2.
+            key_indent = len(item_match.group(1)) + 2
+        elif key_indent is not None and indent != key_indent:
+            # Deeper (a sub-mapping such as `when_thinking_enabled`) or
+            # shallower: not one of this model's own keys.
             continue
         use_match = _MODEL_USE_RE.match(line)
         if use_match:
