@@ -217,6 +217,18 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
     # expiry request must 400 without paying for a scan that can walk the
     # raw-scan budget first.
     expires_at = _resolve_expiry(body)
+    # Storage quota (cheap constant-work check, so it runs before the
+    # snapshot scan): every stored row keeps its payload — revocation is
+    # soft, for owner-side history — so the cap counts all of the caller's
+    # rows, across threads and lifecycle states. Without it a single
+    # authenticated account could grow the shared database without bound
+    # by repeatedly posting immutable snapshots.
+    quota = _sharing_config().max_shares_per_owner
+    if await repo.count_by_owner(user_id) >= quota:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Share limit reached ({quota} stored share snapshots); contact the operator to raise conversation_sharing.max_shares_per_owner or prune old shares",
+        )
     try:
         snapshot, source_last_seq = await build_share_snapshot(thread_id, request=request, user_id=user_id)
     except ShareSnapshotTooLarge as exc:

@@ -16,3 +16,8 @@ class ConversationSharingConfig(BaseModel):
         default=False,
         description="Allow the explicit 'never expires' advanced choice when creating a share",
     )
+    max_shares_per_owner: int = Field(
+        default=100,
+        ge=1,
+        description="Per-owner cap on stored share snapshots (every lifecycle state counts: revocation is soft and rows keep their payload), bounding the per-account storage footprint",
+    )

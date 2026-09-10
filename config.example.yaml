@@ -2917,3 +2917,8 @@ conversation_sharing:
   # finite expiry plus immediate revocation are the compensating controls
   # for bearer-token-in-URL sharing.
   allow_no_expiry: false
+  # Per-owner cap on stored share snapshots. Revocation is soft (rows keep
+  # their payload for owner-side history), so every stored row counts —
+  # across threads and lifecycle states — to bound each account's storage
+  # footprint. Creating past the cap answers 409.
+  max_shares_per_owner: 100

@@ -42,7 +42,7 @@ THREAD_A = "thread-owned-by-a"
 _SNAPSHOT = {"version": 1, "messages": [{"id": "m1", "role": "user", "content": "hello"}]}
 
 
-def _config(*, enabled: bool, allow_no_expiry: bool = False, default_expiry_days: int = 30) -> AppConfig:
+def _config(*, enabled: bool, allow_no_expiry: bool = False, default_expiry_days: int = 30, max_shares_per_owner: int = 100) -> AppConfig:
     return AppConfig.model_validate(
         {
             "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
@@ -50,6 +50,7 @@ def _config(*, enabled: bool, allow_no_expiry: bool = False, default_expiry_days
                 "enabled": enabled,
                 "allow_no_expiry": allow_no_expiry,
                 "default_expiry_days": default_expiry_days,
+                "max_shares_per_owner": max_shares_per_owner,
             },
         }
     )
@@ -69,7 +70,7 @@ def _thread_store() -> MemoryThreadMetaStore:
 
 
 @contextmanager
-def _client(tmp_path, *, user=USER_A, enabled=True, allow_no_expiry=False, with_repo=True, default_expiry_days: int = 30):
+def _client(tmp_path, *, user=USER_A, enabled=True, allow_no_expiry=False, with_repo=True, default_expiry_days: int = 30, max_shares_per_owner: int = 100):
     from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
     from app.gateway.shares.tokens import set_share_pepper
 
@@ -81,7 +82,7 @@ def _client(tmp_path, *, user=USER_A, enabled=True, allow_no_expiry=False, with_
             request.state.auth_source = AUTH_SOURCE_SESSION
             return await call_next(request)
 
-    set_app_config(_config(enabled=enabled, allow_no_expiry=allow_no_expiry, default_expiry_days=default_expiry_days))
+    set_app_config(_config(enabled=enabled, allow_no_expiry=allow_no_expiry, default_expiry_days=default_expiry_days, max_shares_per_owner=max_shares_per_owner))
     set_share_pepper("test-pepper")
     app = make_authed_test_app(user_factory=lambda: user)
     app.add_middleware(_AuthSourceTag)
@@ -287,6 +288,30 @@ def test_create_rejects_oversized_conversation_without_persisting(tmp_path):
         assert response.status_code == 413
         assert "too long to share" in response.json()["detail"]
         assert asyncio.run(repo.list_by_thread(THREAD_A, str(USER_A.id))) == []
+
+
+def test_create_enforces_per_owner_stored_share_quota(tmp_path):
+    """Creation is capped per owner across threads and lifecycle states.
+
+    Every stored row keeps its snapshot payload (revocation is soft, for
+    history), so the quota must count all of the owner's rows — not just
+    this thread's or only active ones — to bound the per-account storage
+    footprint. The check rejects before the snapshot scan is paid for.
+    """
+    with _client(tmp_path, max_shares_per_owner=2) as (client, repo):
+        asyncio.run(repo.create(thread_id="thread-elsewhere", owner_user_id=str(USER_A.id), token_hash="h-quota-1", title="t", snapshot_json=_SNAPSHOT))
+        created = asyncio.run(repo.create(thread_id=THREAD_A, owner_user_id=str(USER_A.id), token_hash="h-quota-2", title="t", snapshot_json=_SNAPSHOT))
+        asyncio.run(repo.revoke(created["id"], THREAD_A, str(USER_A.id)))
+
+        snapshot_mock = AsyncMock(return_value=(_SNAPSHOT, None))
+        with patch.object(shares_router, "build_share_snapshot", snapshot_mock):
+            response = _create(client)
+
+    assert response.status_code == 409
+    assert "share limit" in response.json()["detail"].lower()
+    snapshot_mock.assert_not_awaited()
+    # Nothing was persisted by the rejected request.
+    assert asyncio.run(repo.count_by_owner(str(USER_A.id))) == 2
 
 
 def test_list_strips_token_hashes(tmp_path):

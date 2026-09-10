@@ -144,6 +144,22 @@ async def test_list_by_thread_projects_metadata_only(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_count_by_owner_counts_all_rows_across_threads_and_states(tmp_path):
+    """The per-owner quota counts every stored row: payload survives
+    revocation, so lifecycle state and thread do not change the footprint."""
+    repo = await _make_repo(tmp_path)
+    other_thread = await _create_share(repo, token_hash="tok-count-1", thread_id="thread-2")
+    await _create_share(repo, token_hash="tok-count-2")
+    await _create_share(repo, token_hash="tok-count-3", owner_user_id="user-2")
+
+    assert await repo.revoke(other_thread["id"], "thread-2", "user-1") is True
+    # Revoked rows still count for the owner; other owners are isolated.
+    assert await repo.count_by_owner("user-1") == 2
+    assert await repo.count_by_owner("user-2") == 1
+    assert await repo.count_by_owner("user-nobody") == 0
+
+
+@pytest.mark.asyncio
 async def test_token_hash_unique_constraint(tmp_path):
     repo = await _make_repo(tmp_path)
     await _create_share(repo, token_hash="tok-dup")

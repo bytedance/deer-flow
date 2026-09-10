@@ -63,6 +63,10 @@ class _ShareRepo:
             return None
         return self.record
 
+    async def count_by_owner(self, owner_user_id: str) -> int:
+        # The create path's quota probe; the stub stores at most one record.
+        return 1 if self.record is not None else 0
+
 
 def _request(repo: _ShareRepo):
     return SimpleNamespace(
@@ -92,6 +96,7 @@ async def test_create_and_public_resolve_cold_pepper_do_not_block_event_loop(
             enabled=True,
             allow_no_expiry=True,
             default_expiry_days=30,
+            max_shares_per_owner=100,
         ),
     )
 

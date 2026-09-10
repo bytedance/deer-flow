@@ -81,6 +81,12 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   transcript, so it is never silently truncated.
 - `GET` lists management metadata (never token hashes); `DELETE /{share_id}`
   revokes immediately (scoped to thread + owner in the repository).
+- Creation is quota-capped per owner (`conversation_sharing.max_shares_per_owner`,
+  default 100, constant-work check before the snapshot scan → 409): every
+  stored row counts — revocation is soft and rows keep their payload — so the
+  cap bounds each account's storage footprint across threads and lifecycle
+  states. Retention/pruning of old rows is a deliberate non-goal here, pending
+  a maintainer decision on deletion semantics.
 
 ## Token storage (`tokens.py`)
 

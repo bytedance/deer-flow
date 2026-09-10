@@ -12,7 +12,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.conversation_shares.model import ConversationShareRow
@@ -147,6 +147,17 @@ class ConversationShareRepository:
                 )
             ).all()
             return [self._summary_row_to_dict(row) for row in rows]
+
+    async def count_by_owner(self, owner_user_id: str) -> int:
+        """Count every stored row for *owner_user_id*, across threads and
+        lifecycle states.
+
+        The create-path quota reads this: revocation is soft (rows keep their
+        snapshot payload for owner-side history), so only counting all rows
+        bounds the per-account storage footprint.
+        """
+        async with self._sf() as session:
+            return int(await session.scalar(select(func.count()).select_from(ConversationShareRow).where(ConversationShareRow.owner_user_id == owner_user_id)) or 0)
 
     async def revoke(self, share_id: str, thread_id: str, owner_user_id: str) -> bool:
         """Revoke one of *owner_user_id*'s shares; False if absent/not owned.
