@@ -172,7 +172,10 @@ cd frontend && pnpm test      # Unit tests
 Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
 (`pnpm`) = per-module work.**
 
-Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. Diagnostic scripts resolve the runner and frontend directory to absolute paths before changing the child process working directory, so they remain independent of the caller's current directory. The runner prefers `pnpm.cmd`, then `pnpm` on native Windows Python (`os.name == "nt"`); POSIX keeps `pnpm`, then `pnpm.cmd`. If neither is found, it falls back to `corepack pnpm`, preferring `corepack.cmd` on Windows and `corepack` on POSIX. It is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
+Host pnpm calls use `scripts/pnpm.py`: native Windows tries `pnpm.cmd` before
+`pnpm`; POSIX reverses the order. Its Corepack fallback applies the same ordering
+to `corepack.cmd` and `corepack`. The runner operates from `frontend/` so
+Corepack honors its pinned package-manager version.
 
 ### Prerequisites before `make dev`
 
