@@ -191,13 +191,18 @@ async def _checkpoint_ids_with_writes(saver: Any, thread_id: str) -> set[tuple[s
 
     Protected set item 3: pending/uncommitted writes are retained state, not
     garbage, so v1 refuses to delete any checkpoint that still owns writes
-    rows. Production checkpoints normally accumulate their own committed
-    writes rows too, so the conservative default makes pruning a no-op on
-    hot threads; a policy that distinguishes in-flight from orphaned writes
-    belongs to the contract's next revision, not to a fast path here.
+    rows. On the memory backend ``InMemorySaver.writes`` also holds an *empty*
+    dict for checkpoints whose task produced no writes — counting key presence
+    would spare those phantom entries and silently disable pruning on the
+    memory saver, so a pair qualifies only when its writes dict is non-empty,
+    matching how :func:`_thread_storage_stats` counts rows rather than keys.
+    Production checkpoints normally accumulate their own committed writes rows
+    too, so the conservative default still makes pruning a no-op on hot
+    threads; a policy that distinguishes in-flight from orphaned writes belongs
+    to the contract's next revision, not to a fast path here.
     """
     if isinstance(saver, InMemorySaver):
-        return {(ns, cp_id) for (stored_thread, ns, cp_id) in saver.writes if stored_thread == thread_id}
+        return {(ns, cp_id) for (stored_thread, ns, cp_id), writes in saver.writes.items() if stored_thread == thread_id and writes}
     if isinstance(saver, AsyncSqliteSaver):
         async with saver.conn.execute(
             "SELECT DISTINCT checkpoint_ns, checkpoint_id FROM writes WHERE thread_id = ?",
@@ -301,6 +306,13 @@ async def enforce_thread_retention(
     (``deerflow.runtime.runs.worker._checkpoint_thread_lock(thread_id)``) as
     *thread_lock*; without one, retention must only run while the thread is
     guaranteed quiescent.
+
+    The lock returned by ``_checkpoint_thread_lock`` is a plain, *non-reentrant*
+    ``asyncio.Lock`` (``AsyncKeyedLockTable.hold``). A caller that already
+    holds it and then passes it here self-deadlocks — which matters because
+    the runtime's own ``persist_run_history_metadata`` enters that same lock
+    before writing, so a post-run-hook call site must invoke retention *after*
+    releasing it, not from inside the held section.
     """
     _ensure_supported_saver(saver)
     effective = policy or RetentionPolicy()

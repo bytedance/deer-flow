@@ -222,15 +222,13 @@ async def test_runtime_duration_leaf_pruned_by_default(saver_env: _SaverEnv) -> 
     thread_id, checkpoint_ids, message_ids = await _write_turns(saver_env, steps=3)
     duration_id = await _append_duration_checkpoint(saver_env, thread_id)
 
-    # strict_pending_write_guard=False: on the memory backend every checkpoint
-    # (the duration node included) owns writes rows, so the v1 guard would
-    # spare it there; SQLite/Postgres runs leave no natural writes rows and
-    # the default policy prunes this shape on its own.
-    report = await enforce_thread_retention(
-        saver_env.saver,
-        thread_id,
-        RetentionPolicy(strict_pending_write_guard=False),
-    )
+    # Shipping default (strict_pending_write_guard=True): the duration-only
+    # leaf owns no writes rows — on memory its ``writes`` entry is the phantom
+    # empty dict that ``_checkpoint_ids_with_writes`` does not count — so the
+    # default policy itself prunes it. This is the proof that the headline
+    # "enabled by default" E1 shape is reachable on every backend, not only
+    # after relaxing the guard.
+    report = await enforce_thread_retention(saver_env.saver, thread_id)
 
     assert report.deleted_checkpoint_ids == [duration_id]
     assert report.protected_head_id == checkpoint_ids[-1]
@@ -243,7 +241,7 @@ async def test_runtime_duration_leaf_pruned_by_default(saver_env: _SaverEnv) -> 
 
 
 @pytest.mark.anyio
-async def test_duration_link_protected_after_next_run(saver_env: _SaverEnv) -> None:
+async def def test_duration_link_protected_after_next_run(saver_env: _SaverEnv) -> None:
     """Contract protected set item 4: once a later run has been written on top
     of a duration-only checkpoint, that checkpoint is a chain link on the new
     head's ancestor chain and must not be touched (deleting it would need
