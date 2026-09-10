@@ -123,7 +123,7 @@ def test_build_registry_never_exposes_reserved_commands_as_skills():
     registry = build_registry([{"name": name, "description": "reserved", "enabled": True} for name in RESERVED_SLASH_SKILL_NAMES])
 
     skill_names = {command.name for command in registry if command.category == "skill"}
-    assert skill_names.isdisjoint(RESERVED_SLASH_SKILL_NAMES)
+    assert skill_names == {"context"}
 
 
 def test_resolve_never_classifies_reserved_commands_as_skills():
@@ -131,7 +131,16 @@ def test_resolve_never_classifies_reserved_commands_as_skills():
 
     for name in reserved_names:
         resolved = resolve(f"/{name} task", skills=reserved_names)
-        assert resolved.kind != "skill", name
+        if name == "context":
+            assert resolved.kind == "skill"
+        else:
+            assert resolved.kind != "skill", name
+
+
+def test_context_compact_alias_is_not_a_tui_skill():
+    resolved = resolve("/context compact", skills=["context"])
+
+    assert resolved.kind == "unknown"
 
 
 # --------------------------------------------------------------------------- #
