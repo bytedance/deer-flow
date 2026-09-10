@@ -8,11 +8,20 @@ adapters do not all read the same one —
 - ``tool_calls``: the structured list most adapters prefer;
 - ``additional_kwargs["tool_calls"]``: the raw provider payload (OpenAI
   ``function.arguments`` JSON string) some adapters fall back to;
-- ``content`` ``tool_use`` blocks (Anthropic), including any ``partial_json``;
+- ``content`` blocks that carry their own copy of the arguments: Anthropic
+  ``tool_use`` (``input`` + ``partial_json``), OpenAI Responses
+  ``function_call`` (``arguments`` string, matched by ``call_id``; the
+  ``fc_…`` item id is preserved), and LangChain standard-content
+  ``tool_call`` / ``tool_call_chunk`` (``args`` plus ``extras.arguments``);
 - ``tool_call_chunks`` on an ``AIMessageChunk``.
 
 Rewriting only one surface leaves the original payload reachable through the
-others and can hand a strict provider a request whose surfaces disagree.
+others and can hand a strict provider a request whose surfaces disagree. The
+content surfaces matter most: ``langchain_openai``'s Responses input builder
+emits a content ``function_call`` block *instead of* the structured call
+whose ``call_id`` it already carries, and prefers ``extras.arguments`` over
+the structured args when translating a v1 ``tool_call`` block, so a rewrite
+that touched ``tool_calls`` alone would still send the original payload.
 :func:`rewrite_tool_call_args` rewrites them together and returns a
 ``model_copy`` (or the same object when nothing matched), so callers never
 mutate state and the result is identical across model calls. Policy — which
@@ -93,7 +102,7 @@ def rewrite_tool_call_args(message: AIMessage, replacements: ArgsReplacements) -
             update["additional_kwargs"] = {**additional_kwargs, "tool_calls": rewritten_raw}
 
     if isinstance(message.content, list):
-        rewritten_content = [_rewrite_tool_use_block(block, replacements) for block in message.content]
+        rewritten_content = [_rewrite_content_block(block, replacements) for block in message.content]
         if _any_replaced(rewritten_content, message.content):
             update["content"] = rewritten_content
 
@@ -130,13 +139,34 @@ def _rewrite_raw_tool_call(entry: Any, replacements: ArgsReplacements) -> Any:
     return entry
 
 
-def _rewrite_tool_use_block(block: Any, replacements: ArgsReplacements) -> Any:
-    """Rewrite an Anthropic-style ``tool_use`` content block; ``partial_json`` is dropped so it cannot leak the old payload."""
-    if not isinstance(block, dict) or block.get("type") != "tool_use":
+def _rewrite_content_block(block: Any, replacements: ArgsReplacements) -> Any:
+    """Rewrite one content block that carries tool-call arguments; anything else passes through by identity."""
+    if not isinstance(block, dict):
         return block
-    new_args = _replacement_for_id(block.get("id"), replacements)
-    if new_args is None:
-        return block
-    rewritten = {key: value for key, value in block.items() if key != "partial_json"}
-    rewritten["input"] = new_args
-    return rewritten
+    block_type = block.get("type")
+    if block_type == "tool_use":
+        # Anthropic: ``partial_json`` is dropped so it cannot leak the old payload.
+        new_args = _replacement_for_id(block.get("id"), replacements)
+        if new_args is None:
+            return block
+        rewritten = {key: value for key, value in block.items() if key != "partial_json"}
+        rewritten["input"] = new_args
+        return rewritten
+    if block_type == "function_call":
+        # OpenAI Responses (``responses/v1``): matched by ``call_id``; the ``fc_…`` item id and status are kept.
+        new_args = _replacement_for_id(block.get("call_id"), replacements)
+        if new_args is None:
+            return block
+        return {**block, "arguments": _serialize(new_args)}
+    if block_type in ("tool_call", "tool_call_chunk"):
+        # LangChain standard content (``v1``): ``args`` is a dict on tool_call and a JSON string on
+        # tool_call_chunk; ``extras.arguments`` (raw provider string) wins in the Responses translator.
+        new_args = _replacement_for_id(block.get("id"), replacements)
+        if new_args is None:
+            return block
+        rewritten = {**block, "args": new_args if block_type == "tool_call" else _serialize(new_args)}
+        extras = block.get("extras")
+        if isinstance(extras, dict) and "arguments" in extras:
+            rewritten["extras"] = {**extras, "arguments": _serialize(new_args)}
+        return rewritten
+    return block

@@ -150,3 +150,163 @@ class TestRewriteMessagesToolCallArgs:
 
         assert rewrite_messages_tool_call_args([message], lambda _m, tc: offered.append(tc) or NEW_ARGS) is None
         assert offered == []
+
+
+RESPONSES_V1_BLOCK = {"type": "function_call", "id": "fc_1", "call_id": "call-1", "name": "write_file", "arguments": json.dumps(ARGS), "status": "completed"}
+V1_BLOCK = {"type": "tool_call", "id": "call-1", "name": "write_file", "args": dict(ARGS), "extras": {"item_id": "fc_1", "arguments": json.dumps(ARGS), "status": "completed"}}
+V1_CHUNK_BLOCK = {"type": "tool_call_chunk", "id": "call-1", "name": "write_file", "args": json.dumps(ARGS), "index": 0, "extras": {"item_id": "fc_1"}}
+
+
+def _responses_v1_message():
+    return AIMessage(content=[{"type": "text", "text": "writing"}, dict(RESPONSES_V1_BLOCK)], tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(ARGS)}], response_metadata={"output_version": "responses/v1"})
+
+
+def _v1_message():
+    return AIMessage(content=[{"type": "text", "text": "writing"}, {**V1_BLOCK, "extras": dict(V1_BLOCK["extras"])}], tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(ARGS)}], response_metadata={"output_version": "v1"})
+
+
+class TestContentBlockVariants:
+    """Every content-block dialect that carries its own copy of the arguments is rewritten, ids preserved."""
+
+    def test_responses_function_call_block_matched_by_call_id_keeps_item_id(self):
+        message = _responses_v1_message()
+
+        rewritten = rewrite_tool_call_args(message, {"call-1": NEW_ARGS})
+
+        block = rewritten.content[1]
+        assert json.loads(block["arguments"]) == NEW_ARGS
+        assert block["id"] == "fc_1"
+        assert block["call_id"] == "call-1"
+        assert block["status"] == "completed"
+        assert rewritten.content[0] is message.content[0]
+        assert json.loads(message.content[1]["arguments"]) == ARGS
+
+    def test_responses_function_call_block_ignores_item_id_as_match_key(self):
+        message = _responses_v1_message()
+        assert rewrite_tool_call_args(message, {"fc_1": NEW_ARGS}) is message
+
+    def test_v1_tool_call_block_rewrites_args_and_extras_arguments(self):
+        message = _v1_message()
+
+        rewritten = rewrite_tool_call_args(message, {"call-1": NEW_ARGS})
+
+        block = rewritten.content[1]
+        assert block["args"] == NEW_ARGS
+        assert json.loads(block["extras"]["arguments"]) == NEW_ARGS
+        assert block["extras"]["item_id"] == "fc_1"
+        assert block["extras"]["status"] == "completed"
+        assert message.content[1]["args"] == ARGS
+        assert json.loads(message.content[1]["extras"]["arguments"]) == ARGS
+
+    def test_v1_tool_call_block_without_extras_arguments_gets_no_extras_entry(self):
+        block = {"type": "tool_call", "id": "call-1", "name": "write_file", "args": dict(ARGS), "extras": {"item_id": "fc_1"}}
+        message = AIMessage(content=[block], tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(ARGS)}])
+
+        rewritten = rewrite_tool_call_args(message, {"call-1": NEW_ARGS})
+
+        assert rewritten.content[0]["args"] == NEW_ARGS
+        assert rewritten.content[0]["extras"] == {"item_id": "fc_1"}
+
+    def test_v1_tool_call_chunk_block_rewrites_serialized_args(self):
+        chunk = AIMessageChunk(content=[dict(V1_CHUNK_BLOCK)], tool_call_chunks=[{"name": "write_file", "args": json.dumps(ARGS), "id": "call-1", "index": 0}])
+
+        rewritten = rewrite_tool_call_args(chunk, {"call-1": NEW_ARGS})
+
+        assert json.loads(rewritten.content[0]["args"]) == NEW_ARGS
+        assert rewritten.content[0]["extras"] == {"item_id": "fc_1"}
+        assert rewritten.content[0]["index"] == 0
+        assert json.loads(rewritten.tool_call_chunks[0]["args"]) == NEW_ARGS
+        assert json.loads(chunk.content[0]["args"]) == ARGS
+
+    def test_unrelated_block_types_pass_through_by_identity(self):
+        reasoning = {"type": "reasoning", "id": "rs_1", "summary": []}
+        message = AIMessage(content=[reasoning, dict(RESPONSES_V1_BLOCK)], tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(ARGS)}])
+
+        rewritten = rewrite_tool_call_args(message, {"call-1": NEW_ARGS})
+
+        assert rewritten.content[0] is message.content[0]
+
+
+class TestProviderSerializers:
+    """Lock the rewrite against the real adapter request builders: the payload must not reach the wire."""
+
+    PAYLOAD = ARGS["content"]
+
+    @staticmethod
+    def _responses_input(message):
+        from langchain_openai.chat_models.base import _construct_responses_api_input
+
+        return _construct_responses_api_input([message])
+
+    def _function_calls(self, message):
+        items = self._responses_input(message)
+        assert self.PAYLOAD not in json.dumps(items, ensure_ascii=False)
+        return [item for item in items if item.get("type") == "function_call"]
+
+    def test_responses_v1_content_sends_rewritten_arguments_once(self):
+        calls = self._function_calls(rewrite_tool_call_args(_responses_v1_message(), {"call-1": NEW_ARGS}))
+
+        assert len(calls) == 1
+        assert json.loads(calls[0]["arguments"]) == NEW_ARGS
+        assert calls[0]["call_id"] == "call-1"
+        assert calls[0]["id"] == "fc_1"
+
+    def test_v1_content_sends_rewritten_arguments_once(self):
+        calls = self._function_calls(rewrite_tool_call_args(_v1_message(), {"call-1": NEW_ARGS}))
+
+        assert len(calls) == 1
+        assert json.loads(calls[0]["arguments"]) == NEW_ARGS
+        assert calls[0]["call_id"] == "call-1"
+        assert calls[0]["id"] == "fc_1"
+
+    def test_v0_responses_message_sends_rewritten_arguments_with_item_id(self):
+        message = AIMessage(
+            content=[{"type": "text", "text": "writing"}],
+            tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(ARGS)}],
+            additional_kwargs={"__openai_function_call_ids__": {"call-1": "fc_1"}},
+        )
+
+        calls = self._function_calls(rewrite_tool_call_args(message, {"call-1": NEW_ARGS}))
+
+        assert len(calls) == 1
+        assert json.loads(calls[0]["arguments"]) == NEW_ARGS
+        assert calls[0]["id"] == "fc_1"
+
+    def test_unrewritten_responses_message_still_carries_payload(self):
+        """Sanity check that the probe can see the payload at all."""
+        items = self._responses_input(_responses_v1_message())
+        assert self.PAYLOAD in json.dumps(items, ensure_ascii=False)
+
+    def test_chat_completions_payload_uses_rewritten_arguments(self):
+        from langchain_openai.chat_models.base import _convert_message_to_dict
+
+        payload = _convert_message_to_dict(rewrite_tool_call_args(_full_surface_message(), {"call-1": NEW_ARGS}))
+
+        assert json.loads(payload["tool_calls"][0]["function"]["arguments"]) == NEW_ARGS
+        assert self.PAYLOAD not in json.dumps(payload, ensure_ascii=False)
+
+    def test_anthropic_native_tool_use_payload_uses_rewritten_input(self):
+        from langchain_anthropic.chat_models import _format_messages
+
+        _system, formatted = _format_messages([rewrite_tool_call_args(_full_surface_message(), {"call-1": NEW_ARGS})])
+
+        tool_use = [block for block in formatted[0]["content"] if block["type"] == "tool_use"]
+        assert len(tool_use) == 1
+        assert tool_use[0]["input"] == NEW_ARGS
+        assert self.PAYLOAD not in json.dumps(formatted, ensure_ascii=False)
+
+    def test_anthropic_v1_content_payload_uses_rewritten_input(self):
+        from langchain_anthropic._compat import _convert_from_v1_to_anthropic
+        from langchain_anthropic.chat_models import _format_messages
+
+        rewritten = rewrite_tool_call_args(_v1_message(), {"call-1": NEW_ARGS})
+        # Mirrors ChatAnthropic._get_request_payload's v1 translation step.
+        tcs = [{"type": "tool_call", "name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in rewritten.tool_calls]
+        translated = rewritten.model_copy(update={"content": _convert_from_v1_to_anthropic(rewritten.content, tcs, "anthropic")})
+
+        _system, formatted = _format_messages([translated])
+
+        tool_use = [block for block in formatted[0]["content"] if block["type"] == "tool_use"]
+        assert len(tool_use) == 1
+        assert tool_use[0]["input"] == NEW_ARGS
+        assert self.PAYLOAD not in json.dumps(formatted, ensure_ascii=False)

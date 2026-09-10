@@ -706,3 +706,30 @@ class TestBlockedPayloadElision:
         assert rewritten.tool_calls[0]["args"]["content"].startswith("[payload elided")
         assert rewritten.content[0]["input"]["content"] == payload
         assert payload in rewritten.additional_kwargs["tool_calls"][0]["function"]["arguments"]
+
+    def test_responses_api_request_input_never_carries_the_blocked_payload(self):
+        """End to end against the real OpenAI Responses input builder (reviewer probe on #5329)."""
+        import json
+
+        from langchain_openai.chat_models.base import _construct_responses_api_input
+
+        mw = self._middleware()
+        payload = "r" * 5000
+        args = {"description": "d", "path": self.PATH, "content": payload}
+        ai = AIMessage(
+            content=[{"type": "function_call", "id": "fc_1", "call_id": "call-1", "name": "write_file", "arguments": json.dumps(args), "status": "completed"}],
+            tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(args)}],
+            response_metadata={"output_version": "responses/v1"},
+        )
+        blocked = mw.wrap_tool_call(_make_request("write_file", dict(args), [HumanMessage(content="go"), ai]), MagicMock())
+        request = self._model_request([HumanMessage(content="go"), ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        items = _construct_responses_api_input(self._captured(handler).messages[1:2])
+        calls = [item for item in items if item.get("type") == "function_call"]
+        assert len(calls) == 1
+        assert calls[0]["id"] == "fc_1"
+        assert json.loads(calls[0]["arguments"])["content"].startswith("[payload elided: 5000 chars")
+        assert payload not in json.dumps(items, ensure_ascii=False)
