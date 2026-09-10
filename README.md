@@ -35,6 +35,10 @@ The landing-page case studies open as allowlisted, read-only showcases without r
 
 ## InfoQuest
 
+InfoQuest reader, web search, and image search use a 30-second HTTP connect/read
+inactivity timeout. The crawl `timeout` and `navigation_timeout` settings remain
+separate server-side options; they do not control the local HTTP timeout.
+
 DeerFlow has newly integrated the intelligent search and crawling toolset independently developed by BytePlus--[InfoQuest (supports free online experience)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
 
 <a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
@@ -1222,6 +1226,8 @@ The Web UI shows the active goal above the composer. The same command is availab
 
 ### Manual Context Compaction
 
+The Web UI preserves persisted message order when merging history with live updates. Streaming steps around a persisted result inside the loaded history stay together, including steps that arrive after the result. Steps captured during compaction also remain visible before their persisted result when history has not refreshed and the UI has not rendered them yet.
+
 Compaction keeps the current user request and summarizes older assistant/tool activity. When rescuing that request leaves an assistant/tool-only summary window, input trimming favors its most recent content. For mixed histories whose user-message anchor falls outside the trimming budget, compaction retains the existing final-message fallback. `summarization.trim_tokens_to_summarize` (4000 by default) controls trimming of the raw summary input; escaping and prompt formatting add overhead beyond that budget. Setting this option to `null` disables input trimming for the summary model; choose that only when the model can accept the full history being compacted.
 
 Use `/compact` in the Web UI composer to summarize older context for the current thread. DeerFlow keeps the full chat visible, but future model calls use the compacted summary plus recent messages. The command is ignored when there is not enough history to compact, and it is blocked while the thread has a run in flight, including when that run is owned by another Gateway worker. If a multi-worker reservation loses its lease, DeerFlow cancels the checkpoint writer before the replacing run proceeds and returns a retryable conflict after cleanup. Thread-title edits are serialized through the same state-write boundary and show a conflict without closing the rename dialog when a run is active.
@@ -1456,6 +1462,8 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 
 ## Embedded Python Client
 
+`DeerFlowClient.stream()` includes `summary_text` in each `values` event. This is the current compacted context summary, or `None` when absent. Consumers can record changes without reading checkpoint internals; repeated snapshots may carry the same summary, and an initial snapshot may already contain one from an earlier turn.
+
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
 
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
@@ -1525,8 +1533,10 @@ Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`
 - Choose whether each scheduled task reuses a thread and its conversation history or creates a fresh thread per run
+- Pin each task to `lead_agent` (default) or a custom agent the owner already has; unknown names are rejected
 - Duplicate an existing task into the create form as an editable draft without copying its run history
-- Support `once` and `cron` schedules
+- Support `once`, `cron`, and `interval` schedules
+- Editing or duplicating an interval task preserves its saved cadence until the interval is explicitly changed, including sub-minute intervals allowed by the operator's scheduler configuration
 - Run background scheduled executions as non-interactive DeerFlow runs (`ask_clarification` is not exposed there)
 - Persist a due execution as `queued` when its reused thread or the global execution budget is busy, then launch it when capacity is available; queued occurrences survive Gateway restarts and fail after `scheduler.queue_timeout_seconds`
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
@@ -1538,7 +1548,6 @@ Current MVP limits:
 - No conversation-created `schedule_task` tool yet
 - No text-only notification jobs
 - No channel or GitHub dispatch targets
-- No `interval` schedule type in this first cut
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 

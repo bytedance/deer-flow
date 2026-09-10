@@ -36,7 +36,7 @@ Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` wi
 
 Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
 
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
 ## Architecture
 
@@ -76,6 +76,13 @@ More specific `AGENTS.md` files under `src/` contain the frontend sections split
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
 
 ## Environment
+
+Scheduled-task interval forms preserve the initial `every_seconds` on mount,
+timezone changes, and untouched blur. The backend's configurable interval minimum
+can be lower than the UI's default 60-second floor. Apply that UI floor only after
+an explicit amount/unit edit so editing metadata or duplicating a task cannot
+silently change its cadence. Component regressions live in
+`tests/unit/components/workspace/scheduled-task-schedule-input.dom.test.tsx`.
 
 Backend API URLs are optional; an nginx proxy is used by default:
 

@@ -15,7 +15,7 @@ from starlette.responses import FileResponse
 
 import app.gateway.routers.artifacts as artifacts_router
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
-from deerflow.config.paths import make_safe_user_id
+from deerflow.config.paths import Paths, make_safe_user_id
 from deerflow.sandbox.lease import get_sandbox_lease_manager
 
 ACTIVE_ARTIFACT_CASES = [
@@ -102,7 +102,7 @@ def _artifact_sha256(content: str) -> str:
 
 
 def _patch_artifact_update_dependencies(monkeypatch, artifact_path: Path, provider=None) -> None:
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    monkeypatch.setattr(artifacts_router, "resolve_outputs_confined_path", lambda _thread_id, _path, user_id=None: artifact_path)
     monkeypatch.setattr(artifacts_router, "reserve_artifact_write", _allow_artifact_write)
     monkeypatch.setattr(artifacts_router, "get_sandbox_provider", lambda: provider or _MountedSandboxProvider())
 
@@ -191,6 +191,107 @@ def test_update_artifact_rejects_non_output_path(tmp_path, monkeypatch) -> None:
 
     assert exc_info.value.status_code == 400
     assert artifact_path.read_text(encoding="utf-8") == "before"
+
+
+_REAL_PATHS_THREAD_ID = "thread-1"
+_REAL_PATHS_USER_ID = "user-1"
+
+
+def _patch_real_thread_paths(monkeypatch, tmp_path: Path, provider=None) -> tuple[Path, Path]:
+    """Route ``update_artifact`` through the real virtual-path resolver rooted at *tmp_path*.
+
+    The other update tests stub ``resolve_outputs_confined_path`` so they never
+    exercise the outputs confinement; these tests need the real thread layout.
+    Returns the thread's ``outputs`` and ``uploads`` host directories.
+    """
+    paths = Paths(tmp_path)
+    monkeypatch.setattr("app.gateway.path_utils.get_paths", lambda: paths)
+    monkeypatch.setattr(artifacts_router, "get_effective_user_id", lambda: _REAL_PATHS_USER_ID)
+    monkeypatch.setattr(artifacts_router, "get_trusted_internal_owner_user_id", lambda _request: None)
+    monkeypatch.setattr(artifacts_router, "reserve_artifact_write", _allow_artifact_write)
+    monkeypatch.setattr(artifacts_router, "get_sandbox_provider", lambda: provider or _MountedSandboxProvider())
+
+    outputs = paths.sandbox_outputs_dir(_REAL_PATHS_THREAD_ID, user_id=_REAL_PATHS_USER_ID)
+    uploads = paths.sandbox_uploads_dir(_REAL_PATHS_THREAD_ID, user_id=_REAL_PATHS_USER_ID)
+    outputs.mkdir(parents=True)
+    uploads.mkdir(parents=True)
+    return outputs, uploads
+
+
+def _update_artifact_via_handler(path: str, *, current: str, content: str):
+    return asyncio.run(
+        call_unwrapped(
+            artifacts_router.update_artifact,
+            _REAL_PATHS_THREAD_ID,
+            path,
+            artifacts_router.ArtifactUpdateRequest(content=content, expected_sha256=_artifact_sha256(current)),
+            _make_request(),
+        )
+    )
+
+
+def test_update_artifact_rejects_dot_dot_escape_from_outputs(tmp_path, monkeypatch) -> None:
+    # The outputs-only guard used to be a string-prefix check on the raw path,
+    # so ``outputs/../uploads/...`` passed it and the resolver only confines to
+    # ``user-data/`` — letting PUT overwrite a sibling upload.
+    _, uploads = _patch_real_thread_paths(monkeypatch, tmp_path)
+    victim = uploads / "victim.txt"
+    victim.write_text("before", encoding="utf-8")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _update_artifact_via_handler("mnt/user-data/outputs/../uploads/victim.txt", current="before", content="after")
+
+    assert exc_info.value.status_code == 400
+    assert victim.read_text(encoding="utf-8") == "before"
+
+
+def test_update_artifact_rejects_percent_encoded_dot_dot_over_http(tmp_path, monkeypatch) -> None:
+    # Browsers and HTTP clients collapse a literal ``..`` before sending, but
+    # ``%2e%2e`` reaches the route intact and Starlette decodes it to ``..``.
+    _, uploads = _patch_real_thread_paths(monkeypatch, tmp_path)
+    victim = uploads / "victim.txt"
+    victim.write_text("before", encoding="utf-8")
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.put(
+            f"/api/threads/{_REAL_PATHS_THREAD_ID}/artifacts/mnt/user-data/outputs/%2e%2e/uploads/victim.txt",
+            json={"content": "after", "expected_sha256": _artifact_sha256("before")},
+        )
+
+    assert response.status_code == 400
+    assert victim.read_text(encoding="utf-8") == "before"
+
+
+def test_update_artifact_rejects_symlink_escaping_outputs(tmp_path, monkeypatch) -> None:
+    outputs, uploads = _patch_real_thread_paths(monkeypatch, tmp_path)
+    victim = uploads / "victim.txt"
+    victim.write_text("before", encoding="utf-8")
+    link = outputs / "linked.txt"
+    try:
+        link.symlink_to(victim)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _update_artifact_via_handler("mnt/user-data/outputs/linked.txt", current="before", content="after")
+
+    assert exc_info.value.status_code == 400
+    assert victim.read_text(encoding="utf-8") == "before"
+
+
+def test_update_artifact_normalizes_dot_segments_before_syncing(tmp_path, monkeypatch) -> None:
+    provider = _RemoteSandboxProvider()
+    outputs, _ = _patch_real_thread_paths(monkeypatch, tmp_path, provider=provider)
+    artifact_path = outputs / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+
+    response = _update_artifact_via_handler("mnt/user-data/outputs/./nested/../note.txt", current="before", content="after")
+
+    assert artifact_path.read_text(encoding="utf-8") == "after"
+    assert response.path == "/mnt/user-data/outputs/note.txt"
+    assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"after")]
 
 
 def test_update_artifact_rejects_binary_file(tmp_path, monkeypatch) -> None:

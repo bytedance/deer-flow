@@ -48,6 +48,15 @@ import {
   type ThreadMetadataPatch,
 } from "./api";
 import {
+  dedupeMessagesByIdentity,
+  insertByTrustedSeq,
+  isValidMessageSeq,
+  MESSAGE_SEQ_KEY,
+  mergeMessages,
+  messageIdentity,
+  trustedMessageSeq,
+} from "./message-order";
+import {
   hasRenderedThreadStateUpdate,
   reduceThreadStateUpdates,
 } from "./stream-state";
@@ -185,11 +194,10 @@ export function buildThreadSubmitMessages({
 const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_RUN_MESSAGES: RunMessage[] = [];
 const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
-const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
-// Thread-global feed position, attached by the backend to history rows and to
-// `values` frame messages it has already persisted. Mirrors MESSAGE_SEQ_KEY in
-// `deerflow/runtime/events/message_identity.py`.
-const MESSAGE_SEQ_KEY = "deerflow_seq";
+
+function isNonEmptyString(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
 
 const EMPTY_THREAD_VALUES: AgentThreadState = {
   title: "",
@@ -198,101 +206,10 @@ const EMPTY_THREAD_VALUES: AgentThreadState = {
   todos: [],
 };
 
-function isNonEmptyString(value: string | undefined): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
 const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
   "SummarizationMiddleware.before_model",
   "DeerFlowSummarizationMiddleware.before_model",
 ]);
-
-/** Thread-global feed position, when the backend has attached one. */
-function messageSeq(message: Message): number | undefined {
-  const seq = message.additional_kwargs?.[MESSAGE_SEQ_KEY];
-  return typeof seq === "number" ? seq : undefined;
-}
-
-function messageIdentity(message: Message): string | undefined {
-  if (
-    "tool_call_id" in message &&
-    typeof message.tool_call_id === "string" &&
-    message.tool_call_id.length > 0
-  ) {
-    return `tool:${message.tool_call_id}`;
-  }
-  if (typeof message.id === "string" && message.id.length > 0) {
-    // DynamicContextMiddleware replaces the submitted HumanMessage(id=X) with
-    // a hidden SystemMessage(id=X) and the real HumanMessage(id=X__user).
-    // Treat those human copies as one UI message so a committed render ledger
-    // cannot retain X beside the later checkpoint copy X__user.
-    const messageId =
-      message.type === "human" &&
-      message.id.endsWith(INJECTED_USER_MESSAGE_ID_SUFFIX)
-        ? message.id.slice(0, -INJECTED_USER_MESSAGE_ID_SUFFIX.length) ||
-          message.id
-        : message.id;
-    return `message:${messageId}`;
-  }
-  return undefined;
-}
-
-function dedupeMessagesByIdentity(messages: Message[]): Message[] {
-  const lastIndexByIdentity = new Map<string, number>();
-  const lastVisibleIndexByIdentity = new Map<string, number>();
-
-  // This is a UI-display dedupe rule, not a general LangChain message-stream
-  // contract. Hidden messages that share an identity with a visible message are
-  // treated as control messages for this merged view; hidden messages carrying
-  // independent tracing/task semantics should use a distinct id or a custom
-  // stream/state channel instead of relying on message dedupe preservation.
-  const preservedTurnDurations = new Map<string, number>();
-  messages.forEach((message, index) => {
-    const identity = messageIdentity(message);
-    if (identity) {
-      lastIndexByIdentity.set(identity, index);
-      if (!isHiddenFromUIMessage(message)) {
-        lastVisibleIndexByIdentity.set(identity, index);
-      }
-      if (message.additional_kwargs?.turn_duration !== undefined) {
-        preservedTurnDurations.set(
-          identity,
-          message.additional_kwargs.turn_duration as number,
-        );
-      }
-    }
-  });
-
-  return messages
-    .filter((message, index) => {
-      const identity = messageIdentity(message);
-      if (!identity) {
-        return true;
-      }
-      const visibleIndex = lastVisibleIndexByIdentity.get(identity);
-      if (visibleIndex !== undefined) {
-        return visibleIndex === index;
-      }
-      return lastIndexByIdentity.get(identity) === index;
-    })
-    .map((message) => {
-      const identity = messageIdentity(message);
-      if (
-        identity &&
-        preservedTurnDurations.has(identity) &&
-        message.additional_kwargs?.turn_duration === undefined
-      ) {
-        return {
-          ...message,
-          additional_kwargs: {
-            ...message.additional_kwargs,
-            turn_duration: preservedTurnDurations.get(identity),
-          },
-        } as Message;
-      }
-      return message;
-    });
-}
 
 function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
   const lastIndexByIdentity = new Map<string, number>();
@@ -330,7 +247,32 @@ export function buildVisibleHistoryMessages(
   const visibleRows = messageRows.filter(
     (message) => !supersededRunIds.has(message.run_id),
   );
-  return dedupeMessagesByIdentity([
+  // Content and position converge separately for a repeated identity: the
+  // newest visible row supplies the content, but the position stays the
+  // earliest trusted feed row — mirroring the backend `get_message_seqs`
+  // earliest-seq-wins rule, so a re-persisted update cannot push the message
+  // towards the tail. Hidden control copies never contribute a visible
+  // position (they only serve as a fallback when no visible row carries the
+  // identity).
+  const earliestSeqByIdentity = new Map<string, number>();
+  const earliestVisibleSeqByIdentity = new Map<string, number>();
+  for (const row of visibleRows) {
+    const identity = messageIdentity(row.content);
+    if (!identity || !isValidMessageSeq(row.seq)) {
+      continue;
+    }
+    const known = earliestSeqByIdentity.get(identity);
+    if (known === undefined || row.seq < known) {
+      earliestSeqByIdentity.set(identity, row.seq);
+    }
+    if (!isHiddenFromUIMessage(row.content)) {
+      const knownVisible = earliestVisibleSeqByIdentity.get(identity);
+      if (knownVisible === undefined || row.seq < knownVisible) {
+        earliestVisibleSeqByIdentity.set(identity, row.seq);
+      }
+    }
+  }
+  const deduped = dedupeMessagesByIdentity([
     // Carry the owning run_id onto the content message so historical subtask
     // cards can fetch their persisted step history on expand (#3779). run_id
     // lives on the RunMessage wrapper and would otherwise be dropped here.
@@ -346,6 +288,28 @@ export function buildVisibleHistoryMessages(
       },
     })),
   ]);
+  return deduped.map((message) => {
+    const identity = messageIdentity(message);
+    if (!identity) {
+      return message;
+    }
+    const earliestSeq =
+      earliestVisibleSeqByIdentity.get(identity) ??
+      earliestSeqByIdentity.get(identity);
+    if (
+      earliestSeq === undefined ||
+      message.additional_kwargs?.[MESSAGE_SEQ_KEY] === earliestSeq
+    ) {
+      return message;
+    }
+    return {
+      ...message,
+      additional_kwargs: {
+        ...message.additional_kwargs,
+        [MESSAGE_SEQ_KEY]: earliestSeq,
+      },
+    } as Message;
+  });
 }
 
 export type ThreadMessagesPageResponse = {
@@ -353,10 +317,6 @@ export type ThreadMessagesPageResponse = {
   has_more: boolean;
   next_before_seq: number | null;
 };
-
-function isValidThreadMessageSeq(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
-}
 
 /**
  * Validate the sequence fields that history reconciliation and pagination use
@@ -383,7 +343,7 @@ export function parseThreadMessagesPageResponse(
       typeof row === "object" && row !== null
         ? Reflect.get(row, "seq")
         : undefined;
-    if (!isValidThreadMessageSeq(seq)) {
+    if (!isValidMessageSeq(seq)) {
       throw new Error("Thread history returned a row with an invalid seq.");
     }
     if (seenSeqs.has(seq)) {
@@ -393,7 +353,7 @@ export function parseThreadMessagesPageResponse(
   }
 
   if (
-    (hasMore && !isValidThreadMessageSeq(nextBeforeSeq)) ||
+    (hasMore && !isValidMessageSeq(nextBeforeSeq)) ||
     (!hasMore && nextBeforeSeq !== null)
   ) {
     throw new Error(
@@ -468,7 +428,7 @@ export function reconcileThreadHistoryRows(
   const sourceRows = isAuthoritativeComplete
     ? currentRows
     : [...previousRows, ...currentRows];
-  if (sourceRows.some((row) => !isValidThreadMessageSeq(row.seq))) {
+  if (sourceRows.some((row) => !isValidMessageSeq(row.seq))) {
     console.error(
       "Thread history reconciliation received an invalid sequence value.",
     );
@@ -495,180 +455,10 @@ export function reconcileThreadHistoryRows(
   return reconciled;
 }
 
-export function mergeMessages(
-  historyMessages: Message[],
-  threadMessages: Message[],
-  optimisticMessages: Message[],
-): Message[] {
-  const savedTurnDurations = new Map<string, number>();
-  const savedRunIds = new Map<string, string>();
-  for (const msg of historyMessages) {
-    const identity = messageIdentity(msg);
-    const runId = getMessageRunId(msg);
-    if (identity && runId) {
-      savedRunIds.set(identity, runId);
-    }
-    if (identity && msg.additional_kwargs?.turn_duration !== undefined) {
-      savedTurnDurations.set(
-        identity,
-        msg.additional_kwargs.turn_duration as number,
-      );
-    }
-  }
-
-  const canonical = dedupeMessagesByIdentity(historyMessages);
-  const live = dedupeMessagesByIdentity(threadMessages);
-  const canonicalByIdentity = new Map(
-    canonical.flatMap((message) => {
-      const identity = messageIdentity(message);
-      return identity ? [[identity, message] as const] : [];
-    }),
-  );
-  const replacementByIdentity = new Map<string, Message>();
-  // This uses the same identity-anchor weaving shape as
-  // resolveTransientHistoryBridge, but intentionally remains separate: live
-  // messages may replace canonical copies and identity-less entries survive.
-  const beforeAnchor = new Map<string, Message[]>();
-  let pending: Message[] = [];
-  let lastAnchorIdentity: string | undefined;
-
-  // Lower bound of the history page window that is currently loaded. A live
-  // message whose seq is below it belongs before everything on screen, which
-  // is knowledge the anchor weaving below cannot reach: the anchor only says
-  // "earlier than this row", and after compaction the nearest anchor can sit
-  // deep inside the window (#4666 — measured at row 25 of 50).
-  const canonicalMinSeq = canonical.reduce<number | undefined>(
-    (min, message) => {
-      const seq = messageSeq(message);
-      return seq !== undefined && (min === undefined || seq < min) ? seq : min;
-    },
-    undefined,
-  );
-  const beforeWindow: Message[] = [];
-
-  // Split off what the feed places before the loaded window BEFORE the anchor
-  // walk rather than inside it. A summarized checkpoint can share no identity
-  // at all with the loaded page — compaction keeps only this run's recent tail,
-  // while the page on screen was fetched turns earlier — and the anchor loop
-  // then never runs. That is exactly when a rescued early turn most needs its
-  // seq: user submits, waits without reloading, compaction fires, and the
-  // message is appended to the tail instead (#4666).
-  const liveInWindow: Message[] = [];
-  for (const message of live) {
-    const seq = messageSeq(message);
-    if (
-      seq !== undefined &&
-      canonicalMinSeq !== undefined &&
-      seq < canonicalMinSeq
-    ) {
-      beforeWindow.push(message);
-    } else {
-      liveInWindow.push(message);
-    }
-  }
-
-  // A summarized checkpoint is not necessarily a contiguous history suffix:
-  // middleware may retain protected prompt/input messages at the front and a
-  // recent tail at the back. Treat every shared identity as an ordering anchor,
-  // replacing the canonical copy in place. New live messages are woven before
-  // the next shared anchor (or after the last one), so a protected early input
-  // can never be moved to the tail by global last-copy deduplication.
-  for (const message of liveInWindow) {
-    const identity = messageIdentity(message);
-    const canonicalMessage = identity
-      ? canonicalByIdentity.get(identity)
-      : undefined;
-    if (!identity || !canonicalMessage) {
-      pending.push(message);
-      continue;
-    }
-
-    // A summarized checkpoint may start with a protected message whose true
-    // canonical position is separated from this anchor by unloaded pages —
-    // rescued dynamic-context messages are the common case. Its position
-    // relative to this anchor is still known (both the checkpoint and
-    // seq-sorted history place it earlier), so it is woven in before the
-    // anchor like any other live-only segment. Dropping it instead was how a
-    // user's own question disappeared from a long thread once the first
-    // history page no longer reached back to it (#4666): a collapsed unloaded
-    // gap is recoverable by paging, a discarded message is not.
-    if (pending.length > 0) {
-      beforeAnchor.set(identity, [
-        ...(beforeAnchor.get(identity) ?? []),
-        ...pending,
-      ]);
-    }
-    pending = [];
-    lastAnchorIdentity = identity;
-
-    // A hidden checkpoint control message must not replace a visible canonical
-    // user turn that happens to reuse its identity. In every other case the
-    // live checkpoint copy is fresher and replaces history without moving it.
-    if (
-      !isHiddenFromUIMessage(message) ||
-      isHiddenFromUIMessage(canonicalMessage)
-    ) {
-      replacementByIdentity.set(identity, message);
-    }
-  }
-
-  let canonicalAndLive: Message[];
-  if (!lastAnchorIdentity) {
-    canonicalAndLive = [...canonical, ...liveInWindow];
-  } else {
-    canonicalAndLive = [];
-    for (const message of canonical) {
-      const identity = messageIdentity(message);
-      if (identity) {
-        canonicalAndLive.push(...(beforeAnchor.get(identity) ?? []));
-      }
-      const replacement = identity
-        ? replacementByIdentity.get(identity)
-        : undefined;
-      canonicalAndLive.push(replacement ?? message);
-    }
-    // A trailing live-only segment is known to come after the last shared
-    // anchor, but that anchor may not be the end of canonical history (for
-    // example, another client may have persisted newer rows). Preserve the
-    // canonical source order before appending the live tail.
-    canonicalAndLive.push(...pending);
-  }
-
-  const merged = dedupeMessagesByIdentity([
-    ...[...beforeWindow].sort(
-      (left, right) => (messageSeq(left) ?? 0) - (messageSeq(right) ?? 0),
-    ),
-    ...canonicalAndLive,
-    ...optimisticMessages,
-  ]);
-
-  return merged.map((message) => {
-    const identity = messageIdentity(message);
-    if (!identity) {
-      return message;
-    }
-    const shouldRestoreRunId =
-      savedRunIds.has(identity) && !getMessageRunId(message);
-    const shouldRestoreTurnDuration =
-      savedTurnDurations.has(identity) &&
-      message.additional_kwargs?.turn_duration === undefined;
-    if (shouldRestoreRunId || shouldRestoreTurnDuration) {
-      return {
-        ...message,
-        ...(shouldRestoreRunId ? { run_id: savedRunIds.get(identity) } : {}),
-        ...(shouldRestoreTurnDuration
-          ? {
-              additional_kwargs: {
-                ...message.additional_kwargs,
-                turn_duration: savedTurnDurations.get(identity),
-              },
-            }
-          : {}),
-      } as Message;
-    }
-    return message;
-  });
-}
+// mergeMessages now lives in ./message-order (pure, unit-testable ordering
+// module); it is imported above and re-exported here so existing consumers of
+// this module keep working unchanged.
+export { mergeMessages };
 
 /**
  * Keep messages from a locally submitted turn behind that turn's user input.
@@ -977,8 +767,28 @@ export function resolveTransientHistoryBridge(
     return visibleHistory;
   }
 
+  // Trusted seq outranks identity anchors — the same position priority
+  // mergeMessages applies. A rescued message whose seq is known lands exactly
+  // where the feed places it, even when no bridge identity overlaps the
+  // loaded window; anchor weaving below remains the fallback for entries
+  // without a trustworthy position.
+  const seqPositioned: Message[] = [];
+  const unpositioned: Message[] = [];
+  for (const message of missing) {
+    if (trustedMessageSeq(message) !== undefined) {
+      seqPositioned.push(message);
+    } else {
+      unpositioned.push(message);
+    }
+  }
+  // Place rescued seq rows first so weaving can anchor unsequenced
+  // neighbors to them without a later insertion reversing their order.
+  const positionedHistory = insertByTrustedSeq(visibleHistory, seqPositioned);
+  const anchorIdentities = new Set(
+    positionedHistory.map(messageIdentity).filter(isNonEmptyString),
+  );
   const missingByIdentity = new Map(
-    missing.flatMap((message) => {
+    unpositioned.flatMap((message) => {
       const identity = messageIdentity(message);
       return identity ? [[identity, message] as const] : [];
     }),
@@ -993,12 +803,17 @@ export function resolveTransientHistoryBridge(
   );
   let pending: Message[] = [];
   let lastAnchorIdentity: string | undefined;
-  let hasCanonicalAnchor = false;
 
   for (const identity of bridgeOrder) {
-    if (presentIdentities.has(identity)) {
+    if (anchorIdentities.has(identity)) {
       if (pending.length > 0) {
-        if (hasCanonicalAnchor) {
+        // A rescued seq anchor preserves its captured prefix even if React
+        // has not rendered it yet. Only a leading prefix anchored to loaded
+        // history needs proof that it does not span an unloaded cursor gap.
+        if (
+          lastAnchorIdentity !== undefined ||
+          !presentIdentities.has(identity)
+        ) {
           beforeAnchor.set(identity, [
             ...(beforeAnchor.get(identity) ?? []),
             ...pending,
@@ -1031,12 +846,7 @@ export function resolveTransientHistoryBridge(
           }
         }
       }
-      // The prefix before the first loaded anchor has no trustworthy position:
-      // cursor pages containing its intervening history may not be loaded yet.
-      // The sole exception is a prefix whose exact relative position was
-      // already committed to the previous UI frame.
       pending = [];
-      hasCanonicalAnchor = true;
       lastAnchorIdentity = identity;
       continue;
     }
@@ -1047,17 +857,17 @@ export function resolveTransientHistoryBridge(
     }
   }
 
-  // No bridge identity overlaps canonical history. This is the original
+  // No bridge identity overlaps a positioned row. This is the original
   // persistence-gap case: loaded history is older and the rescued live turns
   // belong after it.
   if (!lastAnchorIdentity) {
-    return [...visibleHistory, ...missing];
+    return [...positionedHistory, ...unpositioned];
   }
 
   // A candidate added before its ordering snapshot (or carrying an identity
   // absent from that snapshot) cannot be anchored. Keep it in capture order at
   // the trailing edge of the anchored bridge rather than dropping it.
-  for (const message of missing) {
+  for (const message of unpositioned) {
     const identity = messageIdentity(message);
     if (identity && !emittedMissingIdentities.has(identity)) {
       pending.push(message);
@@ -1066,7 +876,7 @@ export function resolveTransientHistoryBridge(
   }
 
   const resolved: Message[] = [];
-  for (const message of visibleHistory) {
+  for (const message of positionedHistory) {
     const identity = messageIdentity(message);
     if (identity) {
       resolved.push(...(beforeAnchor.get(identity) ?? []));
@@ -1109,9 +919,27 @@ export function mergeTransientHistoryBridge(
       (!isHiddenFromUIMessage(captured) || isHiddenFromUIMessage(existing))
     ) {
       // Refresh the buffered snapshot without moving its first-known
-      // chronological position. Repeated compression can recapture protected
-      // prefix messages before a newer tail.
-      merged[existingIndex] = captured;
+      // chronological position — and without dropping a trusted position the
+      // earlier copy already carried. Repeated compression can recapture
+      // protected prefix messages before a newer tail; a refresh without seq
+      // must not reset the position the bridge resolver relies on.
+      const existingSeq = trustedMessageSeq(existing);
+      const capturedSeq = trustedMessageSeq(captured);
+      const keptSeq =
+        existingSeq !== undefined &&
+        (capturedSeq === undefined || existingSeq < capturedSeq)
+          ? existingSeq
+          : capturedSeq;
+      merged[existingIndex] =
+        keptSeq !== undefined && capturedSeq !== keptSeq
+          ? ({
+              ...captured,
+              additional_kwargs: {
+                ...captured.additional_kwargs,
+                [MESSAGE_SEQ_KEY]: keptSeq,
+              },
+            } as Message)
+          : captured;
     }
   }
   return merged;

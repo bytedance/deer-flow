@@ -102,6 +102,12 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Added
 
+#### Scheduler
+- **scheduler:** Scheduled tasks accept `interval` (`schedule_spec.every_seconds`)
+  in addition to `once` and `cron`. Cadence is UTC `now + N` with no missed-beat
+  catch-up. N is at least `scheduler.min_once_delay_seconds` (default 60s) and at
+  most 30 days.
+
 #### Authentication
 - **auth:** Personal access tokens (PAT) for programmatic API access:
   `POST/GET/DELETE /api/v1/auth/pats` manage tokens (shown once, stored as
@@ -118,6 +124,15 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Agents & runtime
 
+- **scheduler:** Scheduled tasks can pin `assistant_id` to `lead_agent` (the
+  default) or a custom agent the owner already has. Unknown or malformed names
+  return 422. The workspace create/edit form exposes the same choice.
+  ([#5286])
+- **gateway:** `GET /api/threads/{thread_id}/runs/page` walks thread run history
+  with a `(created_at, run_id)` keyset cursor (`{data, has_more,
+  next_before_created_at, next_before_run_id}`). `GET /api/threads/{thread_id}/runs`
+  still returns a bare array of the newest 100 runs so LangGraph SDK clients keep
+  working. ([#5282])
 - **middleware:** New `TokenBudgetMiddleware` enforces a per-run token budget,
   shared additively across the lead agent and subagents. ([#3412])
 - **middleware:** Structured tool-result metadata and a tool-progress state
@@ -543,7 +558,39 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
-- **uploads:** Surface the converted Markdown companion in `<current_uploads>` and `list_uploaded_files`, and forward `markdown_file` from the frontend, so the agent can `read_file` UTF-8 text instead of the binary original. Outline line numbers now refer to that companion path. Convert-time `.deer-flow-companions.json` keeps collision-renamed mappings (`a.pdf` → `a_1.md`) for historical listing after summarization. Companion identity is a private hard-link pin (not a reusable inode number), so an in-place sandbox edit stays attached while a delete-and-recreate under the same name — including Linux inode reuse — is stale and is not deleted with the original. Sidecar reads are no-follow and byte/entry-capped. Conversion writes with temp+`os.replace` so a symlink planted after `O_CREAT|O_EXCL` reservation cannot escape the uploads directory. Re-uploading the same original removes an unmodified previous companion and keeps an edited one. Sidecar writes and post-delete sidecar cleanup are advisory: they log a warning instead of 500/rolling back files already stored. The sidecar lock lives beside `user-data` (outside sandbox mounts), is opened with no-follow semantics so a planted symlink is not followed with Gateway privileges, and uses a bounded non-blocking flock so a held lock cannot stall the shared file-IO pool. Companion `.md` names are reserved with `O_CREAT|O_EXCL` against the uploads directory (not just the current request), so a later `notes.docx` cannot overwrite an earlier `notes.md`, and a later `a.pdf` cannot collapse `a.docx` → `a.md`. ([#4981], related [#3750])
+- **uploads:** Surface the converted Markdown companion in `<current_uploads>`
+  and `list_uploaded_files`, and forward `markdown_file` from the frontend, 
+  so the agent can `read_file` UTF-8 text instead of the binary original. 
+  Outline line numbers now refer to that companion path. Convert-time `.
+  deer-flow-companions.json` keeps collision-renamed mappings 
+  (`a.pdf` → `a_1.md`) for historical listing after summarization. 
+  Companion identity is a private hard-link pin (not a reusable inode number), 
+  so an in-place sandbox edit stays attached while a delete-and-recreate under
+  the same name — including Linux inode reuse — is stale and is not deleted 
+  with the original. Sidecar reads are no-follow and byte/entry-capped. 
+  Conversion writes with temp+`os.replace` so a symlink planted after 
+  `O_CREAT|O_EXCL` reservation cannot escape the uploads directory. 
+  Re-uploading the same original removes an unmodified previous companion
+  and keeps an edited one. Sidecar writes and post-delete sidecar cleanup
+  are advisory: they log a warning instead of 500/rolling back files 
+  already stored. The sidecar lock lives beside `user-data` 
+  (outside sandbox mounts), is opened with no-follow semantics so a planted 
+  symlink is not followed with Gateway privileges, and uses a bounded 
+  non-blocking flock so a held lock cannot stall the shared file-IO pool. 
+  Companion `.md` names are reserved with `O_CREAT|O_EXCL` against the 
+  uploads directory (not just the current request), so a later `notes.docx`
+  cannot overwrite an earlier `notes.md`, and a later `a.pdf` cannot 
+  collapse `a.docx` → `a.md`. ([#4981], related [#3750])
+- **artifacts:** Keep `PUT /api/threads/{id}/artifacts/{path}` confined to
+  `/mnt/user-data/outputs`. The outputs-only guard was a string-prefix check on
+  the raw path, so a percent-encoded `..` (`outputs/%2e%2e/uploads/x.txt`) —
+  which nginx forwards untouched and Starlette decodes — passed it, and the
+  resolver only confines to `user-data/`, letting a caller overwrite a sibling
+  upload or workspace file in their own thread. Dot segments are now collapsed
+  before the prefix check, and the resolved host path is re-checked against the
+  resolved outputs root so a symlink planted inside `outputs/` cannot redirect
+  the write either. The rule now lives in one shared helper that IM-channel
+  attachment delivery uses as well, so the two copies cannot drift. ([#5321])
 - **gateway:** Stop persisting a caller-supplied `deerflow_trace_id` on the run
   record. `body.metadata` reaches both the live run config, which the run
   worker restamps, and the run record echoed verbatim by the runs API; only the
@@ -2673,5 +2720,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5278]: https://github.com/bytedance/deer-flow/pull/5278
 [#5280]: https://github.com/bytedance/deer-flow/pull/5280
 [#5281]: https://github.com/bytedance/deer-flow/pull/5281
+[#5282]: https://github.com/bytedance/deer-flow/pull/5282
 [#5284]: https://github.com/bytedance/deer-flow/pull/5284
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
+[#5321]: https://github.com/bytedance/deer-flow/pull/5321
