@@ -718,7 +718,143 @@ async def test_cancel_stuck_once_tasks_reconciles_orphaned_running(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tmp_path):
+async def test_cancel_stuck_once_tasks_finalizes_committed_successful_run(tmp_path):
+    """A once task whose occurrence already committed ``success`` is finalized
+    to ``completed`` at restart instead of being blindly cancelled (#5034)."""
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        await task_repo.create(
+            task_id="task-once-succeeded",
+            user_id="user-1",
+            thread_id="thread-1",
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="succeeded once",
+            prompt="p",
+            schedule_type="once",
+            schedule_spec={"run_at": "2026-07-02T01:00:00+00:00"},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_repo.update("task-once-succeeded", user_id="user-1", updates={"status": "running"})
+        # The completion hook committed the occurrence (first transaction)
+        # before the process died between it and the parent-task update.
+        await run_repo.create(
+            run_record_id="task-once-succeeded-row",
+            task_id="task-once-succeeded",
+            thread_id="thread-1",
+            scheduled_for=now,
+            trigger="schedule",
+            status="success",
+        )
+
+        assert await task_repo.cancel_stuck_once_tasks(error="interrupted: gateway restarted") == 1
+        task = await task_repo.get("task-once-succeeded", user_id="user-1")
+        assert task is not None
+        assert task["status"] == "completed"
+        assert task["last_error"] is None
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_cancel_stuck_once_tasks_finalizes_failed_and_interrupted_runs(tmp_path):
+    """Failed/interrupted occurrences finalize the parent task to match,
+    carrying the recorded error instead of a generic restart message."""
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        for run_status, expected_status in (("failed", "failed"), ("interrupted", "cancelled")):
+            task_id = f"task-once-{run_status}"
+            await task_repo.create(
+                task_id=task_id,
+                user_id="user-1",
+                thread_id="thread-1",
+                context_mode="fresh_thread_per_run",
+                assistant_id="lead_agent",
+                title=task_id,
+                prompt="p",
+                schedule_type="once",
+                schedule_spec={"run_at": "2026-07-02T01:00:00+00:00"},
+                timezone="UTC",
+                next_run_at=None,
+            )
+            await task_repo.update(task_id, user_id="user-1", updates={"status": "running"})
+            await run_repo.create(
+                run_record_id=f"{task_id}-row",
+                task_id=task_id,
+                thread_id="thread-1",
+                scheduled_for=now,
+                trigger="schedule",
+                status="running",
+            )
+            await run_repo.update_status(f"{task_id}-row", status=run_status, error="boom")
+
+            assert await task_repo.cancel_stuck_once_tasks(error="interrupted: gateway restarted") == 1
+            task = await task_repo.get(task_id, user_id="user-1")
+            assert task is not None
+            assert task["status"] == expected_status
+            assert task["last_error"] == "boom"
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stuck_once_tasks_finalizes_terminal_successful_run(tmp_path):
+    """The multi-instance path finalizes a stuck once task whose underlying
+    run already committed ``success`` to ``completed`` (#5034)."""
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        durable_run_repo = RunRepository(sf)
+        now = datetime.now(UTC)
+        await task_repo.create(
+            task_id="task-once-multi-success",
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="multi success",
+            prompt="p",
+            schedule_type="once",
+            schedule_spec={"run_at": (now + timedelta(minutes=5)).isoformat()},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_repo.update(
+            "task-once-multi-success",
+            user_id="user-1",
+            updates={"status": "running", "last_run_id": "run-once-multi-success"},
+        )
+        await durable_run_repo.put(
+            "run-once-multi-success",
+            thread_id="thread-multi-success",
+            user_id="user-1",
+            status="success",
+            owner_worker_id="worker-a",
+            lease_expires_at=(now + timedelta(seconds=60)).isoformat(),
+        )
+
+        assert await task_repo.reconcile_stuck_once_tasks(error="restart", now=now) == 1
+        task = await task_repo.get("task-once-multi-success", user_id="user-1")
+        assert task is not None and task["status"] == "completed"
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_lease_aware_once_recovery_keeps_live_peer_and_finalizes_dead_run(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
         sf = get_session_factory()
@@ -767,7 +903,8 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
         live = await task_repo.get("task-once-live", user_id="user-1")
         dead = await task_repo.get("task-once-dead", user_id="user-1")
         assert live is not None and live["status"] == "running"
-        assert dead is not None and dead["status"] == "cancelled"
+        assert dead is not None and dead["status"] == "failed"
+        assert dead["last_error"] is not None
     finally:
         await close_engine()
 

@@ -34,6 +34,23 @@ def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_s
     return lease_expires_at >= now - timedelta(seconds=grace_seconds)
 
 
+def _parent_status_for_run_status(run_status: str) -> str | None:
+    """Map a terminal run status to the parent once-task status.
+
+    Mirrors ``ScheduledTaskService.handle_run_completion`` so restart
+    reconciliation finalizes a stuck ``once`` task to the same outcome the
+    completion hook would have committed. Returns ``None`` for non-terminal
+    or unknown statuses so callers fall back to generic cancellation.
+    """
+    if run_status == "success":
+        return "completed"
+    if run_status == "interrupted":
+        return "cancelled"
+    if run_status in {"failed", "error", "timeout"}:
+        return "failed"
+    return None
+
+
 def _coerce_datetime(value: datetime | str | None) -> datetime | None:
     """Convert serialized task timestamps back before binding DateTime fields."""
     if value is None or isinstance(value, datetime):
@@ -484,6 +501,11 @@ class ScheduledTaskRepository:
         completion hook moves it to a terminal status; its lease was cleared at
         launch, so the claim query's expired-lease reclaim branch never sees
         it. After a crash the hook is gone and the task would be stuck forever.
+        The hook finalizes the occurrence row and the parent task in two
+        separate transactions; a crash between them leaves the occurrence
+        terminal while the task still reads ``running``. Finalize the parent
+        from the committed occurrence outcome instead of blindly cancelling,
+        and only cancel when no terminal outcome was recorded.
         Tasks still holding a lease are left alone — they were claimed but not
         launched, and expired-lease reclaim recovers them safely.
         """
@@ -496,12 +518,40 @@ class ScheduledTaskRepository:
             result = await session.execute(stmt)
             rows = list(result.scalars())
             now = datetime.now(UTC)
+            reconciled = 0
             for row in rows:
-                row.status = "cancelled"
-                row.last_error = error
+                task_status, task_error = await self._finalize_parent_from_latest_run(session, row, fallback=error)
+                row.status = task_status
+                if task_error is not None:
+                    row.last_error = task_error
                 row.updated_at = now
+                reconciled += 1
             await session.commit()
-            return len(rows)
+            return reconciled
+
+    async def _finalize_parent_from_latest_run(
+        self,
+        session: AsyncSession,
+        task: ScheduledTaskRow,
+        *,
+        fallback: str,
+    ) -> tuple[str, str | None]:
+        """Derive the parent status from the task's latest committed occurrence.
+
+        ``mark_stale_active_runs`` finalizes the occurrence row against the
+        underlying run before this sweep runs, so a terminal row is the
+        authoritative outcome. Returns ``(status, error)`` where ``error`` is
+        ``None`` for a completed run, the recorded occurrence error for a
+        failed/cancelled run, and the fallback string when no terminal
+        occurrence exists.
+        """
+        latest = (await session.execute(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task.id).order_by(ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc()).limit(1))).scalars().first()
+        if latest is None:
+            return "cancelled", fallback
+        status = _parent_status_for_run_status(latest.status)
+        if status is None:
+            return "cancelled", fallback
+        return status, None if status == "completed" else (latest.error or fallback)
 
     async def reconcile_stuck_once_tasks(
         self,
@@ -553,8 +603,20 @@ class ScheduledTaskRepository:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
                         if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
                             continue
-                task.status = "cancelled"
-                task.last_error = error
+                    task.status = "cancelled"
+                    task.last_error = error
+                else:
+                    # The underlying run committed a terminal outcome (or none
+                    # exists): finalize the parent to match it instead of
+                    # blindly cancelling a run the completion hook may have
+                    # already marked successful.
+                    task_status = _parent_status_for_run_status(candidate.status) if candidate is not None else None
+                    if task_status is None:
+                        task.status = "cancelled"
+                        task.last_error = error
+                    else:
+                        task.status = task_status
+                        task.last_error = None if task_status == "completed" else (candidate.error or error)
                 task.updated_at = datetime.now(UTC)
                 cancelled += 1
             await session.commit()

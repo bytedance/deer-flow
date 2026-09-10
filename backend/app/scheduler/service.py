@@ -583,7 +583,7 @@ class ScheduledTaskService:
                 # would have finalized it, so reconcile the parent rows too.
                 stuck = await self._task_repo.cancel_stuck_once_tasks(error=restart_error)
                 if stuck:
-                    logger.warning("Cancelled %d stuck once task(s) after restart", stuck)
+                    logger.warning("Reconciled %d stuck once task(s) after restart", stuck)
             except Exception:
                 logger.exception("Failed to reconcile stuck once tasks at startup")
         self._stop.clear()
@@ -608,7 +608,7 @@ class ScheduledTaskService:
                 lease_grace_seconds=self._run_lease_grace_seconds,
             )
             if stuck:
-                logger.warning("Cancelled %d stuck once task(s) after lease reconciliation", stuck)
+                logger.warning("Reconciled %d stuck once task(s) after lease reconciliation", stuck)
         except Exception:
             logger.exception("Failed to reconcile once tasks with leases")
 
