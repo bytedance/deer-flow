@@ -120,4 +120,15 @@ describe("InputBox stop gating (runs:cancel)", () => {
     fireEvent.click(submit);
     expect(onStop).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps the base Submit accessible name when stop is not denied", () => {
+    // Regression: passing an explicitly-undefined aria-label clobbered
+    // PromptInputSubmit's default aria-label="Submit" via JSX spread,
+    // stripping the submit control's accessible name in every
+    // non-denied state (e2e locates the button by that name).
+    const { container } = renderComposer({ onStop: rs.fn() });
+
+    const submit = getSubmitButton(container);
+    expect(submit.getAttribute("aria-label")).toBe("Submit");
+  });
 });

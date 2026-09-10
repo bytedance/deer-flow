@@ -2763,13 +2763,16 @@ export function InputBox({
               status={status}
               // A bare disabled stop square reads as a broken composer;
               // explain the permission boundary (native title, since a
-              // Radix tooltip won't fire on a disabled button).
-              aria-label={
-                stopDenied ? t.inputBox.stopStreamingUnavailable : undefined
-              }
-              title={
-                stopDenied ? t.inputBox.stopStreamingUnavailable : undefined
-              }
+              // Radix tooltip won't fire on a disabled button). Spread
+              // conditionally: an explicitly-undefined aria-label would
+              // clobber PromptInputSubmit's default aria-label="Submit"
+              // and strip the submit control's accessible name.
+              {...(stopDenied
+                ? {
+                    "aria-label": t.inputBox.stopStreamingUnavailable,
+                    title: t.inputBox.stopStreamingUnavailable,
+                  }
+                : {})}
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();
