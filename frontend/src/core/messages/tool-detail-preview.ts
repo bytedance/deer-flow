@@ -25,9 +25,11 @@ export function formatToolDetail(value: unknown): {
   let truncated = false;
   let nodes = 0;
   let budgetCollapses = 0;
+  let generatedMarkers = 0;
   const seen = new WeakSet<object>();
   const marker = (budgetCollapsed = false) => {
     truncated = true;
+    generatedMarkers++;
     if (budgetCollapsed) budgetCollapses++;
     return JSON.stringify("…");
   };
@@ -45,7 +47,7 @@ export function formatToolDetail(value: unknown): {
       else high = middle - 1;
     }
     const prefix = textPrefix(text, low);
-    if (prefix === "") budgetCollapses++;
+    if (prefix === "") return marker(true);
     return JSON.stringify(prefix + "…");
   };
   const visit = (item: unknown, depth: number, budget: number): string => {
@@ -73,6 +75,14 @@ export function formatToolDetail(value: unknown): {
     let output = array ? "[" : "{";
     let count = 0;
     let hasEllipsis = false;
+    let tailMarkerEnd: number | undefined;
+    const append = (entry: string, generated: boolean) => {
+      output += entry;
+      // Remember a complete entry boundary, never a character-budget cut.
+      // A real later value clears it so middle array indices stay intact.
+      if (array && generated) tailMarkerEnd ??= output.length;
+      else tailMarkerEnd = undefined;
+    };
     for (const key in item) {
       if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
       const prefix = (count ? ",\n" : "\n") + indent;
@@ -89,11 +99,12 @@ export function formatToolDetail(value: unknown): {
         available - encodedKey.length < 3
       ) {
         truncated = true;
-        if (array || !hasEllipsis) output += prefix + notice;
+        if (array || !hasEllipsis) append(prefix + notice, true);
         break;
       }
       const descriptor = Object.getOwnPropertyDescriptor(item, key);
       const previousBudgetCollapses = budgetCollapses;
+      const previousGeneratedMarkers = generatedMarkers;
       const child =
         descriptor && "value" in descriptor
           ? visit(descriptor.value, depth + 1, available - encodedKey.length)
@@ -105,14 +116,18 @@ export function formatToolDetail(value: unknown): {
         budgetCollapses > previousBudgetCollapses &&
         child === notice
       ) {
-        output += prefix + notice;
+        append(prefix + notice, true);
         break;
       }
-      output += prefix + encodedKey + child;
+      append(
+        prefix + encodedKey + child,
+        generatedMarkers > previousGeneratedMarkers && child === notice,
+      );
       count++;
       if (key === "…") hasEllipsis = true;
     }
     seen.delete(item);
+    if (tailMarkerEnd !== undefined) output = output.slice(0, tailMarkerEnd);
     return output + (output.length === 1 ? (array ? "]" : "}") : closing);
   };
   // Preserve tool text verbatim: JSON.parse can round IDs, drop duplicate keys,

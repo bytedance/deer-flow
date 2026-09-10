@@ -176,6 +176,53 @@ it("preserves literal ellipsis array entries and the values after them", () => {
   });
 });
 
+it("coalesces generated array tail markers without changing middle positions", () => {
+  const tail: unknown[] = [42];
+  tail.push(tail, tail);
+  const middle: unknown[] = [];
+  middle.push(middle, middle, 42);
+  const literal: unknown[] = [];
+  literal.push(literal, "…", literal, literal);
+  for (const [value, expected] of [
+    [tail, [42, "…"]],
+    [middle, ["…", "…", 42]],
+    [literal, ["…", "…", "…"]],
+    [
+      [tail, middle],
+      [
+        [42, "…"],
+        ["…", "…", 42],
+      ],
+    ],
+  ]) {
+    const preview = formatToolDetail(value);
+    expect(JSON.parse(preview.text)).toEqual(expected);
+    expect(preview.truncated).toBe(true);
+    expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+  }
+});
+
+it("coalesces accessor, depth and budget tail markers", () => {
+  const accessors = [42, 0, 0];
+  for (const key of ["1", "2"]) {
+    Object.defineProperty(accessors, key, {
+      get() {
+        throw new Error("must not read");
+      },
+    });
+  }
+  expect(JSON.parse(formatToolDetail(accessors).text)).toEqual([42, "…"]);
+  let deep: unknown = [1, 2, 3];
+  for (let i = 0; i < 6; i++) deep = { child: deep };
+  let parsed = JSON.parse(formatToolDetail(deep).text);
+  for (let i = 0; i < 6; i++) parsed = parsed.child;
+  expect(parsed).toEqual(["…"]);
+
+  const wide: unknown[] = [42];
+  for (let i = 0; i < 4000; i++) wide.push(wide);
+  expect(JSON.parse(formatToolDetail(wide).text)).toEqual([42, "…"]);
+});
+
 // Text is already the tool's representation; parsing it again is lossy.
 it.each([
   "9223372036854775807",
