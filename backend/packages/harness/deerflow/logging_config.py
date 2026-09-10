@@ -29,15 +29,31 @@ _TRACE_FILTER_NAME = "deerflow_trace_context_filter"
 # is still rewritten; a bare credential-free origin passes through as-is.
 _URL_REDACT_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s@]*@)?(?P<host>[^/?#\s]+)(?P<rest>[/?#]\S*)?")
 
+# urllib3's per-request DEBUG line (connectionpool.py:545 on urllib3 2.7.0)
+# splits the URL across the format string:
+# ``'%s://%s:%s "%s %s %s" %s %s'`` renders as
+# ``scheme://host:port "GET /private/x?token=y HTTP/1.1" 200 None`` — the
+# authority and the signed origin-form target are two separate args. The
+# absolute-URL regex above cannot see either half: the authority is followed
+# by a space (so ``rest`` never matches and the bare-origin early return
+# applies) and the quoted target has no scheme. The request line therefore
+# gets its own shape — authority immediately followed by a quoted
+# ``METHOD target HTTP/x.x`` line — rewritten to scheme + host with the
+# target collapsed to ``/<redacted>``.
+_URLLIB3_REQUEST_LINE_RE = re.compile(r'(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s"@]*@)?(?P<host>[^/?#\s"]+) "(?P<method>[A-Z]+) (?P<target>/[^"\s]*) (?P<version>HTTP/[0-9.]+)"')
+
 
 class UrlRedactionFilter(logging.Filter):
     """Redact URLs in httpx/urllib3 request log records down to scheme + host.
 
     Path, query, fragment, and any userinfo credentials in the authority are
-    replaced; the host (and port) stay for operator debuggability. The record
-    is rewritten in place (``msg`` set to the redacted formatted message,
-    ``args`` cleared) so every downstream handler and formatter — text or
-    JSON — sees the same redacted line, while the method/status/duration
+    replaced; the host (and port) stay for operator debuggability. urllib3's
+    per-request DEBUG line carries the same data split across its format —
+    authority, then a quoted ``METHOD target HTTP/x.x`` request line — which
+    the absolute-URL pattern cannot match, so a second shape handles it. The
+    record is rewritten in place (``msg`` set to the redacted formatted
+    message, ``args`` cleared) so every downstream handler and formatter —
+    text or JSON — sees the same redacted line, while the method/status/duration
     observability is preserved. A URL is rewritten only when it carries
     something to hide (userinfo, path, query, or fragment); a bare
     credential-free origin and records without any URL pass through
@@ -53,7 +69,16 @@ class UrlRedactionFilter(logging.Filter):
             userinfo = "<redacted>@" if match.group("userinfo") else ""
             return match.group("scheme") + userinfo + match.group("host") + "/<redacted>"
 
-        redacted = _URL_REDACT_RE.sub(_redact, message)
+        def _redact_request_line(match: re.Match[str]) -> str:
+            userinfo = "<redacted>@" if match.group("userinfo") else ""
+            return match.group("scheme") + userinfo + match.group("host") + ' "' + match.group("method") + " /<redacted> " + match.group("version") + '"'
+
+        # The request-line pass runs first: its rewrite leaves a bare origin
+        # that the absolute-URL pass then passes through, while the reverse
+        # order would already have rewritten any authority userinfo into a
+        # shape the request-line pattern no longer matches.
+        redacted = _URLLIB3_REQUEST_LINE_RE.sub(_redact_request_line, message)
+        redacted = _URL_REDACT_RE.sub(_redact, redacted)
         if redacted != message:
             record.msg = redacted
             record.args = None
@@ -68,10 +93,11 @@ class UrlRedactionFilter(logging.Filter):
 # - httpx emits via the bare ``httpx`` logger, so a logger filter works.
 # - urllib3 emits via children (``urllib3.poolmanager`` logs
 #   ``Redirecting <url> -> <url>`` at INFO, ``urllib3.connectionpool`` logs
-#   redirect/request lines at DEBUG), so a filter on bare ``urllib3`` is
-#   dead code. Handler-level filters DO see propagated records, so the
-#   filter is also attached to every root handler — covering urllib3 and
-#   any future library without knowing its logger names.
+#   redirect lines plus the per-request authority/quoted-target line at
+#   DEBUG), so a filter on bare ``urllib3`` is dead code. Handler-level
+#   filters DO see propagated records, so the filter is also attached to
+#   every root handler — covering urllib3 and any future library without
+#   knowing its logger names.
 _REDACTED_LOGGER_NAMES = ("httpx",)
 
 

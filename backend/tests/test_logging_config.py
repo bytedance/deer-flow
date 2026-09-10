@@ -162,6 +162,99 @@ def test_url_redaction_filter_covers_urllib3_redirect_records() -> None:
         root.setLevel(old_level)
 
 
+def test_url_redaction_filter_covers_urllib3_request_line_records() -> None:
+    """urllib3's per-request DEBUG line splits the URL across its format
+    string, so the absolute-URL regex alone cannot catch it. The installed
+    urllib3 (2.7.0) emits this exact record from
+    HTTPConnectionPool._make_request (connectionpool.py:545):
+    log.debug('%s://%s:%s "%s %s %s" %s %s', scheme, host, port, method,
+    url, response.version_string, response.status,
+    response.length_remaining) — the authority ends at a space (bare-origin
+    early return) and the quoted origin-form target has no scheme, which is
+    why the request line needs its own redaction shape."""
+    from deerflow.logging_config import UrlRedactionFilter
+
+    format_string = '%s://%s:%s "%s %s %s" %s %s'
+    filt = UrlRedactionFilter()
+
+    def _record(target: str, version: str = "HTTP/1.1", method: str = "GET") -> logging.LogRecord:
+        return logging.LogRecord(
+            "urllib3.connectionpool",
+            logging.DEBUG,
+            __file__,
+            1,
+            format_string,
+            ("https", "cdn.example", 443, method, target, version, 200, None),
+            None,
+        )
+
+    # The reviewer's repro shape: host:port, then a quoted request line whose
+    # origin-form target carries the signed path+query. The rewrite keeps
+    # scheme + host + method + version for observability and collapses the
+    # target to /<redacted>.
+    record = _record("/private/BearerSecret?token=QuerySecret")
+    assert filt.filter(record) is True
+    formatted = record.getMessage()
+    assert formatted == 'https://cdn.example:443 "GET /<redacted> HTTP/1.1" 200 None'
+    assert "BearerSecret" not in formatted
+    assert "token=" not in formatted
+
+    # A target with no query still hides the path: the inbound-media rule is
+    # host-only visibility, not query-only.
+    path_only = _record("/private/photo.jpg")
+    assert filt.filter(path_only) is True
+    assert '"GET /<redacted> HTTP/1.1"' in path_only.getMessage()
+    assert "photo.jpg" not in path_only.getMessage()
+
+    # HTTP/2 responses keep version_string in the quoted line; the shape must
+    # still match and rewrite.
+    http2 = _record("/private/BearerSecret?token=QuerySecret", version="HTTP/2")
+    assert filt.filter(http2) is True
+    assert '"GET /<redacted> HTTP/2"' in http2.getMessage()
+    assert "BearerSecret" not in http2.getMessage()
+
+
+def test_url_redaction_filter_covers_urllib3_request_line_through_real_emit() -> None:
+    """Real-emitter wiring for the per-request line: urllib3 logs through the
+    ``urllib3.connectionpool`` child logger at DEBUG, so only the
+    handler-level filters installed by configure_logging can rewrite the
+    record. Emits with the connectionpool.py:545 format string at root
+    DEBUG."""
+    from deerflow.logging_config import configure_logging
+
+    root = logging.getLogger()
+    old_handlers = root.handlers[:]
+    old_level = root.level
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+
+    try:
+        root.handlers = [handler]
+        root.setLevel(logging.DEBUG)
+        configure_logging(SimpleNamespace(log_level="debug", logging=SimpleNamespace(enhance=SimpleNamespace(enabled=False, format="text"))))
+
+        logging.getLogger("urllib3.connectionpool").debug(
+            '%s://%s:%s "%s %s %s" %s %s',
+            "https",
+            "cdn.example",
+            443,
+            "GET",
+            "/private/BearerSecret?token=QuerySecret",
+            "HTTP/1.1",
+            200,
+            None,
+        )
+
+        out = stream.getvalue()
+        assert "BearerSecret" not in out
+        assert "QuerySecret" not in out
+        assert 'https://cdn.example:443 "GET /<redacted> HTTP/1.1"' in out
+        assert "200" in out  # status observability preserved
+    finally:
+        root.handlers = old_handlers
+        root.setLevel(old_level)
+
+
 def test_configure_logging_installs_url_redaction_on_httpx_logger_and_root_handlers() -> None:
     from deerflow.logging_config import UrlRedactionFilter, _has_url_redaction_filter, configure_logging, install_url_log_redaction
 
