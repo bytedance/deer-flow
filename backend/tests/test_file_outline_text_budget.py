@@ -85,3 +85,13 @@ def test_long_unicode_heading_preserves_readable_prefix(tmp_path: Path) -> None:
     assert title.startswith("研究研究")
     assert title.endswith("… (truncated)")
     assert len(title) <= 200
+
+
+def test_exact_fit_preview_stops_before_following_content(tmp_path: Path) -> None:
+    document = tmp_path / "report.md"
+    original = "Z" * 2000 + "\nACTUAL CONTENT\n"
+    document.write_text(original, encoding="utf-8")
+    # Markers describe truncation within an included line. Reaching the total
+    # budget stops the preview, just like reaching its five-line limit.
+    assert extract_outline_for_file(document) == ([], ["Z" * 2000])
+    assert document.read_text(encoding="utf-8") == original

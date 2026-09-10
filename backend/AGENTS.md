@@ -333,7 +333,7 @@ Multi-file uploads convert documents; outlines skip fenced code:
 - Gateway HTTP uploads stage bytes as `.upload-*.part` files and atomically replace the destination only after size validation. These staging files are hidden from upload listings, agent upload context, and sandbox listing/search tools, and swept on Gateway startup if a hard crash leaves one behind.
 - Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
 - Mounted upload paths skip both sandbox acquisition and per-file synchronization. For AIO remote/provisioner deployments this requires an explicit, accurate `sandbox.thread_data_mounts: true`; omission preserves backend auto-detection.
-- `UploadsMiddleware` injects file context; outline titles cap at 200 characters and previews at 2000, including truncation markers. Chat titles use the original request, or `New Conversation` for attachment-only input.
+- `UploadsMiddleware` caps outline titles at 200 characters and previews at 2000 including markers. Chat titles use `original_user_content`, not upload-prefixed content; attachment-only input uses `New Conversation`.
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 
