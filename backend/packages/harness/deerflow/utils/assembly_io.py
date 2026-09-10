@@ -10,7 +10,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +88,8 @@ async def run_assembly[**P, T](func: Callable[P, T], /, *args: P.args, **kwargs:
     def _work() -> T:
         # The decrement must ride the dispatched work item, not the asyncio
         # future: if the submitting loop is closed while the worker is still
-        # running, the future never resolves and a future-done-callback would
-        # never fire, ratcheting the count up permanently and eventually
+        # running, the future never resolves and an asyncio-future callback
+        # would never fire, ratcheting the count up permanently and eventually
         # firing the starvation warning with no starvation behind it.
         global _pending_assemblies
         try:
@@ -98,4 +98,25 @@ async def run_assembly[**P, T](func: Callable[P, T], /, *args: P.args, **kwargs:
             with _pending_lock:
                 _pending_assemblies -= 1
 
-    return await loop.run_in_executor(_ASSEMBLY_EXECUTOR, _work)
+    try:
+        executor_future = _ASSEMBLY_EXECUTOR.submit(_work)
+    except Exception:
+        # Nothing was dispatched, so the work item's finally will never run;
+        # release the slot claimed above or the count wedges.
+        with _pending_lock:
+            _pending_assemblies -= 1
+        raise
+
+    def _release_if_cancelled(future: Future[T]) -> None:
+        # Exactly-once cleanup for jobs cancelled while still queued:
+        # ``Future.cancel`` only succeeds before the executor starts the
+        # item, so ``cancelled()`` is true precisely when ``_work()`` never
+        # ran and its finally-block decrement never will. Runs in whichever
+        # thread cancels or completes the job — loop-independent.
+        global _pending_assemblies
+        if future.cancelled():
+            with _pending_lock:
+                _pending_assemblies -= 1
+
+    executor_future.add_done_callback(_release_if_cancelled)
+    return await asyncio.wrap_future(executor_future, loop=loop)
