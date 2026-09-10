@@ -63,9 +63,7 @@ def test_waiter_timeout_does_not_stop_started_sync_work():
             assert running.cancelled()
             assert not finished.is_set()
 
-            sentinel = asyncio.create_task(
-                asyncio.to_thread(loop.call_soon_threadsafe, sentinel_started.set)
-            )
+            sentinel = asyncio.create_task(asyncio.to_thread(loop.call_soon_threadsafe, sentinel_started.set))
             await asyncio.sleep(0)
             assert not sentinel_started.is_set()
 
