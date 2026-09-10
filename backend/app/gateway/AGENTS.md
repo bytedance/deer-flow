@@ -147,9 +147,3 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 archive/search behavior, read [Thread lifecycle invariants](../../docs/THREAD_LIFECYCLE.md).
 It owns lineage and settled-checkpoint rules, legacy fallback boundaries, archive
 filtering before pagination, owner isolation, and activity-time preservation.
-
-Custom skill export requires `require_admin_user` (no PAT). `skill_export.py` uses
-shared I/O workers; hold leases until workers drain and responses close. Bound
-streaming separately; distinguish peer disconnects from server cancellation.
-Preserve user context and omit raw file errors. See the
-[export API contract](../../docs/API.md#export-a-custom-skill).
