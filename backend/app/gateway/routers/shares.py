@@ -217,17 +217,17 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
     # expiry request must 400 without paying for a scan that can walk the
     # raw-scan budget first.
     expires_at = _resolve_expiry(body)
-    # Storage quota (cheap constant-work check, so it runs before the
-    # snapshot scan): every stored row keeps its payload — revocation is
-    # soft, for owner-side history — so the cap counts all of the caller's
-    # rows, across threads and lifecycle states. Without it a single
-    # authenticated account could grow the shared database without bound
-    # by repeatedly posting immutable snapshots.
+    # Storage quota, two layers: this indexed pre-check rejects over-quota
+    # requests before they pay for the snapshot scan, and the create call
+    # enforces the cap atomically (admission is a guarded counter upsert in
+    # the insert's transaction), so concurrent creations racing past the
+    # pre-check cannot overshoot. Every stored row counts — revocation is
+    # soft, for owner-side history — across threads and lifecycle states.
     quota = _sharing_config().max_shares_per_owner
     if await repo.count_by_owner(user_id) >= quota:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Share limit reached ({quota} stored share snapshots); contact the operator to raise conversation_sharing.max_shares_per_owner or prune old shares",
+            detail=f"Share limit reached ({quota} stored share snapshots); contact the operator to raise conversation_sharing.max_shares_per_owner",
         )
     try:
         snapshot, source_last_seq = await build_share_snapshot(thread_id, request=request, user_id=user_id)
@@ -256,7 +256,15 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
         snapshot_version=snapshot["version"],
         source_last_seq=source_last_seq,
         expires_at=expires_at,
+        quota_limit=quota,
     )
+    if record is None:
+        # The atomic admission refused a request that raced past the
+        # pre-check — same cap, same answer.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Share limit reached ({quota} stored share snapshots); contact the operator to raise conversation_sharing.max_shares_per_owner",
+        )
     logger.info("Share created: share_id=%s thread_id=%s expires=%s", record["id"], thread_id, expires_at or "never")
     return ShareCreatedResponse(
         share_id=str(record["id"]),

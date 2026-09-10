@@ -82,10 +82,16 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
 - `GET` lists management metadata (never token hashes); `DELETE /{share_id}`
   revokes immediately (scoped to thread + owner in the repository).
 - Creation is quota-capped per owner (`conversation_sharing.max_shares_per_owner`,
-  default 100, constant-work check before the snapshot scan → 409): every
-  stored row counts — revocation is soft and rows keep their payload — so the
-  cap bounds each account's storage footprint across threads and lifecycle
-  states. Retention/pruning of old rows is a deliberate non-goal here, pending
+  default 100) in two layers: an indexed `count_by_owner` pre-check rejects
+  over-quota requests before they pay for the snapshot scan, and the insert
+  itself admits atomically — a guarded counter upsert on
+  `conversation_share_quotas` (migration 0023, backfilled) inside the insert's
+  transaction, so concurrent creations cannot overshoot and a failed insert
+  rolls its admission back. Every stored row counts (revocation is soft and
+  rows keep their payload) across threads and lifecycle states. The public
+  token resolve probes liveness on light columns (`id`, expiry; revocation
+  filtered in SQL) and materializes the snapshot only for live shares.
+  Retention/pruning of old rows is a deliberate non-goal here, pending
   a maintainer decision on deletion semantics.
 
 ## Token storage (`tokens.py`)

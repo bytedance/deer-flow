@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -157,6 +158,96 @@ async def test_count_by_owner_counts_all_rows_across_threads_and_states(tmp_path
     assert await repo.count_by_owner("user-1") == 2
     assert await repo.count_by_owner("user-2") == 1
     assert await repo.count_by_owner("user-nobody") == 0
+
+
+@pytest.mark.asyncio
+async def test_create_admits_atomically_under_concurrency(tmp_path):
+    """Concurrent creations for one owner cannot overshoot the cap.
+
+    A pre-checked COUNT-then-INSERT races (each request passes the count,
+    then every request inserts); admission must be a single atomic
+    statement whose guard carries the cap, so racing requests serialize on
+    the owner's counter instead.
+    """
+    repo = await _make_repo(tmp_path)
+    results = await asyncio.gather(*[_create_share(repo, token_hash=f"tok-race-{i}", quota_limit=3) for i in range(5)])
+
+    succeeded = [record for record in results if record is not None]
+    assert len(succeeded) == 3
+    assert await repo.count_by_owner("user-1") == 3
+    # The cap holds for later requests too — admission is durable.
+    assert await _create_share(repo, token_hash="tok-after-race", quota_limit=3) is None
+
+
+@pytest.mark.asyncio
+async def test_failed_insert_rolls_back_quota_admission(tmp_path):
+    """A create that fails after admission must not consume a slot."""
+    from sqlalchemy.exc import IntegrityError
+
+    repo = await _make_repo(tmp_path)
+    assert await _create_share(repo, token_hash="tok-base-quota", quota_limit=2) is not None
+    with pytest.raises(IntegrityError):
+        await _create_share(repo, token_hash="tok-base-quota", quota_limit=2)
+
+    # The failed duplicate did not consume the owner's second slot...
+    assert await _create_share(repo, token_hash="tok-ok-1", quota_limit=2) is not None
+    # ...and the cap still refuses the third stored row.
+    assert await _create_share(repo, token_hash="tok-ok-2", quota_limit=2) is None
+
+
+def _capture_statements(statements: list[str]):
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    return _capture
+
+
+@pytest.mark.asyncio
+async def test_revoked_token_resolution_never_materializes_snapshot(tmp_path):
+    """A retained token for a dead share must not load its payload.
+
+    Revocation is SQL-filtered before any heavy column is projected: the
+    public resolve path stays cheap no matter how large the stored
+    snapshots are.
+    """
+    repo = await _make_repo(tmp_path)
+    created = await _create_share(repo, token_hash="tok-dead-revoked")
+    assert await repo.revoke(created["id"], "thread-1", "user-1") is True
+
+    session_factory = get_session_factory()
+    engine = session_factory.kw["bind"]
+    listener = _capture_statements(statements := [])
+    event.listen(engine.sync_engine, "before_cursor_execute", listener)
+    try:
+        assert await repo.get_active_by_token_hash("tok-dead-revoked") is None
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", listener)
+
+    selects = [s for s in statements if "FROM conversation_shares" in s]
+    assert len(selects) == 1
+    assert "snapshot_json" not in selects[0]
+    assert "title" not in selects[0]
+
+
+@pytest.mark.asyncio
+async def test_expired_token_resolution_never_materializes_snapshot(tmp_path):
+    """Same contract for expired shares: the liveness probe reads id and
+    expiry only; the payload is fetched only for live shares."""
+    repo = await _make_repo(tmp_path)
+    await _create_share(repo, token_hash="tok-dead-expired", expires_at=datetime.now(UTC) - timedelta(seconds=1))
+
+    session_factory = get_session_factory()
+    engine = session_factory.kw["bind"]
+    listener = _capture_statements(statements := [])
+    event.listen(engine.sync_engine, "before_cursor_execute", listener)
+    try:
+        assert await repo.get_active_by_token_hash("tok-dead-expired") is None
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", listener)
+
+    selects = [s for s in statements if "FROM conversation_shares" in s]
+    assert len(selects) == 1
+    assert "snapshot_json" not in selects[0]
 
 
 @pytest.mark.asyncio

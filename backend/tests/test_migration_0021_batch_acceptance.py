@@ -68,7 +68,7 @@ async def test_forward_revision_cannot_skip_required_batch_columns(tmp_path, mon
             # The conversation-shares merge renumbered the shares migration to
             # 0022 chaining after 0019_thread_incarnations, so the tree head the
             # rolled-back view below must not know is now the shares revision.
-            assert current_head == "0022_conversation_shares"
+            assert current_head == "0023_conversation_share_quotas"
             assert {"0020_threads_meta_project_id", "0021_batch_acceptance", current_head} <= current_revisions
             monkeypatch.setattr(
                 bootstrap,

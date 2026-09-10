@@ -33,7 +33,7 @@ CURRENT_HEAD = "0019_thread_incarnations"
 # Tree head after the conversation-shares merge: the shares migration renumbered
 # to 0022 and chains after the incarnations revision, so bootstrap_schema lands
 # here while the forward-compat anchor stays pinned to CURRENT_HEAD above.
-MERGED_HEAD = "0022_conversation_shares"
+MERGED_HEAD = "0023_conversation_share_quotas"
 ROLLBACK_HEAD = "0020_threads_meta_project_id"
 INCARNATION_PARENT = "0021_batch_acceptance"
 ORIGINAL_INCARNATION_PARENT = "0018_oauth_identity_pg_partial"
@@ -62,7 +62,7 @@ async def _set_database_revision(engine, revision: str) -> None:
 
 
 async def _seed_current_head(engine) -> None:
-    # bootstrap_schema now lands on the merged tree head (0022_conversation_shares);
+    # bootstrap_schema now lands on the merged tree head (0023_conversation_share_quotas);
     # these tests exercise the incarnations forward-compat window, so pin the
     # seed to that revision the same way _seed_rollback_head pins its own.
     cfg = _get_alembic_config(engine)
@@ -90,7 +90,7 @@ async def _add_forward_columns(engine) -> None:
 
 def _simulate_rollback_binary(monkeypatch: pytest.MonkeyPatch) -> None:
     current_head, current_revisions = bootstrap_mod._get_revision_metadata()
-    # After the conversation-shares merge the tree head is 0022_conversation_shares,
+    # After the conversation-shares merge the tree head is 0023_conversation_share_quotas,
     # while the forward-compat anchor stays pinned to the incarnations revision id.
     assert current_head == MERGED_HEAD
     assert CURRENT_HEAD == _FORWARD_COMPATIBLE_REVISION

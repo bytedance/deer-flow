@@ -13,9 +13,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.conversation_shares.model import ConversationShareRow
+from deerflow.persistence.conversation_shares.model import ConversationShareQuota, ConversationShareRow
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -72,7 +74,19 @@ class ConversationShareRepository:
         snapshot_version: int = 1,
         source_last_seq: int | None = None,
         expires_at: datetime | None = None,
-    ) -> dict[str, Any]:
+        quota_limit: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Insert one share row, atomically capped per owner.
+
+        ``quota_limit`` enforces the owner's stored-row cap inside this
+        insert's transaction: admission is a single guarded upsert on the
+        owner's counter row, so concurrently racing creations serialize on
+        the counter instead of each passing a pre-checked count and all
+        inserting. Returns ``None`` when the owner is already at the cap.
+        ``None`` admits uncapped — direct/test use; the router always
+        passes the configured cap (plus its cheap indexed pre-check so
+        over-quota requests never pay for the snapshot scan).
+        """
         now = datetime.now(UTC)
         row = ConversationShareRow(
             id=str(uuid.uuid4()),
@@ -88,10 +102,39 @@ class ConversationShareRepository:
             updated_at=now,
         )
         async with self._sf() as session:
-            session.add(row)
-            await session.commit()
+            async with session.begin():
+                if quota_limit is not None and not await self._admit_share_slot(session, owner_user_id, quota_limit):
+                    return None
+                session.add(row)
             await session.refresh(row)
             return self._row_to_dict(row)
+
+    @staticmethod
+    async def _admit_share_slot(session: AsyncSession, owner_user_id: str, quota_limit: int) -> bool:
+        """Atomic quota admission: one guarded upsert statement.
+
+        The cap lives in the upsert's WHERE clause, so ``stored_shares``
+        only ever increments below it; rowcount 0 means the owner is at the
+        cap. Runs in the caller's transaction — a later insert failure
+        rolls the admission back with it.
+        """
+        bind = session.bind
+        if bind is None:  # pragma: no cover - sessions here are always bound
+            raise RuntimeError("quota admission requires a bound session")
+        if bind.dialect.name == "postgresql":
+            upsert = pg_insert(ConversationShareQuota)
+        elif bind.dialect.name == "sqlite":
+            upsert = sqlite_insert(ConversationShareQuota)
+        else:  # pragma: no cover - the config only offers these backends
+            raise ValueError(f"unsupported database backend for share quota: {bind.dialect.name}")
+        result = await session.execute(
+            upsert.values(owner_user_id=owner_user_id, stored_shares=1).on_conflict_do_update(
+                index_elements=[ConversationShareQuota.owner_user_id],
+                set_={ConversationShareQuota.stored_shares: ConversationShareQuota.stored_shares + 1},
+                where=ConversationShareQuota.stored_shares < quota_limit,
+            )
+        )
+        return result.rowcount == 1
 
     async def get_active_by_token_hash(self, token_hash: str) -> dict[str, Any] | None:
         """Return the non-revoked, non-expired share for *token_hash*.
@@ -99,18 +142,30 @@ class ConversationShareRepository:
         Revocation and expiry are evaluated on every public request: a share
         that has been revoked or has passed ``expires_at`` resolves to ``None``
         here even though its row remains readable for owner-side history.
+        Liveness is decided by a light probe (id + expiry only, revocation
+        filtered in SQL) and the full row — snapshot payload included — is
+        fetched only for live shares, so a retained token for a dead share
+        never materializes its payload no matter how large the snapshots are.
         """
         async with self._sf() as session:
-            row = (await session.execute(select(ConversationShareRow).where(ConversationShareRow.token_hash == token_hash))).scalar_one_or_none()
-            if row is None or row.revoked_at is not None:
+            probe = (
+                await session.execute(
+                    select(ConversationShareRow.id, ConversationShareRow.expires_at).where(
+                        ConversationShareRow.token_hash == token_hash,
+                        ConversationShareRow.revoked_at.is_(None),
+                    )
+                )
+            ).first()
+            if probe is None:
                 return None
-            expires_at = row.expires_at
+            expires_at = probe.expires_at
             if expires_at is not None:
                 # SQLite drops tzinfo on read; normalize before comparing.
                 if expires_at.tzinfo is None:
                     expires_at = expires_at.replace(tzinfo=UTC)
                 if expires_at <= datetime.now(UTC):
                     return None
+            row = (await session.execute(select(ConversationShareRow).where(ConversationShareRow.id == probe.id))).scalar_one()
             return self._row_to_dict(row)
 
     async def get(self, share_id: str) -> dict[str, Any] | None:

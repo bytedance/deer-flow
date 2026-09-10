@@ -16,7 +16,13 @@ class ConversationShareRow(Base):
 
     __tablename__ = "conversation_shares"
 
-    __table_args__ = (Index("ix_conversation_shares_token_hash", "token_hash", unique=True),)
+    __table_args__ = (
+        Index("ix_conversation_shares_token_hash", "token_hash", unique=True),
+        # The per-owner quota count runs on every creation; without the
+        # index it degrades to a full table scan as deployments accumulate
+        # shares across accounts.
+        Index("ix_conversation_shares_owner_user_id", "owner_user_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -40,3 +46,23 @@ class ConversationShareRow(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
+
+
+class ConversationShareQuota(Base):
+    """Per-owner admission counter backing the stored-share cap.
+
+    A COUNT-then-INSERT admission check races under concurrency (every
+    racing request passes the same count and then all of them insert), so
+    the cap is enforced by a single atomic upsert —
+    ``stored_shares = stored_shares + 1 WHERE stored_shares < cap`` — which
+    serializes racing requests on the owner's counter row (row-locked on
+    Postgres, single-writer on SQLite). The counter shares the share
+    insert's transaction, so a failed insert rolls the admission back, and
+    it never decreases: stored rows are only ever soft-revoked, never
+    deleted, so the counter stays equal to the owner's stored row count.
+    """
+
+    __tablename__ = "conversation_share_quotas"
+
+    owner_user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    stored_shares: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
