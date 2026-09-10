@@ -44,7 +44,7 @@ export function formatToolDetail(value: unknown): {
       if (nodes >= MAX_NODES || remaining <= 0) {
         truncated = true;
         if (Array.isArray(output)) output.push("…");
-        else output["…"] = "…";
+        else if (!("…" in output)) output["…"] = "…";
         break;
       }
       const boundedKey = Array.isArray(output) ? key : cutString(key);

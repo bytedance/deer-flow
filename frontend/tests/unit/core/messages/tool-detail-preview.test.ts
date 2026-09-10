@@ -22,6 +22,16 @@ describe("formatToolDetail", () => {
       expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
     }
   });
+  it("preserves a real ellipsis key when object traversal is truncated", () => {
+    const value: Record<string, number> = { "…": 42 };
+    for (let i = 0; i < 20000; i++) value[`k${i}`] = 0;
+
+    const preview = formatToolDetail(value);
+
+    expect(preview.truncated).toBe(true);
+    expect(preview.text).toContain('"…": 42');
+    expect(preview.text.length).toBeLessThanOrEqual(TOOL_PREVIEW_LIMIT);
+  });
   it("formats JSON and preserves falsy results and plain text", () => {
     for (const text of ["null", "false", "0", "", "plain text"]) {
       expect(formatToolDetail(text)).toEqual({ text, truncated: false });
