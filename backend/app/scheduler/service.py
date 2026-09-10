@@ -39,7 +39,7 @@ class ScheduledTaskService:
         queue_timeout_seconds: int = 3600,
         multi_instance: bool = False,
         run_lease_grace_seconds: int = 10,
-        on_runs_recovered: Callable[[list[str]], Awaitable[None]] | None = None,
+        on_runs_recovered: Callable[[list[str]], Awaitable[bool | None]] | None = None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo

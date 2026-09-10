@@ -713,7 +713,7 @@ class ScheduledTaskRunRepository:
         now: datetime,
         owner_worker_id: str,
         lease_grace_seconds: int = 10,
-        on_runs_recovered: Callable[[list[str]], Awaitable[None]] | None = None,
+        on_runs_recovered: Callable[[list[str]], Awaitable[bool | None]] | None = None,
     ) -> int:
         """Reconcile only rows whose underlying owner is no longer live.
 
@@ -722,6 +722,7 @@ class ScheduledTaskRunRepository:
         lease, belongs to another process and must survive this startup.
         """
         recovered_run_ids: list[str] = []
+        deferred_terminal_rows: list[tuple[str, str, str, str, str | None]] = []
         async with self._sf() as session:
             result = await session.execute(
                 select(
@@ -757,12 +758,28 @@ class ScheduledTaskRunRepository:
                     # would hold SQLite's writer lock across the nested short
                     # transaction used by that durable-run CAS.
                     associations.append((task, row, candidate))
-                    if candidate.status not in {"pending", "running"} and candidate.stop_reason == "scheduled_task_orphan_recovered":
+                    if on_runs_recovered is not None and candidate.status not in {"pending", "running"} and candidate.stop_reason == "scheduled_task_orphan_recovered":
                         # Heal a scheduler takeover that committed before this
-                        # process crashed (or before the outer bookkeeping
-                        # transaction could commit).  Singleton events make
-                        # this post-commit notification safe to repeat.
+                        # process completed terminal observability. Keep this
+                        # parent row active until the post-commit callback
+                        # succeeds so another scheduler can retry after a crash.
                         recovered_run_ids.append(candidate.run_id)
+                        if candidate.status == "success":
+                            terminal_status, terminal_error = "success", None
+                        elif candidate.status in {"error", "timeout"}:
+                            terminal_status, terminal_error = "failed", candidate.error
+                        else:
+                            terminal_status, terminal_error = "interrupted", candidate.error or error
+                        deferred_terminal_rows.append(
+                            (
+                                row.id,
+                                row.task_id,
+                                candidate.run_id,
+                                terminal_status,
+                                terminal_error,
+                            )
+                        )
+                        continue
                 if candidate is not None and candidate.status not in {"pending", "running"}:
                     row.lease_owner = None
                     row.lease_expires_at = None
@@ -803,6 +820,21 @@ class ScheduledTaskRunRepository:
                     )
                     if claimed:
                         recovered_run_ids.append(candidate.run_id)
+                        if on_runs_recovered is not None:
+                            # The durable run takeover committed in its own
+                            # transaction. Leave the scheduled row executing as
+                            # a retryable outbox until events and stream END are
+                            # confirmed outside this SQL session.
+                            deferred_terminal_rows.append(
+                                (
+                                    row.id,
+                                    row.task_id,
+                                    candidate.run_id,
+                                    "interrupted",
+                                    error,
+                                )
+                            )
+                            continue
                     else:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
                         if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
@@ -825,7 +857,40 @@ class ScheduledTaskRunRepository:
                 self._associate_task_with_run(task, row, candidate)
             await session.commit()
         if recovered_run_ids and on_runs_recovered is not None:
-            await on_runs_recovered(list(dict.fromkeys(recovered_run_ids)))
+            callback_result = await on_runs_recovered(list(dict.fromkeys(recovered_run_ids)))
+            if callback_result is False:
+                return stale
+
+            # Phase 2: terminalize only the exact parent rows whose durable run
+            # observability completed. If the process dies before this commit,
+            # their executing status makes the next reconciliation retry the
+            # idempotent callback.
+            async with self._sf() as session:
+                for row_id, task_id, run_id, terminal_status, terminal_error in deferred_terminal_rows:
+                    task = await session.get(
+                        ScheduledTaskRow,
+                        task_id,
+                        with_for_update=True,
+                    )
+                    row = await session.get(
+                        ScheduledTaskRunRow,
+                        row_id,
+                        with_for_update=True,
+                    )
+                    if row is None or row.status not in EXECUTING_RUN_STATUSES:
+                        continue
+                    candidate = await session.get(RunRow, run_id)
+                    if candidate is None or candidate.status in {"pending", "running"} or candidate.stop_reason != "scheduled_task_orphan_recovered":
+                        continue
+                    self._associate_scheduled_run(row, candidate)
+                    self._associate_task_with_run(task, row, candidate)
+                    row.status = terminal_status
+                    row.error = terminal_error
+                    row.finished_at = now
+                    row.lease_owner = None
+                    row.lease_expires_at = None
+                    stale += 1
+                await session.commit()
         return stale
 
     @staticmethod

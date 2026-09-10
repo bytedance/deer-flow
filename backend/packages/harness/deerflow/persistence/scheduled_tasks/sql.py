@@ -511,10 +511,11 @@ class ScheduledTaskRepository:
         now: datetime,
         owner_worker_id: str,
         lease_grace_seconds: int = 10,
-        on_runs_recovered: Callable[[list[str]], Awaitable[None]] | None = None,
+        on_runs_recovered: Callable[[list[str]], Awaitable[bool | None]] | None = None,
     ) -> int:
         """Cancel once tasks only after their underlying run is no longer live."""
         recovered_run_ids: list[str] = []
+        deferred_task_rows: list[tuple[str, str]] = []
         async with self._sf() as session:
             result = await session.execute(
                 select(ScheduledTaskRow.id).where(
@@ -541,12 +542,14 @@ class ScheduledTaskRepository:
                 )
                 task_run = run_result.scalars().first()
                 candidate = await self._find_underlying_run(session, task_run, task)
-                if candidate is not None and candidate.status not in {"pending", "running"} and candidate.stop_reason == "scheduled_task_orphan_recovered":
+                if on_runs_recovered is not None and candidate is not None and candidate.status not in {"pending", "running"} and candidate.stop_reason == "scheduled_task_orphan_recovered":
                     # A prior scheduler process may have committed the run
-                    # takeover but died before finishing this parent-task row
-                    # or publishing terminal observability.  Retry the
-                    # idempotent post-commit notification here.
+                    # takeover but died before publishing terminal
+                    # observability or closing this parent row. Keep the row
+                    # retryable until the callback succeeds.
                     recovered_run_ids.append(candidate.run_id)
+                    deferred_task_rows.append((task.id, candidate.run_id))
+                    continue
                 if candidate is not None and candidate.status in {"pending", "running"}:
                     if _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
                         continue
@@ -562,6 +565,9 @@ class ScheduledTaskRepository:
                     )
                     if claimed:
                         recovered_run_ids.append(candidate.run_id)
+                        if on_runs_recovered is not None:
+                            deferred_task_rows.append((task.id, candidate.run_id))
+                            continue
                     else:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
                         if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
@@ -572,7 +578,30 @@ class ScheduledTaskRepository:
                 cancelled += 1
             await session.commit()
         if recovered_run_ids and on_runs_recovered is not None:
-            await on_runs_recovered(list(dict.fromkeys(recovered_run_ids)))
+            callback_result = await on_runs_recovered(list(dict.fromkeys(recovered_run_ids)))
+            if callback_result is False:
+                return cancelled
+
+            # Close only the exact once-task parents whose terminal
+            # observability completed. Their running state is the durable retry
+            # marker across a crash between the callback and this second commit.
+            async with self._sf() as session:
+                for task_id, run_id in deferred_task_rows:
+                    task = await session.get(
+                        ScheduledTaskRow,
+                        task_id,
+                        with_for_update=True,
+                    )
+                    if task is None or task.status != "running":
+                        continue
+                    candidate = await session.get(RunRow, run_id)
+                    if candidate is None or candidate.status in {"pending", "running"} or candidate.stop_reason != "scheduled_task_orphan_recovered":
+                        continue
+                    task.status = "cancelled"
+                    task.last_error = error
+                    task.updated_at = datetime.now(UTC)
+                    cancelled += 1
+                await session.commit()
         return cancelled
 
     @staticmethod

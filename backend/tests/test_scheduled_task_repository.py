@@ -351,9 +351,13 @@ async def test_scheduled_reconciliation_retries_observability_for_preclaimed_run
         durable_run_repo = RunRepository(sf)
         now = datetime.now(UTC)
         recovered_run_ids = []
+        callback_attempts = 0
 
         async def on_runs_recovered(run_ids):
+            nonlocal callback_attempts
+            callback_attempts += 1
             recovered_run_ids.extend(run_ids)
+            return callback_attempts > 1
 
         await task_repo.create(
             task_id="task-preclaimed",
@@ -392,17 +396,25 @@ async def test_scheduled_reconciliation_retries_observability_for_preclaimed_run
             lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
         )
 
-        assert (
-            await task_run_repo.reconcile_active_runs(
-                error="lease expired",
-                now=now,
-                owner_worker_id="replacement-scheduler",
-                on_runs_recovered=on_runs_recovered,
-            )
-            == 1
+        first = await task_run_repo.reconcile_active_runs(
+            error="lease expired",
+            now=now,
+            owner_worker_id="replacement-scheduler",
+            on_runs_recovered=on_runs_recovered,
+        )
+        row = (await task_run_repo.list_by_task("task-preclaimed"))[0]
+        assert first == 0
+        assert row["status"] == "running"
+
+        second = await task_run_repo.reconcile_active_runs(
+            error="lease expired",
+            now=now,
+            owner_worker_id="replacement-scheduler",
+            on_runs_recovered=on_runs_recovered,
         )
 
-        assert recovered_run_ids == ["run-preclaimed"]
+        assert second == 1
+        assert recovered_run_ids == ["run-preclaimed", "run-preclaimed"]
         row = (await task_run_repo.list_by_task("task-preclaimed"))[0]
         assert row["status"] == "failed"
         assert row["run_id"] == "run-preclaimed"
@@ -869,9 +881,13 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
         task_repo = ScheduledTaskRepository(sf)
         durable_run_repo = RunRepository(sf)
         recovered_run_ids = []
+        callback_attempts = 0
 
         async def on_runs_recovered(run_ids):
+            nonlocal callback_attempts
+            callback_attempts += 1
             recovered_run_ids.extend(run_ids)
+            return callback_attempts > 1
 
         now = datetime.now(UTC)
         for suffix in ("live", "dead"):
@@ -911,20 +927,28 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tm
             lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
         )
 
-        assert (
-            await task_repo.reconcile_stuck_once_tasks(
-                error="restart",
-                now=now,
-                owner_worker_id="scheduler-recovery",
-                on_runs_recovered=on_runs_recovered,
-            )
-            == 1
+        first = await task_repo.reconcile_stuck_once_tasks(
+            error="restart",
+            now=now,
+            owner_worker_id="scheduler-recovery",
+            on_runs_recovered=on_runs_recovered,
         )
+        assert first == 0
+        dead = await task_repo.get("task-once-dead", user_id="user-1")
+        assert dead is not None and dead["status"] == "running"
+
+        second = await task_repo.reconcile_stuck_once_tasks(
+            error="restart",
+            now=now,
+            owner_worker_id="scheduler-recovery",
+            on_runs_recovered=on_runs_recovered,
+        )
+        assert second == 1
         live = await task_repo.get("task-once-live", user_id="user-1")
         dead = await task_repo.get("task-once-dead", user_id="user-1")
         assert live is not None and live["status"] == "running"
         assert dead is not None and dead["status"] == "cancelled"
-        assert recovered_run_ids == ["run-once-dead"]
+        assert recovered_run_ids == ["run-once-dead", "run-once-dead"]
         recovered = await durable_run_repo.get("run-once-dead", user_id=None)
         assert recovered is not None
         assert recovered["status"] == "error"

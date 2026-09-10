@@ -7,6 +7,7 @@ import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
@@ -419,7 +420,12 @@ async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
     """Worker attach failures should finalize only runs still pending startup."""
     store = MemoryRunStore()
     events = MemoryRunEventStore()
-    manager = RunManager(store=store, event_store=events)
+    on_recovered = AsyncMock()
+    manager = RunManager(
+        store=store,
+        event_store=events,
+        on_orphans_recovered=on_recovered,
+    )
     record = await manager.create_or_reject("thread-1")
     error = "Failed to attach run worker: boom"
 
@@ -445,6 +451,7 @@ async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
     assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
     assert len(terminal) == 1
     assert terminal[0]["metadata"] == {"status": "error", "recovered": True}
+    on_recovered.assert_awaited_once()
 
     running = await manager.create_or_reject("thread-2")
     assert await manager.try_start(running.run_id) == RunStartOutcome.started
@@ -463,7 +470,12 @@ async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
 async def test_taskless_cancel_backfills_terminal_events_once():
     store = MemoryRunStore()
     events = MemoryRunEventStore()
-    manager = RunManager(store=store, event_store=events)
+    on_recovered = AsyncMock()
+    manager = RunManager(
+        store=store,
+        event_store=events,
+        on_orphans_recovered=on_recovered,
+    )
     record = await manager.create_or_reject("thread-1")
 
     assert await manager.cancel(record.run_id) == CancelOutcome.cancelled
@@ -475,6 +487,7 @@ async def test_taskless_cancel_backfills_terminal_events_once():
     assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
     assert len(terminal) == 1
     assert terminal[0]["metadata"] == {"status": "interrupted", "recovered": True}
+    on_recovered.assert_awaited_once()
 
 
 @pytest.mark.anyio
@@ -590,7 +603,7 @@ async def test_terminalize_recovered_runs_backfills_events_and_notifies_gateway(
     record = await manager.get("scheduler-recovered", user_id=None)
     assert record is not None
 
-    await manager.terminalize_recovered_runs([record])
+    assert await manager.terminalize_recovered_runs([record]) is True
 
     delivery = await events.list_events(
         "thread-1",
@@ -606,6 +619,34 @@ async def test_terminalize_recovered_runs_backfills_events_and_notifies_gateway(
     assert len(terminal) == 1
     assert terminal[0]["metadata"] == {"status": "error", "recovered": True}
     assert [[item.run_id for item in batch] for batch in callback_batches] == [["scheduler-recovered"]]
+
+
+@pytest.mark.anyio
+async def test_terminalize_recovered_runs_reports_incomplete_observability():
+    """Scheduler parents stay retryable when an event singleton cannot persist."""
+
+    class FailingEventStore(MemoryRunEventStore):
+        async def put_if_absent(self, **kwargs):
+            raise RuntimeError("event store unavailable")
+
+    store = MemoryRunStore()
+    await store.put(
+        "scheduler-recovered",
+        thread_id="thread-1",
+        status="error",
+        stop_reason="scheduled_task_orphan_recovered",
+    )
+    callback = AsyncMock()
+    manager = RunManager(
+        store=store,
+        event_store=FailingEventStore(),
+        on_orphans_recovered=callback,
+    )
+    record = await manager.get("scheduler-recovered", user_id=None)
+    assert record is not None
+
+    assert await manager.terminalize_recovered_runs([record]) is False
+    callback.assert_awaited_once_with([record])
 
 
 @pytest.mark.anyio

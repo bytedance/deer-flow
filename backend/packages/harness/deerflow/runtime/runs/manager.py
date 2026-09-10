@@ -244,7 +244,7 @@ class _LocalTerminalFinalizersPending(Exception):
         self.tasks = tasks
 
 
-OrphanRecoveryCallback = Callable[[list[RunRecord]], Awaitable[None]]
+OrphanRecoveryCallback = Callable[[list[RunRecord]], Awaitable[bool | None]]
 
 
 class RunManager:
@@ -1122,7 +1122,7 @@ class RunManager:
                 lambda: self._store.get(run_id, user_id=record.user_id),
             )
             if stored is not None and stored.get("status") == RunStatus.error.value:
-                await self._ensure_recovered_run_events(self._record_from_store(stored))
+                await self.terminalize_recovered_runs([self._record_from_store(stored)])
         return True
 
     async def get_many_by_thread(
@@ -1363,39 +1363,45 @@ class RunManager:
             )
             return False
 
-    async def _ensure_recovered_run_events(self, record: RunRecord) -> None:
+    async def _ensure_recovered_run_events(self, record: RunRecord) -> bool:
         """Best-effort terminal singleton backfill for an atomically claimed run."""
         if record.operation_kind != ThreadOperationKind.run:
-            return
-        await self._ensure_delivery_receipt(record)
-        await self._ensure_terminal_event(record)
+            return True
+        delivery_persisted = await self._ensure_delivery_receipt(record)
+        terminal_persisted = await self._ensure_terminal_event(record)
+        return delivery_persisted and terminal_persisted
 
-    async def terminalize_recovered_runs(self, records: list[RunRecord]) -> None:
+    async def terminalize_recovered_runs(self, records: list[RunRecord]) -> bool:
         """Backfill terminal observability for already-claimed run rows.
 
         Recovery callers outside ``RunManager`` may own the durable takeover
         transaction, but they must not grow a second implementation of the
         terminal-event and retained-stream contract.  Only already-terminal
         run operations are accepted.  Event writes are idempotent and
-        best-effort; the durable ``RunRow.status`` remains authoritative.
+        best-effort; the durable ``RunRow.status`` remains authoritative. The
+        return value lets two-phase recovery callers keep their parent record
+        retryable until both event persistence and Gateway END publication
+        have completed.
         """
         terminal_runs: list[RunRecord] = []
+        successful = True
         for record in records:
             if record.operation_kind != ThreadOperationKind.run:
                 continue
             if record.status in (RunStatus.pending, RunStatus.running):
+                successful = False
                 logger.warning(
                     "Skipped recovered-run terminalization for active run %s",
                     record.run_id,
                 )
                 continue
-            await self._ensure_recovered_run_events(record)
+            successful = await self._ensure_recovered_run_events(record) and successful
             terminal_runs.append(record)
 
         if not terminal_runs or self._on_orphans_recovered is None:
-            return
+            return successful
         try:
-            await self._on_orphans_recovered(terminal_runs)
+            callback_result = await self._on_orphans_recovered(terminal_runs)
         except Exception:
             logger.warning(
                 "Recovered-run callback failed for %d run(s): run_ids=%s",
@@ -1403,8 +1409,10 @@ class RunManager:
                 [record.run_id for record in terminal_runs],
                 exc_info=True,
             )
+            return False
+        return callback_result is not False and successful
 
-    async def terminalize_recovered_run_ids(self, run_ids: list[str]) -> None:
+    async def terminalize_recovered_run_ids(self, run_ids: list[str]) -> bool:
         """Load terminal rows by id, then publish their recovery contract.
 
         This is the bridge used by scheduler repositories after their takeover
@@ -1413,9 +1421,10 @@ class RunManager:
         writes never run while the scheduler's SQL session is held open.
         """
         if self._store is None:
-            return
+            return False
 
         records: list[RunRecord] = []
+        successful = True
         for run_id in dict.fromkeys(run_ids):
             try:
                 stored = await self._call_store_with_retry(
@@ -1424,6 +1433,7 @@ class RunManager:
                     lambda run_id=run_id: self._store.get(run_id, user_id=None),
                 )
             except Exception:
+                successful = False
                 logger.warning(
                     "Failed to load recovered run %s for terminal observability",
                     run_id,
@@ -1431,6 +1441,7 @@ class RunManager:
                 )
                 continue
             if stored is None:
+                successful = False
                 logger.warning(
                     "Recovered run %s disappeared before terminal observability",
                     run_id,
@@ -1439,13 +1450,14 @@ class RunManager:
             try:
                 records.append(self._record_from_store(stored))
             except Exception:
+                successful = False
                 logger.warning(
                     "Failed to map recovered run %s for terminal observability",
                     run_id,
                     exc_info=True,
                 )
 
-        await self.terminalize_recovered_runs(records)
+        return await self.terminalize_recovered_runs(records) and successful
 
     async def _ensure_terminal_event(self, record: RunRecord) -> bool:
         """Idempotently backfill authoritative ``run.end`` after takeover."""
@@ -1738,7 +1750,7 @@ class RunManager:
                         RunStatus.pending.value,
                         RunStatus.running.value,
                     }:
-                        await self._ensure_recovered_run_events(self._record_from_store(stored))
+                        await self.terminalize_recovered_runs([self._record_from_store(stored)])
             if not persisted and self._store is not None:
                 # ``_persist_status`` already fetched ``existing`` internally;
                 # re-check the store to see if a peer takeover flipped the
@@ -1824,7 +1836,7 @@ class RunManager:
             except Exception:
                 logger.warning("Failed to map cancelled run %s for terminal event backfill", run_id, exc_info=True)
             else:
-                await self._ensure_recovered_run_events(taken_record)
+                await self.terminalize_recovered_runs([taken_record])
             logger.warning("Run %s taken over by worker %s (action=%s)", run_id, self._worker_id, action)
             return CancelOutcome.taken_over
 
@@ -1951,7 +1963,7 @@ class RunManager:
                 record.durable_terminal_status = stored_record.durable_terminal_status
                 record.updated_at = _now_iso()
         if stored_status not in (RunStatus.pending, RunStatus.running):
-            await self._ensure_recovered_run_events(stored_record)
+            await self.terminalize_recovered_runs([stored_record])
 
     async def _admit_thread_operation(
         self,
@@ -2191,6 +2203,7 @@ class RunManager:
         try:
             for interrupted_record in interrupted_records:
                 await self._persist_status(interrupted_record, RunStatus.interrupted)
+            claimed_records: list[RunRecord] = []
             for claimed_row in claimed_store_rows:
                 if claimed_row.get("operation_kind", ThreadOperationKind.run.value) != ThreadOperationKind.run.value:
                     continue
@@ -2201,7 +2214,8 @@ class RunManager:
                 except Exception:
                     logger.warning("Failed to map atomically claimed run for terminal event backfill", exc_info=True)
                     continue
-                await self._ensure_recovered_run_events(claimed_record)
+                claimed_records.append(claimed_record)
+            await self.terminalize_recovered_runs(claimed_records)
         except asyncio.CancelledError:
             cleanup = asyncio.create_task(self._close_cancelled_admission(record))
             cleanup.set_name(f"deerflow-close-cancelled-admission-{record.run_id}")

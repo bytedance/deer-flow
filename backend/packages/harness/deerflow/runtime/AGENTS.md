@@ -142,7 +142,11 @@ admission. Multi-instance scheduled-task reconciliation is another takeover
 caller: its repository commits and closes the scheduler transaction before it
 hands the claimed run IDs to `RunManager.terminalize_recovered_run_ids()`,
 which re-reads the authoritative rows and shares this event plus Gateway END
-path. Claimed non-run reservations never receive run events, and active
+path. The scheduled parent stays in an executing state as a durable retry
+marker until that callback succeeds; only then does a second short transaction
+terminalize the exact parent row. This closes crashes both before and after
+callback dispatch without writing events while scheduler locks are held.
+Claimed non-run reservations never receive run events, and active
 local worker tasks retain responsibility for their own final output once they
 have started, including after they stage a terminal in-memory status: admission
 routes them through the local interruption/finalization barrier and must not

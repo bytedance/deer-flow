@@ -222,6 +222,7 @@ async def test_interrupt_reclaims_expired_checkpoint_write_reservation():
 async def test_cross_worker_admission_backfills_terminal_events_for_every_claimed_run(strategy):
     store = MemoryRunStore()
     events = _OwnerCapturingEventStore(store)
+    on_recovered = AsyncMock()
     expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
     for run_id, owner_id in (("old-run-a", "owner-a"), ("old-run-b", "owner-b")):
         await store.put(
@@ -247,6 +248,7 @@ async def test_cross_worker_admission_backfills_terminal_events_for_every_claime
     manager = _make_manager(
         store=store,
         event_store=events,
+        on_orphans_recovered=on_recovered,
         worker_id="worker-b",
         run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=10),
     )
@@ -276,6 +278,8 @@ async def test_cross_worker_admission_backfills_terminal_events_for_every_claime
         ("old-run-b", "run.delivery", "owner-b"),
         ("old-run-b", "run.end", "owner-b"),
     }
+    on_recovered.assert_awaited_once()
+    assert {record.run_id for record in on_recovered.await_args.args[0]} == {"old-run-a", "old-run-b"}
 
 
 @pytest.mark.anyio
@@ -2325,6 +2329,7 @@ async def test_cancel_takeover_from_crashed_worker():
 async def test_cancel_takeover_backfills_owner_scoped_terminal_events_once():
     store = MemoryRunStore()
     events = _OwnerCapturingEventStore(store)
+    on_recovered = AsyncMock()
     grace = 10
     expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
     await store.put(
@@ -2339,6 +2344,7 @@ async def test_cancel_takeover_backfills_owner_scoped_terminal_events_once():
     manager = _make_manager(
         store=store,
         event_store=events,
+        on_orphans_recovered=on_recovered,
         run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace),
     )
 
@@ -2362,6 +2368,8 @@ async def test_cancel_takeover_backfills_owner_scoped_terminal_events_once():
         ("run-expired", "run.delivery", "run-owner"),
         ("run-expired", "run.end", "run-owner"),
     ]
+    on_recovered.assert_awaited_once()
+    assert [record.run_id for record in on_recovered.await_args.args[0]] == ["run-expired"]
 
 
 @pytest.mark.anyio
