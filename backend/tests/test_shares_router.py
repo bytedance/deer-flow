@@ -314,6 +314,23 @@ def test_create_enforces_per_owner_stored_share_quota(tmp_path):
     assert asyncio.run(repo.count_by_owner(str(USER_A.id))) == 2
 
 
+def test_create_maps_atomic_admission_refusal_to_conflict(tmp_path):
+    """The pre-check is advisory; the insert's atomic admission is the cap.
+
+    A request that raced past the count pre-check can still be refused at
+    the insert — that refusal must answer the same 409, not surface as an
+    error or a half-created share.
+    """
+    with _client(tmp_path) as (client, repo):
+        with (
+            patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))),
+            patch.object(repo, "create", AsyncMock(return_value=None)),
+        ):
+            response = _create(client)
+    assert response.status_code == 409
+    assert "share limit" in response.json()["detail"].lower()
+
+
 def test_list_strips_token_hashes(tmp_path):
     with _client(tmp_path) as (client, _repo):
         with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=(_SNAPSHOT, None))):

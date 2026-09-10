@@ -118,6 +118,11 @@ class ConversationShareRepository:
         cap. Runs in the caller's transaction — a later insert failure
         rolls the admission back with it.
         """
+        if quota_limit < 1:
+            # The upsert's INSERT branch (no counter row yet) is guarded by
+            # nothing, so a sub-1 cap must be refused here; config enforces
+            # ge=1, this protects direct callers.
+            return False
         bind = session.bind
         if bind is None:  # pragma: no cover - sessions here are always bound
             raise RuntimeError("quota admission requires a bound session")
