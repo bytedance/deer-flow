@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
@@ -76,10 +76,7 @@ function renderComposer({
       </QueryClientProvider>
     </I18nProvider>
   );
-  return {
-    ...render(tree(onStop)),
-    rerenderWith: (next: () => void) => render(tree(next)),
-  };
+  return render(tree(onStop));
 }
 
 afterEach(() => {
@@ -125,10 +122,14 @@ describe("InputBox stop gating (runs:cancel)", () => {
     // Regression: passing an explicitly-undefined aria-label clobbered
     // PromptInputSubmit's default aria-label="Submit" via JSX spread,
     // stripping the submit control's accessible name in every
-    // non-denied state (e2e locates the button by that name).
-    const { container } = renderComposer({ onStop: rs.fn() });
+    // non-denied state (e2e locates the button by that name). Query by
+    // role + name so the assertion resolves the accessible name the
+    // same way e2e and assistive tech do, not via the raw attribute.
+    renderComposer({ onStop: rs.fn() });
 
-    const submit = getSubmitButton(container);
-    expect(submit.getAttribute("aria-label")).toBe("Submit");
+    // getByRole throws when no button exposes the "Submit" accessible
+    // name, which is exactly the regression being guarded.
+    const submit = screen.getByRole("button", { name: "Submit" });
+    expect(submit.tagName).toBe("BUTTON");
   });
 });
