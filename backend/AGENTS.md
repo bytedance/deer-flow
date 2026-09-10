@@ -225,6 +225,19 @@ the tool graph or subagent executor during state/schema imports.
 SQLite, and PostgreSQL: missing differs from null, bool differs from int, and
 float filters accept integer or real JSON numbers through `json_value_matches`.
 
+### Gateway Run-Context Trust Boundary
+
+Run context reaches `runtime.context` from two client-writable surfaces:
+`body.context` (whitelist-merged) and free-form `body.config` (copied verbatim),
+so a server-produced key must be gated on both — forwarded by
+`merge_run_context_overrides` only when `internal=True` (the shared-secret auth
+source: scheduler, channels — never session/PAT), and scrubbed from the assembled
+`context` *and* `configurable` by `strip_internal_context_keys`. Keep
+`disable_clarification` gated alongside `non_interactive`: the clarification and
+sandbox middlewares read them as the same signal. Where a key may land is a
+separate axis (`_CONTEXT_RUNTIME_ONLY_KEYS` never enter checkpoint-persisted
+`configurable`); a new key needs both decisions.
+
 ## Development Workflow
 
 ### Test-Driven Development (TDD) — MANDATORY
