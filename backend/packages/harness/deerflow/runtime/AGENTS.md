@@ -159,7 +159,10 @@ Only claimed local records are cancelled after commit. Their finalizers renew
 that terminal marker through receipt, terminal event, completion hooks, and
 stream END; consumers may finish early only from a durable receipt, a terminal
 row plus a matching marked `run.end`, or after an atomic expired-marker
-takeover converts it to orphan recovery. A pending run
+takeover converts it to orphan recovery. Admission waits for an already-staged
+local terminal finalizer for at most `grace_seconds`; timeout returns a
+retryable conflict while the shielded finalizer continues, so a wedged hook
+cannot make thread admission wait forever. A pending run
 cancelled before Agent startup remains `interrupted`; rollback is never
 attempted without a captured pre-run boundary, and a cancelled metadata wrapper
 that never entered `run_agent()` becomes recoverable after its marker lease.

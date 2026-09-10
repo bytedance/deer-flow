@@ -1011,6 +1011,48 @@ async def test_cancelling_waiting_admission_does_not_cancel_terminal_finalizer()
 
 
 @pytest.mark.anyio
+async def test_waiting_admission_times_out_without_cancelling_terminal_finalizer():
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(
+            heartbeat_enabled=True,
+            grace_seconds=0,
+        ),
+    )
+    old = await manager.create_or_reject("thread-finalizer-timeout")
+    await manager.set_status(old.run_id, RunStatus.running)
+
+    release_finalizer = asyncio.Event()
+    finalizer = asyncio.create_task(release_finalizer.wait())
+    old.task = finalizer
+    await manager.set_status(
+        old.run_id,
+        RunStatus.success,
+        persist=False,
+        stage_terminal=True,
+    )
+    store.create_thread_operation_atomic = AsyncMock(
+        wraps=store.create_thread_operation_atomic,
+    )
+
+    with pytest.raises(ConflictError, match="still finalizing"):
+        await manager.create_or_reject(
+            old.thread_id,
+            multitask_strategy="interrupt",
+        )
+
+    assert finalizer.done() is False
+    assert (await store.get(old.run_id))["status"] == RunStatus.running.value
+    store.create_thread_operation_atomic.assert_not_awaited()
+
+    release_finalizer.set()
+    await finalizer
+    await manager.set_finalizing(old.run_id, False)
+
+
+@pytest.mark.anyio
 async def test_interrupt_admission_backfills_a_cancelled_pending_worker():
     store = MemoryRunStore()
     events = MemoryRunEventStore()

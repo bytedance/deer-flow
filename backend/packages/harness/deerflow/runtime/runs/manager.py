@@ -2282,7 +2282,19 @@ class RunManager:
                     len(pending.tasks),
                     thread_id,
                 )
-                await asyncio.shield(asyncio.gather(*pending.tasks, return_exceptions=True))
+                finalizers = asyncio.gather(
+                    *pending.tasks,
+                    return_exceptions=True,
+                )
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(finalizers),
+                        timeout=float(self.grace_seconds),
+                    )
+                except TimeoutError:
+                    # Existing finalizer tasks keep running; only this
+                    # admission attempt degrades to a retryable conflict.
+                    raise ConflictError(f"Thread {thread_id} is still finalizing the previous run") from None
 
     @staticmethod
     async def _await_atomic_admission(
