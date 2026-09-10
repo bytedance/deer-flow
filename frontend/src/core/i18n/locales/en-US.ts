@@ -490,6 +490,8 @@ export const enUS: Translations = {
       title: "Create scheduled task",
       taskTitle: "Task title",
       prompt: "Prompt",
+      agent: "Agent",
+      leadAgent: "Default agent (lead_agent)",
       submit: "Create",
       fillRequired: "Fill all required fields",
     },
@@ -514,6 +516,7 @@ export const enUS: Translations = {
     },
     detail: {
       contextMode: "Context mode",
+      agent: "Agent",
       thread: "Thread",
       lastThread: "Last thread",
       schedule: "Schedule",

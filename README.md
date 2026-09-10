@@ -1533,6 +1533,7 @@ Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`
 - Choose whether each scheduled task reuses a thread and its conversation history or creates a fresh thread per run
+- Pin each task to `lead_agent` (default) or a custom agent the owner already has; unknown names are rejected
 - Duplicate an existing task into the create form as an editable draft without copying its run history
 - Support `once`, `cron`, and `interval` schedules
 - Editing or duplicating an interval task preserves its saved cadence until the interval is explicitly changed, including sub-minute intervals allowed by the operator's scheduler configuration

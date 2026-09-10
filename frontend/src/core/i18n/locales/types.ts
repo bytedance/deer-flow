@@ -399,6 +399,8 @@ export interface Translations {
       title: string;
       taskTitle: string;
       prompt: string;
+      agent: string;
+      leadAgent: string;
       submit: string;
       fillRequired: string;
     };
@@ -422,6 +424,7 @@ export interface Translations {
     };
     detail: {
       contextMode: string;
+      agent: string;
       thread: string;
       lastThread: string;
       schedule: string;
