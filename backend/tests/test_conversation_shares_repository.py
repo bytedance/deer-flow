@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import event
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.conversation_shares import ConversationShareRepository
@@ -100,6 +101,46 @@ async def test_list_by_thread_is_isolated_per_owner(tmp_path):
     # Lifecycle fields ride along for the management view.
     assert listed[0]["revoked_at"] is None
     assert listed[0]["expires_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_by_thread_projects_metadata_only(tmp_path):
+    """The management list must not materialize snapshot payloads.
+
+    Each share's snapshot can be as large as the share cap, and revoked rows
+    stay listed for history — dozens of shares would otherwise deserialize
+    hundreds of MiB for a response that only ever reads the summary fields.
+    Pinned at the SQL level (the heavy columns are never projected) and at
+    the contract level (the dicts carry metadata only).
+    """
+    repo = await _make_repo(tmp_path)
+    first = await _create_share(repo, token_hash="tok-meta-1")
+    second = await _create_share(repo, token_hash="tok-meta-2", title="second")
+
+    statements: list[str] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    session_factory = get_session_factory()
+    engine = session_factory.kw["bind"]
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        listed = await repo.list_by_thread("thread-1", "user-1")
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+    selects = [s for s in statements if "FROM conversation_shares" in s]
+    assert len(selects) == 1
+    # The heavy columns are never projected...
+    assert "snapshot_json" not in selects[0]
+    assert "token_hash" not in selects[0]
+    # ...while every field the management summary reads is.
+    for column in ("id", "title", "expires_at", "revoked_at", "created_at"):
+        assert f"conversation_shares.{column}" in selects[0]
+    # The returned dicts match the projection: metadata only, newest first.
+    assert [row["id"] for row in listed] == [second["id"], first["id"]]
+    assert set(listed[0]) == {"id", "title", "expires_at", "revoked_at", "created_at"}
 
 
 @pytest.mark.asyncio

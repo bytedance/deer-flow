@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 _DATETIME_FIELDS = ("expires_at", "revoked_at", "created_at", "updated_at")
 
+# Columns the owner-facing management list projects. The response reads
+# id/title and the lifecycle timestamps only, so the heavy payload
+# (``snapshot_json``, capped at the share limit per row) and the token hash
+# are deliberately never loaded by the listing query — a thread with many
+# (including revoked) shares must stay cheap to list no matter how large the
+# snapshots are.
+_SUMMARY_DATETIME_FIELDS = ("expires_at", "revoked_at", "created_at")
+
 
 class ConversationShareRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -34,6 +42,22 @@ class ConversationShareRepository:
             val = d.get(key)
             if isinstance(val, datetime):
                 # SQLite drops tzinfo on read; normalize so output is tz-aware.
+                d[key] = coerce_iso(val)
+        return d
+
+    @staticmethod
+    def _summary_row_to_dict(row: Any) -> dict[str, Any]:
+        """Map a metadata-projection row, normalizing datetimes like full rows."""
+        d = {
+            "id": row.id,
+            "title": row.title,
+            "expires_at": row.expires_at,
+            "revoked_at": row.revoked_at,
+            "created_at": row.created_at,
+        }
+        for key in _SUMMARY_DATETIME_FIELDS:
+            val = d[key]
+            if isinstance(val, datetime):
                 d[key] = coerce_iso(val)
         return d
 
@@ -98,23 +122,31 @@ class ConversationShareRepository:
     async def list_by_thread(self, thread_id: str, owner_user_id: str) -> list[dict[str, Any]]:
         """List a thread's shares for the owner's management view.
 
-        Ordered newest first; lifecycle fields (``expires_at`` / ``revoked_at``)
-        are included so the UI can show active vs. revoked links. Token hashes
-        are present in rows but must be stripped by the API layer — the
-        repository serves the raw persistence view.
+        Projects only the summary columns (id, title, and the lifecycle
+        timestamps) — never the snapshot payload or the token hash — so the
+        listing cost is independent of snapshot sizes and of how many shares
+        (revoked rows included, for history) a thread accumulates. Ordered
+        newest first; ``expires_at`` / ``revoked_at`` let the UI show active
+        vs. revoked links.
         """
         async with self._sf() as session:
             rows = (
                 await session.execute(
-                    select(ConversationShareRow)
+                    select(
+                        ConversationShareRow.id,
+                        ConversationShareRow.title,
+                        ConversationShareRow.expires_at,
+                        ConversationShareRow.revoked_at,
+                        ConversationShareRow.created_at,
+                    )
                     .where(
                         ConversationShareRow.thread_id == thread_id,
                         ConversationShareRow.owner_user_id == owner_user_id,
                     )
                     .order_by(ConversationShareRow.created_at.desc())
                 )
-            ).scalars()
-            return [self._row_to_dict(row) for row in rows]
+            ).all()
+            return [self._summary_row_to_dict(row) for row in rows]
 
     async def revoke(self, share_id: str, thread_id: str, owner_user_id: str) -> bool:
         """Revoke one of *owner_user_id*'s shares; False if absent/not owned.
