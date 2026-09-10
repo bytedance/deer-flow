@@ -60,21 +60,44 @@ class UrlRedactionFilter(logging.Filter):
         return True
 
 
-# The filter is generic over the formatted message, so it serves any HTTP
-# client library whose own INFO-level records embed full URLs. urllib3's
-# ``Redirecting <url> -> <url>`` is the one other such line reachable in this
-# process (requests-based flows); today no gateway path both uses requests
-# and redirects a signed URL, but the logger is covered so the class of leak
-# stays closed rather than dormant.
-_REDACTED_LOGGERS = ("httpx", "urllib3")
+# The filter class is generic over the formatted message, so it serves any
+# HTTP client library whose records embed full URLs. Where it must be
+# ATTACHED differs per library, because a logging.Filter on a logger only
+# runs for records emitted through that exact logger — it is not inherited
+# by child loggers and never sees propagated records:
+# - httpx emits via the bare ``httpx`` logger, so a logger filter works.
+# - urllib3 emits via children (``urllib3.poolmanager`` logs
+#   ``Redirecting <url> -> <url>`` at INFO, ``urllib3.connectionpool`` logs
+#   redirect/request lines at DEBUG), so a filter on bare ``urllib3`` is
+#   dead code. Handler-level filters DO see propagated records, so the
+#   filter is also attached to every root handler — covering urllib3 and
+#   any future library without knowing its logger names.
+_REDACTED_LOGGER_NAMES = ("httpx",)
+
+
+def _has_url_redaction_filter(handler: logging.Handler) -> bool:
+    return any(isinstance(item, UrlRedactionFilter) for item in handler.filters)
+
+
+def _install_url_redaction_filter(handler: logging.Handler) -> None:
+    if not _has_url_redaction_filter(handler):
+        handler.addFilter(UrlRedactionFilter())
 
 
 def install_url_log_redaction() -> None:
-    """Idempotently attach URL redaction to the ``httpx`` and ``urllib3`` loggers."""
-    for logger_name in _REDACTED_LOGGERS:
+    """Attach URL redaction to the ``httpx`` logger and to every root handler.
+
+    The httpx logger filter covers records at their emission point (httpx
+    logs via the bare ``httpx`` name); the root-handler filters cover
+    propagated records from libraries that emit through child loggers, such
+    as urllib3's ``urllib3.poolmanager`` / ``urllib3.connectionpool``.
+    """
+    for logger_name in _REDACTED_LOGGER_NAMES:
         target = logging.getLogger(logger_name)
         if not any(isinstance(item, UrlRedactionFilter) for item in target.filters):
             target.addFilter(UrlRedactionFilter())
+    for handler in logging.root.handlers:
+        _install_url_redaction_filter(handler)
 
 
 class TraceContextFilter(logging.Filter):
@@ -160,6 +183,10 @@ def configure_logging(config: object) -> None:
     enhanced = bool(getattr(enhance, "enabled", False))
 
     for handler in logging.root.handlers:
+        _install_url_redaction_filter(handler)
+        # URL redaction is level-agnostic and applies whether or not the
+        # trace enhancement is on; handler filters see propagated records
+        # from child loggers (urllib3 et al.), which logger filters cannot.
         if enhanced:
             _install_trace_filter(handler)
             handler.setFormatter(_trace_formatter(getattr(enhance, "format", "text")))

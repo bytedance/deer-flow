@@ -120,47 +120,72 @@ def test_url_redaction_filter_rewrites_request_records() -> None:
 
 
 def test_url_redaction_filter_covers_urllib3_redirect_records() -> None:
-    """urllib3 logs ``Redirecting %s -> %s`` at INFO with full URLs on both sides."""
-    from deerflow.logging_config import UrlRedactionFilter
+    """Real-emitter wiring: urllib3 logs through CHILD loggers, and a filter on
+    the bare ``urllib3`` logger never sees propagated records (logger filters
+    are not inherited). Verified against the installed urllib3 2.7.0:
+    ``urllib3.poolmanager`` logs ``Redirecting %s -> %s`` at INFO
+    (poolmanager.py:500) and ``urllib3.connectionpool`` logs the same shape at
+    DEBUG (connectionpool.py:922). Both must come out redacted through the
+    real emit path with configure_logging's handler-level installation."""
+    from deerflow.logging_config import configure_logging
 
-    filt = UrlRedactionFilter()
-    record = logging.LogRecord(
-        "urllib3",
-        logging.INFO,
-        __file__,
-        1,
-        "Redirecting %s -> %s",
-        (
+    root = logging.getLogger()
+    old_handlers = root.handlers[:]
+    old_level = root.level
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+
+    try:
+        root.handlers = [handler]
+        root.setLevel(logging.DEBUG)
+        configure_logging(SimpleNamespace(log_level="debug", logging=SimpleNamespace(enhance=SimpleNamespace(enabled=False, format="text"))))
+
+        logging.getLogger("urllib3.poolmanager").info(
+            "Redirecting %s -> %s",
             "https://cdn.example/private/BearerSecret?token=QuerySecret",
             "https://mirror.example/private/BearerSecret?sig=OtherSecret",
-        ),
-        None,
-    )
-    assert filt.filter(record) is True
-    formatted = record.getMessage()
-    assert "BearerSecret" not in formatted
-    assert "QuerySecret" not in formatted
-    assert "OtherSecret" not in formatted
-    assert "cdn.example/<redacted>" in formatted
-    assert "mirror.example/<redacted>" in formatted
+        )
+        logging.getLogger("urllib3.connectionpool").debug(
+            "Redirecting %s -> %s",
+            "https://cdn.example/private/BearerSecret?token=QuerySecret",
+            "https://mirror.example/private/BearerSecret?sig=OtherSecret",
+        )
+
+        out = stream.getvalue()
+        assert "BearerSecret" not in out
+        assert "QuerySecret" not in out
+        assert "OtherSecret" not in out
+        assert out.count("cdn.example/<redacted>") == 2
+        assert out.count("mirror.example/<redacted>") == 2
+    finally:
+        root.handlers = old_handlers
+        root.setLevel(old_level)
 
 
-def test_configure_logging_installs_url_redaction_on_both_loggers() -> None:
-    from deerflow.logging_config import UrlRedactionFilter, install_url_log_redaction
+def test_configure_logging_installs_url_redaction_on_httpx_logger_and_root_handlers() -> None:
+    from deerflow.logging_config import UrlRedactionFilter, _has_url_redaction_filter, configure_logging, install_url_log_redaction
 
-    saved = {name: logging.getLogger(name).filters[:] for name in ("httpx", "urllib3")}
+    httpx_logger = logging.getLogger("httpx")
+    root = logging.getLogger()
+    old_filters = httpx_logger.filters[:]
+    old_handlers = root.handlers[:]
+    handler = logging.StreamHandler(io.StringIO())
+
     try:
-        for filters in saved.values():
-            filters[:] = [f for f in filters if not isinstance(f, UrlRedactionFilter)]
+        root.handlers = [handler]
+        httpx_logger.filters = [f for f in old_filters if not isinstance(f, UrlRedactionFilter)]
         install_url_log_redaction()
         install_url_log_redaction()  # idempotent
-        for name in ("httpx", "urllib3"):
-            target = logging.getLogger(name)
-            assert sum(isinstance(f, UrlRedactionFilter) for f in target.filters) == 1
+        assert sum(isinstance(f, UrlRedactionFilter) for f in httpx_logger.filters) == 1
+        assert all(_has_url_redaction_filter(h) for h in root.handlers)
 
+        # Handlers added later are covered by the configure_logging loop, not
+        # by the one-shot installer.
+        late = logging.StreamHandler(io.StringIO())
+        root.handlers.append(late)
         configure_logging(SimpleNamespace(log_level="info", logging=SimpleNamespace(enhance=SimpleNamespace(enabled=False, format="text"))))
-        for name in ("httpx", "urllib3"):
-            assert any(isinstance(f, UrlRedactionFilter) for f in logging.getLogger(name).filters)
+        assert _has_url_redaction_filter(late)
+        assert _has_url_redaction_filter(root.handlers[0])
     finally:
-        for name, filters in saved.items():
-            logging.getLogger(name).filters = filters
+        httpx_logger.filters = old_filters
+        root.handlers = old_handlers
