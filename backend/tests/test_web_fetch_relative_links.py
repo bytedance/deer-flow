@@ -111,3 +111,61 @@ def test_invalid_document_base_does_not_lose_valid_relative_links(base):
         url=PAGE_URL,
     )
     assert "[Next](https://example.com/next)" in article.to_markdown()
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "<b>Bold <i>mixed</b> italics</i>",
+        "<p>Before<div>Block</div>after</p>",
+        "<table>Outside<tr><td>Cell</td></tr></table>",
+        '<a href="https://example.com/next">Outer <a href="https://example.com/inner">Inner</a> Tail</a>',
+    ],
+)
+def test_url_resolution_preserves_malformed_markup_extraction(fragment):
+    html = _article(fragment + '<a href="../next">Next</a>')
+    extractor = ReadabilityExtractor()
+    assert extractor.extract_article(html, url=PAGE_URL).to_markdown() == extractor.extract_article(html).to_markdown().replace("(../next)", "(https://example.com/next)")
+
+
+def test_document_base_skips_target_only_base():
+    html = _article('<a href="next">Next</a>', head='<base target="_blank"><base href="https://cdn.example.com/assets/">')
+    assert "[Next](https://cdn.example.com/assets/next)" in ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+
+@pytest.mark.parametrize("destination", ["href=../next", "HREF='../next'", 'href="../next?x=1&amp;y=2"', 'href = "../next" href="/ignored"'])
+def test_rewriter_changes_only_destination_values(destination):
+    from deerflow.utils.readability import _resolve_html_urls
+
+    html = """<!-- <a href="/comment"> -->\n<script>const sample = "<a href=/script>";</script>\n""" + f"<p><b>Misnested <i>text</b> tail</i> <a {destination}>Next</a></p>"
+    result = _resolve_html_urls(html, PAGE_URL)
+    assert result.startswith(html[: html.index("<p>")])
+    assert "<p><b>Misnested <i>text</b> tail</i>" in result
+    assert '"https://example.com/next' in result
+    if 'href="/ignored"' in html:
+        assert 'href="/ignored"' in result
+
+
+@pytest.mark.parametrize("tag", ["textarea", "title", "xmp", "iframe", "noembed", "noframes"])
+def test_rewriter_preserves_link_examples_in_text_elements(tag):
+    from deerflow.utils.readability import _resolve_html_urls
+
+    example = f'<{tag}><a href="/literal">Example</a></{tag}>'
+    html = example + '<a href="../next">Next</a>'
+    assert _resolve_html_urls(html, PAGE_URL) == example + '<a href="https://example.com/next">Next</a>'
+
+
+@pytest.mark.parametrize("attribute", ["href", 'href=""', "href=''", 'href href="/ignored"'])
+def test_empty_destination_uses_document_base(attribute):
+    from deerflow.utils.readability import _resolve_html_urls
+
+    html = f"<a {attribute}>Current</a>"
+    assert f'href="{PAGE_URL}"' in _resolve_html_urls(html, PAGE_URL)
+
+
+def test_textarea_with_script_example_does_not_hide_following_links():
+    from deerflow.utils.readability import _resolve_html_urls
+
+    example = '<textarea><script><a href="/literal"></textarea>'
+    html = example + '<a href="../next">Next</a>'
+    assert _resolve_html_urls(html, PAGE_URL) == example + '<a href="https://example.com/next">Next</a>'
