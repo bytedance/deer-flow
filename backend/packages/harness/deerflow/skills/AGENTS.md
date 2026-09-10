@@ -33,28 +33,8 @@ Lets a caller pass per-request, short-lived end-user credentials (e.g. an ERP to
 
 ### Custom skill export
 
-`skills/export.py` owns read-only custom package capture and `.skill` ZIP construction.
-`export_manifest` returns bounded facts and structural blockers; `build_skill_export`
-requires the manifest's content revision. Both accept a cooperative cancellation event.
-Snapshots use unnamed temporary files, and ZIP bytes come exclusively from captured
-raw bytes. The v1 length-delimited digest covers UTF-8 paths, node kind, size, raw
-content SHA-256, and normalized executable semantics, including empty directories.
-The source is rechecked under `skill_projection_read_lock`: this uses the same user
-projection lock identity as mutations without invalidating or rebuilding projections.
-Local storage uses a separate `.custom.projection.lock` beside its custom root for
-both mutations and exports. Both storage writers create and remove temporary files
-inside the mutation lock. Import normalizes regular-file permissions to 0644/0755.
-
-Export is not activation, execution, or a safety-review verdict. It never bypasses
-installation scanning. Entry, file, aggregate, ZIP, path, depth, lock, and soft time
-limits are independent of SkillScan configuration. Source files and directory nodes
-are opened through no-follow directory descriptors; unsupported platforms fail closed.
-Resource limits raise errors rather than returning truncated manifests. Frontmatter parsing
-is separately bounded to 1 MiB. Before shared validation constructs any YAML objects,
-a cancellable event preflight rejects aliases (including merge aliases), nesting beyond
-32 levels, and more than 16384 events. Larger UTF-8 bodies remain supported and stream into
-the raw snapshot. Malformed secret declarations produce a content-free warning. Ownership is
-resolved only through `get_custom_skill_dir`, never through legacy/public fallback.
-Only relative paths and generic diagnostic text are exposed. Tests live in
-`tests/test_skill_export.py`; `scripts/benchmark/skill_export.py` measures real public,
-64 MiB, 4096-entry, and cancellation workloads in fresh processes.
+- `export.py` captures only `storage.get_custom_skill_dir(name)`; never use public or legacy fallback. Export neither executes skills nor replaces installation scanning.
+- Capture and recheck source bytes under `skill_projection_read_lock` in `projection.py`, using the same lock as storage mutations. Keep writer staging and cleanup inside that lock; read-only export must not rebuild projections.
+- Build archives from captured bytes and require the preview's revision. Preserve file contents, empty directories, and normalized executable flags; import must not restore privileged permission bits.
+- Keep traversal, YAML parsing, and archive construction bounded and cancellable. Reject unsupported filesystem operations rather than following links; report limits instead of truncating results. Preserve YAML preflight before object construction.
+- Export includes raw saved files and is not a secret audit. Return relative paths and generic errors without leaking source content. See the [export API contract](../../../../docs/API.md#export-a-custom-skill) for response fields and limits.

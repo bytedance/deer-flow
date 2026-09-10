@@ -148,4 +148,8 @@ archive/search behavior, read [Thread lifecycle invariants](../../docs/THREAD_LI
 It owns lineage and settled-checkpoint rules, legacy fallback boundaries, archive
 filtering before pagination, owner isolation, and activity-time preservation.
 
-Custom Skill export requires `require_admin_user` (no PAT). `skill_export.py` holds two non-queuing slots until worker drain and response cleanup; the harness captures bytes. Resolve users in the ContextVar-preserving I/O worker. Cancellation signals/drains workers and closes unclaimed results before slot release. Use ASGI `finally` even before body iteration. Never log raw exceptions/content. Contract: `../../docs/API.md`.
+Custom skill export uses `require_admin_user` (no PAT) and the shared file-I/O
+executor. `skill_export.py` holds export leases until workers drain and responses
+close, including cancellation before body iteration. Resolve users in the worker's
+preserved context; never log source contents or raw file errors. See the
+[export API contract](../../docs/API.md#export-a-custom-skill).
