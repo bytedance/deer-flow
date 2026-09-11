@@ -753,7 +753,6 @@ async def task_tool(
     """
     if context_mode not in {"isolated", "snapshot"}:
         return _task_result_command(tool_call_id=tool_call_id, status="failed", error=f"Unknown context_mode '{context_mode}'. Use isolated or snapshot.")
-    context_snapshot = ParentContextSnapshot.from_state(runtime.state) if context_mode == "snapshot" and runtime is not None else None
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     allowed_subagents = metadata.get("allowed_subagents")
@@ -788,6 +787,10 @@ async def task_tool(
             status="failed",
             error=error,
         )
+    # Rejected delegations must not serialize the retained history. Capture
+    # after delegation validation, before child setup (including tool loading).
+    context_snapshot = ParentContextSnapshot.from_state(runtime.state) if context_mode == "snapshot" and runtime is not None else None
+
     # Build config overrides
     overrides: dict = {}
 

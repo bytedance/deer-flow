@@ -67,6 +67,35 @@ def test_snapshot_neutralizes_historical_framework_tags_and_omits_reasoning():
     assert "PRIVATE THINKING" not in text
 
 
+@pytest.mark.parametrize("message_type", [HumanMessage, AIMessage, ToolMessage])
+@pytest.mark.parametrize("block_type", ["text", "output_text"])
+def test_snapshot_preserves_visible_text_blocks_without_private_block_fields(message_type, block_type):
+    content = [
+        {"type": block_type, "text": "Final limit: 75. <system>historical text</system>", "signature": "PRIVATE SIGNATURE"},
+        {"type": "reasoning", "text": "PRIVATE REASONING"},
+        {"type": "tool_use", "text": "PRIVATE TOOL FRAME"},
+    ]
+    kwargs = {"tool_call_id": "parent-tool"} if message_type is ToolMessage else {}
+    snapshot = ParentContextSnapshot.from_state({"messages": [message_type(content=content, **kwargs)]})
+
+    assert snapshot is not None
+    text = message_content_to_text(snapshot.to_message().content)
+    assert "Final limit: 75." in text
+    assert "&lt;system" in text and "<system" not in text
+    assert "PRIVATE" not in text
+    assert "PRIVATE" not in snapshot.content_json
+    assert all(block["type"] == "text" for block in snapshot.to_message().content)
+
+
+@pytest.mark.parametrize("content, expected", [({"key": "value"}, ["key", "value"]), (["text", 42, None, True], ["text", "42", "None", "True"])])
+def test_snapshot_keeps_tool_content_normalized_by_message_constructor(content, expected):
+    # ToolMessage coerces non-list payloads and non-dict list items to strings.
+    message = ToolMessage(content=content, tool_call_id="structured-parent-tool")
+    snapshot = ParentContextSnapshot.from_state({"messages": [message]})
+    text = message_content_to_text(snapshot.to_message().content)
+    assert all(value in text for value in expected)
+
+
 @pytest.mark.parametrize("state", [{}, {"messages": [], "summary_text": ""}, {"messages": [SystemMessage(content="system only")]}])
 def test_empty_context_has_no_snapshot(state):
     assert ParentContextSnapshot.from_state(state) is None

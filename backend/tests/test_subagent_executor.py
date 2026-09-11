@@ -580,7 +580,8 @@ class TestAgentConstruction:
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("inherit", [False, True])
-    async def test_snapshot_real_graph_writes_from_background_with_child_only_receipts(self, classes, base_config, tmp_path, inherit):
+    @pytest.mark.parametrize("history_format", ["plain", "output_text"])
+    async def test_snapshot_real_graph_writes_from_background_with_child_only_receipts(self, classes, base_config, tmp_path, inherit, history_format):
         """Real LangGraph/tool execution; the deterministic model observes its input.
 
         Use the production receipt middleware with the real executor lifecycle.
@@ -596,7 +597,7 @@ class TestAgentConstruction:
 
         parent = {
             "messages": [
-                HumanMessage(content="The implementation must use SQLite."),
+                AIMessage(content=[{"type": "output_text", "text": "The implementation must use SQLite."}]) if history_format == "output_text" else HumanMessage(content="The implementation must use SQLite."),
                 AIMessage(content="Parent investigation", tool_calls=[{"name": "bash", "args": {"command": "pytest"}, "id": "parent-only"}]),
                 ToolMessage(content="parent tests passed [r1]", name="bash", tool_call_id="parent-only"),
             ],

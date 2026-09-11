@@ -73,7 +73,7 @@ class ParentContextSnapshot:
                 if isinstance(block, str):
                     if block:
                         history.append({"type": "text", "text": neutralize_untrusted_tags(block)})
-                elif block.get("type") == "text" and isinstance(block.get("text"), str):
+                elif block.get("type") in {"text", "output_text"} and isinstance(block.get("text"), str):
                     history.append({"type": "text", "text": neutralize_untrusted_tags(block["text"])})
                 elif block.get("type") in _MEDIA_BLOCK_TYPES:
                     history.append({key: value for key, value in block.items() if key != "cache_control"})

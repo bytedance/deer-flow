@@ -1,6 +1,6 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-**Context**: `task.context_mode` defaults to `isolated`; `snapshot` freezes history/summary as Human data via `context_snapshot.py`. Never copy parent AI/tool frames or execution state: they pollute receipts and budgets. Child role/tools stay independent; no later sync.
+**Context**: `task.context_mode` defaults to `isolated`; `snapshot` freezes history/summary after validation, before child setup. Render `text`/`output_text` as Human data; never copy parent AI/tool frames or execution state into child receipts. Child role/tools stay independent; no later sync.
 
 **Durable batch acceptance**: `batch_task` normalizes optional per-item criteria
 before persistence (empty becomes null; 20 items × 500 neutralized characters),

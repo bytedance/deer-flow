@@ -929,6 +929,31 @@ def test_task_tool_emits_cumulative_usage_on_running_event(monkeypatch):
 
 
 @pytest.mark.parametrize("context_mode", [None, "isolated", "snapshot"])
+@pytest.mark.parametrize("rejection", ["unknown", "caller-policy", "host-bash"])
+def test_rejected_task_does_not_capture_parent_history(monkeypatch, context_mode, rejection):
+    from langchain_core.messages import HumanMessage
+
+    runtime = _make_runtime()
+    runtime.state["messages"] = [HumanMessage(content="Retained parent history")]
+    if rejection == "caller-policy":
+        runtime.config["metadata"]["allowed_subagents"] = []
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: [] if rejection == "caller-policy" else ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: None if rejection == "unknown" else _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: False)
+    capture = MagicMock(wraps=task_tool_module.ParentContextSnapshot.from_state)
+    monkeypatch.setattr(task_tool_module.ParentContextSnapshot, "from_state", capture)
+    executor = MagicMock()
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", executor)
+
+    kwargs = {"context_mode": context_mode} if context_mode is not None else {}
+    result = _run_task_tool(runtime=runtime, prompt="Do the task", subagent_type="bash" if rejection == "host-bash" else "general-purpose", tool_call_id="tc-rejected", **kwargs)
+
+    assert _task_tool_message(result).additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    capture.assert_not_called()
+    executor.assert_not_called()
+
+
+@pytest.mark.parametrize("context_mode", [None, "isolated", "snapshot"])
 def test_task_tool_context_mode_captures_dispatch_time_history(monkeypatch, context_mode):
     from langchain_core.messages import HumanMessage
 
