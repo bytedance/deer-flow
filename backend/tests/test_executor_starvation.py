@@ -104,7 +104,7 @@ def test_dedicated_file_io_pool_runs_while_default_executor_is_saturated(monkeyp
             await default_started.wait()
 
             file_task = asyncio.create_task(file_io.run_file_io(dedicated_work))
-            await dedicated_started.wait()
+            await asyncio.wait_for(dedicated_started.wait(), timeout=5)
             assert await file_task == "file-io"
 
             release.set()
