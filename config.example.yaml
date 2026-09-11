@@ -252,6 +252,12 @@ models:
   #   max_retries: 2
   #   use_responses_api: true
   #   output_version: responses/v1
+  #   # Optional, forwarded to ChatOpenAI as-is (default false): send only the new
+  #   # turn plus previous_response_id instead of replaying the full history. The
+  #   # chained context is still billed as input tokens, and any client-side
+  #   # history rewrite (e.g. blocked-write payload elision) is only honored when
+  #   # the history is replayed.
+  #   use_previous_response_id: false
   #   context_window: 400000
   #   supports_vision: true
 
