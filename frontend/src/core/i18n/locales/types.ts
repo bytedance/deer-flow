@@ -412,6 +412,7 @@ export interface Translations {
       reuseNoticeTitle: string;
       reuseNoticeDescription: string;
     };
+    search: { placeholder: string; clear: string; noResults: string };
     filters: {
       allStatuses: string;
       enabled: string;

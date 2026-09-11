@@ -1532,6 +1532,7 @@ DeerFlow now includes a first-class scheduled-task MVP in the workspace.
 Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`
+- Search task titles or prompts, combined with status/type filters and the current thread scope.
 - Choose whether each scheduled task reuses a thread and its conversation history or creates a fresh thread per run
 - Pin each task to `lead_agent` (default) or a custom agent the owner already has; unknown names are rejected
 - Duplicate an existing task into the create form as an editable draft without copying its run history
