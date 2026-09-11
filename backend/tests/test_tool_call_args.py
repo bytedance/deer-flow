@@ -310,3 +310,78 @@ class TestProviderSerializers:
         assert len(tool_use) == 1
         assert tool_use[0]["input"] == NEW_ARGS
         assert self.PAYLOAD not in json.dumps(formatted, ensure_ascii=False)
+
+
+class TestResponseChainInvalidation:
+    """A rewritten history must be replayed, never chained to the original server-side copy."""
+
+    PAYLOAD = ARGS["content"]
+
+    @staticmethod
+    def _chained_history(rewritten_call=True):
+        first = AIMessage(content=[{"type": "text", "text": "earlier"}], response_metadata={"id": "resp_a", "model_name": "gpt-x"})
+        call = _responses_v1_message()
+        call = call.model_copy(update={"response_metadata": {**call.response_metadata, "id": "resp_b", "model_name": "gpt-x"}})
+        tool = ToolMessage(content="Error: blocked", tool_call_id="call-1", name="write_file", status="error")
+        later = AIMessage(content=[{"type": "text", "text": "later"}], response_metadata={"id": "resp_c"})
+        return [HumanMessage(content="go"), first, call, tool, later]
+
+    def test_rewrite_drops_resp_ids_from_every_ai_message(self):
+        messages = self._chained_history()
+
+        rewritten = rewrite_messages_tool_call_args(messages, lambda _m, tc: NEW_ARGS if tc["id"] == "call-1" else None)
+
+        assert [type(m) for m in rewritten] == [type(m) for m in messages]
+        for index in (1, 2, 4):
+            assert "id" not in rewritten[index].response_metadata
+            assert rewritten[index] is not messages[index]
+        assert rewritten[1].response_metadata == {"model_name": "gpt-x"}
+        assert rewritten[2].tool_calls[0]["args"] == NEW_ARGS
+        assert rewritten[0] is messages[0]
+        assert rewritten[3] is messages[3]
+        # Stored history keeps its chain ids and arguments.
+        assert messages[1].response_metadata["id"] == "resp_a"
+        assert messages[2].response_metadata["id"] == "resp_b"
+        assert messages[4].response_metadata["id"] == "resp_c"
+        assert messages[2].tool_calls[0]["args"] == ARGS
+
+    def test_non_resp_ids_are_left_alone(self):
+        anthropic_style = AIMessage(content="earlier", response_metadata={"id": "msg_01", "model": "claude"})
+        messages = [anthropic_style, _full_surface_message(), ToolMessage(content="ok", tool_call_id="call-1", name="write_file")]
+
+        rewritten = rewrite_messages_tool_call_args(messages, lambda _m, tc: NEW_ARGS)
+
+        assert rewritten[0] is anthropic_style
+        assert rewritten[0].response_metadata["id"] == "msg_01"
+
+    def test_no_rewrite_keeps_chain_ids(self):
+        messages = self._chained_history()
+        assert rewrite_messages_tool_call_args(messages, lambda _m, _tc: None) is None
+        assert messages[2].response_metadata["id"] == "resp_b"
+
+    @staticmethod
+    def _chained_model():
+        from langchain_openai import ChatOpenAI
+
+        return ChatOpenAI(model="gpt-4.1", api_key="test-key", use_responses_api=True, use_previous_response_id=True)
+
+    def test_unrewritten_history_chains_and_never_sends_the_call(self):
+        """Documents the leak: with chaining on, the adapter sends only the tail after the last resp_ id."""
+        payload = self._chained_model()._get_request_payload(self._chained_history()[:4])
+
+        assert payload["previous_response_id"] == "resp_b"
+        assert [item["type"] for item in payload["input"]] == ["function_call_output"]
+
+    def test_rewritten_history_is_replayed_with_rewritten_arguments(self):
+        messages = self._chained_history()[:4]
+        rewritten = rewrite_messages_tool_call_args(messages, lambda _m, tc: NEW_ARGS if tc["id"] == "call-1" else None)
+
+        payload = self._chained_model()._get_request_payload(rewritten)
+
+        assert "previous_response_id" not in payload
+        calls = [item for item in payload["input"] if item.get("type") == "function_call"]
+        assert len(calls) == 1
+        assert json.loads(calls[0]["arguments"]) == NEW_ARGS
+        assert calls[0]["id"] == "fc_1"
+        assert any(item.get("type") == "function_call_output" for item in payload["input"])
+        assert self.PAYLOAD not in json.dumps(payload, ensure_ascii=False)

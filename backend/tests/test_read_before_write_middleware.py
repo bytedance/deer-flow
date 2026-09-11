@@ -733,3 +733,62 @@ class TestBlockedPayloadElision:
         assert calls[0]["id"] == "fc_1"
         assert json.loads(calls[0]["arguments"])["content"].startswith("[payload elided: 5000 chars")
         assert payload not in json.dumps(items, ensure_ascii=False)
+
+    def _successful_write(self, tool_call_id, path="/mnt/user-data/outputs/other.md", payload="s" * 5000):
+        ai = AIMessage(content="", tool_calls=[{"name": "write_file", "id": tool_call_id, "args": {"description": "d", "path": path, "content": payload}}])
+        return ai, ToolMessage(content="OK", tool_call_id=tool_call_id, name="write_file")
+
+    @pytest.mark.parametrize("success_first", [True, False], ids=["success-before-block", "block-before-success"])
+    def test_reused_call_id_only_elides_the_blocked_occurrence(self, success_first):
+        """Tool-call ids repeat across turns; pairing is per occurrence, not per id (review on #5329)."""
+        import json
+
+        from langchain_openai.chat_models.base import _convert_message_to_dict
+
+        mw = self._middleware()
+        ok_ai, ok_tool = self._successful_write("call-1")
+        blocked_ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "b" * 5000}, tool_call_id="call-1")
+        turns = [ok_ai, ok_tool, blocked_ai, blocked] if success_first else [blocked_ai, blocked, ok_ai, ok_tool]
+        request = self._model_request([HumanMessage(content="go"), *turns])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        captured = self._captured(handler).messages
+        ok_index, blocked_index = (1, 3) if success_first else (3, 1)
+        assert captured[ok_index] is ok_ai
+        assert captured[blocked_index].tool_calls[0]["args"]["content"].startswith("[payload elided: 5000 chars")
+        ok_wire = json.loads(_convert_message_to_dict(captured[ok_index])["tool_calls"][0]["function"]["arguments"])
+        blocked_wire = json.loads(_convert_message_to_dict(captured[blocked_index])["tool_calls"][0]["function"]["arguments"])
+        assert ok_wire["content"] == "s" * 5000
+        assert blocked_wire["content"].startswith("[payload elided")
+
+    def test_chained_responses_request_replays_the_rewritten_history(self):
+        """With use_previous_response_id the adapter must not chain past the elided call (review on #5329)."""
+        import json
+
+        from langchain_openai import ChatOpenAI
+
+        mw = self._middleware()
+        payload = "c" * 5000
+        args = {"description": "d", "path": self.PATH, "content": payload}
+        ai = AIMessage(
+            content=[{"type": "function_call", "id": "fc_1", "call_id": "call-1", "name": "write_file", "arguments": json.dumps(args), "status": "completed"}],
+            tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(args)}],
+            response_metadata={"id": "resp_blocked", "output_version": "responses/v1"},
+        )
+        blocked = mw.wrap_tool_call(_make_request("write_file", dict(args), [HumanMessage(content="go"), ai]), MagicMock())
+        request = self._model_request([HumanMessage(content="go"), ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+        model = ChatOpenAI(model="gpt-4.1", api_key="test-key", use_responses_api=True, use_previous_response_id=True)
+
+        mw.wrap_model_call(request, handler)
+
+        leaked = model._get_request_payload(request.messages)
+        assert leaked["previous_response_id"] == "resp_blocked"
+        sent = model._get_request_payload(self._captured(handler).messages)
+        assert "previous_response_id" not in sent
+        calls = [item for item in sent["input"] if item.get("type") == "function_call"]
+        assert len(calls) == 1
+        assert json.loads(calls[0]["arguments"])["content"].startswith("[payload elided: 5000 chars")
+        assert payload not in json.dumps(sent, ensure_ascii=False)

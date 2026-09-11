@@ -27,6 +27,18 @@ that touched ``tool_calls`` alone would still send the original payload.
 mutate state and the result is identical across model calls. Policy — which
 calls, and what replaces their arguments — stays with the caller; see
 ``read_before_write_middleware.elide_blocked_write_payloads`` for one.
+
+A rewrite also invalidates server-side continuation. With
+``use_previous_response_id`` the OpenAI adapter sends only the messages after
+the last AIMessage carrying a ``resp_…`` ``response_metadata["id"]`` and lets
+the server rebuild the rest from *its* stored copy of the conversation, which
+still holds the original arguments; stored responses cannot be edited, and
+every response produced after the rewritten call chains back to that history.
+So whenever anything was rewritten, :func:`rewrite_messages_tool_call_args`
+drops every ``resp_`` id from the model-bound copy and the adapter falls back
+to replaying the full rewritten history (the same request shape as
+``use_previous_response_id=False``; per OpenAI's docs chained input tokens are
+billed either way, so replay costs no more).
 """
 
 from __future__ import annotations
@@ -47,9 +59,11 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
     """Apply ``replacement_for(message, tool_call)`` to every AIMessage tool call in ``messages``.
 
     Returns a new list with the rewritten AIMessages, or ``None`` when no call
-    was replaced. Untouched messages pass through by identity. Only calls with
-    a non-empty string id are offered to the selector, since nothing else can
-    be matched across surfaces.
+    was replaced. Untouched messages pass through by identity, except that once
+    anything was rewritten every AIMessage loses its ``resp_`` response id (see
+    the module docstring: the server-side history behind that id still holds
+    the original arguments). Only calls with a non-empty string id are offered
+    to the selector, since nothing else can be matched across surfaces.
     """
     updated: list[Any] = []
     changed = False
@@ -71,7 +85,20 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
         if patched is not message:
             changed = True
         updated.append(patched)
-    return updated if changed else None
+    if not changed:
+        return None
+    return [_without_response_chain_id(message) for message in updated]
+
+
+def _without_response_chain_id(message: Any) -> Any:
+    """Drop an OpenAI ``resp_`` response id so the adapter replays history instead of chaining to it."""
+    if not isinstance(message, AIMessage):
+        return message
+    response_metadata = message.response_metadata or {}
+    response_id = response_metadata.get("id")
+    if not (isinstance(response_id, str) and response_id.startswith("resp_")):
+        return message
+    return message.model_copy(update={"response_metadata": {key: value for key, value in response_metadata.items() if key != "id"}})
 
 
 def rewrite_tool_call_args(message: AIMessage, replacements: ArgsReplacements) -> AIMessage:
