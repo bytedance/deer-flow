@@ -250,7 +250,7 @@ def test_list_uploaded_files_model_schema_excludes_injected_runtime() -> None:
     """The model-facing schema must not expose ToolRuntime internals."""
     parameters = convert_to_openai_tool(list_uploaded_files)["function"]["parameters"]
 
-    assert set(parameters["properties"]) == {"include_outline", "max_results"}
+    assert set(parameters["properties"]) == {"include_outline", "max_results", "query", "extensions"}
 
 
 @pytest.mark.parametrize("tool_obj", [case[0] for case in _TOOL_CASES], ids=[case[0].name for case in _TOOL_CASES])
