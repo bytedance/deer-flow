@@ -8,6 +8,11 @@ export const userSchema = z.object({
   system_role: z.enum(["admin", "user"]),
   needs_setup: z.boolean().optional().default(false),
   oauth_provider: z.string().nullable().optional().default(null),
+  auth_disabled: z.boolean().optional(),
+  // Epoch-second iat of the session token (from /me). PAT requests declare
+  // `<id>:<session_generation>` so the backend can fence a stale tab whose
+  // React identity no longer matches the shared session cookie.
+  session_generation: z.number().nullable().optional(),
 });
 
 export type User = Omit<z.infer<typeof userSchema>, "oauth_provider"> & {

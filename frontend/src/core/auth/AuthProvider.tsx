@@ -12,6 +12,11 @@ import React, {
 
 import { isStaticWebsiteOnly } from "../static-mode";
 
+import {
+  adjustLoginRedirectDeferral,
+  isLoginRedirectDeferred,
+  setDeferredUnauthorizedHandler,
+} from "./login-redirect-deferral";
 import { type User, buildLoginUrl } from "./types";
 
 // Re-export for consumers
@@ -27,6 +32,14 @@ interface AuthContextType {
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
   applyUser: (user: User | null) => void;
+  /**
+   * Register/clear a deferral of the automatic 401 login redirect. The PAT
+   * show-once flow uses it: a session expiring while the raw token is
+   * displayed must not navigate the workspace away and discard the
+   * credential's only copy — the pending redirect fires as soon as the
+   * last deferral clears (see {@link useDeferLoginRedirect}).
+   */
+  setLoginRedirectDeferral: (active: boolean) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -47,11 +60,32 @@ interface AuthProviderProps {
 export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(initialUser);
   const [isLoading, setIsLoading] = useState(false);
+  const [loginRedirectDeferrals, setLoginRedirectDeferrals] = useState(0);
+  // The live count lives in a module shared with the API fetcher (see
+  // login-redirect-deferral.ts): a /me refresh that was already in flight
+  // when a deferral armed keeps the closure it started with, so the 401
+  // branch below must read the live value, never a captured snapshot.
+  const [pendingLoginRedirect, setPendingLoginRedirect] = useState<
+    string | null
+  >(null);
   const router = useRouter();
   const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
 
   const isAuthenticated = user !== null;
+
+  const setLoginRedirectDeferral = useCallback((active: boolean) => {
+    setLoginRedirectDeferrals(adjustLoginRedirectDeferral(active));
+  }, []);
+
+  // The API fetcher hands its suppressed login redirects here: the armed
+  // target below fires the moment the last deferral clears, so a 401 from
+  // any shared-fetcher call while a deferral holds still ends at login —
+  // not only the ones that happen to route through a /me refresh.
+  useEffect(() => {
+    setDeferredUnauthorizedHandler((target) => setPendingLoginRedirect(target));
+    return () => setDeferredUnauthorizedHandler(null);
+  }, []);
 
   /**
    * Apply a user value supplied by a caller (e.g. banner probe) that has
@@ -81,9 +115,20 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       } else if (res.status === 401) {
         // Session expired or invalid
         setUser(null);
-        // Redirect to login if on a protected route
+        // Redirect to login if on a protected route. A deferral holds the
+        // redirect: the soft navigation would unmount the deferring flow
+        // (the PAT show-once dialog) without firing beforeunload and
+        // discard the only copy of an active credential — session expiry
+        // does not revoke a minted token. The count is read live at
+        // resolution time: this closure may predate the arm() call, so a
+        // captured snapshot could still say 0 while a deferral holds.
         if (pathname?.startsWith("/workspace")) {
-          router.push(buildLoginUrl(pathname));
+          const target = buildLoginUrl(pathname);
+          if (isLoginRedirectDeferred()) {
+            setPendingLoginRedirect(target);
+          } else {
+            router.push(target);
+          }
         }
       }
     } catch (err) {
@@ -93,6 +138,13 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       setIsLoading(false);
     }
   }, [staticMode, pathname, router]);
+
+  // The held redirect fires the moment the last deferral clears.
+  useEffect(() => {
+    if (pendingLoginRedirect === null || loginRedirectDeferrals > 0) return;
+    router.push(pendingLoginRedirect);
+    setPendingLoginRedirect(null);
+  }, [pendingLoginRedirect, loginRedirectDeferrals, router]);
 
   /**
    * Logout - call FastAPI logout endpoint and clear local state
@@ -167,9 +219,41 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     logout,
     refreshUser,
     applyUser,
+    setLoginRedirectDeferral,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+/**
+ * Defer the provider's automatic 401 login redirect while *active* is true.
+ * Deferrals are counted — multiple deferrers never cancel each other — and
+ * the held redirect fires as soon as the last one clears. Used by flows
+ * whose one-time output cannot survive an unmount: the PAT show-once token
+ * stays active after a session expires (expiry does not revoke it), so
+ * navigating its page away would permanently discard the credential's only
+ * raw copy.
+ *
+ * Also returns an imperative ``arm()`` channel: it registers a deferral
+ * synchronously and hands back its release. The *active* channel rides a
+ * render+effect, which is one commit late — callers who must be protected
+ * inside the synchronous submission window (a pending /me refresh can
+ * answer 401 before the pending state has rendered) arm it in the same
+ * breath they start the request, then release once the *active* channel
+ * has taken over.
+ */
+export function useDeferLoginRedirect(active: boolean): () => () => void {
+  const { setLoginRedirectDeferral } = useAuth();
+  useEffect(() => {
+    if (!active) return;
+    setLoginRedirectDeferral(true);
+    return () => setLoginRedirectDeferral(false);
+  }, [active, setLoginRedirectDeferral]);
+  const arm = useCallback(() => {
+    setLoginRedirectDeferral(true);
+    return () => setLoginRedirectDeferral(false);
+  }, [setLoginRedirectDeferral]);
+  return arm;
 }
 
 /**

@@ -44,9 +44,10 @@ export function ModelLoadErrorBanner({
     }
   };
 
-  // The shared fetcher has already started a login redirect for this error.
-  // Rendering a model-specific warning during navigation would be duplicate
-  // and misleading feedback.
+  // The shared fetcher has already started a login redirect for this error —
+  // or, while a login-redirect deferral holds, armed one that fires when the
+  // last deferral clears. Rendering a model-specific warning during (or
+  // ahead of) that navigation would be duplicate and misleading feedback.
   if (
     (!visibleError && !isRetrying) ||
     visibleError instanceof UnauthorizedError ||

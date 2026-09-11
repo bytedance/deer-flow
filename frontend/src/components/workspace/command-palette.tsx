@@ -28,6 +28,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { useGlobalShortcuts } from "@/hooks/use-global-shortcuts";
 
 import { useSettingsDialog } from "./settings";
+import { getSettingsDialogSnapshot } from "./settings/settings-dialog-store";
 
 export function CommandPalette() {
   const { t } = useI18n();
@@ -38,13 +39,24 @@ export function CommandPalette() {
   const [isMac, setIsMac] = useState(false);
 
   const handleNewChat = useCallback(() => {
-    router.push("/workspace/chats/new");
     setOpen(false);
+    // Keep in-progress Settings flows intact. In particular, navigating away
+    // while a show-once PAT is visible could permanently hide the token before
+    // the user has copied it.
+    if (getSettingsDialogSnapshot().open) {
+      return;
+    }
+    router.push("/workspace/chats/new");
   }, [router]);
 
   const handleOpenSettings = useCallback(() => {
     setOpen(false);
-    openSettings("appearance");
+    // Already-open guard: re-invoking the shortcut while Settings is open
+    // would reset the active section and unmount in-progress flows (e.g. a
+    // freshly minted show-once PAT before the user copies it).
+    if (!getSettingsDialogSnapshot().open) {
+      openSettings("appearance");
+    }
   }, [openSettings]);
 
   const handleShowShortcuts = useCallback(() => {
