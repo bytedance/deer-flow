@@ -15,6 +15,12 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 - **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
 - **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
 
+`pnpm-workspace.yaml` overrides vulnerable `@xmldom/xmldom` 0.9.x releases to
+0.9.12 for GHSA-965w-775f-mr7g. Nextra pulls it in through MathJax and
+`speech-rule-engine@4.1.2`, which pins 0.9.8. Keep the override until the
+upstream dependency chain resolves a patched version without it; regenerate
+`pnpm-lock.yaml` and verify the docs build when changing this constraint.
+
 ## Commands
 
 | Command          | Purpose                                       |
@@ -105,6 +111,11 @@ the standalone server from `frontend/` with `node --env-file=.env
 
 To reach a dev server on anything other than localhost — a LAN address, or a proxied hostname — list the host in `DEER_FLOW_DEV_ALLOWED_ORIGINS` (comma-separated; a full URL is reduced to its host). It feeds Next's `allowedDevOrigins`, which gates `/_next/*`, fonts, and HMR. Without it those requests get a 403 and the page renders server-side but never hydrates, so nothing on it — including the login form — responds. Development only; production builds ignore it.
 
+One-time schedule input uses `validZonedLocalToUtcIso` to reject wall times that
+do not round-trip in the selected timezone. Invalid input emits an empty spec and
+localized inline feedback; both create and edit must block submission. Keep this
+UI validation separate from the API payload and preserve valid DST-fold inputs.
+
 ## Resources
 
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
@@ -147,7 +158,8 @@ lists from the server instead of inserting those snapshots into either view.
 
 CSV/TSV previews share `artifact-table-preview.tsx` between the panel and standalone viewer. Papa Parse runs only inside `delimited-preview.worker.ts`; `use-delimited-preview.ts` bounds input before transfer, cancels stale work, and enforces a five-second timeout. The parser detects the first record separator outside quoted fields and passes it explicitly to Papa Parse, so embedded newlines in an incomplete quoted field cannot corrupt newline detection. It retains at most 202 logical records and 50 columns, discarding an incomplete final record from truncated input. UI pagination displays at most 200 data rows in pages of 50. Keep the table mounted but inactive when switching to source so header/pagination state survives; changing file identity resets it. Pending `write_file` content stays in source mode until success.
 
-One-time schedule input uses `validZonedLocalToUtcIso` to reject wall times that
-do not round-trip in the selected timezone. Invalid input emits an empty spec and
-localized inline feedback; both create and edit must block submission. Keep this
-UI validation separate from the API payload and preserve valid DST-fold inputs.
+Custom skill export is admin-only and disabled in static demos. The lazy
+`skill-export-dialog.tsx` must abort requests and ignore stale callbacks on close
+or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob download;
+HTTP 409 requires explicit preview refresh. Keep file lists paginated and diagnostics
+localized. Browser handoff does not prove the file was saved to disk.

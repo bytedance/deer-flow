@@ -410,7 +410,7 @@ export function utcToZonedLocalInput(iso: string, timezone: string): string {
   )}T${pad2(local.getUTCHours())}:${pad2(local.getUTCMinutes())}`;
 }
 
-/** Return null when a wall value is invalid or skipped by a timezone transition. */
+/** Validate minute-precision YYYY-MM-DDTHH:mm input; invalid or skipped wall times return null. */
 export function validZonedLocalToUtcIso(
   localValue: string,
   timezone: string,

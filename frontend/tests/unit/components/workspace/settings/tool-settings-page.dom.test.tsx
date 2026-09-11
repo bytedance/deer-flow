@@ -5,6 +5,7 @@ import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-
 
 const mcpMockState = rs.hoisted(() => ({
   isPending: false,
+  error: null as Error | null,
   mutate: rs.fn(),
   updateIsPending: false,
   updateMutate: rs.fn(),
@@ -27,6 +28,7 @@ rs.mock("@/core/i18n/hooks", () => ({
   useI18n: () => ({
     t: {
       common: {
+        error: "Error:",
         loading: "Loading",
         cancel: "Cancel",
         save: "Save",
@@ -67,7 +69,7 @@ rs.mock("@/core/mcp/hooks", () => ({
   useMCPConfig: () => ({
     config: { mcp_servers: mcpMockState.servers },
     isLoading: false,
-    error: null,
+    error: mcpMockState.error,
   }),
   useEnableMCPServer: () => ({
     isPending: mcpMockState.isPending,
@@ -118,6 +120,7 @@ function definitionTextbox(): HTMLTextAreaElement {
 
 afterEach(() => {
   mcpMockState.isPending = false;
+  mcpMockState.error = null;
   mcpMockState.updateIsPending = false;
   mcpMockState.mutate.mockReset();
   mcpMockState.updateMutate.mockReset();
@@ -126,6 +129,14 @@ afterEach(() => {
 });
 
 describe("ToolSettingsPage MCP switches", () => {
+  it("renders a localized load error", () => {
+    mcpMockState.error = new Error("request failed");
+
+    render(<ToolSettingsPage />);
+
+    expect(screen.getByText("Error: request failed")).toBeDefined();
+  });
+
   it("disables every switch while a targeted update is pending", () => {
     twoServers();
     mcpMockState.isPending = true;
