@@ -255,6 +255,33 @@ class TestSendWsChatSerialization:
         # Either batch order is fine; what matters is no interleaving.
         assert contents in (chunks_a + chunks_b, chunks_b + chunks_a)
 
+    def test_staggered_waiter_keeps_one_lock_and_registry_drains(self):
+        # The interleaving this fix exists for: the waiter must queue on the
+        # same lock while the holder's cleanup runs, never end up holding a
+        # fresh lock mid-batch, and the registry must drain once both finish.
+        ch, sent = self._recording_channel()
+        text_a = "\n".join(f"先行批 第{i}段 " + "字" * 50 for i in range(400))
+        text_b = "\n".join(f"后到批 第{i}段 " + "文" * 50 for i in range(400))
+        chunks_a = _split_for_byte_limit(text_a, _WECOM_MAX_CONTENT_BYTES)
+        chunks_b = _split_for_byte_limit(text_b, _WECOM_MAX_CONTENT_BYTES)
+        assert len(chunks_a) > 1 and len(chunks_b) > 1
+
+        async def staggered():
+            holder = asyncio.create_task(ch._send_ws(self._push("c1", text_a)))
+            # Let the holder get mid-batch, then queue the waiter on the same
+            # chat so its registration overlaps the holder's later chunks.
+            for _ in range(3):
+                await asyncio.sleep(0)
+            waiter = asyncio.create_task(ch._send_ws(self._push("c1", text_b)))
+            await asyncio.gather(holder, waiter)
+
+        _run(staggered())
+        contents = [content for _, content in sent]
+        # The holder started first and keeps the lock, so its batch is first.
+        assert contents == chunks_a + chunks_b
+        assert ch._ws_send_locks == {}
+        assert ch._ws_send_lock_users == {}
+
     def test_completed_chat_lock_is_reclaimed(self):
         ch, _ = self._recording_channel()
         _run(ch._send_ws(self._push("c1", "short push")))
