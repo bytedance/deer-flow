@@ -19,12 +19,11 @@ dependency-free style.
 
 from __future__ import annotations
 
-import logging
 import math
 import re
+from collections.abc import Iterator
+from itertools import islice
 from typing import Any
-
-logger = logging.getLogger(__name__)
 
 try:
     import jieba
@@ -33,61 +32,48 @@ try:
 except ImportError:  # pragma: no cover - exercised via the tokenizer fallback
     _jieba_available = False
 
-_WORD_RE = re.compile(r"[a-zA-Z0-9_]+")
+_WORD_RE = re.compile(r"[a-zA-Z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]+")
 
 #: A token pair overlaps when the tokens are equal or one is a prefix of the
 #: other (minimum 4 characters so short words do not over-match).
 _PREFIX_MATCH_MIN_CHARS = 4
 
-#: How many content tokens participate in near-duplicate similarity.
+#: Shared bound for lexical ranking and near-duplicate similarity.
 _SIMILARITY_TOKEN_BUDGET = 128
+_TEXT_CHAR_BUDGET = 4096
+
+
+def warm_tokenizer() -> None:
+    """Load the optional segmenter's dictionary off the first-request path."""
+    if _jieba_available:
+        jieba.initialize()
 
 
 def tokenize(text: str) -> list[str]:
-    """Tokenize for relevance scoring (jieba when available, else words).
+    """Tokenize at most 4096 characters into at most 128 relevance tokens.
 
     Space-free CJK text without jieba falls back to character bigrams so
     Chinese queries still produce deterministic token overlap.
     """
-    if not text or not text.strip():
+    if not text:
         return []
-    lowered = text.strip().lower()
+    lowered = text[:_TEXT_CHAR_BUDGET].strip().lower()
     if _jieba_available:
-        return [token for token in jieba.cut(lowered) if token.strip()]
-    tokens = _WORD_RE.findall(lowered)
-    if tokens:
-        return tokens
-    parts = lowered.split()
-    if len(parts) == 1 and any("一" <= char <= "鿿" for char in lowered):
-        return [lowered[index : index + 2] for index in range(len(lowered) - 1)]
-    return [part for part in parts if part]
+        return list(islice((token for token in jieba.cut(lowered) if token.strip()), _SIMILARITY_TOKEN_BUDGET))
 
+    def fallback_tokens() -> Iterator[str]:
+        for match in _WORD_RE.finditer(lowered):
+            part = match.group()
+            if "\u3400" <= part[0] <= "\u9fff":
+                if len(part) == 1:
+                    yield part
+                else:
+                    for index in range(len(part) - 1):
+                        yield part[index : index + 2]
+            else:
+                yield part
 
-def _common_prefix_length(left: str, right: str) -> int:
-    count = 0
-    for left_char, right_char in zip(left, right):
-        if left_char != right_char:
-            break
-        count += 1
-    return count
-
-
-def _tokens_overlap(left: str, right: str) -> bool:
-    """Match equal tokens, full-word prefixes, or a shared stem (>=4 chars).
-
-    The shared-stem rule covers inflection without a stemmer: ``linting``
-    matches ``lints`` via their common prefix ``lint``, while short words
-    like ``cat`` never match ``category``.
-    """
-    # Single-character tokens are stopword-like noise; never match them.
-    if len(left) < 2 or len(right) < 2:
-        return False
-    if left == right:
-        return True
-    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
-    if longer.startswith(shorter):
-        return len(shorter) >= 4
-    return _common_prefix_length(left, right) >= _PREFIX_MATCH_MIN_CHARS
+    return list(islice(fallback_tokens(), _SIMILARITY_TOKEN_BUDGET))
 
 
 def build_idf(corpus: list[list[str]]) -> dict[str, float]:
@@ -113,18 +99,22 @@ def lexical_relevance(
     *,
     idf: dict[str, float] | None = None,
 ) -> float:
-    """Cosine similarity of idf-weighted token sets in ``[0, 1]``.
+    """Query-normalized idf-weighted token overlap in ``[0, 1]``.
 
     A containment signal (whole query inside the content, or vice versa)
     joins both vectors as a synthetic token so unsegmented text such as CJK
     content still scores above zero without a segmenter.
     """
-    query_text = (query or "").strip().lower()
-    content_text = (content or "").strip().lower()
+    query_text = (query or "")[:_TEXT_CHAR_BUDGET].strip().lower()
+    return _lexical_relevance(query_text, tokenize(query_text), content, idf=idf)
+
+
+def _lexical_relevance(query_text: str, query_tokens: list[str], content: str, *, idf: dict[str, float] | None) -> float:
+    """Score with a prepared query and an indexed, bounded content vector."""
+    content_text = (content or "")[:_TEXT_CHAR_BUDGET].strip().lower()
     if not query_text or not content_text:
         return 0.0
 
-    query_tokens = tokenize(query_text)
     content_tokens = tokenize(content_text)
     containment = (query_text in content_text) or (content_text in query_text)
     if not query_tokens and not containment:
@@ -147,15 +137,19 @@ def lexical_relevance(
         return 0.0
 
     overlap = 0.0
+    # Shared stems are exactly four-character prefixes. Preserve the original
+    # first-match tie rule, but avoid scanning every content token per query token.
+    prefix_weights: dict[str, float] = {}
+    for token, weight in content_vector.items():
+        if len(token) >= _PREFIX_MATCH_MIN_CHARS:
+            prefix_weights.setdefault(token[:_PREFIX_MATCH_MIN_CHARS], weight)
     for token, query_weight in query_vector.items():
         content_weight = content_vector.get(token, 0.0)
         if content_weight > 0.0:
             overlap += query_weight * content_weight
             continue
-        for content_token, token_weight in content_vector.items():
-            if _tokens_overlap(token, content_token):
-                overlap += query_weight * token_weight
-                break
+        if len(token) >= _PREFIX_MATCH_MIN_CHARS:
+            overlap += query_weight * prefix_weights.get(token[:_PREFIX_MATCH_MIN_CHARS], 0.0)
 
     if overlap <= 0.0:
         return 0.0
@@ -176,7 +170,7 @@ def _coerce_confidence(fact: dict[str, Any]) -> float:
         if not math.isfinite(value):
             raise ValueError
     except (TypeError, ValueError):
-        return 0.5
+        return 0.0
     return min(1.0, max(0.0, value))
 
 
@@ -202,10 +196,12 @@ def score_facts(
             )
         ]
 
+    query_text = (query or "")[:_TEXT_CHAR_BUDGET].strip().lower()
+    query_tokens = tokenize(query_text)
     scored: list[tuple[float, dict[str, Any]]] = []
     for fact in facts:
         content = fact.get("content")
-        relevance = lexical_relevance(query, content, idf=idf) if isinstance(content, str) else 0.0
+        relevance = _lexical_relevance(query_text, query_tokens, content, idf=idf) if isinstance(content, str) else 0.0
         confidence = _coerce_confidence(fact)
         combined = relevance_weight * relevance + (1.0 - relevance_weight) * confidence
         scored.append((combined, fact))
@@ -224,15 +220,6 @@ def rank_facts(
     return [fact for _, fact in score_facts(facts, query, relevance_weight=relevance_weight, idf=idf)]
 
 
-def _content_similarity(left: str, right: str) -> float:
-    """Jaccard similarity over bounded, case-folded token sets."""
-    left_set = set(tokenize(left)[:_SIMILARITY_TOKEN_BUDGET])
-    right_set = set(tokenize(right)[:_SIMILARITY_TOKEN_BUDGET])
-    if not left_set or not right_set:
-        return 0.0
-    return len(left_set & right_set) / len(left_set | right_set)
-
-
 def diversify(
     scored: list[tuple[float, dict[str, Any]]],
     *,
@@ -243,31 +230,37 @@ def diversify(
 
     ``similarity_weight == 0`` returns the score order unchanged.
     """
-    if similarity_weight <= 0.0 or not scored:
-        ordered = [fact for _, fact in scored]
-        return ordered[:limit] if limit is not None else ordered
+    ordered = iter_diversify(scored, similarity_weight=similarity_weight)
+    return list(islice(ordered, max(0, limit))) if limit is not None else list(ordered)
 
-    remaining = list(scored)
-    picked: list[tuple[float, dict[str, Any]]] = []
-    while remaining and (limit is None or len(picked) < limit):
+
+def iter_diversify(scored: list[tuple[float, dict[str, Any]]], *, similarity_weight: float) -> Iterator[dict[str, Any]]:
+    """Lazy MMR: tokenize each fact once and update penalties once per pick.
+
+    Consumers can stop at their result or token budget without ranking the rest.
+    Equal adjusted scores retain their input order.
+    """
+    if similarity_weight <= 0.0:
+        yield from (fact for _, fact in scored)
+        return
+    token_sets = [set(tokenize(fact["content"])) if isinstance(fact.get("content"), str) else set() for _, fact in scored]
+    remaining = list(range(len(scored)))
+    penalties = [0.0] * len(scored)
+    while remaining:
         best_index = 0
         best_adjusted = -math.inf
-        for index, (score, fact) in enumerate(remaining):
-            content = fact.get("content")
-            content_text = content if isinstance(content, str) else ""
-            worst_similarity = 0.0
-            for _, picked_fact in picked:
-                picked_content = picked_fact.get("content")
-                picked_text = picked_content if isinstance(picked_content, str) else ""
-                similarity = _content_similarity(content_text, picked_text)
-                if similarity > worst_similarity:
-                    worst_similarity = similarity
-            adjusted = score - similarity_weight * worst_similarity
+        for index, fact_index in enumerate(remaining):
+            adjusted = scored[fact_index][0] - similarity_weight * penalties[fact_index]
             if adjusted > best_adjusted:
                 best_adjusted = adjusted
                 best_index = index
-        picked.append(remaining.pop(best_index))
-    return [fact for _, fact in picked]
+        picked_index = remaining.pop(best_index)
+        yield scored[picked_index][1]
+        picked_tokens = token_sets[picked_index]
+        for fact_index in remaining:
+            tokens = token_sets[fact_index]
+            similarity = len(tokens & picked_tokens) / len(tokens | picked_tokens) if tokens and picked_tokens else 0.0
+            penalties[fact_index] = max(penalties[fact_index], similarity)
 
 
 def order_facts_for_query(
@@ -277,9 +270,8 @@ def order_facts_for_query(
     relevance_weight: float = 0.5,
     diversity_weight: float = 0.0,
     idf: dict[str, float] | None = None,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Score by relevance+confidence, then diversify; used by search/injection."""
     scored = score_facts(facts, query, relevance_weight=relevance_weight, idf=idf)
-    if diversity_weight > 0.0:
-        return diversify(scored, similarity_weight=diversity_weight)
-    return [fact for _, fact in scored]
+    return diversify(scored, similarity_weight=diversity_weight, limit=limit)

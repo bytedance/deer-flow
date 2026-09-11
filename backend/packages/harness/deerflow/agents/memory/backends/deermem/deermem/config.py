@@ -71,12 +71,16 @@ class DeerMemConfig(BaseModel):
     )
     retrieval_adapter: str = Field(
         default="fts5",
-        description="Retrieval adapter factory: 'fts5' (default), an empty string to disable, or a dotted factory receiving DeerMemConfig and implementing RetrievalPort.",
+        description=(
+            "Retrieval adapter factory: 'fts5' (default), an empty string to disable, or a dotted factory receiving DeerMemConfig and implementing RetrievalPort. "
+            "Search bypasses this adapter when retrieval_relevance_enabled is true; indexing remains configured."
+        ),
     )
     retrieval_relevance_enabled: bool = Field(
         default=False,
         description=(
             "Opt-in relevance-aware retrieval (issue #4495). When true, "
+            "search bypasses retrieval_adapter (including FTS5 and custom factories); "
             "memory_search ranks all facts in scope by deterministic lexical "
             "relevance combined with confidence, related facts are returned "
             "even without a literal substring match, and prompt injection "

@@ -279,6 +279,16 @@ runs by default.
 - `retrieval_relevance_enabled: true` opts in. `memory_search` then ranks every
   fact in scope (not only literal substring matches) and prompt injection ranks
   facts against the current query before the token-budget selection.
+  This takes precedence over `retrieval_adapter`: search bypasses FTS5/custom
+  retrieval, while adapter indexing and warm-up remain configured.
+- Ranking reads at most 4096 characters and 128 tokens per query/fact. The
+  no-jieba fallback emits both Latin words and CJK bigrams, including mixed text.
+  `DeerMem.warm()` initializes optional jieba before serving requests, even
+  with character-based token counting. Invalid/missing confidence defaults to 0.
+- Search stops MMR after `top_k` picks. Injection diversifies guaranteed and
+  regular pools independently and lazily, stopping when each token budget is
+  exhausted; it never truncates candidates before the guaranteed partition.
+  MMR caches token sets and incrementally updates maximum similarity penalties.
 - `retrieval_relevance_weight` blends lexical relevance with confidence;
   `retrieval_diversity_weight` demotes near-duplicate facts. Defaults preserve
   the legacy confidence-only ordering exactly.
