@@ -142,6 +142,11 @@ class SubagentResult:
             execution. ``None`` when the delegation carried no acceptance
             criteria, the run ended before streaming, or harvesting failed;
             an empty list means the stream carried no bash-family tool calls.
+        execution_teardown_event: Set only after the isolated-loop
+            ``run_with_timeout()`` wrapper has fully returned (its own
+            ``finally``, after ``_aexecute`` teardown). Terminal
+            ``status``/``completed_at`` are published earlier and must not be
+            treated as teardown confirmation.
     """
 
     task_id: str
@@ -160,6 +165,7 @@ class SubagentResult:
     tool_receipts: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     bash_executions: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    execution_teardown_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self):
@@ -252,6 +258,14 @@ class SubagentResult:
             self.completed_at = completed_at or _utcnow()
             self.status = status
             return True
+
+    def mark_execution_teardown_complete(self) -> None:
+        """Publish that isolated-loop execution teardown has finished."""
+        self.execution_teardown_event.set()
+
+    def is_execution_teardown_complete(self) -> bool:
+        """True after ``run_with_timeout()`` has fully returned."""
+        return self.execution_teardown_event.is_set()
 
 
 def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
@@ -1824,6 +1838,11 @@ class SubagentExecutor:
                 logger.exception("[trace=%s] Subagent %s async execution failed", self.trace_id, self.config.name)
                 result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
                 return result
+            finally:
+                # After ``_aexecute`` (including its sandbox/holder ``finally``)
+                # and this wrapper's timeout/cancel handlers. Terminal status
+                # alone is published earlier and is not teardown.
+                result.mark_execution_teardown_complete()
 
         try:
             execution_future = _submit_to_isolated_loop_in_context(parent_context, run_with_timeout)
@@ -1841,6 +1860,10 @@ class SubagentExecutor:
             _background_futures[execution_id] = execution_future
 
         def forget_future(_future: Future[SubagentResult]) -> None:
+            # The future completing is the same moment ``run_with_timeout``
+            # has returned; keep the sticky event set if the wrapper's
+            # ``finally`` was skipped by an unexpected submit/callback path.
+            result.mark_execution_teardown_complete()
             with _background_tasks_lock:
                 _background_futures.pop(execution_id, None)
 
