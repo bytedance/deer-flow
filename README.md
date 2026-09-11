@@ -1647,7 +1647,7 @@ blocking IO that may run on the backend event loop, prints a concise summary,
 and writes complete JSON findings to `.deer-flow/blocking-io-findings.json`.
 The JSON includes compact review records with `priority`, `location`,
 `blocking_call`, `event_loop_exposure`, `reason`, and `code`.
-Gateway artifact serving now forces active web content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
+Gateway artifact serving now forces active web content types (`text/html` and XML documents such as `.xml`, `.xhtml`, and `.svg`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
 
 Frontend route asset budgets can be checked with `cd frontend && pnpm
 perf:check`. The command measures `/login` from a normal production build, then

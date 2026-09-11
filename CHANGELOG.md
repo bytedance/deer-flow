@@ -1468,6 +1468,16 @@ This section accumulates work toward the **2.1.0** milestone
   environment — inheriting the host ssh-agent socket lets sandboxed code
   sign and authenticate with every key the agent holds — unless a skill
   explicitly declares it via required-secrets. ([#5145])
+- **artifacts:** Serve XML artifacts as download attachments like HTML and
+  SVG. `GET /api/threads/{id}/artifacts/{path}` rendered `.xml`, `.xsl`, and
+  `.rdf` files — and `+xml` types such as `.rss` wherever the host MIME
+  database maps them — inline in the application origin, so an XML document
+  with an XHTML-namespaced `<script>`, written by a prompt-injected agent and
+  opened from a chat link, could call the API with the viewer's session.
+  Every XML MIME type (`text/xml`, `application/xml`, `text/xsl`, any `+xml`
+  subtype) is now treated as active content, including `.skill` archive
+  members; the artifacts panel keeps previewing XML through its ranged fetch.
+  ([#5353])
 
 ### Documentation
 
@@ -2699,3 +2709,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5284]: https://github.com/bytedance/deer-flow/pull/5284
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
 [#5321]: https://github.com/bytedance/deer-flow/pull/5321
+[#5353]: https://github.com/bytedance/deer-flow/pull/5353
