@@ -108,7 +108,9 @@ function TruncatedBadge({
 }
 
 export function AgentCard({ agent }: AgentCardProps) {
-  const displayName = agent.display_name?.length ? agent.display_name : agent.name;
+  const displayName = agent.display_name?.length
+    ? agent.display_name
+    : agent.name;
   const { t } = useI18n();
   const router = useRouter();
   const deleteAgent = useDeleteAgent();
