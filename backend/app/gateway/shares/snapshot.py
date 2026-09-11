@@ -50,6 +50,10 @@ _THINK_CLOSE_PREFIX_RE = re.compile(r"</think", re.IGNORECASE)
 # not fences, and every block-interrupting line ends a paragraph (an
 # inline span can never reach across one).
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+# remarkMath flow-math opener: up to three spaces then ``$$``. Display math
+# is its own block in the shipped renderer, so it interrupts paragraphs the
+# same way fences do — inline code spans must never pair across it.
+_DISPLAY_MATH_OPEN_RE = re.compile(r"^ {0,3}\$\$")
 _HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]|$)")
 _BLOCKQUOTE_RE = re.compile(r"^ {0,3}>")
 _QUOTE_DEPTH_MARKER_RE = re.compile(r" {0,3}>[ \t]?")
@@ -923,6 +927,7 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
     container_html_requires_quote = False
     indented_start: int | None = None
     indented_end = 0
+    math_open = False
     # An indented code block may open only where no paragraph is open —
     # after a blank line, the document start, or a leaf block (heading,
     # fence close, HTML block end, thematic break, setext underline) — and
@@ -996,12 +1001,31 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
                     container_html_kind = None
                     indented_eligible = True
                 continue
+        if math_open:
+            # Display math runs to a line carrying the closing ``$$``;
+            # content inside is math (never code) and never bridges spans.
+            if "$$" in content:
+                math_open = False
+                indented_eligible = True
+            continue
         if indented_start is not None:
             if _is_commonmark_blank(content) or _indent_columns(content) >= 4:
                 indented_end = line_end
                 indented_eligible = _is_commonmark_blank(content)
                 continue
             close_indented()
+        math_match = _DISPLAY_MATH_OPEN_RE.match(content)
+        if math_match is not None:
+            # remarkMath renders the opener as its own flow block: the
+            # paragraph ends here, so unmatched backticks cannot pair across
+            # the math — flush exactly like the other block boundaries and
+            # protect nothing inside the math itself.
+            close_indented()
+            flush_segment()
+            if content.find("$$", math_match.end()) == -1:
+                math_open = True
+            indented_eligible = True
+            continue
         if _is_commonmark_blank(content):
             flush_segment()
             indented_eligible = True
@@ -1416,7 +1440,7 @@ class _SparseSpans:
         return (index + shrink, index + shrink)
 
 
-def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _SparseSpans]:
+def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _SparseSpans] | None:
     """Decode entities (and optionally percent) to a fixpoint, sparsely.
 
     Mirrors ``_collapse_separators_once``'s entity/percent branches without
@@ -1426,9 +1450,18 @@ def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _Sp
     exceptions. Backslash and slash-run handling stay out — callers gate on
     ``\\`` and foldable ``//`` before entering and fall back to the
     materialized path when the decoded shadow re-introduces them.
+
+    Returns ``None`` when a second decode pass changed the text: the sparse
+    map composes decode *boundaries* across passes but not positions an
+    earlier pass decoded and later passes left alone (a standalone
+    ``&amp;`` survivor), so every position after such a decode would
+    under-map and cut private-reference redactions short. That multi-pass
+    shape is rare and adversarial — callers take the materialized path for
+    it; the sparse fast path only has to be exact for the common one.
     """
     current = text
     spans = _SparseSpans(len(text), ())
+    passes_that_changed = 0
     for _ in range(_COLLAPSE_MAX_PASSES):
         if _HTML_ENTITY_RE.search(current) is None and not (decode_percent and "%" in current):
             break
@@ -1470,10 +1503,13 @@ def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _Sp
             i += 1
         if not changed:
             break
+        passes_that_changed += 1
         out.append(current[cursor:])
         new_length = out_index + (n - cursor)
         current = "".join(out)
         spans = _SparseSpans(new_length, decodes)
+    if passes_that_changed > 1:
+        return None
     return current, spans
 
 
@@ -1530,11 +1566,14 @@ def _collapse_separators_with_offsets(text: str, *, resolve_dots: bool = True) -
         # reference to a fixpoint without a per-character span list (round-16:
         # one trailing ``&amp;`` on a 500 kB message still peaked ~206 MiB
         # through two materialized maps). Fall back to the materialized path
-        # only when the decoded shadow still needs backslash, slash-run, or
-        # dot processing.
-        normalized, sparse = _decode_escapes_sparse(text, decode_percent=False)
-        if not _needs_materialized_collapse(normalized, resolve_dots=resolve_dots):
-            return normalized, sparse
+        # when the decode needed multiple changing passes (surviving
+        # earlier-pass positions under-map the sparse map) or when the
+        # decoded shadow still needs backslash, slash-run, or dot processing.
+        sparse_result = _decode_escapes_sparse(text, decode_percent=False)
+        if sparse_result is not None:
+            normalized, sparse = sparse_result
+            if not _needs_materialized_collapse(normalized, resolve_dots=resolve_dots):
+                return normalized, sparse
     if resolve_dots:
         normalized, spans = _remove_dot_segments_once(text, [(index, index) for index in range(len(text))])
     else:
@@ -1578,11 +1617,15 @@ def _normalize_workspace_path_with_offsets(text: str, *, resolve_dots: bool) -> 
         return normalized, spans
     if "\\" not in text and _FOLDABLE_SLASH_RUN_RE.search(text) is None and ("%" in text or ("&" in text and _HTML_ENTITY_RE.search(text) is not None)):
         # Entity/percent-only path: decode to a fixpoint with a sparse offset
-        # map (round-16), falling back when the decoded shadow still needs
-        # backslash, slash-run, or dot processing.
-        normalized, sparse = _decode_escapes_sparse(text, decode_percent=True)
-        if not _needs_materialized_collapse(normalized, resolve_dots=resolve_dots):
-            return normalized, sparse
+        # map (round-16), falling back when the decode needed multiple
+        # changing passes (surviving earlier-pass positions under-map the
+        # sparse map) or when the decoded shadow still needs backslash,
+        # slash-run, or dot processing.
+        sparse_result = _decode_escapes_sparse(text, decode_percent=True)
+        if sparse_result is not None:
+            normalized, sparse = sparse_result
+            if not _needs_materialized_collapse(normalized, resolve_dots=resolve_dots):
+                return normalized, sparse
     normalized = text
     spans = [(index, index) for index in range(len(text))]
     for _ in range(_COLLAPSE_MAX_PASSES):

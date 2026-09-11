@@ -18,8 +18,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.bootstrap import _MIGRATIONS_DIR
 
-pytestmark = pytest.mark.asyncio
-
 _SCRIPT_LOCATION = str(_MIGRATIONS_DIR)
 _REVISION = "0023_conversation_share_quotas"
 _PREVIOUS = "0022_conversation_shares"
@@ -52,6 +50,7 @@ async def _inspect(engine, fn):
         return await conn.run_sync(fn)
 
 
+@pytest.mark.asyncio
 async def test_quota_migration_upgrades_backfills_and_downgrades(tmp_path: Path) -> None:
     db_path = tmp_path / "share-quota-migration.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
@@ -95,6 +94,38 @@ async def test_quota_migration_upgrades_backfills_and_downgrades(tmp_path: Path)
         # Upgrade again recreates them (idempotent round trip).
         await asyncio.to_thread(alembic_command.upgrade, cfg, "head")
         assert "conversation_share_quotas" in await _inspect(engine, _table_names)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_backfill_runs_on_migration_retry_after_interrupted_upgrade(tmp_path: Path) -> None:
+    """An upgrade interrupted after table creation but before completion
+    leaves the table in place with the revision unstamped; the retry must
+    backfill anyway instead of skipping permanently."""
+    db_path = tmp_path / "share-quota-retry.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    cfg = _alembic_config(f"sqlite+aiosqlite:///{db_path}")
+    try:
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _PREVIOUS)
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "INSERT INTO conversation_shares (id, thread_id, owner_user_id, token_hash, title,"
+                    " snapshot_version, snapshot_json, source_last_seq, expires_at, revoked_at, created_at, updated_at)"
+                    " VALUES ('r1', 't1', 'owner-retry', 'hr1', 'x', 1, '{}', NULL, NULL, NULL, '2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+                )
+            )
+            # Simulate the interrupted upgrade: the quota table exists but
+            # was never backfilled.
+            await conn.execute(sa.text("CREATE TABLE conversation_share_quotas (owner_user_id VARCHAR(64) PRIMARY KEY NOT NULL, stored_shares INTEGER NOT NULL)"))
+
+        await asyncio.to_thread(alembic_command.upgrade, cfg, "head")
+
+        async with engine.connect() as conn:
+            rows = (await conn.execute(sa.text("SELECT owner_user_id, stored_shares FROM conversation_share_quotas"))).fetchall()
+            counters = {row[0]: row[1] for row in rows}
+        assert counters == {"owner-retry": 1}
     finally:
         await engine.dispose()
 

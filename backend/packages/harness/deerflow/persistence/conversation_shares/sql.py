@@ -170,8 +170,18 @@ class ConversationShareRepository:
                     expires_at = expires_at.replace(tzinfo=UTC)
                 if expires_at <= datetime.now(UTC):
                     return None
-            row = (await session.execute(select(ConversationShareRow).where(ConversationShareRow.id == probe.id))).scalar_one()
-            return self._row_to_dict(row)
+            # Re-apply liveness at the fetch: a share revoked or removed
+            # between the probe and this statement resolves as dead (the
+            # indistinguishable-None contract), never as an error.
+            row = (
+                await session.execute(
+                    select(ConversationShareRow).where(
+                        ConversationShareRow.id == probe.id,
+                        ConversationShareRow.revoked_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            return self._row_to_dict(row) if row is not None else None
 
     async def get(self, share_id: str) -> dict[str, Any] | None:
         """Return one share row by id regardless of lifecycle state."""

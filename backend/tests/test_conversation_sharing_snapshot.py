@@ -230,6 +230,38 @@ async def test_neutralize_backslash_separators():
     assert neutralize("mnt\\user-data\\report.pdf") == "[private artifact omitted]"
 
 
+async def test_multipass_entity_decodes_do_not_leak_reference_tails():
+    """Surviving pass-1 decodes ahead of a reference must not shift the cut.
+
+    The sparse offset map composes decode boundaries but not positions that
+    an earlier pass decoded and later passes left alone, so a standalone
+    ``&amp;`` decoy ahead of a doubly-encoded private reference under-mapped
+    every later position and cut the redaction short, publishing the
+    reference's tail (willem's 14:26 repro). The multi-pass shape now takes
+    the materialized path.
+    """
+    neutralize = _neutralize_private_references
+    for decoy_count in (2, 6, 10):
+        decoys = " ".join(["x&amp;"] * decoy_count)
+        content = neutralize(f"{decoys} &amp;#47;api&amp;#47;threads&amp;#47;uploads&amp;#47;SECRETqwertyuiop1234567890")
+        assert "SECRET" not in content, decoy_count
+        assert content.count("[private artifact omitted]") == 1
+        # The decoys themselves are public and keep their bytes.
+        assert "x&amp;" in content
+
+
+async def test_workspace_route_multipass_decodes_do_not_leak_tails():
+    """The workspace-path sparse branch inherits the same fix: the route id
+    never survives a multi-pass decode anchored behind decoys — the cut
+    lands on the full original bytes, decoys stay public."""
+    neutralize = _neutralize_private_references
+    decoys = " ".join(["x&amp;"] * 6)
+    content = neutralize(f"{decoys} &amp;#47;workspace&amp;#47;chats&amp;#47;thread-SECRETqwertyuiop")
+    assert "thread-SECRET" not in content
+    assert content.count("[private artifact omitted]") == 1
+    assert "x&amp;" in content
+
+
 async def test_neutralize_separator_runs():
     """Runs of raw forward slashes classify like their escaped forms.
 
@@ -1803,6 +1835,31 @@ def test_strip_preserves_code_in_heading_and_selfclosed_script_fence():
     assert "in-heading" in strip("# `x<think>in-heading</think>x`")
 
 
+def test_display_math_block_flushes_inline_code_scanning():
+    """A `$$` display-math block is its own flow block under remarkMath.
+
+    Unmatched backticks on either side must not pair across it, so the
+    reasoning between them is stripped rather than preserved as code
+    (same contract as the empty-ATX-heading boundary above).
+    """
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    out = strip("a `\n$$\nx\n$$\n<think>secret-math</think> ` tail")
+    assert "secret-math" not in out
+    assert "a `" in out and "tail" in out
+
+    # Single-line math closes on the same line and breaks pairing too.
+    out2 = strip("a `\n$$x$$\n<think>secret-inline-math</think> ` tail")
+    assert "secret-inline-math" not in out2
+
+    # A real code span on one line is untouched; math content itself is not
+    # code and keeps none of the reasoning.
+    out3 = strip("`ok <think>in-span</think> ok`\n$$\nmath\n$$")
+    assert "in-span" in out3
+
+
 def test_empty_atx_heading_interrupts_inline_code_before_reasoning():
     """An empty ATX heading is a block boundary under CommonMark 4.2."""
     from app.gateway.shares.snapshot import (
@@ -2592,10 +2649,16 @@ def test_sparse_escape_decode_matches_materialized_collapse():
 
     for text in corpus:
         for decode_percent in (False, True):
-            shadow, sparse = snapshot_module._decode_escapes_sparse(
+            sparse_result = snapshot_module._decode_escapes_sparse(
                 text,
                 decode_percent=decode_percent,
             )
+            if sparse_result is None:
+                # Multi-pass decode: the sparse map composes boundaries but
+                # not surviving earlier-pass positions, so callers take the
+                # materialized path by design (round-19).
+                continue
+            shadow, sparse = sparse_result
             ref_shadow, ref_spans = reference(text, decode_percent)
             if snapshot_module._needs_materialized_collapse(shadow, resolve_dots=False):
                 # The caller falls back to the materialized path; the sparse

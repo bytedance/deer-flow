@@ -251,6 +251,39 @@ async def test_expired_token_resolution_never_materializes_snapshot(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_row_deleted_between_probe_and_fetch_resolves_dead(tmp_path):
+    """A row removed between the liveness probe and the full fetch resolves
+    to None, never raises.
+
+    The public resolve is anonymous and hot: a future retention sweep that
+    deletes rows (the open storage thread) must find this path returning
+    the same indistinguishable "dead share" as any other unknown token,
+    not a NoResultFound 500.
+    """
+    repo = await _make_repo(tmp_path)
+    created = await _create_share(repo, token_hash="tok-vanishing")
+
+    session_factory = get_session_factory()
+    engine = session_factory.kw["bind"]
+
+    def _delete_after_probe(conn, cursor, statement, parameters, context, executemany):
+        if "expires_at" in statement and "snapshot_json" not in statement:
+            # The probe just ran; delete the row before the full fetch.
+            import sqlite3
+
+            raw = sqlite3.connect(engine.url.database)
+            raw.execute("DELETE FROM conversation_shares WHERE id = ?", (created["id"],))
+            raw.commit()
+            raw.close()
+
+    event.listen(engine.sync_engine, "after_cursor_execute", _delete_after_probe)
+    try:
+        assert await repo.get_active_by_token_hash("tok-vanishing") is None
+    finally:
+        event.remove(engine.sync_engine, "after_cursor_execute", _delete_after_probe)
+
+
+@pytest.mark.asyncio
 async def test_token_hash_unique_constraint(tmp_path):
     repo = await _make_repo(tmp_path)
     await _create_share(repo, token_hash="tok-dup")

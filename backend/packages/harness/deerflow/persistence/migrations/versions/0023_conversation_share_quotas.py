@@ -27,10 +27,14 @@ def upgrade() -> None:
             sa.Column("stored_shares", sa.Integer(), nullable=False),
             sa.PrimaryKeyConstraint("owner_user_id"),
         )
-        # Backfill the admission counter from rows that predate it, so an
-        # upgraded deployment starts with a quota consistent with its
-        # stored shares (PK conflict makes a re-run idempotent).
-        op.execute("INSERT INTO conversation_share_quotas (owner_user_id, stored_shares) SELECT owner_user_id, COUNT(*) FROM conversation_shares GROUP BY owner_user_id")
+    # Backfill the admission counter from rows that predate it — and keep
+    # running it on migration retries: an interrupted upgrade can leave the
+    # table created but the revision unstamped, and a backfill that only ran
+    # with the table's creation would skip permanently, letting affected
+    # owners exceed the cap by their legacy row count. ON CONFLICT DO
+    # NOTHING keeps owners whose counter is already live (a completed
+    # backfill or post-migration admissions) untouched.
+    op.execute("INSERT INTO conversation_share_quotas (owner_user_id, stored_shares) SELECT owner_user_id, COUNT(*) FROM conversation_shares GROUP BY owner_user_id ON CONFLICT (owner_user_id) DO NOTHING")
     indexes = {index["name"] for index in inspector.get_indexes("conversation_shares")}
     if "ix_conversation_shares_owner_user_id" not in indexes:
         # The per-owner quota count runs on every creation.
