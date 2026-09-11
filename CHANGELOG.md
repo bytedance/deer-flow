@@ -214,6 +214,16 @@ This section accumulates work toward the **2.1.0** milestone
   subagent's graph state, making `list_uploaded_files` eligible for normal
   tool-policy filtering (durable `batch_task` workers keep it disabled).
   ([#5170])
+- **agents:** The read-before-write gate now elides the dead payload of a
+  blocked `write_file` / `str_replace` call (`content`, `old_str`, `new_str`)
+  from model-bound requests. A blocked call never ran and must be re-issued
+  after a re-read, so the original arguments only cost context; stored
+  history, receipts, and the run journal keep them. Blocked results are
+  paired with call occurrences (tool-call ids may repeat across turns), and
+  a request whose history was rewritten drops OpenAI `resp_` response ids so
+  `use_previous_response_id` chaining cannot resume the original server-side
+  history. Controlled by `read_before_write.elide_blocked_payloads` (default
+  on) and `read_before_write.elide_min_chars` (default 2000).
 
 #### Memory
 

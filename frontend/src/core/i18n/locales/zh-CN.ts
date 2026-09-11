@@ -1270,6 +1270,59 @@ export const zhCN: Translations = {
       },
     },
     skills: {
+      exportPrevious: "上 50 项",
+      exportNotices: {
+        skill_export_yaml_alias:
+          "导出暂不支持 YAML 别名，请在 SKILL.md 中改为明确的值。",
+        skill_export_yaml_complexity:
+          "YAML 声明的嵌套层级或结构复杂度超出导出限制。",
+        skill_export_invalid_declaration:
+          "已忽略格式无效的凭据声明，请检查 SKILL.md。",
+        skill_export_link: "外链文件或目录暂不支持导出。",
+        skill_export_unsupported_node:
+          "仅支持普通文件和目录；硬链接和特殊文件无法导出。",
+        skill_export_invalid_path: "此路径不符合跨平台要求，或与其他路径重名。",
+        skill_export_nested_skill: "安装器不接受嵌套的 SKILL.md 文件。",
+        skill_export_executable_binary: "安装器不接受可执行二进制文件。",
+        skill_export_invalid_frontmatter:
+          "SKILL.md 的声明必须有效，且名称须与技能目录一致。",
+        skill_export_sensitive_filename:
+          "此文件名可能对应本地凭据或代码仓库元数据。",
+        skill_export_platform_declarations:
+          "请在目标环境重新配置已声明的工具和凭据。",
+      },
+      exportSkill: "导出",
+      exportTitle: "导出技能",
+      exportDescription: "将当前已保存的技能下载为 .skill 文件。",
+      exportLoading: "正在准备文件清单…",
+      exportFiles: "文件",
+      exportDirectories: "目录",
+      exportSize: "未压缩体积",
+      exportContents: "包内文件",
+      exportMore: "下 50 项",
+      exportRequirements: "已声明的环境要求",
+      exportCompatibility: "运行环境",
+      exportTools: "允许的工具",
+      exportSecrets: "凭据名称",
+      exportOptional: "可选",
+      exportRequired: "必需",
+      exportUndeclared: "未声明",
+      exportScope:
+        "包含此技能目录内的全部文件。账号配置、对话和目录外的历史不会导出；目标环境需重新配置工具与凭据。",
+      exportWarnings: "请检查包内文件",
+      exportWarningDescription:
+        "以下提示来自文件名和声明。写在包内文件中的秘密也会原样导出；此操作不进行安全扫描。",
+      exportBlocked: "此技能包暂时无法导出",
+      exportDownload: "下载 .skill",
+      exportDownloading: "正在准备下载…",
+      exportHandedOff: "文件已交给浏览器下载。",
+      exportChanged: "技能已修改，请刷新文件清单后下载。",
+      exportRefresh: "刷新文件清单",
+      exportFailed: "导出失败，请重试。",
+      exportBusy: "当前导出任务已满，请稍后重试。",
+      exportTimeout: "准备技能包超时，请稍后重试。",
+      exportLimit: "技能包超出导出的大小、数量或路径限制。",
+      exportNotFound: "此自定义技能已不存在，请刷新技能列表。",
       title: "技能",
       description: "管理 Agent Skill 配置和启用状态。",
       createSkill: "新建技能",
