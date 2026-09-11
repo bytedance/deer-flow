@@ -11,6 +11,7 @@ import os
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 import pytest_asyncio
@@ -32,10 +33,20 @@ from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 pytestmark = pytest.mark.asyncio
 
 
+def _asyncpg_url(url: str | None) -> str | None:
+    """CI passes a sync ``postgresql://...?sslmode=disable`` URL; use asyncpg and drop libpq-only keys."""
+    if not url:
+        return url
+    parts = urlsplit(url)
+    scheme = "postgresql+asyncpg" if parts.scheme in {"postgres", "postgresql"} else parts.scheme
+    query = urlencode([(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key not in {"sslmode", "channel_binding"}])
+    return urlunsplit(parts._replace(scheme=scheme, query=query))
+
+
 @pytest_asyncio.fixture(params=["sqlite", "postgres-single", "postgres-multi"])
 async def occurrence_databases(request, tmp_path):
     backend = request.param
-    postgres_uri = os.environ.get("TEST_POSTGRES_URI")
+    postgres_uri = _asyncpg_url(os.environ.get("TEST_POSTGRES_URI"))
     if backend != "sqlite" and not postgres_uri:
         pytest.skip("TEST_POSTGRES_URI is not set")
     schema = "scheduler_order_" + uuid.uuid4().hex

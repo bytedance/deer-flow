@@ -35,8 +35,11 @@ async def occurrence_factories(request, tmp_path):
         if not uri:
             pytest.skip("requires TEST_POSTGRES_URI (real Postgres for occurrence ordering)")
         parts = urlsplit(uri)
+        # CI passes a sync ``postgresql://...?sslmode=disable`` URL; the async
+        # engine needs the asyncpg driver and rejects libpq-only query keys.
+        scheme = "postgresql+asyncpg" if parts.scheme in {"postgres", "postgresql"} else parts.scheme
         query = urlencode([(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key not in {"sslmode", "channel_binding"}])
-        uri = urlunsplit(parts._replace(query=query))
+        uri = urlunsplit(parts._replace(scheme=scheme, query=query))
         schema = f"occurrence_{uuid.uuid4().hex}"
         options = {"connect_args": build_asyncpg_connect_args(schema)}
     else:
