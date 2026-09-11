@@ -111,11 +111,19 @@ async def test_cancelled_policy_sync_keeps_lease_until_sync_worker_finishes(
     provider = _BlockingSkillSyncProvider()
     middleware = SandboxMiddleware(lazy_init=True, available_skills={"allowed"})
     projection = object()
+    release_entry_sync_finished: list[bool] = []
+    original_release_sandbox_async = middleware._release_sandbox_async
+
+    async def _record_release_entry(sandbox_id: str, *, owner_id: str | None) -> None:
+        release_entry_sync_finished.append(provider.sync_finished.is_set())
+        await original_release_sandbox_async(sandbox_id, owner_id=owner_id)
+
     monkeypatch.setattr(
         middleware,
         "_prepare_agent_skill_projection",
         lambda *_args, **_kwargs: projection,
     )
+    monkeypatch.setattr(middleware, "_release_sandbox_async", _record_release_entry)
     set_sandbox_provider(provider)
     task = asyncio.create_task(
         middleware.abefore_agent(
@@ -130,6 +138,7 @@ async def test_cancelled_policy_sync_keeps_lease_until_sync_worker_finishes(
         await asyncio.sleep(0)
 
         assert not task.done()
+        assert release_entry_sync_finished == []
         assert provider.release_calls == []
         assert not provider.sync_finished.is_set()
 
@@ -137,6 +146,7 @@ async def test_cancelled_policy_sync_keeps_lease_until_sync_worker_finishes(
         await asyncio.sleep(0)
 
         assert not task.done()
+        assert release_entry_sync_finished == []
         assert provider.release_calls == []
         assert not provider.sync_finished.is_set()
 
@@ -145,6 +155,7 @@ async def test_cancelled_policy_sync_keeps_lease_until_sync_worker_finishes(
             await task
 
         assert provider.sync_finished.is_set()
+        assert release_entry_sync_finished == [True]
         assert provider.release_calls == [provider.sandbox.id]
     finally:
         provider.allow_sync_finish.set()
