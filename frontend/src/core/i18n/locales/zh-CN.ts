@@ -38,6 +38,7 @@ export const zhCN: Translations = {
     custom: "自定义",
     notAvailableInDemoMode: "在演示模式下不可用",
     loading: "加载中...",
+    error: "错误：",
     version: "版本",
     lastUpdated: "最后更新",
     code: "代码",
@@ -425,6 +426,7 @@ export const zhCN: Translations = {
     scheduleType: {
       cron: "重复",
       once: "单次",
+      interval: "间隔",
     },
     preset: {
       label: "重复方式",
@@ -443,6 +445,11 @@ export const zhCN: Translations = {
       cronPlaceholder: "0 9 * * *",
       runAt: "运行时间",
       timezone: "时区",
+      intervalAmount: "每",
+      intervalUnitSeconds: "秒",
+      intervalUnitMinutes: "分钟",
+      intervalUnitHours: "小时",
+      intervalMinHint: "最短 60 秒（默认服务端下限）。",
     },
     weekdays: {
       mon: "周一",
@@ -459,6 +466,8 @@ export const zhCN: Translations = {
       title: "创建定时任务",
       taskTitle: "任务标题",
       prompt: "提示词",
+      agent: "Agent",
+      leadAgent: "默认 Agent（lead_agent）",
       submit: "创建",
       fillRequired: "请填写所有必填项",
     },
@@ -479,9 +488,11 @@ export const zhCN: Translations = {
       allTypes: "全部类型",
       cron: "定时",
       once: "单次",
+      interval: "间隔",
     },
     detail: {
       contextMode: "上下文模式",
+      agent: "Agent",
       thread: "线程",
       lastThread: "上个线程",
       schedule: "调度",

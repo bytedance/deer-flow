@@ -58,12 +58,15 @@ class Article:
         return content
 
 
+_BASE_TAG_RE = re.compile(r"<base", re.IGNORECASE)
+
+
 def _resolve_html_urls(html: str, url: str) -> str:
     """Resolve destinations before extraction can discard the document's base tag."""
-    # Match the HTML5 tree construction used by Readability.js/jsdom.
-    soup = BeautifulSoup(html, "html5lib")
+    # A base element requires a literal start-tag prefix. False positives in
+    # comments or text elements still go through HTML5 tree construction.
+    base = BeautifulSoup(html, "html5lib").find("base", href=True) if _BASE_TAG_RE.search(html) else None
     base_url = url
-    base = soup.find("base", href=True)
     if base is not None:
         try:
             candidate = urljoin(url, str(base["href"]).strip())

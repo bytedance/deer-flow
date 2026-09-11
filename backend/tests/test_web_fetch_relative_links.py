@@ -169,3 +169,43 @@ def test_textarea_with_script_example_does_not_hide_following_links():
     example = '<textarea><script><a href="/literal"></textarea>'
     html = example + '<a href="../next">Next</a>'
     assert _resolve_html_urls(html, PAGE_URL) == example + '<a href="https://example.com/next">Next</a>'
+
+
+def test_pages_without_base_skip_html5_tree_construction(monkeypatch):
+    from deerflow.utils import readability
+
+    def unexpected_parse(*args, **kwargs):
+        pytest.fail("A page without a base prefix must not build an HTML5 tree")
+
+    monkeypatch.setattr(readability, "BeautifulSoup", unexpected_parse)
+    html = '<p>Guide</p><a href="../next">Next</a>'
+    assert readability._resolve_html_urls(html, PAGE_URL) == '<p>Guide</p><a href="https://example.com/next">Next</a>'
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        '<BaSe href="https://cdn.example.com/">',
+        '<!-- <base href="/ignored/"> --><BASE href="https://cdn.example.com/">',
+    ],
+)
+def test_base_precheck_retains_case_insensitive_tree_selection(head):
+    from deerflow.utils.readability import _resolve_html_urls
+
+    html = _article('<a href="next">Next</a>', head=head)
+    assert '<a href="https://cdn.example.com/next">Next</a>' in _resolve_html_urls(html, PAGE_URL)
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        '<!-- <base href="/ignored/"> -->',
+        """<script>const sample = '<base href="/ignored/">';</script>""",
+        '<title>Example &lt;base href="/ignored/"&gt;</title>',
+    ],
+)
+def test_base_precheck_false_positives_do_not_override_page_url(head):
+    from deerflow.utils.readability import _resolve_html_urls
+
+    html = _article('<a href="../next">Next</a>', head=head)
+    assert '<a href="https://example.com/next">Next</a>' in _resolve_html_urls(html, PAGE_URL)
