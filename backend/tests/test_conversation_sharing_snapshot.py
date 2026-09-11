@@ -1835,6 +1835,30 @@ def test_strip_preserves_code_in_heading_and_selfclosed_script_fence():
     assert "in-heading" in strip("# `x<think>in-heading</think>x`")
 
 
+def test_midline_dollars_do_not_close_display_math():
+    """Only a standalone dollar run closes flow math — a mid-line ``$$`` is
+    math content, not a fence, exactly as the renderer keeps the block open.
+
+    The eager close used to let a ``` inside the still-open math open a code
+    fence here, protecting (and publishing) reasoning the renderer serves as
+    prose after the real math close (bot's 09-11 repro).
+    """
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    out = strip("$$\nx $$ y\n```\n$$\n<think>secret-midline</think>\n```")
+    assert "secret-midline" not in out
+    # The math itself keeps its content (no fence protection inside math).
+    assert "x $$ y" in out
+
+    # A longer opener needs a run at least its length to close: `$$` alone
+    # is content, the standalone `$$$` closes.
+    out2 = strip("$$$\nx $$ y\n$$\nstill math\n$$$\n<think>secret-long</think>")
+    assert "secret-long" not in out2
+    assert "still math" in out2
+
+
 def test_display_math_block_flushes_inline_code_scanning():
     """A `$$` display-math block is its own flow block under remarkMath.
 
@@ -1850,9 +1874,12 @@ def test_display_math_block_flushes_inline_code_scanning():
     assert "secret-math" not in out
     assert "a `" in out and "tail" in out
 
-    # Single-line math closes on the same line and breaks pairing too.
+    # A same-line ``$$x$$`` is NOT a flow fence (its meta carries a ``$``):
+    # the renderer parses it as inline math inside the paragraph, which does
+    # not interrupt code spans — the backticks pair and the span, reasoning
+    # included, is protected code.
     out2 = strip("a `\n$$x$$\n<think>secret-inline-math</think> ` tail")
-    assert "secret-inline-math" not in out2
+    assert "secret-inline-math" in out2
 
     # A real code span on one line is untouched; math content itself is not
     # code and keeps none of the reasoning.
@@ -2631,6 +2658,9 @@ def test_sparse_escape_decode_matches_materialized_collapse():
         "%2f%2fworkspace/chats/id",
         "&sol;workspace&sol;chats&sol;id",
         "&#37;2Fworkspace/chats/id",
+        "x&amp; x&amp; &amp;#47;api&amp;#47;threads&amp;#47;id",
+        "x&amp;amp; y&Tab; &#37;2Fmnt%2Fuser-data",
+        "x%2541 y&amp;#47;workspace&#47;chats&#47;id",
     ]
 
     def reference(text, decode_percent):
@@ -2647,18 +2677,17 @@ def test_sparse_escape_decode_matches_materialized_collapse():
             spans = [(spans[first][0], spans[last][1]) for first, last in collapsed_spans]
         return normalized, spans
 
+    # Multi-pass entries stay in: the sparse map composes levels (records
+    # carried across passes with shift deltas), so it must equal the
+    # materialized reference for every corpus shape — the None fallback of
+    # round-19 re-opened the per-character memory cost adversarial entity
+    # text could force (bot's 09-11 measurement).
     for text in corpus:
         for decode_percent in (False, True):
-            sparse_result = snapshot_module._decode_escapes_sparse(
+            shadow, sparse = snapshot_module._decode_escapes_sparse(
                 text,
                 decode_percent=decode_percent,
             )
-            if sparse_result is None:
-                # Multi-pass decode: the sparse map composes boundaries but
-                # not surviving earlier-pass positions, so callers take the
-                # materialized path by design (round-19).
-                continue
-            shadow, sparse = sparse_result
             ref_shadow, ref_spans = reference(text, decode_percent)
             if snapshot_module._needs_materialized_collapse(shadow, resolve_dots=False):
                 # The caller falls back to the materialized path; the sparse

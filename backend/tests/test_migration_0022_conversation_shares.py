@@ -17,8 +17,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.bootstrap import _MIGRATIONS_DIR
 
-pytestmark = pytest.mark.asyncio
-
 _SCRIPT_LOCATION = str(_MIGRATIONS_DIR)
 _REVISION = "0022_conversation_shares"
 _PREVIOUS = "0019_thread_incarnations"
@@ -73,6 +71,7 @@ async def _inspect(engine, fn):
         return await conn.run_sync(fn)
 
 
+@pytest.mark.asyncio
 async def test_share_migration_upgrade_downgrade_cycle(tmp_path: Path) -> None:
     db_path = tmp_path / "share-migration.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
