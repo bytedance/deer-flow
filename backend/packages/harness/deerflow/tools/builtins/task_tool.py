@@ -9,7 +9,7 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
@@ -27,6 +27,7 @@ from deerflow.subagents import SubagentExecutor, get_available_subagent_names, g
 from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.context_snapshot import ParentContextSnapshot
 from deerflow.subagents.executor import (
     SubagentStatus,
     cleanup_background_task,
@@ -651,6 +652,7 @@ async def task_tool(
     *,
     acceptance_criteria: list[str] | None = None,
     description: str = "",
+    context_mode: Literal["isolated", "snapshot"] = "isolated",
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -742,7 +744,16 @@ async def task_tool(
             ["file:../outputs/report.md non-empty"]. Omit for open-ended
             exploration where no crisp acceptance condition exists.
         description: Optional short (3-5 word) description of the task for logging/display.
+        context_mode: Defaults to isolated (only the delegated prompt). Choose
+            snapshot when relevant requirements or failed approaches are spread
+            across the parent conversation: it adds retained history and its
+            summary as background at dispatch time, increasing input tokens.
+            The child keeps its own role/tools; later parent turns are not synced.
+            Historical tool actions are not evidence of child completion.
     """
+    if context_mode not in {"isolated", "snapshot"}:
+        return _task_result_command(tool_call_id=tool_call_id, status="failed", error=f"Unknown context_mode '{context_mode}'. Use isolated or snapshot.")
+    context_snapshot = ParentContextSnapshot.from_state(runtime.state) if context_mode == "snapshot" and runtime is not None else None
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     allowed_subagents = metadata.get("allowed_subagents")
@@ -910,6 +921,8 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    if context_snapshot is not None:
+        executor_kwargs["context_snapshot"] = context_snapshot
     middleware_recorder = None
     parent_journal = parent_context.get("__run_journal")
     if parent_journal is not None:
