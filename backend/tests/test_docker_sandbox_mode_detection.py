@@ -316,3 +316,108 @@ require_compose_version
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert "too old" in result.stdout
+
+
+def test_aio_dood_socket_preflight_allows_windows_when_docker_reachable():
+    """Windows Git Bash without /var/run/docker.sock proceeds when Docker daemon is reachable."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        _seed_env_examples(tmp_root)
+        (tmp_root / "config.yaml").write_text(
+            "sandbox:\n  use: deerflow.community.aio_sandbox:AioSandboxProvider\n",
+            encoding="utf-8",
+        )
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+require_compose_version() {{ :; }}
+uname() {{ echo 'MINGW64_NT-10.0'; }}
+docker() {{
+  if [ "$1" = info ]; then
+    return 0
+  fi
+  return 0
+}}
+DEER_FLOW_DOCKER_SOCKET='/nonexistent/docker.sock'
+COMPOSE_CMD=echo
+start
+"""
+        result = subprocess.run(
+            [BASH_EXECUTABLE, "-lc", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "docker-compose.dood.yaml" in result.stdout
+
+
+def test_aio_dood_socket_preflight_rejects_missing_socket_on_posix():
+    """POSIX hosts without a physical socket file must fail fast."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        _seed_env_examples(tmp_root)
+        (tmp_root / "config.yaml").write_text(
+            "sandbox:\n  use: deerflow.community.aio_sandbox:AioSandboxProvider\n",
+            encoding="utf-8",
+        )
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+require_compose_version() {{ :; }}
+uname() {{ echo 'Linux'; }}
+DEER_FLOW_DOCKER_SOCKET='/nonexistent/docker.sock'
+COMPOSE_CMD=echo
+start
+"""
+        result = subprocess.run(
+            [BASH_EXECUTABLE, "-lc", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "Docker socket not found" in result.stdout
+
+
+def test_aio_dood_socket_preflight_rejects_windows_when_docker_unreachable():
+    """Windows Git Bash must fail if Docker daemon is not reachable."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        _seed_env_examples(tmp_root)
+        (tmp_root / "config.yaml").write_text(
+            "sandbox:\n  use: deerflow.community.aio_sandbox:AioSandboxProvider\n",
+            encoding="utf-8",
+        )
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+require_compose_version() {{ :; }}
+uname() {{ echo 'MINGW64_NT-10.0'; }}
+docker() {{
+  if [ "$1" = info ]; then
+    return 1
+  fi
+  return 0
+}}
+DEER_FLOW_DOCKER_SOCKET='/nonexistent/docker.sock'
+COMPOSE_CMD=echo
+start
+"""
+        result = subprocess.run(
+            [BASH_EXECUTABLE, "-lc", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "Docker socket not found" in result.stdout
