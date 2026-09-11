@@ -82,7 +82,9 @@ class DeerMemConfig(BaseModel):
             "user/agent scope AND category reaches "
             "fact_dedup_similarity_threshold merges into that fact instead "
             "of being appended: the existing id/content/createdAt are kept, "
-            "confidence is raised to max(old, new), and source is refreshed. "
+            "confidence is raised to max(old, new), and source is refreshed "
+            "only when confidence increases. Correction replacements and "
+            "proposed removal targets are excluded from near-dedup. "
             "False preserves the legacy behavior exactly."
         ),
     )
@@ -90,11 +92,7 @@ class DeerMemConfig(BaseModel):
         default=0.7,
         ge=0.5,
         le=1.0,
-        description=(
-            "Minimum bounded token-Jaccard similarity for the write-side "
-            "near-duplicate merge gate. Used only when fact_dedup_enabled "
-            "is true."
-        ),
+        description=("Minimum bounded token-Jaccard similarity for the write-side near-duplicate merge gate. Used only when fact_dedup_enabled is true."),
     )
     # ── Queue ────────────────────────────────────────────────────────────
     debounce_seconds: int = Field(

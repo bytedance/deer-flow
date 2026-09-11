@@ -1409,6 +1409,17 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 
 Most agents forget everything the moment a conversation ends. DeerFlow remembers.
 
+DeerMem can optionally suppress near-duplicate extracted facts with
+`memory.backend_config.fact_dedup_enabled: true` and
+`fact_dedup_similarity_threshold` (default `0.7`, range `0.5`–`1.0`).
+This local, deterministic word/CJK-bigram heuristic compares facts only within
+the same user, agent, and category; it is not semantic equivalence detection.
+It keeps the existing ID, text, and creation time, raises confidence to the
+maximum, and refreshes the source only when confidence increases. Explicit
+correction replacements and facts proposed for removal are protected from
+near-duplicate merging. A merge does not count as user confirmation. The gate
+is off by default and does not affect targeted fact updates.
+
 DeerFlow also includes an optional `openviking` memory backend. It uses the
 official `langchain-openviking` package to capture completed turns into stable
 OpenViking Sessions and recall memory for prompt injection while leaving

@@ -275,8 +275,18 @@ Keep these cross-component constraints in sync:
 write-side counterpart to relevance-aware retrieval (issue #5252): a proposed
 NEW fact that paraphrases an existing same-category fact merges into it
 (existing id/content/createdAt kept, confidence raised to the maximum, source
-refreshed) instead of being appended, and one `facts_merged_dedup` metric
+refreshed only when confidence increases) instead of being appended, and one `facts_merged_dedup` metric
 increment records the merge. The similarity is deterministic and network-free
 (bounded token-Jaccard via the updater-local tokenizer). Exact-content
 duplicates keep going through the existing content-key check; targeted updates
 by fact id are untouched.
+
+Paired replacement proposals bypass near-dedup so their content remains
+available to the post-capacity replacement check. Any ID proposed for normal
+or stale removal is excluded from merge targets, even if a removal guard or
+cap retains it. Scope, confidence, exact-content, and capacity gates still
+apply; dedup never authorizes a removal or supplies a confirmation signal.
+Latin words and CJK bigrams both participate in mixed-script similarity.
+Whitespace-separated CJK runs retain adjacent-character ordering.
+INFO logs identify the target and proposal index without memory content and
+explicitly describe a proposed merge, not a completed persistence audit.
