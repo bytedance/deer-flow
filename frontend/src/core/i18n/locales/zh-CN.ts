@@ -38,6 +38,7 @@ export const zhCN: Translations = {
     custom: "自定义",
     notAvailableInDemoMode: "在演示模式下不可用",
     loading: "加载中...",
+    error: "错误：",
     version: "版本",
     lastUpdated: "最后更新",
     code: "代码",

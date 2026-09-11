@@ -162,7 +162,8 @@ export function AgentCard({ agent }: AgentCardProps) {
           )}
         </CardHeader>
 
-        {(agent.tool_groups?.length ?? agent.skills?.length ?? 0) > 0 && (
+        {((agent.tool_groups?.length ?? 0) > 0 ||
+          (agent.skills?.length ?? 0) > 0) && (
           <CardContent className="pt-0 pb-3">
             <div className="flex flex-wrap gap-1">
               {agent.tool_groups?.map((group) => (
