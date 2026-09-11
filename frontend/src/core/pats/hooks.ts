@@ -66,11 +66,14 @@ function useIdentityReconciler() {
   // Stable across renders (refreshUser itself is callback-stable) so the
   // recovery interval below is not reset on every render. The optional
   // fallback lives inside the callback so the dependency list stays static.
-  return useCallback(function reconcile() {
-    if (refreshUser) {
-      void refreshUser();
-    }
-  }, [refreshUser]);
+  return useCallback(
+    function reconcile() {
+      if (refreshUser) {
+        void refreshUser();
+      }
+    },
+    [refreshUser],
+  );
 }
 
 /** Cadence of the inconclusive-refresh recovery loop in `usePats`. */

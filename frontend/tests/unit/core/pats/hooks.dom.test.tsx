@@ -445,10 +445,13 @@ describe("usePats", () => {
     // creation behind the database-required banner.
     fetchMock
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ detail: "Service Temporarily Unavailable" }), {
-          status: 503,
-          headers: { "Content-Type": "application/json" },
-        }),
+        new Response(
+          JSON.stringify({ detail: "Service Temporarily Unavailable" }),
+          {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
       )
       .mockResolvedValueOnce(Response.json([summary("pat-a")]));
     const queryClient = new QueryClient({

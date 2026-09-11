@@ -1,8 +1,12 @@
 /**
- * Raised after the shared fetcher has started a login redirect for a 401.
+ * Raised after the shared fetcher has started a login redirect for a 401 —
+ * or, while a login-redirect deferral holds, handed the redirect to the
+ * provider's held-redirect machinery, which fires it the moment the last
+ * deferral clears.
  *
  * Callers may use this type to avoid showing a second, misleading API error
- * while the browser is already navigating to the authentication flow.
+ * while the browser is navigating (or is about to navigate) to the
+ * authentication flow; the redirect itself is always underway or armed.
  */
 export class UnauthorizedError extends Error {
   constructor() {

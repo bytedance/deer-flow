@@ -103,9 +103,7 @@ async function throwForPatFailure(res: Response, fallback: string) {
     if (body?.detail === PAT_STORE_UNAVAILABLE_DETAIL) {
       throw new PatStoreUnavailableError();
     }
-    throw new Error(
-      typeof body?.detail === "string" ? body.detail : fallback,
-    );
+    throw new Error(typeof body?.detail === "string" ? body.detail : fallback);
   }
   if (res.status === 409) {
     const body = (await res.json().catch(() => null)) as {

@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 
 import { fetch as apiFetch } from "@/core/api/fetcher";
-import { adjustLoginRedirectDeferral } from "@/core/auth/login-redirect-deferral";
+import {
+  adjustLoginRedirectDeferral,
+  setDeferredUnauthorizedHandler,
+} from "@/core/auth/login-redirect-deferral";
 
 describe("api fetcher unauthorized redirect", () => {
   let originalFetch: typeof globalThis.fetch;
@@ -38,6 +41,32 @@ describe("api fetcher unauthorized redirect", () => {
     expect(next).toBe(
       "/artifacts/view?path=%2Fmnt%2Fuser-data%2Foutputs%2Freport.md&thread_id=t-1",
     );
+  });
+
+  it("hands the suppressed login redirect to the deferral machinery", async () => {
+    // Skipping the hard navigation alone strands the 401: every other
+    // consumer of UnauthorizedError trusts that a login redirect is underway
+    // (the banner withholds its warning, the models hook declines to
+    // retry), so "suppress" must mean "hand over", not "drop" — the armed
+    // target fires the moment the last deferral clears.
+    window.history.replaceState({}, "", "/workspace/settings?x=1");
+    const handed: string[] = [];
+    setDeferredUnauthorizedHandler((target) => handed.push(target));
+    adjustLoginRedirectDeferral(true);
+    try {
+      const hrefBefore = window.location.href;
+      await expect(apiFetch("/api/v1/auth/pats")).rejects.toThrow();
+      expect(window.location.href).toBe(hrefBefore);
+      expect(handed).toHaveLength(1);
+      expect(handed[0]).toContain("/login?next=");
+      expect(handed[0]).toContain(
+        encodeURIComponent("/workspace/settings?x=1"),
+      );
+    } finally {
+      adjustLoginRedirectDeferral(false);
+      setDeferredUnauthorizedHandler(null);
+      window.history.replaceState({}, "", "/workspace");
+    }
   });
 
   it("suppresses the hard 401 navigation while a login-redirect deferral holds", async () => {

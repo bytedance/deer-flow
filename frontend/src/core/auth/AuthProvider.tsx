@@ -12,7 +12,11 @@ import React, {
 
 import { isStaticWebsiteOnly } from "../static-mode";
 
-import { adjustLoginRedirectDeferral, isLoginRedirectDeferred } from "./login-redirect-deferral";
+import {
+  adjustLoginRedirectDeferral,
+  isLoginRedirectDeferred,
+  setDeferredUnauthorizedHandler,
+} from "./login-redirect-deferral";
 import { type User, buildLoginUrl } from "./types";
 
 // Re-export for consumers
@@ -61,7 +65,9 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   // login-redirect-deferral.ts): a /me refresh that was already in flight
   // when a deferral armed keeps the closure it started with, so the 401
   // branch below must read the live value, never a captured snapshot.
-  const [pendingLoginRedirect, setPendingLoginRedirect] = useState<string | null>(null);
+  const [pendingLoginRedirect, setPendingLoginRedirect] = useState<
+    string | null
+  >(null);
   const router = useRouter();
   const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
@@ -70,6 +76,15 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
   const setLoginRedirectDeferral = useCallback((active: boolean) => {
     setLoginRedirectDeferrals(adjustLoginRedirectDeferral(active));
+  }, []);
+
+  // The API fetcher hands its suppressed login redirects here: the armed
+  // target below fires the moment the last deferral clears, so a 401 from
+  // any shared-fetcher call while a deferral holds still ends at login —
+  // not only the ones that happen to route through a /me refresh.
+  useEffect(() => {
+    setDeferredUnauthorizedHandler((target) => setPendingLoginRedirect(target));
+    return () => setDeferredUnauthorizedHandler(null);
   }, []);
 
   /**

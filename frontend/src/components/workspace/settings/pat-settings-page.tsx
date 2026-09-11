@@ -155,7 +155,9 @@ function InteractivePatSettingsPage() {
   // token. The held redirect fires when the result view closes. This
   // passive channel rides a render+effect; the imperative channel covers
   // the synchronous submission window (see handleCreate).
-  const armLoginRedirectDeferral = useDeferLoginRedirect(created !== null || create.isPending);
+  const armLoginRedirectDeferral = useDeferLoginRedirect(
+    created !== null || create.isPending,
+  );
 
   // While the only copy of a token is on screen (or is about to arrive),
   // navigating away or closing the tab must at least warn: the credential is
@@ -227,7 +229,12 @@ function InteractivePatSettingsPage() {
   useEffect(() => {
     if (created === null) return;
     const confirmedUser = user?.id;
-    if (confirmedUser == null || createdFor == null || confirmedUser === createdFor) return;
+    if (
+      confirmedUser == null ||
+      createdFor == null ||
+      confirmedUser === createdFor
+    )
+      return;
     setCreated(null);
     setCreatedFor(null);
     setCopied(false);
@@ -305,6 +312,11 @@ function InteractivePatSettingsPage() {
       // No token copy is (or will be) on screen for these outcomes; the
       // result view keeps its own guard via created above.
       setUnloadGuard(false);
+      // The silent return is not silent to the user: the fetcher hard-
+      // navigated on this 401, or — because the deferral above held —
+      // handed its login redirect to the held-redirect machinery, and the
+      // release above lets the armed redirect fire. An error toast on top
+      // would be duplicate feedback for a navigation already underway.
       if (err instanceof UnauthorizedError) return;
       if (err instanceof PatStoreUnavailableError) {
         // The backend switched to (or restarted on) the memory store: close
@@ -345,6 +357,9 @@ function InteractivePatSettingsPage() {
       toast.success(t.settings.tokens.revoked);
       setRevoking(null);
     } catch (err) {
+      // Same contract as creation: a 401 means the fetcher navigated (or
+      // armed the held redirect because a deferral holds), so the
+      // navigation is the feedback and no toast is added on top.
       if (err instanceof UnauthorizedError) return;
       if (err instanceof PatStoreUnavailableError) {
         // A deployment that no longer has a PAT store cannot service any of

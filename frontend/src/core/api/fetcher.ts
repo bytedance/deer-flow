@@ -1,4 +1,7 @@
-import { isLoginRedirectDeferred } from "@/core/auth/login-redirect-deferral";
+import {
+  deferredUnauthorized,
+  isLoginRedirectDeferred,
+} from "@/core/auth/login-redirect-deferral";
 import { buildLoginUrl } from "@/core/auth/types";
 
 import { UnauthorizedError } from "./errors";
@@ -84,22 +87,28 @@ export async function fetch(
   });
 
   if (res.status === 401) {
+    // Include the search string: routes that carry their target in the query
+    // (e.g. the standalone artifact viewer) are otherwise unrecoverable after
+    // login, which lands on the default workspace instead.
+    const target = buildLoginUrl(
+      `${window.location.pathname}${window.location.search}`,
+    );
     // A held login-redirect deferral suppresses this hard navigation too:
     // it discards every client-state copy of what is on screen, and the
     // deferring flow (the PAT show-once window) keeps the only copy of a
     // live credential there — session expiry does not revoke a minted
-    // token. The UnauthorizedError still surfaces to the caller; the
-    // provider's held-redirect machinery (or the next /me refresh)
-    // navigates once the deferral clears. The count is read live, never
-    // from a closure: a request already in flight when the deferral armed
-    // must be gated by the same value a request started later sees.
+    // token. Suppressing alone would strand the 401 — UnauthorizedError's
+    // consumers (the model-load banner withholds its warning, the models
+    // hook declines to retry) all trust that a login redirect is underway —
+    // so the suppressed redirect is handed to the provider's held-redirect
+    // machinery and fires the moment the last deferral clears. The count is
+    // read live, never from a closure: a request already in flight when the
+    // deferral armed must be gated by the same value a request started
+    // later sees.
     if (!isLoginRedirectDeferred()) {
-      // Include the search string: routes that carry their target in the query
-      // (e.g. the standalone artifact viewer) are otherwise unrecoverable after
-      // login, which lands on the default workspace instead.
-      window.location.href = buildLoginUrl(
-        `${window.location.pathname}${window.location.search}`,
-      );
+      window.location.href = target;
+    } else {
+      deferredUnauthorized(target);
     }
     throw new UnauthorizedError();
   }

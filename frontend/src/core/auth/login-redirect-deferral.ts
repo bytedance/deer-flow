@@ -13,6 +13,32 @@
 
 let loginRedirectDeferrals = 0;
 
+/** Receiver for a login redirect the API fetcher suppressed. */
+type DeferredUnauthorizedHandler = (target: string) => void;
+
+let deferredUnauthorizedHandler: DeferredUnauthorizedHandler | null = null;
+
+/**
+ * Register the receiver for a login redirect the API fetcher suppressed
+ * because a deferral held. The provider registers this so the suppressed
+ * redirect is *handed over*, not dropped: it arms the held-redirect
+ * machinery, which fires the target the moment the last deferral clears —
+ * even when nothing else triggers a ``/me`` refresh afterwards. Without the
+ * handover, every other consumer of ``UnauthorizedError`` (the model-load
+ * banner withholds its warning, the models hook declines to retry) would
+ * leave an unrelated expired-session 401 silent for the rest of the session.
+ */
+export function setDeferredUnauthorizedHandler(
+  handler: DeferredUnauthorizedHandler | null,
+): void {
+  deferredUnauthorizedHandler = handler;
+}
+
+/** Emit a suppressed login-redirect target to the registered receiver. */
+export function deferredUnauthorized(target: string): void {
+  deferredUnauthorizedHandler?.(target);
+}
+
 /** Adjust the count by one arm/release pair and return the new value. */
 export function adjustLoginRedirectDeferral(active: boolean): number {
   loginRedirectDeferrals = active

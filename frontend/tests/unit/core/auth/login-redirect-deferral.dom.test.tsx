@@ -1,13 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
-import { AuthProvider, useAuth, useDeferLoginRedirect } from "@/core/auth/AuthProvider";
+import { fetch as sharedFetcher } from "@/core/api/fetcher";
+import {
+  AuthProvider,
+  useAuth,
+  useDeferLoginRedirect,
+} from "@/core/auth/AuthProvider";
 import type { User } from "@/core/auth/types";
 
 const routerMock = rs.hoisted(() => ({ push: rs.fn() }));
 
 rs.mock("next/navigation", () => ({
-  useRouter: () => ({ push: routerMock.push, replace: rs.fn(), refresh: rs.fn() }),
+  useRouter: () => ({
+    push: routerMock.push,
+    replace: rs.fn(),
+    refresh: rs.fn(),
+  }),
   usePathname: () => "/workspace",
 }));
 
@@ -219,6 +235,53 @@ describe("login redirect deferral", () => {
     });
     await waitFor(() => {
       expect(routerMock.push).toHaveBeenCalledWith("/login?next=%2Fworkspace");
+    });
+  });
+
+  it("a shared-fetcher 401 while held arms the redirect through the handover, not only the /me path", async () => {
+    meStatus = 401;
+    // The held-redirect machinery used to arm only from refreshUser()'s 401
+    // branch, so a 401 from any other shared-fetcher call while a deferral
+    // held produced no navigation, no banner, and no retry anywhere — the
+    // fetcher must hand its suppressed redirect over so it fires on release.
+    let release!: () => void;
+    function ArmAndFetchProbe() {
+      // Imperative arm only (active=false): the render-effect arm would hold
+      // a second deferral this test never releases.
+      const arm = useDeferLoginRedirect(false);
+      return (
+        <button
+          onClick={() => {
+            release = arm();
+            void sharedFetcher("/api/v1/pats", { method: "POST" }).catch(() => {
+              // The rejection is expected; the handover is the assertion target.
+            });
+          }}
+        >
+          arm-and-fetch
+        </button>
+      );
+    }
+    render(
+      <AuthProvider initialUser={user}>
+        <ArmAndFetchProbe />
+      </AuthProvider>,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "arm-and-fetch" }));
+    });
+
+    // Held behind the deferral: no navigation with the credential on screen.
+    expect(routerMock.push).not.toHaveBeenCalled();
+
+    await act(async () => {
+      release();
+    });
+    await waitFor(() => {
+      expect(routerMock.push).toHaveBeenCalledWith(
+        expect.stringContaining("/login?next="),
+      );
     });
   });
 });

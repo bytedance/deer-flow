@@ -10,6 +10,7 @@ import {
 import type { PropsWithChildren } from "react";
 
 import { PatSettingsPage } from "@/components/workspace/settings/pat-settings-page";
+import { UnauthorizedError } from "@/core/api/errors";
 
 function renderWithQueryClient(ui: React.ReactElement) {
   const queryClient = new QueryClient({
@@ -84,9 +85,7 @@ const authMockState = rs.hoisted(() => ({
   userId: "test-user" as string | null,
 }));
 
-const deferLoginRedirectMock = rs.hoisted(() =>
-  rs.fn(() => () => undefined),
-);
+const deferLoginRedirectMock = rs.hoisted(() => rs.fn(() => () => undefined));
 
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({
@@ -413,6 +412,42 @@ describe("PatSettingsPage", () => {
     // No await: still inside the pre-render latch window.
     expect(deferLoginRedirectMock).toHaveBeenCalledTimes(1);
     expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers a create 401 with navigation, not a dead click", async () => {
+    // Review finding: the catch releases the deferral BEFORE the 401
+    // check, so the silent return used to strand the user — the fetcher's
+    // gate had suppressed the hard navigation and nothing armed the held
+    // redirect, leaving no navigation, no toast, nothing at all. With the
+    // fetcher handover the armed redirect fires on this release; the page's
+    // half of the contract is the synchronous release plus no duplicate
+    // error toast on top of the navigation.
+    const release = rs.fn();
+    patsMockState.createMutate = rs.fn(() =>
+      Promise.reject(new UnauthorizedError()),
+    );
+    deferLoginRedirectMock.mockReset();
+    deferLoginRedirectMock.mockReturnValue(release);
+    toastMockState.error.mockReset();
+
+    renderWithQueryClient(<PatSettingsPage />);
+    fireEvent.click(screen.getByText("Create token"));
+    fireEvent.change(screen.getByPlaceholderText("e.g. ci-runner"), {
+      target: { value: "ci" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: "Read threads" }));
+    const submit = screen
+      .getAllByText("Create token")
+      .find((element) => element.closest("[role=dialog]") !== null)!;
+    fireEvent.click(submit);
+
+    // The catch released the deferral: the held redirect the fetcher armed
+    // on the 401 can fire now instead of stranding the user.
+    await waitFor(() => {
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+    // The navigation is the feedback; no duplicate API-error toast on top.
+    expect(toastMockState.error).not.toHaveBeenCalled();
   });
 
   it("releases the imperative deferral when the page unmounts mid-mint", () => {
