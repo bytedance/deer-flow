@@ -1673,6 +1673,7 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
             "disable_clarification": True,
             "agent_name": "coding-llm-gateway",
         },
+        internal=True,
     )
 
     # Forwarded into runtime context — what tools/middlewares read.
@@ -1685,15 +1686,46 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
     assert "disable_clarification" not in config.get("configurable", {})
 
 
+def test_context_only_keys_are_internal_only():
+    """``github_token`` / ``disable_clarification`` are produced by the channel run
+    policies, which reach the Gateway over the internally-authenticated channel. A
+    non-internal caller must not be able to supply either through ``body.context``.
+
+    ``disable_clarification`` is not a milder cousin of ``non_interactive``:
+    ``ClarificationMiddleware`` answers every clarification — ``risk_confirmation``
+    included — with "proceed without asking", and ``SandboxMiddleware`` reads the two
+    keys as the same non-interactive signal. Forwarding it ungated reopened exactly
+    the gate ``_CONTEXT_INTERNAL_CALLER_KEYS`` exists to close.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(
+        config,
+        {
+            "github_token": "attacker-supplied",
+            "disable_clarification": True,
+            "agent_name": "coding-llm-gateway",
+        },
+    )
+
+    assert "github_token" not in config["context"]
+    assert "disable_clarification" not in config["context"]
+    assert "github_token" not in config.get("configurable", {})
+    assert "disable_clarification" not in config.get("configurable", {})
+    # Whitelisted agent-config keys still come through for ordinary callers.
+    assert config["context"]["agent_name"] == "coding-llm-gateway"
+
+
 def test_merge_run_context_overrides_context_only_keys_do_not_override_existing():
-    """A token already in ``config['context']`` must not be clobbered by a
-    client-supplied one (defense in depth — the manager is the only legitimate
-    source, but ``setdefault`` keeps the contract explicit)."""
+    """A token already in ``config['context']`` must not be clobbered by one supplied
+    in ``body.context`` (defense in depth — ``setdefault`` keeps the contract explicit
+    even now that only internal callers reach this branch)."""
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
     config["context"] = {"github_token": "pre-existing"}
-    merge_run_context_overrides(config, {"github_token": "attacker-supplied"})
+    merge_run_context_overrides(config, {"github_token": "later-supplied"}, internal=True)
 
     assert config["context"]["github_token"] == "pre-existing"
 
@@ -2914,6 +2946,71 @@ def test_strip_internal_context_keys_scrubs_config_smuggled_non_interactive():
     via_configurable = build_run_config("thread-1", {"configurable": {"non_interactive": True}}, None)
     strip_internal_context_keys(via_configurable)
     assert "non_interactive" not in via_configurable["configurable"]
+
+
+def test_strip_internal_context_keys_scrubs_config_smuggled_context_only_keys():
+    """The context-only internal keys need the same ``body.config`` scrub as
+    ``non_interactive``: ``build_run_config`` copies both sections verbatim, so gating
+    ``merge_run_context_overrides`` alone still leaves ``body.config['context']`` open.
+
+    The ``configurable`` half matters on its own — that dict is persisted in
+    checkpoints, so a smuggled ``github_token`` would write a live credential into the
+    checkpoint store even though no tool reads it from there.
+    """
+    from app.gateway.services import build_run_config, strip_internal_context_keys
+
+    via_context = build_run_config(
+        "thread-1",
+        {"context": {"github_token": "attacker-supplied", "disable_clarification": True, "model_name": "gpt"}},
+        None,
+    )
+    strip_internal_context_keys(via_context)
+    assert "github_token" not in via_context["context"]
+    assert "disable_clarification" not in via_context["context"]
+    assert via_context["context"]["model_name"] == "gpt"
+
+    via_configurable = build_run_config(
+        "thread-1",
+        {"configurable": {"github_token": "attacker-supplied", "disable_clarification": True}},
+        None,
+    )
+    strip_internal_context_keys(via_configurable)
+    assert "github_token" not in via_configurable["configurable"]
+    assert "disable_clarification" not in via_configurable["configurable"]
+
+
+def test_start_run_sequence_drops_context_only_keys_for_session_caller():
+    """Replay the real ``start_run`` assembly order for a session-authenticated caller
+    that pushes the keys through *both* smuggling surfaces at once."""
+    request = _make_request_with_auth_source("session")
+    config = _assemble_authz_run_config(
+        {"context": {"github_token": "via-config", "disable_clarification": True}},
+        request,
+        body_context={"github_token": "via-body-context", "disable_clarification": True},
+    )
+
+    assert "github_token" not in config["context"]
+    assert "disable_clarification" not in config["context"]
+    assert "github_token" not in config.get("configurable", {})
+    assert "disable_clarification" not in config.get("configurable", {})
+
+
+def test_start_run_sequence_keeps_context_only_keys_for_internal_caller():
+    """The channel path (internal auth) must keep carrying the minted token and the
+    non-interactive flag, and neither may land in checkpoint-persisted ``configurable``."""
+    from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+
+    request = _make_request_with_auth_source(AUTH_SOURCE_INTERNAL, system_role=INTERNAL_SYSTEM_ROLE)
+    config = _assemble_authz_run_config(
+        {},
+        request,
+        body_context={"github_token": "ghs_installation_token", "disable_clarification": True},
+    )
+
+    assert config["context"]["github_token"] == "ghs_installation_token"
+    assert config["context"]["disable_clarification"] is True
+    assert "github_token" not in config.get("configurable", {})
+    assert "disable_clarification" not in config.get("configurable", {})
 
 
 # --- Authorization identity anti-forgery tests ---
