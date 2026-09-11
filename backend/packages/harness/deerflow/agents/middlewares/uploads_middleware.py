@@ -19,7 +19,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.uploads.companion_map import CompanionEntry, load_companion_entries
+from deerflow.uploads.companion_map import CompanionEntry, CompanionMapState, load_companion_state
 from deerflow.uploads.manager import is_upload_hidden_file
 from deerflow.utils.file_outline import extract_outline_for_file, resolve_converted_markdown_path
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
@@ -174,7 +174,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         message: HumanMessage,
         uploads_dir: Path | None = None,
         *,
-        entries: Mapping[str, CompanionEntry] | None = None,
+        entries: CompanionMapState | Mapping[str, CompanionEntry] | None = None,
     ) -> list[dict] | None:
         """Extract file info from message additional_kwargs.files.
 
@@ -253,10 +253,10 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 pass
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=resolve_runtime_user_id(runtime)) if thread_id else None
         has_file_metadata = bool((last_message.additional_kwargs or {}).get("files"))
-        companion_entries = load_companion_entries(uploads_dir) if uploads_dir is not None and has_file_metadata else None
+        companion_state = load_companion_state(uploads_dir) if uploads_dir is not None and has_file_metadata else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
-        new_files = self._files_from_kwargs(last_message, uploads_dir, entries=companion_entries) or []
+        new_files = self._files_from_kwargs(last_message, uploads_dir, entries=companion_state) or []
         if not new_files:
             if (last_message.additional_kwargs or {}).get("files"):
                 logger.info(
@@ -280,7 +280,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                     phys_path,
                     companion_name=companion_name if isinstance(companion_name, str) else None,
                     md_path=md_path,
-                    entries=companion_entries,
+                    entries=companion_state,
                 )
                 file["outline"] = outline
                 file["outline_preview"] = preview

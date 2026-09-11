@@ -590,7 +590,7 @@ class TestExtractOutlineForFileReuse:
         def boom(*_args, **_kwargs):
             raise AssertionError("pre-resolved md_path must not load the sidecar")
 
-        monkeypatch.setattr("deerflow.utils.file_outline.load_companion_entries", boom)
+        monkeypatch.setattr("deerflow.uploads.companion_map.coerce_companion_state", boom)
 
         outline, preview = extract_outline_for_file(pdf, md_path=right)
         assert preview == []

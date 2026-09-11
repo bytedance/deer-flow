@@ -663,13 +663,13 @@ class TestBeforeAgent:
             files.append({"filename": name, "size": 4, "path": f"/mnt/user-data/uploads/{name}"})
 
         loads = {"n": 0}
-        real = companion_map_mod._load_unlocked
+        real = companion_map_mod._load_state_unlocked
 
         def counting(path):
             loads["n"] += 1
             return real(path)
 
-        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+        monkeypatch.setattr(companion_map_mod, "_load_state_unlocked", counting)
 
         result = mw.before_agent(self._state(_human("summarise", files=files)), _runtime())
 
@@ -689,13 +689,13 @@ class TestBeforeAgent:
         record_companion_mapping(uploads_dir, "a.pdf", "a.md")
 
         loads = {"n": 0}
-        real = companion_map_mod._load_unlocked
+        real = companion_map_mod._load_state_unlocked
 
         def counting(path):
             loads["n"] += 1
             return real(path)
 
-        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+        monkeypatch.setattr(companion_map_mod, "_load_state_unlocked", counting)
 
         mw.before_agent(self._state(_human("plain message")), _runtime())
         assert loads["n"] == 0

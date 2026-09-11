@@ -15,7 +15,10 @@ cap, so a sandbox cannot block the Gateway on a FIFO or turn the mapping
 into an unbounded parse. Writes prune
 to those same caps (oldest entries first, binary-searching the serialized
 size) and unpin evicted rows so this
-module cannot persist a map its own reader would drop. Companion deletion
+module cannot persist a map its own reader would drop. Dropped live rows
+leave a durable original-name tombstone (or, if even that list cannot fit,
+a sticky ``no_legacy_fallback`` flag) so collision-renamed companions are
+not mistaken for pre-sidecar ``<stem>.md`` uploads. Companion deletion
 renames the directory entry to a quarantine name, then verifies the moved
 inode against the pin before unlinking, so a sandbox replacement of the
 basename is restored instead of deleted. The lock file lives *outside*
@@ -38,7 +41,7 @@ import threading
 import time
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -98,6 +101,30 @@ class CompanionEntry:
     dev: int | None = None
     ino: int | None = None
     id: str | None = None
+
+
+@dataclass(frozen=True)
+class CompanionMapState:
+    """Sidecar contents: live rows, eviction tombstones, and the overflow flag.
+
+    ``evicted`` originals once had a companion mapping that was pruned to
+    fit the reader caps. They must not use the legacy ``<stem>.md`` heuristic.
+    ``no_legacy_fallback`` is the sticky overflow switch used when even the
+    tombstone list cannot fit the byte cap: then *every* unmapped original
+    skips that heuristic. The flag is stored on disk, not in process memory.
+    """
+
+    companions: dict[str, CompanionEntry] = field(default_factory=dict)
+    evicted: tuple[str, ...] = ()
+    no_legacy_fallback: bool = False
+
+    def blocks_legacy_fallback(self, original: str) -> bool:
+        """Return whether *original* must not use the ``<stem>.md`` heuristic."""
+        if not original:
+            return False
+        if self.no_legacy_fallback:
+            return True
+        return original in self.companions or original in self.evicted
 
 
 def is_companion_map_file(filename: str) -> bool:
@@ -374,25 +401,51 @@ def _sanitize_entry(key: object, value: object) -> tuple[str, CompanionEntry] | 
     return key, CompanionEntry(name=name, size=size, mtime_ns=mtime_ns, dev=dev, ino=ino, id=identity)
 
 
-def _sanitize_mapping(raw: object) -> dict[str, CompanionEntry]:
-    if not isinstance(raw, dict):
-        return {}
-    companions = raw.get("companions")
-    if not isinstance(companions, dict):
-        return {}
-    out: dict[str, CompanionEntry] = {}
-    truncated = False
-    for key, value in companions.items():
-        if len(out) >= MAX_COMPANION_MAP_ENTRIES:
-            truncated = True
-            break
-        sanitized = _sanitize_entry(key, value)
-        if sanitized is not None:
-            original, entry = sanitized
-            out[original] = entry
-    if truncated:
-        logger.warning("Companion map exceeds %s entries; ignoring the rest", MAX_COMPANION_MAP_ENTRIES)
+def _dedupe_evicted(names: Iterable[str], *, occupied: Mapping[str, CompanionEntry] | None = None) -> list[str]:
+    """Return safe original names not currently mapped, first occurrence kept."""
+    occupied_keys = occupied if occupied is not None else {}
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if not isinstance(name, str) or not _is_safe_original(name):
+            continue
+        if name in occupied_keys or name in seen:
+            continue
+        out.append(name)
+        seen.add(name)
     return out
+
+
+def _sanitize_mapping(raw: object) -> dict[str, CompanionEntry]:
+    return _sanitize_state(raw).companions
+
+
+def _sanitize_state(raw: object) -> CompanionMapState:
+    if not isinstance(raw, dict):
+        return CompanionMapState()
+    companions_raw = raw.get("companions")
+    out: dict[str, CompanionEntry] = {}
+    if isinstance(companions_raw, dict):
+        truncated = False
+        for key, value in companions_raw.items():
+            if len(out) >= MAX_COMPANION_MAP_ENTRIES:
+                truncated = True
+                break
+            sanitized = _sanitize_entry(key, value)
+            if sanitized is not None:
+                original, entry = sanitized
+                out[original] = entry
+        if truncated:
+            logger.warning("Companion map exceeds %s entries; ignoring the rest", MAX_COMPANION_MAP_ENTRIES)
+    evicted_raw = raw.get("evicted")
+    evicted: list[str] = []
+    if isinstance(evicted_raw, list):
+        evicted = _dedupe_evicted(evicted_raw, occupied=out)
+    return CompanionMapState(
+        companions=out,
+        evicted=tuple(evicted),
+        no_legacy_fallback=raw.get("no_legacy_fallback") is True,
+    )
 
 
 def _open_sidecar_no_follow(path: Path) -> int:
@@ -437,7 +490,7 @@ def _open_sidecar_no_follow(path: Path) -> int:
     return fd
 
 
-def _load_unlocked(uploads_dir: Path) -> dict[str, CompanionEntry]:
+def _load_state_unlocked(uploads_dir: Path) -> CompanionMapState:
     path = _map_path(uploads_dir)
     fd = -1
     raw_bytes = b""
@@ -445,15 +498,15 @@ def _load_unlocked(uploads_dir: Path) -> dict[str, CompanionEntry]:
         fd = _open_sidecar_no_follow(path)
         info = os.fstat(fd)
         if info.st_size <= 0:
-            return {}
+            return CompanionMapState()
         if info.st_size > MAX_COMPANION_MAP_BYTES:
             logger.warning("Ignoring oversized companion map at %s (%s bytes)", path, info.st_size)
-            return {}
+            return CompanionMapState()
         raw_bytes = os.read(fd, info.st_size)
     except FileNotFoundError:
-        return {}
+        return CompanionMapState()
     except OSError:
-        return {}
+        return CompanionMapState()
     finally:
         if fd >= 0:
             os.close(fd)
@@ -462,12 +515,16 @@ def _load_unlocked(uploads_dir: Path) -> dict[str, CompanionEntry]:
         raw = json.loads(raw_bytes.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         logger.warning("Ignoring corrupt companion map at %s", path)
-        return {}
-    return _sanitize_mapping(raw)
+        return CompanionMapState()
+    return _sanitize_state(raw)
 
 
-def _mapping_payload(mapping: dict[str, CompanionEntry]) -> dict:
-    return {
+def _mapping_payload(
+    mapping: dict[str, CompanionEntry],
+    evicted: Iterable[str] = (),
+    no_legacy_fallback: bool = False,
+) -> dict:
+    payload: dict = {
         "version": _MAP_VERSION,
         "companions": {
             original: {
@@ -481,58 +538,130 @@ def _mapping_payload(mapping: dict[str, CompanionEntry]) -> dict:
             for original, entry in mapping.items()
         },
     }
+    if no_legacy_fallback:
+        payload["no_legacy_fallback"] = True
+    else:
+        names = _dedupe_evicted(evicted, occupied=mapping)
+        if names:
+            payload["evicted"] = names
+    return payload
 
 
-def _serialized_map_bytes(mapping: dict[str, CompanionEntry]) -> int:
-    return len(json.dumps(_mapping_payload(mapping), ensure_ascii=False, indent=2).encode("utf-8"))
+def _serialized_map_bytes(
+    mapping: dict[str, CompanionEntry],
+    evicted: Iterable[str] = (),
+    no_legacy_fallback: bool = False,
+) -> int:
+    return len(json.dumps(_mapping_payload(mapping, evicted, no_legacy_fallback), ensure_ascii=False, indent=2).encode("utf-8"))
 
 
 def _trim_mapping_to_limits(
     mapping: dict[str, CompanionEntry],
-) -> tuple[dict[str, CompanionEntry], list[CompanionEntry]]:
-    """Drop oldest rows until the payload fits the reader caps.
+    evicted: Iterable[str] = (),
+    no_legacy_fallback: bool = False,
+) -> tuple[dict[str, CompanionEntry], list[CompanionEntry], list[str], bool]:
+    """Drop oldest live rows until the payload fits the reader caps.
 
     Byte-cap eviction binary-searches the drop count so the exclusive flock is
-    not held across a quadratic ``json.dumps`` loop.
+    not held across a quadratic ``json.dumps`` loop. Dropped originals are kept
+    as tombstones so they are not treated as pre-sidecar uploads. If even the
+    tombstone list cannot fit, ``no_legacy_fallback`` is set and names are omitted.
     """
     items = list(mapping.items())
-    evicted: list[CompanionEntry] = []
+    prior_evicted = _dedupe_evicted(evicted, occupied=mapping)
+    dropped: list[tuple[str, CompanionEntry]] = []
+    flag = no_legacy_fallback
+
     overflow = len(items) - MAX_COMPANION_MAP_ENTRIES
     if overflow > 0:
-        evicted.extend(entry for _, entry in items[:overflow])
+        dropped.extend(items[:overflow])
         items = items[overflow:]
+
+    def merge_tombstones(kept: dict[str, CompanionEntry], extra: list[tuple[str, CompanionEntry]]) -> list[str]:
+        return _dedupe_evicted(
+            [original for original, _ in extra] + prior_evicted,
+            occupied=kept,
+        )
+
+    def payload_bytes(kept: dict[str, CompanionEntry], names: Iterable[str], sticky: bool) -> int:
+        return _serialized_map_bytes(kept, names, sticky)
+
+    def fit(
+        kept: dict[str, CompanionEntry],
+        extra: list[tuple[str, CompanionEntry]],
+        sticky: bool,
+    ) -> tuple[list[str], bool, int]:
+        names = merge_tombstones(kept, extra)
+        size = payload_bytes(kept, names, sticky)
+        if size <= MAX_COMPANION_MAP_BYTES:
+            return names, sticky, size
+        sticky_size = payload_bytes(kept, (), True)
+        if sticky_size <= MAX_COMPANION_MAP_BYTES:
+            return [], True, sticky_size
+        return names, sticky, size
+
+    extra_all = dropped
     if not items:
-        return {}, evicted
-    if _serialized_map_bytes(dict(items)) <= MAX_COMPANION_MAP_BYTES:
-        return dict(items), evicted
-    if _serialized_map_bytes(dict(items[-1:])) > MAX_COMPANION_MAP_BYTES:
+        names, flag, size = fit({}, extra_all, flag)
+        if size <= MAX_COMPANION_MAP_BYTES:
+            return {}, [entry for _, entry in extra_all], names, flag
         raise ValueError(f"Companion map exceeds {MAX_COMPANION_MAP_BYTES} bytes even after pruning")
+
+    names, flag, size = fit(dict(items), extra_all, flag)
+    if size <= MAX_COMPANION_MAP_BYTES:
+        return dict(items), [entry for _, entry in extra_all], names, flag
+
+    last_kept = dict(items[-1:])
+    last_extra = extra_all + items[:-1]
+    _, _, last_size = fit(last_kept, last_extra, flag)
+    if last_size > MAX_COMPANION_MAP_BYTES:
+        raise ValueError(f"Companion map exceeds {MAX_COMPANION_MAP_BYTES} bytes even after pruning")
+
     lo, hi = 1, len(items) - 1
     while lo < hi:
         mid = (lo + hi) // 2
-        if _serialized_map_bytes(dict(items[mid:])) <= MAX_COMPANION_MAP_BYTES:
+        kept = dict(items[mid:])
+        extra = extra_all + items[:mid]
+        _, _, candidate = fit(kept, extra, flag)
+        if candidate <= MAX_COMPANION_MAP_BYTES:
             hi = mid
         else:
             lo = mid + 1
-    evicted.extend(entry for _, entry in items[:lo])
-    return dict(items[lo:]), evicted
+    kept = dict(items[lo:])
+    extra = extra_all + items[:lo]
+    names, flag, size = fit(kept, extra, flag)
+    if size > MAX_COMPANION_MAP_BYTES:
+        raise ValueError(f"Companion map exceeds {MAX_COMPANION_MAP_BYTES} bytes even after pruning")
+    return kept, [entry for _, entry in extra], names, flag
 
 
-def _persist_unlocked(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> None:
+def _persist_unlocked(
+    uploads_dir: Path,
+    mapping: dict[str, CompanionEntry],
+    *,
+    evicted: Iterable[str] = (),
+    no_legacy_fallback: bool = False,
+) -> None:
     path = _map_path(uploads_dir)
     if path.is_symlink():
         raise ValueError("Companion map path is a symlink")
-    evicted: list[CompanionEntry] = []
-    if mapping:
-        mapping, evicted = _trim_mapping_to_limits(mapping)
-    if not mapping:
+    dropped: list[CompanionEntry] = []
+    evicted_names = list(evicted)
+    flag = no_legacy_fallback
+    if mapping or evicted_names or flag:
+        mapping, dropped, evicted_names, flag = _trim_mapping_to_limits(mapping, evicted_names, flag)
+    if not mapping and not evicted_names and not flag:
         try:
             path.unlink()
         except FileNotFoundError:
             pass
+        if dropped:
+            logger.warning("Companion map exceeded persist limits; dropping %s older entries", len(dropped))
+            for entry in dropped:
+                _unpin_companion(uploads_dir, entry.id)
         return
 
-    payload = _mapping_payload(mapping)
+    payload = _mapping_payload(mapping, evicted_names, flag)
     data = json.dumps(payload, ensure_ascii=False, indent=2)
     fd, tmp_name = tempfile.mkstemp(prefix=f"{_COMPANION_MAP_PREFIX}.", suffix=".tmp", dir=uploads_dir)
     tmp_path = Path(tmp_name)
@@ -549,9 +678,9 @@ def _persist_unlocked(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> 
             pass
         raise
 
-    if evicted:
-        logger.warning("Companion map exceeded persist limits; dropping %s older entries", len(evicted))
-        for entry in evicted:
+    if dropped:
+        logger.warning("Companion map exceeded persist limits; dropping %s older entries", len(dropped))
+        for entry in dropped:
             _unpin_companion(uploads_dir, entry.id)
 
 
@@ -561,12 +690,33 @@ def load_companion_map(uploads_dir: Path) -> dict[str, str]:
     Name-only view of the raw sidecar, stale entries included; use
     :func:`lookup_companion_mapping` for a fingerprint-verified answer.
     """
-    return {original: entry.name for original, entry in _load_unlocked(uploads_dir).items()}
+    return {original: entry.name for original, entry in _load_state_unlocked(uploads_dir).companions.items()}
 
 
 def load_companion_entries(uploads_dir: Path) -> dict[str, CompanionEntry]:
     """Return the raw sidecar entries, stale ones included."""
-    return _load_unlocked(uploads_dir)
+    return _load_state_unlocked(uploads_dir).companions
+
+
+def load_companion_state(uploads_dir: Path) -> CompanionMapState:
+    """Return live rows, eviction tombstones, and the overflow flag."""
+    return _load_state_unlocked(uploads_dir)
+
+
+def coerce_companion_state(
+    uploads_dir: Path,
+    entries: CompanionMapState | Mapping[str, CompanionEntry] | None = None,
+) -> CompanionMapState:
+    """Reuse a preloaded sidecar view, or load one from *uploads_dir*.
+
+    A bare mapping is treated as live rows only (no tombstones), matching
+    callers that already decided there are no sidecar rows.
+    """
+    if isinstance(entries, CompanionMapState):
+        return entries
+    if entries is None:
+        return _load_state_unlocked(uploads_dir)
+    return CompanionMapState(companions=dict(entries), evicted=(), no_legacy_fallback=False)
 
 
 def _stat_regular_companion(uploads_dir: Path, entry: CompanionEntry) -> os.stat_result | None:
@@ -722,30 +872,30 @@ def lookup_companion_mapping(uploads_dir: Path, original: str) -> str | None:
     """
     if not _is_safe_original(original):
         return None
-    entry = _load_unlocked(uploads_dir).get(original)
+    entry = _load_state_unlocked(uploads_dir).companions.get(original)
     if entry is None or not companion_entry_matches(uploads_dir, entry):
         return None
     return entry.name
 
 
 def has_companion_entry(uploads_dir: Path, original: str) -> bool:
-    """Return whether the sidecar holds any entry for *original*, even a stale one."""
+    """Return whether the sidecar holds a live or tombstoned row for *original*."""
     if not _is_safe_original(original):
         return False
-    return original in _load_unlocked(uploads_dir)
+    state = _load_state_unlocked(uploads_dir)
+    return original in state.companions or original in state.evicted
 
 
 def mapped_companion_names(
     uploads_dir: Path,
-    entries: Mapping[str, CompanionEntry] | None = None,
+    entries: CompanionMapState | Mapping[str, CompanionEntry] | None = None,
 ) -> set[str]:
     """Return companion basenames whose recorded file still matches its fingerprint.
 
-    Pass a preloaded *entries* mapping (from :func:`load_companion_entries`) so a
-    listing pass can reuse one sidecar read instead of opening the JSON again.
+    Pass a preloaded sidecar view so a listing pass can reuse one read.
     ``entries is None`` loads from disk; an empty mapping means no companions.
     """
-    source = _load_unlocked(uploads_dir) if entries is None else entries
+    source = coerce_companion_state(uploads_dir, entries).companions
     names: set[str] = set()
     for entry in source.values():
         if companion_entry_matches(uploads_dir, entry):
@@ -792,11 +942,14 @@ def record_companion_mapping(uploads_dir: Path, original: str, companion: str) -
             except OSError as exc:
                 _unpin_companion(uploads_dir, pin_token)
                 raise FileNotFoundError(f"Companion file does not exist: {companion!r}") from exc
-            mapping = _load_unlocked(uploads_dir)
+            state = _load_state_unlocked(uploads_dir)
+            mapping = dict(state.companions)
             previous = mapping.pop(original, None)
+            displaced_keys: list[str] = []
             displaced: list[CompanionEntry] = []
             for key, entry in list(mapping.items()):
                 if entry.name == companion:
+                    displaced_keys.append(key)
                     displaced.append(mapping.pop(key))
             mapping[original] = CompanionEntry(
                 name=companion,
@@ -806,8 +959,17 @@ def record_companion_mapping(uploads_dir: Path, original: str, companion: str) -
                 ino=companion_stat.st_ino,
                 id=pin_token,
             )
+            tombstones = _dedupe_evicted(
+                list(state.evicted) + displaced_keys,
+                occupied=mapping,
+            )
             try:
-                _persist_unlocked(uploads_dir, mapping)
+                _persist_unlocked(
+                    uploads_dir,
+                    mapping,
+                    evicted=tombstones,
+                    no_legacy_fallback=state.no_legacy_fallback,
+                )
             except Exception:
                 _unpin_companion(uploads_dir, pin_token)
                 raise
@@ -848,12 +1010,19 @@ def forget_companion_mappings(
         return
     try:
         with _map_write_lock(uploads_dir):
-            mapping = _load_unlocked(uploads_dir)
+            state = _load_state_unlocked(uploads_dir)
+            mapping = dict(state.companions)
             stale = [key for key, entry in mapping.items() if (key, entry.name) in wanted]
             if not stale:
                 return
             dropped = [mapping.pop(key) for key in stale]
-            _persist_unlocked(uploads_dir, mapping)
+            tombstones = _dedupe_evicted(list(state.evicted) + stale, occupied=mapping)
+            _persist_unlocked(
+                uploads_dir,
+                mapping,
+                evicted=tombstones,
+                no_legacy_fallback=state.no_legacy_fallback,
+            )
             for entry in dropped:
                 _unpin_companion(uploads_dir, entry.id)
     except CompanionMapLockTimeout:
@@ -871,16 +1040,26 @@ def forget_companion_mapping(
         return
     try:
         with _map_write_lock(uploads_dir):
-            mapping = _load_unlocked(uploads_dir)
+            state = _load_state_unlocked(uploads_dir)
+            mapping = dict(state.companions)
             dropped: list[CompanionEntry] = []
+            companion_forgotten: list[str] = []
             if original is not None and original in mapping:
                 dropped.append(mapping.pop(original))
             if companion is not None:
                 for key, entry in list(mapping.items()):
                     if entry.name == companion:
                         dropped.append(mapping.pop(key))
-            if dropped:
-                _persist_unlocked(uploads_dir, mapping)
+                        companion_forgotten.append(key)
+            tombstones = [name for name in state.evicted if name != original]
+            tombstones = _dedupe_evicted(tombstones + companion_forgotten, occupied=mapping)
+            if dropped or tombstones != list(state.evicted):
+                _persist_unlocked(
+                    uploads_dir,
+                    mapping,
+                    evicted=tombstones,
+                    no_legacy_fallback=state.no_legacy_fallback,
+                )
                 for entry in dropped:
                     _unpin_companion(uploads_dir, entry.id)
     except CompanionMapLockTimeout:

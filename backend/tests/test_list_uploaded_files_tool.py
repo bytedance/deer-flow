@@ -237,13 +237,13 @@ class TestListUploadedFiles:
             record_companion_mapping(uploads_dir, f"f{i}.pdf", f"f{i}.md")
 
         loads = {"n": 0}
-        real = companion_map_mod._load_unlocked
+        real = companion_map_mod._load_state_unlocked
 
         def counting(path):
             loads["n"] += 1
             return real(path)
 
-        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+        monkeypatch.setattr(companion_map_mod, "_load_state_unlocked", counting)
 
         result = _list_uploaded_files_impl(include_outline=True, runtime=_runtime(), _paths=_paths(tmp_path))
 

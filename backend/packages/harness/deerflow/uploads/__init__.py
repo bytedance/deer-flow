@@ -1,6 +1,7 @@
 from .companion_map import (
     COMPANION_MAP_FILENAME,
     CompanionEntry,
+    CompanionMapState,
     companion_entry_matches,
     forget_companion_mapping,
     forget_companion_mappings,
@@ -8,6 +9,7 @@ from .companion_map import (
     is_companion_map_file,
     load_companion_entries,
     load_companion_map,
+    load_companion_state,
     lookup_companion_mapping,
     mapped_companion_names,
     record_companion_mapping,
@@ -37,6 +39,7 @@ from .manager import (
 __all__ = [
     "COMPANION_MAP_FILENAME",
     "CompanionEntry",
+    "CompanionMapState",
     "companion_entry_matches",
     "get_uploads_dir",
     "ensure_uploads_dir",
@@ -56,6 +59,7 @@ __all__ = [
     "is_upload_staging_file",
     "load_companion_entries",
     "load_companion_map",
+    "load_companion_state",
     "lookup_companion_mapping",
     "mapped_companion_names",
     "record_companion_mapping",

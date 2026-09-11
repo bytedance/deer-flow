@@ -28,6 +28,7 @@ from deerflow.uploads.companion_map import (
     is_companion_map_file,
     load_companion_entries,
     load_companion_map,
+    load_companion_state,
     lookup_companion_mapping,
     mapped_companion_names,
     record_companion_mapping,
@@ -226,13 +227,13 @@ class TestMappedCompanionNames:
         preloaded = load_companion_entries(tmp_path)
 
         loads = {"n": 0}
-        real = companion_map_mod._load_unlocked
+        real = companion_map_mod._load_state_unlocked
 
         def counting(uploads_dir):
             loads["n"] += 1
             return real(uploads_dir)
 
-        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+        monkeypatch.setattr(companion_map_mod, "_load_state_unlocked", counting)
 
         assert mapped_companion_names(tmp_path, preloaded) == {"a.md"}
         assert loads["n"] == 0
@@ -394,13 +395,13 @@ class TestResolveUsesSidecar:
         preloaded = load_companion_entries(tmp_path)
 
         loads = {"n": 0}
-        real = companion_map_mod._load_unlocked
+        real = companion_map_mod._load_state_unlocked
 
         def counting(uploads_dir):
             loads["n"] += 1
             return real(uploads_dir)
 
-        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+        monkeypatch.setattr(companion_map_mod, "_load_state_unlocked", counting)
 
         assert resolve_converted_markdown_path(pdf, entries=preloaded) == renamed
         assert loads["n"] == 0
@@ -414,13 +415,13 @@ class TestResolveUsesSidecar:
         record_companion_mapping(tmp_path, "a.pdf", "a_1.md")
 
         loads = {"n": 0}
-        real = companion_map_mod._load_unlocked
+        real = companion_map_mod._load_state_unlocked
 
         def counting(uploads_dir):
             loads["n"] += 1
             return real(uploads_dir)
 
-        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+        monkeypatch.setattr(companion_map_mod, "_load_state_unlocked", counting)
 
         # No sidecar row in the preloaded map → legacy stem fallback, no disk read.
         assert resolve_converted_markdown_path(pdf, entries={}) == tmp_path / "a.md"
@@ -825,6 +826,7 @@ class TestSidecarWriteBounds:
 
         loaded = load_companion_entries(tmp_path)
         assert {original: entry.name for original, entry in loaded.items()} == {"b.pdf": "b.md", "c.pdf": "c.md"}
+        assert load_companion_state(tmp_path).evicted == ("a.pdf",)
         if oldest.id is not None:
             assert not companion_identity_path(tmp_path, oldest.id).exists()
         newest = loaded["c.pdf"]
@@ -846,6 +848,8 @@ class TestSidecarWriteBounds:
         assert loaded, "a persist that exceeds the reader byte cap must prune, not write an unreadable map"
         assert loaded.get("c.pdf") == "c.md"
         assert "a.pdf" not in loaded
+        state = load_companion_state(tmp_path)
+        assert "a.pdf" in state.evicted or state.no_legacy_fallback
         if oldest.id is not None:
             assert not companion_identity_path(tmp_path, oldest.id).exists()
         sidecar_size = (tmp_path / COMPANION_MAP_FILENAME).stat().st_size
@@ -882,27 +886,97 @@ class TestSidecarWriteBounds:
     def test_trim_byte_cap_matches_oldest_first_policy_without_per_eviction_dumps(self, monkeypatch, keep):
         n = 64
         mapping = {f"{i:04d}.pdf": CompanionEntry(name=f"{i:04d}.md", size=i, mtime_ns=i, dev=1, ino=i, id="x" * 32) for i in range(n)}
-        cap = companion_map_mod._serialized_map_bytes(dict(list(mapping.items())[-keep:]))
+        kept_map = dict(list(mapping.items())[-keep:])
+        dropped_keys = [key for key, _ in list(mapping.items())[: n - keep]]
+        # Cap at last-`keep` lives plus the sticky flag. Tombstones for the
+        # dropped names may or may not fit; either way `keep+1` lives cannot.
+        cap = companion_map_mod._serialized_map_bytes(kept_map, (), True)
         monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_BYTES", cap)
         monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_ENTRIES", n)
 
         calls = {"n": 0}
         real = companion_map_mod._serialized_map_bytes
 
-        def counting(candidate):
+        def counting(candidate, *args, **kwargs):
             calls["n"] += 1
-            return real(candidate)
+            return real(candidate, *args, **kwargs)
 
         monkeypatch.setattr(companion_map_mod, "_serialized_map_bytes", counting)
 
-        kept, evicted = companion_map_mod._trim_mapping_to_limits(mapping)
+        kept, dropped, tombstones, flag = companion_map_mod._trim_mapping_to_limits(mapping)
         expected_keys = [f"{i:04d}.pdf" for i in range(n - keep, n)]
         assert list(kept) == expected_keys
-        assert [entry.name for entry in evicted] == [f"{i:04d}.md" for i in range(n - keep)]
-        assert real(kept) <= cap
-        # Full map + last-row fail-closed check + binary search over n-1 cut points.
-        # keep=63 (drop 1) is the common path; comparing dumps to evicted count would fail it.
-        assert calls["n"] <= 2 + math.ceil(math.log2(n - 1))
+        assert [entry.name for entry in dropped] == [f"{i:04d}.md" for i in range(n - keep)]
+        if flag:
+            assert tombstones == []
+        else:
+            assert tombstones == dropped_keys
+        assert real(kept, tombstones, flag) <= cap
+        # Each candidate may dump once (tombstones fit) or twice (retry with sticky flag).
+        # Full map + last-row fail-closed check + binary search over n-1 cut points,
+        # plus a small slack for the sticky-flag retry on the accepted cut.
+        assert calls["n"] <= 2 * (2 + math.ceil(math.log2(n - 1))) + 2
+
+
+class TestEvictedOriginalsAreNotLegacy:
+    """Pruning must not turn collision-renamed companions into stem guesses."""
+
+    def _evict_pdf_mapping(self, tmp_path: Path, monkeypatch, mode: str) -> None:
+        (tmp_path / "a.docx").write_bytes(b"docx")
+        (tmp_path / "a.pdf").write_bytes(b"pdf")
+        (tmp_path / "a.md").write_text("FROM DOCX", encoding="utf-8")
+        (tmp_path / "a_1.md").write_text("FROM PDF", encoding="utf-8")
+        record_companion_mapping(tmp_path, "a.docx", "a.md")
+        record_companion_mapping(tmp_path, "a.pdf", "a_1.md")
+        if mode == "entries":
+            monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_ENTRIES", 2)
+        else:
+            size_two = (tmp_path / COMPANION_MAP_FILENAME).stat().st_size
+            monkeypatch.setattr(companion_map_mod, "MAX_COMPANION_MAP_BYTES", size_two)
+        for stem in ("c", "d"):
+            (tmp_path / f"{stem}.md").write_text(stem, encoding="utf-8")
+            record_companion_mapping(tmp_path, f"{stem}.pdf", f"{stem}.md")
+        state = load_companion_state(tmp_path)
+        assert "a.pdf" not in state.companions
+        assert state.blocks_legacy_fallback("a.pdf")
+
+    @pytest.mark.parametrize("mode", ["entries", "bytes"])
+    def test_lookup_does_not_choose_other_document_companion(self, tmp_path, monkeypatch, mode):
+        self._evict_pdf_mapping(tmp_path, monkeypatch, mode)
+        assert resolve_converted_markdown_path(tmp_path / "a.pdf") is None
+        assert (tmp_path / "a.md").read_text(encoding="utf-8") == "FROM DOCX"
+
+    @pytest.mark.parametrize("mode", ["entries", "bytes"])
+    def test_delete_preserves_other_document_companion(self, tmp_path, monkeypatch, mode):
+        self._evict_pdf_mapping(tmp_path, monkeypatch, mode)
+        delete_file_safe(tmp_path, "a.pdf", convertible_extensions={".pdf", ".docx"})
+        assert not (tmp_path / "a.pdf").exists()
+        assert (tmp_path / "a.md").read_text(encoding="utf-8") == "FROM DOCX"
+
+    def test_genuine_legacy_upload_still_uses_stem_fallback(self, tmp_path, monkeypatch):
+        self._evict_pdf_mapping(tmp_path, monkeypatch, "entries")
+        (tmp_path / "report.pdf").write_bytes(b"pdf")
+        sibling = tmp_path / "report.md"
+        sibling.write_text("# legacy\n", encoding="utf-8")
+        assert resolve_converted_markdown_path(tmp_path / "report.pdf") == sibling
+
+    def test_rerecord_clears_tombstone(self, tmp_path, monkeypatch):
+        self._evict_pdf_mapping(tmp_path, monkeypatch, "entries")
+        (tmp_path / "a_2.md").write_text("FROM PDF v2", encoding="utf-8")
+        record_companion_mapping(tmp_path, "a.pdf", "a_2.md")
+        state = load_companion_state(tmp_path)
+        assert "a.pdf" not in state.evicted
+        assert resolve_converted_markdown_path(tmp_path / "a.pdf") == tmp_path / "a_2.md"
+
+    def test_sticky_flag_is_durable_and_blocks_stem_fallback(self, tmp_path):
+        payload = {"version": 2, "companions": {}, "no_legacy_fallback": True}
+        (tmp_path / COMPANION_MAP_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+        (tmp_path / "a.pdf").write_bytes(b"pdf")
+        (tmp_path / "a.md").write_text("FROM DOCX", encoding="utf-8")
+        assert load_companion_state(tmp_path).no_legacy_fallback is True
+        assert resolve_converted_markdown_path(tmp_path / "a.pdf") is None
+        delete_file_safe(tmp_path, "a.pdf", convertible_extensions={".pdf"})
+        assert (tmp_path / "a.md").read_text(encoding="utf-8") == "FROM DOCX"
 
 
 class TestReplacementCleansPreviousCompanion:

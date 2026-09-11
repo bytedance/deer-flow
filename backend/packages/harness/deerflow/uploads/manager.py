@@ -17,7 +17,7 @@ from deerflow.uploads.companion_map import (
     companion_entry_matches,
     forget_companion_mapping,
     is_companion_map_file,
-    load_companion_entries,
+    load_companion_state,
     unlink_verified_companion,
 )
 from deerflow.utils.thread_id import validate_thread_id
@@ -391,7 +391,8 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     against the identity pin so a sandbox replacement of the basename is
     preserved. A stale sidecar entry (companion deleted or replaced outside
     this API) disables companion cleanup so no unrelated file is removed.
-    Without any sidecar entry the legacy ``<stem>.md`` heuristic applies.
+    Without any sidecar evidence the legacy ``<stem>.md`` heuristic applies.
+    Evicted originals and the sticky overflow flag also skip that heuristic.
 
     Args:
         base_dir: Directory containing the file.
@@ -415,8 +416,8 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     if not file_path.is_file():
         raise FileNotFoundError(f"File not found: {filename}")
 
-    entries = load_companion_entries(base_dir)
-    entry = entries.get(safe_name)
+    state = load_companion_state(base_dir)
+    entry = state.companions.get(safe_name)
     matched = entry is not None and companion_entry_matches(base_dir, entry)
     file_path.unlink()
 
@@ -426,7 +427,7 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
             if entry is not None and matched:
                 unlink_verified_companion(base_dir, entry)
                 forget_companion_mapping(base_dir, companion=entry.name)
-            elif entry is None:
+            elif not state.blocks_legacy_fallback(safe_name):
                 companion_name = file_path.with_suffix(".md").name
                 if companion_name != safe_name:
                     companion_path = file_path.with_name(companion_name)
