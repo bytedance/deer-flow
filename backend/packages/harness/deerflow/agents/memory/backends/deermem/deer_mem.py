@@ -44,7 +44,7 @@ from .deermem.core.message_processing import (
 from .deermem.core.paths import DEFAULT_AGENT_BUCKET
 from .deermem.core.prompt import format_memory_for_injection, load_prompt, load_prompt_messages, warm_tiktoken_cache
 from .deermem.core.queue import MemoryUpdateQueue, QueueFull
-from .deermem.core.relevance import build_idf, order_facts_for_query, tokenize
+from .deermem.core.relevance import build_idf, order_facts_for_query, tokenize, warm_tokenizer
 from .deermem.core.storage import MemoryRevisionConflict, MemoryStorageCorruption, create_storage
 from .deermem.core.updater import MemoryUpdater, _coerce_source_confidence
 
@@ -462,8 +462,9 @@ class DeerMem(MemoryManager):
             relevance_weight=self._config.retrieval_relevance_weight,
             diversity_weight=self._config.retrieval_diversity_weight,
             idf=corpus_idf,
+            limit=top_k,
         )
-        return _compat_document({"facts": ranked[:top_k]})["facts"]
+        return _compat_document({"facts": ranked})["facts"]
 
     def _ensure_retrieval_scopes(self, scopes: list[dict[str, str | None]]) -> None:
         """Lazily rebuild every requested scope when warm-up was skipped."""
@@ -588,6 +589,8 @@ class DeerMem(MemoryManager):
         or warming was unnecessary); False if tiktoken is unavailable or the
         download failed.
         """
+        if self._config.retrieval_relevance_enabled:
+            warm_tokenizer()
         if self._config.token_counting == "char":
             logger.info("token_counting='char'; tiktoken not used, skipping warm-up")
             return True

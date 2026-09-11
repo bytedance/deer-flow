@@ -8,13 +8,14 @@ import math
 import re
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
 import yaml
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-from .relevance import order_facts_for_query
+from .relevance import iter_diversify, score_facts
 
 logger = logging.getLogger(__name__)
 
@@ -385,7 +386,7 @@ def _escape_summary(value: Any) -> str:
 
 
 def _select_fact_lines(
-    ranked_facts: list[dict[str, Any]],
+    ranked_facts: Iterable[dict[str, Any]],
     *,
     token_budget: int,
     use_tiktoken: bool,
@@ -601,21 +602,20 @@ def format_memory_for_injection(
         # redoing validation work on the hot prompt-injection path.
         valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
 
-        # Query-aware ranking (issue #4495): reorder the valid facts by
-        # deterministic lexical relevance combined with confidence, then
-        # optionally diversify near-duplicates. The partition below must then
-        # preserve this order instead of re-sorting by confidence.
-        relevance_ordered = False
-        if query and query.strip() and relevance_weight is not None:
-            valid_facts = order_facts_for_query(
-                valid_facts,
-                query,
-                relevance_weight=relevance_weight,
-                diversity_weight=diversity_weight or 0.0,
-            )
-            relevance_ordered = True
-
         try:
+            # Score once, then lazily diversify each budget pool. Do not run
+            # full-scope MMR before the token-budget consumer can stop it.
+            relevance_ordered = bool(query and query.strip() and relevance_weight is not None)
+            scores = {}
+            if relevance_ordered:
+                scores = {id(fact): score for score, fact in score_facts(valid_facts, query, relevance_weight=relevance_weight)}
+
+            def _rank_pool(pool: list[dict[str, Any]]) -> Iterable[dict[str, Any]]:
+                if not relevance_ordered:
+                    return sorted(pool, key=_confidence_key, reverse=True)
+                scored = sorted(((scores[id(fact)], fact) for fact in pool), key=lambda pair: pair[0], reverse=True)
+                return iter_diversify(scored, similarity_weight=diversity_weight or 0.0)
+
             # Partition valid facts into guaranteed vs regular groups.
             # Use the *raw* category field (no ``or "context"`` default) so
             # a category-less legacy fact is never silently promoted into
@@ -636,14 +636,10 @@ def format_memory_for_injection(
 
                 guaranteed_pool = [f for f in valid_facts if _category_match(f)]
                 regular_pool = [f for f in valid_facts if not _category_match(f)]
-                if relevance_ordered:
-                    guaranteed, regular = guaranteed_pool, regular_pool
-                else:
-                    guaranteed = sorted(guaranteed_pool, key=_confidence_key, reverse=True)
-                    regular = sorted(regular_pool, key=_confidence_key, reverse=True)
+                guaranteed, regular = _rank_pool(guaranteed_pool), _rank_pool(regular_pool)
             else:
                 guaranteed = []
-                regular = valid_facts if relevance_ordered else sorted(valid_facts, key=_confidence_key, reverse=True)
+                regular = _rank_pool(valid_facts)
 
             # ── Phase 1: select guaranteed lines ──────────────────────────
             header_cost = _count_tokens(facts_header, use_tiktoken=use_tiktoken)

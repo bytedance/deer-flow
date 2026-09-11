@@ -14,6 +14,7 @@ confidence-based behavior. Coverage:
 
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.messages import HumanMessage
 
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
@@ -52,6 +53,61 @@ def _deer_mem_with_facts(facts: list[dict], backend_config: dict | None = None) 
 
 
 class TestLexicalRelevance:
+    def test_missing_confidence_defaults_to_zero(self):
+        missing = {"content": "unrelated first"}
+        low = _make_fact("unrelated second", confidence=0.1)
+        assert rank_facts([missing, low], "python")[0] is low
+
+    def test_optional_segmenter_receives_bounded_input(self, monkeypatch):
+        from deerflow.agents.memory.backends.deermem.deermem.core import relevance
+
+        seen = []
+
+        def cut(text):
+            seen.append(len(text))
+            yield from ("token" for _ in range(10000))
+
+        monkeypatch.setattr(relevance, "_jieba_available", True)
+        monkeypatch.setattr(relevance, "jieba", SimpleNamespace(cut=cut), raising=False)
+        assert len(tokenize("word" * 10000)) == 128
+        assert seen == [4096]
+
+    def test_mixed_cjk_without_jieba(self, monkeypatch):
+        from deerflow.agents.memory.backends.deermem.deermem.core import relevance
+
+        monkeypatch.setattr(relevance, "_jieba_available", False)
+        assert {"python", "我喜", "喜欢", "编程"} <= set(tokenize("我喜欢Python编程"))
+        assert {"你好", "世界"} <= set(tokenize("你好 世界"))
+        assert lexical_relevance("数据库升级", "Python数据库迁移") > 0
+
+    @pytest.mark.parametrize("confidence", [None, "invalid", float("nan"), float("inf")])
+    def test_invalid_confidence_does_not_outrank_low_confidence(self, confidence):
+        invalid = _make_fact("unrelated first", confidence=confidence)
+        low = _make_fact("unrelated second", confidence=0.1)
+        assert rank_facts([invalid, low], "python")[0] is low
+
+    def test_bounded_tokens(self, monkeypatch):
+        from deerflow.agents.memory.backends.deermem.deermem.core import relevance
+
+        monkeypatch.setattr(relevance, "_jieba_available", False)
+        assert len(tokenize("word " * 10000)) <= 128
+        assert len(tokenize("数据库迁移" * 10000)) <= 128
+
+    def test_query_tokenized_once_per_ranking(self, monkeypatch):
+        from deerflow.agents.memory.backends.deermem.deermem.core import relevance
+
+        original = relevance.tokenize
+        queries = []
+
+        def counted(text):
+            if text == "database migration":
+                queries.append(text)
+            return original(text)
+
+        monkeypatch.setattr(relevance, "tokenize", counted)
+        rank_facts([_make_fact(f"python fact {i}") for i in range(100)], "database migration")
+        assert len(queries) == 1
+
     def test_overlapping_content_scores_higher_than_unrelated(self):
         query = "database migration"
         related = lexical_relevance(query, "Migrations are managed with alembic and a PostgreSQL database")
@@ -118,6 +174,44 @@ class TestRankFacts:
 
 
 class TestDiversify:
+    def test_incremental_penalties_match_reference_mmr(self):
+        scored = [(0.9 - (i % 4) * 0.1, _make_fact(f"database {i % 3} fact {i % 5}")) for i in range(20)]
+        remaining = list(scored)
+        expected = []
+
+        def penalty(fact):
+            left = set(tokenize(fact["content"]))
+            return max((len(left & set(tokenize(picked["content"]))) / len(left | set(tokenize(picked["content"]))) for picked in expected), default=0.0)
+
+        while remaining:
+            index = max(range(len(remaining)), key=lambda i: remaining[i][0] - 0.5 * penalty(remaining[i][1]))
+            expected.append(remaining.pop(index)[1])
+        for limit in (0, 1, 5, len(scored), len(scored) + 1):
+            assert diversify(scored, similarity_weight=0.5, limit=limit) == expected[:limit]
+
+    def test_limit_preserves_full_prefix(self):
+        from deerflow.agents.memory.backends.deermem.deermem.core.relevance import order_facts_for_query
+
+        facts = [_make_fact(text) for text in ["database migrations", "database migration", "python testing", "Italian cooking"]]
+        full = order_facts_for_query(facts, "database", diversity_weight=0.5)
+        assert order_facts_for_query(facts, "database", diversity_weight=0.5, limit=2) == full[:2]
+        assert order_facts_for_query(facts, "database", diversity_weight=0.5, limit=0) == []
+
+    def test_tokenization_is_linear(self, monkeypatch):
+        from deerflow.agents.memory.backends.deermem.deermem.core import relevance
+
+        calls = []
+        original = relevance.tokenize
+
+        def counted(text):
+            calls.append(text)
+            return original(text)
+
+        monkeypatch.setattr(relevance, "tokenize", counted)
+        scored = [(0.7, _make_fact(f"database fact {i}")) for i in range(30)]
+        diversify(scored, similarity_weight=0.5, limit=5)
+        assert len(calls) <= len(scored)
+
     def test_promotes_distinct_fact_over_near_duplicate(self):
         facts = [
             _make_fact("Use ruff for linting"),
@@ -174,6 +268,34 @@ class TestRelevanceConfig:
 
 
 class TestRelevanceSearch:
+    def test_search_passes_top_k_to_mmr(self, monkeypatch):
+        from deerflow.agents.memory.backends.deermem import deer_mem
+
+        facts = [_make_fact(f"database fact {i}") for i in range(30)]
+        original = deer_mem.order_facts_for_query
+        limits = []
+
+        def ranked(*args, **kwargs):
+            limits.append(kwargs.get("limit"))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(deer_mem, "order_facts_for_query", ranked)
+        mgr = _deer_mem_with_facts(facts, {"retrieval_relevance_enabled": True, "retrieval_diversity_weight": 0.5, "retrieval_adapter": ""})
+        assert len(mgr.search("database", top_k=3)) == 3
+        assert limits == [3]
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    @pytest.mark.parametrize("counting", ["char", "tiktoken"])
+    def test_warms_segmenter_only_when_enabled(self, monkeypatch, enabled, counting):
+        from deerflow.agents.memory.backends.deermem import deer_mem
+
+        calls = []
+        monkeypatch.setattr(deer_mem, "warm_tokenizer", lambda: calls.append("jieba"))
+        monkeypatch.setattr(deer_mem, "warm_tiktoken_cache", lambda: calls.append("tiktoken") or True)
+        mgr = _deer_mem_with_facts([], {"retrieval_relevance_enabled": enabled, "token_counting": counting, "retrieval_adapter": ""})
+        assert mgr.warm() is True
+        assert calls == (["jieba"] if enabled else []) + (["tiktoken"] if counting == "tiktoken" else [])
+
     def test_returns_related_fact_without_literal_substring(self):
         facts = [
             _make_fact("Database migrations are handled with alembic", "project", 0.4),
@@ -262,6 +384,31 @@ class TestRelevanceSearch:
 
 
 class TestInjectionRelevance:
+    def test_diversification_stops_at_budget_and_preserves_guaranteed_pool(self, monkeypatch):
+        from deerflow.agents.memory.backends.deermem.deermem.core import prompt
+
+        original = prompt.iter_diversify
+        picked = []
+
+        def counted(*args, **kwargs):
+            for fact in original(*args, **kwargs):
+                picked.append(fact)
+                yield fact
+
+        monkeypatch.setattr(prompt, "iter_diversify", counted)
+        facts = [_make_fact(f"database fact {i}", confidence=0.9) for i in range(100)]
+        facts.append(_make_fact("Always ask before deleting files", category="correction", confidence=0.1))
+        result = prompt.format_memory_for_injection(
+            {"facts": facts},
+            query="database",
+            relevance_weight=0.7,
+            diversity_weight=0.5,
+            **self._injection_args(max_tokens=40, guaranteed_categories=["correction"], guaranteed_token_budget=20),
+        )
+        assert "Always ask before deleting files" in result
+        assert "database fact" in result
+        assert len(picked) < 10
+
     def _injection_args(self, **overrides):
         args = {
             "max_tokens": 300,
