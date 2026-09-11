@@ -38,6 +38,7 @@ export const enUS: Translations = {
     custom: "Custom",
     notAvailableInDemoMode: "Not available in demo mode",
     loading: "Loading...",
+    error: "Error:",
     version: "Version",
     lastUpdated: "Last updated",
     code: "Code",
@@ -126,6 +127,32 @@ export const enUS: Translations = {
       "This file could not be previewed. You can still download it.",
     viewSource: "View source",
     missingTarget: "This link does not say which artifact to display.",
+  },
+
+  artifactTable: {
+    title: "Table preview",
+    header: "First row as header",
+    column: (index) => `Column ${index}`,
+    total: (count) => `${count} rows`,
+    sample: (count) => `Preview of first ${count} rows`,
+    range: (start, end, limited) =>
+      `${start}–${end}${limited ? " of preview" : ""}`,
+    columnsLimited: "Showing the first 50 columns of the preview.",
+    uneven:
+      "Some rows have different numbers of fields. Missing fields are marked.",
+    empty: "This file is empty.",
+    incomplete:
+      "No complete records fit in this preview. View the source or download the file.",
+    failed:
+      "Unable to preview this table reliably. View the source or download the file.",
+    retry: "Retry preview",
+    previous: "Previous page",
+    next: "Next page",
+    cell: (row, column) => `View cell: row ${row}, column ${column}`,
+    cellValue: "Cell value",
+    missing: "Missing",
+    savedVersion:
+      "Opens or downloads the saved file. Your draft has not been saved.",
   },
 
   artifactArchive: {
@@ -313,6 +340,39 @@ export const enUS: Translations = {
     scheduledTasks: "Scheduled tasks",
     agentsDisabledTooltip: "Feature not enabled",
   },
+  // Sidebar projects section
+  projects: {
+    title: "Projects",
+    newProject: "New project",
+    namePlaceholder: "Project name",
+    moveToProject: "Move to project",
+    moveToProjectHint:
+      "Moving a chat doesn't remove the content already in it.",
+    removeFromProject: "Remove from project",
+    archive: "Archive",
+    restore: "Restore",
+    deleteProject: "Delete project",
+    deleteProjectConfirm:
+      "Deleting this project unlinks its chats. Chats, their history, and their files are not deleted.",
+    archived: "Archived",
+    empty: "No chats in this project yet.",
+    newChat: "New chat",
+    create: "Create",
+    createFailed: "Failed to create project",
+    moveFailed: "Failed to move chat",
+    archiveFailed: "Failed to archive project",
+    restoreFailed: "Failed to restore project",
+    deleteFailed: "Failed to delete project",
+    switchToGrouped: "Group chats by project",
+    switchToFlat: "Show flat chat list",
+    threads: "Chats",
+    threadsLoadFailed: "Couldn't load project chats",
+    untitled: "Untitled",
+    settings: "Settings",
+    notFound: "Project not found or deleted.",
+    projectUnavailable:
+      "Couldn't link the chat to the project. Your message was not sent — try again.",
+  },
 
   backgroundTasks: {
     label: "Background tasks",
@@ -391,6 +451,7 @@ export const enUS: Translations = {
     scheduleType: {
       cron: "Recurring",
       once: "One-time",
+      interval: "Interval",
     },
     preset: {
       label: "Repeat",
@@ -409,6 +470,11 @@ export const enUS: Translations = {
       cronPlaceholder: "0 9 * * *",
       runAt: "Run at",
       timezone: "Timezone",
+      intervalAmount: "Every",
+      intervalUnitSeconds: "seconds",
+      intervalUnitMinutes: "minutes",
+      intervalUnitHours: "hours",
+      intervalMinHint: "Minimum 60 seconds (the default server floor).",
     },
     weekdays: {
       mon: "Mon",
@@ -425,6 +491,8 @@ export const enUS: Translations = {
       title: "Create scheduled task",
       taskTitle: "Task title",
       prompt: "Prompt",
+      agent: "Agent",
+      leadAgent: "Default agent (lead_agent)",
       submit: "Create",
       fillRequired: "Fill all required fields",
     },
@@ -445,9 +513,11 @@ export const enUS: Translations = {
       allTypes: "All types",
       cron: "Cron",
       once: "Once",
+      interval: "Interval",
     },
     detail: {
       contextMode: "Context mode",
+      agent: "Agent",
       thread: "Thread",
       lastThread: "Last thread",
       schedule: "Schedule",
@@ -636,6 +706,21 @@ export const enUS: Translations = {
 
   // Chats
   chats: {
+    noActiveChats: "No recent chats",
+    activeChats: "Recent chats",
+    archivedChats: "Archived",
+    archiveChat: "Archive chat",
+    restoreChat: "Restore chat",
+    archiveSuccess: "Chat archived",
+    restoreSuccess: "Chat restored",
+    archiveFailed: "Failed to update archived chat",
+    archiveDescription:
+      "Archiving keeps messages and files. Running and scheduled tasks continue.",
+    undoArchive: "Undo",
+    noArchivedChats: "No archived chats",
+    noMatchingChats: "No matching chats in the loaded conversations",
+    loadChatsFailed: "Failed to load conversations",
+    retryLoadChats: "Retry",
     searchChats: "Search chats",
     branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
     loadMoreToSearch: "Load more to search older conversations",

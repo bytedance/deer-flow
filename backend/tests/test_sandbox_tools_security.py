@@ -315,6 +315,24 @@ def test_mask_local_paths_no_thread_data_still_masks_skills() -> None:
         assert "/mnt/skills/a/b.md" in masked
 
 
+def test_mask_local_paths_normalizes_windows_spelled_skill_tails() -> None:
+    """The static-pattern splice normalizes nested Windows-spelled tails.
+
+    This is the Linux-CI guard for the ``mask_local_paths_in_output`` splice:
+    the host root and the output are Windows-spelled *strings*, so the tail
+    keeps backslashes on every platform. Reverting the normalization here
+    turns this test red on Linux CI too, not only on Windows hosts.
+    """
+    windows_root = "C:\\Users\\alice\\deer-flow\\skills"
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value=windows_root),
+    ):
+        masked = mask_local_paths_in_output(f"Reading: {windows_root}\\lark-cli\\lark-doc\\SKILL.md", None)
+
+    assert masked == "Reading: /mnt/skills/lark-cli/lark-doc/SKILL.md"
+
+
 def test_mask_local_paths_hides_global_integration_skill_paths(tmp_path: Path) -> None:
     from deerflow.config.paths import Paths
 

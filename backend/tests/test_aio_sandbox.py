@@ -49,6 +49,29 @@ def test_local_sandbox_client_bypasses_environment_proxy():
     )
 
 
+def test_local_sandbox_client_forwards_trusted_relay_headers():
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+    sentinel_httpx = MagicMock()
+    headers = {"X-DeerFlow-Relay-Token": "secret-token"}
+    with (
+        patch("deerflow.community.aio_sandbox.aio_sandbox.httpx.Client", return_value=sentinel_httpx),
+        patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient") as sdk_cls,
+    ):
+        AioSandbox(
+            id="test-sandbox",
+            base_url="http://host.docker.internal:8080",
+            request_headers=headers,
+        )
+
+    sdk_cls.assert_called_once_with(
+        base_url="http://host.docker.internal:8080",
+        timeout=600,
+        headers=headers,
+        httpx_client=sentinel_httpx,
+    )
+
+
 @pytest.mark.parametrize(
     "base_url",
     [
@@ -579,7 +602,7 @@ class TestListDirSerialization:
         """list_dir should hold the lock during execution."""
         lock_was_held = []
 
-        original_exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/a\n/b")))
+        original_exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/a\n/b\n\n__DF_FIND_STATUS__:0\n", exit_code=0)))
 
         def tracking_exec(command, **kwargs):
             lock_was_held.append(sandbox._lock.locked())
@@ -590,6 +613,39 @@ class TestListDirSerialization:
         result = sandbox.list_dir("/test")
         assert result == ["/a", "/b"]
         assert lock_was_held == [True], "list_dir must hold the lock during exec_command"
+
+    def test_list_dir_raises_when_exec_fails(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(side_effect=RuntimeError("sandbox down"))
+
+        with pytest.raises(OSError, match="Failed to list directory"):
+            sandbox.list_dir("/test")
+
+    def test_list_dir_raises_when_find_returns_no_entries(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="\n__DF_FIND_STATUS__:1\n", exit_code=1)))
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/missing")
+
+    def test_list_dir_raises_oserror_when_result_data_is_none(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=None))
+
+        with pytest.raises(OSError, match="Failed to list directory"):
+            sandbox.list_dir("/test")
+
+    def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="", exit_code=127)))
+
+        with pytest.raises(OSError, match="exited with code 127"):
+            sandbox.list_dir("/test")
+
+    def test_list_dir_uses_find_H(self, sandbox):
+        sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/test\n\n__DF_FIND_STATUS__:0\n", exit_code=0)))
+
+        sandbox.list_dir("/test")
+
+        command = sandbox._client.shell.exec_command.call_args.kwargs["command"]
+        assert "find -H " in command
+        assert "\\( -type f -o -type d \\)" in command
 
 
 class TestNoChangeTimeout:
@@ -634,7 +690,7 @@ class TestNoChangeTimeout:
 
         def mock_exec(command, **kwargs):
             calls.append(kwargs)
-            return SimpleNamespace(data=SimpleNamespace(output="/a\n/b"))
+            return SimpleNamespace(data=SimpleNamespace(output="/a\n/b\n\n__DF_FIND_STATUS__:0\n", exit_code=0))
 
         sandbox._client.shell.exec_command = mock_exec
 
@@ -658,35 +714,47 @@ class TestReadFile:
         )
 
 
+class TestWriteFile:
+    def test_append_uses_server_append_without_pre_read(self, sandbox):
+        sandbox._client.file.read_file = MagicMock(side_effect=RuntimeError("read timed out"))
+        sandbox._client.file.write_file = MagicMock()
+
+        sandbox.write_file("/mnt/user-data/workspace/report.txt", "tail", append=True)
+
+        sandbox._client.file.read_file.assert_not_called()
+        sandbox._client.file.write_file.assert_called_once_with(
+            file="/mnt/user-data/workspace/report.txt",
+            content="tail",
+            append=True,
+        )
+
+    def test_overwrite_keeps_existing_request_shape(self, sandbox):
+        sandbox._client.file.write_file = MagicMock()
+
+        sandbox.write_file("/mnt/user-data/workspace/report.txt", "replacement")
+
+        sandbox._client.file.write_file.assert_called_once_with(
+            file="/mnt/user-data/workspace/report.txt",
+            content="replacement",
+        )
+
+
 class TestConcurrentFileWrites:
     """Verify file write paths do not lose concurrent updates."""
 
     def test_append_should_preserve_both_parallel_writes(self, sandbox):
         storage = {"content": "seed\n"}
-        active_reads = 0
         state_lock = threading.Lock()
-        overlap_detected = threading.Event()
 
-        def overlapping_read_file(path):
-            nonlocal active_reads
+        def write_back(*, file, content, append=False, **kwargs):
             with state_lock:
-                active_reads += 1
-                snapshot = storage["content"]
-                if active_reads == 2:
-                    overlap_detected.set()
-
-            overlap_detected.wait(0.05)
-
-            with state_lock:
-                active_reads -= 1
-
-            return snapshot
-
-        def write_back(*, file, content, **kwargs):
-            storage["content"] = content
+                if append:
+                    storage["content"] += content
+                else:
+                    storage["content"] = content
             return SimpleNamespace(data=SimpleNamespace())
 
-        sandbox.read_file = overlapping_read_file
+        sandbox.read_file = MagicMock(side_effect=AssertionError("native append must not pre-read"))
         sandbox._client.file.write_file = write_back
 
         barrier = threading.Barrier(2)
@@ -869,6 +937,6 @@ class TestClose:
 def test_list_dir_preserves_trailing_space_in_filename(sandbox):
     """ "notes.txt " (trailing space) is a legal Linux filename; find prints it
     verbatim, one entry per line, so a per-line strip() corrupts the name."""
-    sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/test/notes.txt \n/test/sub\n")))
+    sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/test/notes.txt \n/test/sub\n\n__DF_FIND_STATUS__:0\n", exit_code=0)))
 
     assert sandbox.list_dir("/test") == ["/test/notes.txt ", "/test/sub"]
