@@ -383,7 +383,6 @@ class TestLifecycleAndConfig:
             cfg1["configurable"]["model_name"],
             cfg1["configurable"]["thinking_enabled"],
             cfg1["configurable"]["is_plan_mode"],
-            cfg1["configurable"]["subagent_enabled"],
         )
 
         c2 = DeerFlowClient(checkpointer=None, plan_mode=True)
@@ -392,7 +391,6 @@ class TestLifecycleAndConfig:
             cfg2["configurable"]["model_name"],
             cfg2["configurable"]["thinking_enabled"],
             cfg2["configurable"]["is_plan_mode"],
-            cfg2["configurable"]["subagent_enabled"],
         )
 
         assert key1 != key2

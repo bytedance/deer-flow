@@ -33,11 +33,11 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middlewares
+from deerflow.agents.lead_agent.agent import _authorize_model_name, _inject_resolved_runtime_option, _resolve_runtime_option, build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
-from deerflow.config.agents_config import AGENT_NAME_PATTERN
+from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
@@ -181,7 +181,7 @@ class DeerFlowClient:
         *,
         model_name: str | None = None,
         thinking_enabled: bool = True,
-        subagent_enabled: bool = False,
+        subagent_enabled: bool | None = None,
         plan_mode: bool = False,
         agent_name: str | None = None,
         available_skills: set[str] | None = None,
@@ -199,7 +199,9 @@ class DeerFlowClient:
                 Without a checkpointer, each call is stateless.
             model_name: Override the default model name from config.
             thinking_enabled: Enable model's extended thinking.
-            subagent_enabled: Enable subagent delegation.
+            subagent_enabled: Enable or disable subagent delegation. When None,
+                a custom agent's configured default is used before falling back
+                to the runtime default.
             plan_mode: Enable TodoList middleware for plan mode.
             agent_name: Name of the agent to use.
             available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
@@ -267,8 +269,13 @@ class DeerFlowClient:
             "model_name": overrides.get("model_name", self._model_name),
             "thinking_enabled": overrides.get("thinking_enabled", self._thinking_enabled),
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
-            "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
         }
+        subagent_enabled = overrides.get("subagent_enabled", self._subagent_enabled)
+        if subagent_enabled is not None:
+            configurable["subagent_enabled"] = subagent_enabled
+        max_concurrent_subagents = overrides.get("max_concurrent_subagents")
+        if max_concurrent_subagents is not None:
+            configurable["max_concurrent_subagents"] = max_concurrent_subagents
         return RunnableConfig(
             configurable=configurable,
             recursion_limit=overrides.get("recursion_limit", 100),
@@ -286,6 +293,37 @@ class DeerFlowClient:
         # authorization principal so one trusted embedded client can safely
         # serve more than one caller.
         effective_user_id = cfg.get("user_id") or get_effective_user_id()
+        agent_config = load_agent_config(self._agent_name, user_id=effective_user_id) if self._agent_name else None
+        agent_subagent_enabled = getattr(agent_config, "subagent_enabled", None) if agent_config else None
+        agent_max_concurrent_subagents = getattr(agent_config, "max_concurrent_subagents", None) if agent_config else None
+        allowed_subagents = getattr(agent_config, "allowed_subagents", None) if agent_config else None
+
+        subagent_enabled = bool(_resolve_runtime_option(cfg, "subagent_enabled", agent_subagent_enabled, False))
+        subagent_enabled = bool(subagent_enabled and allowed_subagents != [])
+
+        from deerflow.config.subagents_config import effective_subagent_concurrency
+
+        # Lightweight integrations and older tests may construct a client via
+        # ``__new__`` and inject only ``_app_config``. Production clients keep
+        # the startup snapshot set by ``__init__``; the fallback preserves the
+        # pre-snapshot construction contract without consulting global state.
+        subagent_execution_capacity = getattr(
+            self,
+            "_subagent_execution_capacity",
+            int(getattr(getattr(self._app_config, "subagent_runtime", None), "max_running", 3)),
+        )
+        requested_max_concurrent = _resolve_runtime_option(cfg, "max_concurrent_subagents", agent_max_concurrent_subagents, None)
+        max_concurrent_subagents = effective_subagent_concurrency(
+            requested_max_concurrent,
+            self._app_config,
+            execution_capacity=subagent_execution_capacity,
+        )
+        cfg["subagent_enabled"] = subagent_enabled
+        cfg["max_concurrent_subagents"] = max_concurrent_subagents
+        _inject_resolved_runtime_option(config, "subagent_enabled", subagent_enabled)
+        _inject_resolved_runtime_option(config, "max_concurrent_subagents", max_concurrent_subagents)
+        metadata = config.setdefault("metadata", {})
+        metadata["allowed_subagents"] = list(allowed_subagents) if allowed_subagents is not None else None
 
         authorization_identity = None
         if self._app_config.authorization.enabled:
@@ -309,6 +347,7 @@ class DeerFlowClient:
             cfg.get("subagent_enabled"),
             cfg.get("max_concurrent_subagents"),
             cfg.get("max_total_subagents"),
+            tuple(allowed_subagents) if allowed_subagents is not None else None,
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
@@ -332,23 +371,6 @@ class DeerFlowClient:
         if model_name is None and self._app_config.models:
             model_name = self._app_config.models[0].name
         model_name = _authorize_model_name(model_name, context=cfg, app_config=self._app_config)
-        subagent_enabled = cfg.get("subagent_enabled", False)
-        from deerflow.config.subagents_config import effective_subagent_concurrency
-
-        # Lightweight integrations and older tests may construct a client via
-        # ``__new__`` and inject only ``_app_config``. Production clients keep
-        # the startup snapshot set by ``__init__``; the fallback preserves the
-        # pre-snapshot construction contract without consulting global state.
-        subagent_execution_capacity = getattr(
-            self,
-            "_subagent_execution_capacity",
-            int(getattr(getattr(self._app_config, "subagent_runtime", None), "max_running", 3)),
-        )
-        max_concurrent_subagents = effective_subagent_concurrency(
-            cfg.get("max_concurrent_subagents"),
-            self._app_config,
-            execution_capacity=subagent_execution_capacity,
-        )
         max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
@@ -422,6 +444,7 @@ class DeerFlowClient:
                 mcp_routing_hints_section=mcp_routing_hints_section,
                 user_id=effective_user_id,
                 skill_names=skill_setup.skill_names or None,
+                allowed_subagents=allowed_subagents,
                 subagent_execution_capacity=subagent_execution_capacity,
             ),
             "state_schema": get_thread_state_schema(self._checkpoint_channel_mode, self._checkpoint_snapshot_frequency),
@@ -847,7 +870,8 @@ class DeerFlowClient:
             message: User message text.
             thread_id: Thread ID for conversation context. Auto-generated if None.
             **kwargs: Override client defaults (model_name, thinking_enabled,
-                plan_mode, subagent_enabled, recursion_limit). Trusted embedded
+                plan_mode, subagent_enabled, max_concurrent_subagents,
+                recursion_limit). Trusted embedded
                 callers may also provide user_id, user_role, oauth_provider,
                 oauth_id, channel_user_id, is_internal, and authz_attributes.
 

@@ -712,6 +712,24 @@ class TestAgentsAPI:
             ],
         }
 
+    def test_update_agent_preserves_hand_authored_subagent_defaults(self, agent_client):
+        """Editing another field must not disable a custom agent's delegation."""
+        agent_client.post("/api/agents", json={"name": "delegating-agent", "description": "old desc", "soul": "p"})
+
+        tmp_path: Path = agent_client._tmp_path  # type: ignore[attr-defined]
+        config_file = tmp_path / "users" / "test-user-autouse" / "agents" / "delegating-agent" / "config.yaml"
+        config_data = yaml.safe_load(config_file.read_text())
+        config_data.update({"subagent_enabled": True, "max_concurrent_subagents": 2})
+        config_file.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+
+        response = agent_client.put("/api/agents/delegating-agent", json={"description": "new desc"})
+
+        assert response.status_code == 200
+        reloaded = yaml.safe_load(config_file.read_text())
+        assert reloaded["description"] == "new desc"
+        assert reloaded["subagent_enabled"] is True
+        assert reloaded["max_concurrent_subagents"] == 2
+
     def test_update_memory_only_user_dir_with_legacy_agent_returns_409(self, agent_client, tmp_path):
         """Regression for #3390's PUT /api/agents/{name} guard.
 
