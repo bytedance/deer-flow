@@ -6,6 +6,7 @@ from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.subagents.capacity import (
     SubagentCapacityRejected,
     SubagentCapacityTimeout,
+    SubagentExecutionCapacity,
     configure_subagent_execution_capacity,
     configured_subagent_max_running,
     get_subagent_execution_capacity,
@@ -110,6 +111,57 @@ async def test_capacity_cancelled_waiter_does_not_leak_queue_or_slot() -> None:
     assert capacity.snapshot().queued == 0
     release.set()
     await first
+    assert capacity.snapshot().running == 0
+
+
+@pytest.mark.asyncio
+async def test_capacity_cancellation_during_release_does_not_leak_slot(monkeypatch) -> None:
+    configure_subagent_execution_capacity(SubagentRuntimeConfig(max_running=1))
+    capacity = get_subagent_execution_capacity()
+    release_started = asyncio.Event()
+    release_allowed = asyncio.Event()
+    original_release = capacity._release
+
+    async def controlled_release() -> None:
+        release_started.set()
+        await release_allowed.wait()
+        await original_release()
+
+    monkeypatch.setattr(capacity, "_release", controlled_release)
+
+    async def work() -> None:
+        async with capacity.slot():
+            pass
+
+    execution = asyncio.create_task(work())
+    await asyncio.wait_for(release_started.wait(), timeout=1)
+    execution.cancel()
+    await asyncio.sleep(0)
+    execution.cancel()
+    await asyncio.sleep(0)
+    assert not execution.done()
+    release_allowed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+
+    assert capacity.snapshot().running == 0
+
+
+@pytest.mark.asyncio
+async def test_capacity_runs_after_acquire_before_body_and_releases_on_rejection() -> None:
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+    events: list[str] = []
+
+    async def reject_after_acquire() -> bool:
+        assert capacity.snapshot().running == 1
+        events.append("hook")
+        return False
+
+    with pytest.raises(SubagentCapacityRejected, match="admission hook"):
+        async with capacity.slot(after_acquire=reject_after_acquire):
+            events.append("body")
+
+    assert events == ["hook"]
     assert capacity.snapshot().running == 0
 
 

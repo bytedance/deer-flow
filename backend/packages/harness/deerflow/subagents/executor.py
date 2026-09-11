@@ -2,13 +2,15 @@
 
 import asyncio
 import atexit
+import inspect
 import json
 import logging
 import os
 import re
+import sys
 import threading
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
@@ -36,6 +38,7 @@ from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import (
     SubagentCapacityError,
+    SubagentCapacityRejected,
     SubagentExecutionCapacity,
     get_subagent_execution_capacity,
 )
@@ -68,6 +71,165 @@ _SANDBOX_LEASE_OWNER_CONTEXT_KEY = "sandbox_lease_owner_id"
 _SANDBOX_COMMAND_SCOPE_CONTEXT_KEY = "sandbox_command_scope_id"
 
 
+def _defer_subagent_cancellation(
+    deferred: asyncio.CancelledError | None,
+    interrupt: asyncio.CancelledError,
+) -> asyncio.CancelledError:
+    """Preserve the first host cancellation while allowing teardown to finish."""
+    return deferred or interrupt
+
+
+def _prefer_cleanup_error(
+    current: BaseException | None,
+    candidate: BaseException | None,
+) -> BaseException | None:
+    """Keep first-observed ordering unless a later fatal outranks a normal error."""
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    current_is_fatal = not isinstance(current, (asyncio.CancelledError, Exception))
+    candidate_is_fatal = not isinstance(candidate, (asyncio.CancelledError, Exception))
+    if candidate_is_fatal and not current_is_fatal:
+        return candidate
+    return current
+
+
+async def _await_stream_cleanup(
+    task: asyncio.Future[Any],
+    deferred: asyncio.CancelledError | None,
+) -> tuple[asyncio.CancelledError | None, BaseException | None]:
+    """Drain one cleanup task despite repeated cancellation of its host task."""
+    host = asyncio.current_task()
+    observed_cancellations = host.cancelling() if host is not None else 0
+    while True:
+        try:
+            await asyncio.shield(task)
+            return deferred, None
+        except asyncio.CancelledError as exc:
+            current_cancellations = host.cancelling() if host is not None else 0
+            if current_cancellations <= observed_cancellations:
+                return deferred, exc
+            observed_cancellations = current_cancellations
+            deferred = _defer_subagent_cancellation(deferred, exc)
+        except BaseException as exc:
+            return deferred, exc
+
+
+async def _capture_admitted_execution(
+    factory: Callable[[], Coroutine[Any, Any, Any]],
+) -> tuple[Any, BaseException | None]:
+    """Keep BaseException inside the child task so the parent owns propagation."""
+    try:
+        return await factory(), None
+    except BaseException as exc:
+        return None, exc
+
+
+async def _await_admitted_execution(
+    task: asyncio.Task[tuple[Any, BaseException | None]],
+    *,
+    cancellation_gate: asyncio.Future[bool] | None = None,
+) -> Any:
+    """Cancel an admitted execution once, then drain all of its teardown."""
+    deferred: asyncio.CancelledError | None = None
+    host = asyncio.current_task()
+    observed_cancellations = host.cancelling() if host is not None else 0
+    while True:
+        try:
+            result, execution_error = await asyncio.shield(task)
+            if execution_error is not None and not isinstance(
+                execution_error,
+                (asyncio.CancelledError, Exception),
+            ):
+                raise execution_error
+            if deferred is not None:
+                raise deferred
+            if execution_error is not None:
+                raise execution_error
+            return result
+        except asyncio.CancelledError as exc:
+            current_cancellations = host.cancelling() if host is not None else 0
+            if current_cancellations <= observed_cancellations:
+                if deferred is not None:
+                    raise deferred
+                raise
+            observed_cancellations = current_cancellations
+            if deferred is None and not task.done():
+                deferred = _defer_subagent_cancellation(deferred, exc)
+                should_cancel = True
+                if cancellation_gate is not None:
+                    while True:
+                        try:
+                            should_cancel = await asyncio.shield(cancellation_gate)
+                            break
+                        except asyncio.CancelledError as gate_exc:
+                            current_cancellations = host.cancelling() if host is not None else 0
+                            if current_cancellations <= observed_cancellations:
+                                raise deferred
+                            observed_cancellations = current_cancellations
+                            deferred = _defer_subagent_cancellation(
+                                deferred,
+                                gate_exc,
+                            )
+                if should_cancel and not task.done():
+                    task.cancel()
+                continue
+            deferred = _defer_subagent_cancellation(deferred, exc)
+
+
+async def _capture_stream_cleanup(
+    cleanup: Awaitable[Any],
+) -> BaseException | None:
+    """Keep cleanup BaseException inside its task for parent-owned propagation."""
+    try:
+        await cleanup
+    except BaseException as exc:
+        return exc
+    return None
+
+
+async def _close_agent_stream(
+    stream: Any,
+    *,
+    cancellation: asyncio.CancelledError | None = None,
+) -> tuple[asyncio.CancelledError | None, BaseException | None]:
+    """Drain LangGraph teardown and close its stream without losing cancellation."""
+    deferred = cancellation
+    close_error: BaseException | None = None
+    seen_tasks: set[int] = set()
+
+    # LangGraph attaches an in-flight AsyncPregelLoop exit task to
+    # CancelledError.args so consumers can drain it before reusing resources.
+    for value in getattr(cancellation, "args", ()):
+        if not isinstance(value, asyncio.Future) or id(value) in seen_tasks:
+            continue
+        seen_tasks.add(id(value))
+        deferred, task_error = await _await_stream_cleanup(value, deferred)
+        close_error = _prefer_cleanup_error(close_error, task_error)
+
+    close = getattr(stream, "aclose", None)
+    if close is None:
+        return deferred, close_error
+    try:
+        close_result = close()
+    except BaseException as exc:
+        return deferred, _prefer_cleanup_error(close_error, exc)
+    if not inspect.isawaitable(close_result):
+        return deferred, close_error
+
+    close_task = asyncio.create_task(
+        _capture_stream_cleanup(close_result),
+        name="subagent-stream-close",
+    )
+    if id(close_task) not in seen_tasks:
+        deferred, task_error = await _await_stream_cleanup(close_task, deferred)
+        captured_error = close_task.result() if task_error is None else None
+        close_error = _prefer_cleanup_error(close_error, task_error)
+        close_error = _prefer_cleanup_error(close_error, captured_error)
+    return deferred, close_error
+
+
 def _utcnow() -> datetime:
     # SubagentResult timestamp writers must stamp UTC-aware datetimes so
     # lifecycle metadata never depends on the host wall clock (see deerflow.utils.time).
@@ -98,6 +260,10 @@ class SubagentStatus(Enum):
             type(self).CANCELLED,
             type(self).TIMED_OUT,
         }
+
+
+class SubagentBackgroundFatalError(RuntimeError):
+    """A fatal execution error transported without killing the shared loop."""
 
 
 @dataclass
@@ -142,6 +308,10 @@ class SubagentResult:
             execution. ``None`` when the delegation carried no acceptance
             criteria, the run ended before streaming, or harvesting failed;
             an empty list means the stream carried no bash-family tool calls.
+        execution_done_event: Set after the execution task has exited its
+            cleanup and capacity contexts, whether normally or with an error.
+            Unlike ``status``, this is an internal lifecycle fence rather than
+            a business result.
     """
 
     task_id: str
@@ -160,7 +330,10 @@ class SubagentResult:
     tool_receipts: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     bash_executions: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    execution_done_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _background_execution: bool = field(default=False, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _fatal_error: BaseException | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         """Initialize mutable defaults."""
@@ -252,6 +425,36 @@ class SubagentResult:
             self.completed_at = completed_at or _utcnow()
             self.status = status
             return True
+
+    def record_fatal_error(self, exc: BaseException) -> None:
+        """Make a fatal background failure visible without losing its cause."""
+        with self._state_lock:
+            if self._fatal_error is not None:
+                return
+            self._fatal_error = exc
+            # Fatal teardown invalidates every provisional business outcome,
+            # including cancellation, timeout, and an earlier ordinary failure.
+            self.status = SubagentStatus.FAILED
+            self.result = None
+            self.stop_reason = None
+            self.error = str(exc) or type(exc).__name__
+            self.completed_at = self.completed_at or _utcnow()
+
+    def record_background_error(self, exc: Exception) -> None:
+        """Promote a provisional outcome to a non-fatal infrastructure failure."""
+        with self._state_lock:
+            if self._fatal_error is not None:
+                return
+            self.status = SubagentStatus.FAILED
+            self.result = None
+            self.stop_reason = None
+            self.error = str(exc) or type(exc).__name__
+            self.completed_at = self.completed_at or _utcnow()
+
+    def get_fatal_error(self) -> BaseException | None:
+        """Return the first original fatal captured by the background runner."""
+        with self._state_lock:
+            return self._fatal_error
 
 
 def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
@@ -351,8 +554,20 @@ def _extract_llm_error_fallback(final_state: Any) -> str | None:
 # Global storage for background task results
 _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
-
 _background_futures: dict[str, Future[SubagentResult]] = {}
+_background_cleanup_requested: set[str] = set()
+
+
+@dataclass
+class _BackgroundRunner:
+    """Cancellation handshake between callers and the isolated-loop runner."""
+
+    loop: asyncio.AbstractEventLoop | None = None
+    task: asyncio.Task[SubagentResult] | None = None
+    cancel_requested: bool = False
+
+
+_background_runners: dict[str, _BackgroundRunner] = {}
 
 
 def _harvest_tool_receipts(
@@ -790,6 +1005,8 @@ class SubagentExecutor:
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
         tool_promotion_recorder: Any | None = None,
+        admission_hook: Callable[[], Awaitable[bool | None]] | None = None,
+        admission_hook_loop: asyncio.AbstractEventLoop | None = None,
     ):
         """Initialize the executor.
 
@@ -827,6 +1044,11 @@ class SubagentExecutor:
                 Direct ``create_deerflow_agent`` callers pass one through their
                 ``SubagentRuntime``; application factories fall back to the
                 startup-configured process singleton.
+            admission_hook: Optional async callback run after process capacity
+                is acquired but before execution starts.
+            admission_hook_loop: Event loop that owns ``admission_hook``. Batch
+                persistence hooks use this to return to the service/database
+                loop from the isolated executor loop.
             acceptance_criteria: Optional lead-supplied completion requirements
                 (RFC #4651 PR3). Criterion values are model-supplied untrusted
                 data, so ``_build_initial_state`` appends them to the task
@@ -883,6 +1105,8 @@ class SubagentExecutor:
         # generation underneath the delegated work.
         self.extensions = extensions
         self.execution_capacity = execution_capacity
+        self.admission_hook = admission_hook
+        self.admission_hook_loop = admission_hook_loop
         # Raw lead-supplied criteria; stripping/capping happens at render time
         # in report_contract.render_acceptance_criteria_block.
         self.acceptance_criteria = acceptance_criteria
@@ -1296,20 +1520,69 @@ class SubagentExecutor:
             )
         with ensure_trace_context(self.deerflow_trace_id):
             try:
-                capacity = self.execution_capacity or get_subagent_execution_capacity()
-                async with capacity.slot():
-                    with result._state_lock:
-                        if not result.status.is_terminal:
-                            result.status = SubagentStatus.RUNNING
-                            result.started_at = _utcnow()
-                    return await self._aexecute_admitted(task, result)
-            except SubagentCapacityError as exc:
-                result.try_set_terminal(
-                    SubagentStatus.FAILED,
-                    error=str(exc),
-                    admission_failure=True,
-                )
-                return result
+                try:
+                    attempt_gate = asyncio.get_running_loop().create_future() if self.admission_hook is not None else None
+
+                    async def run_admission_hook() -> bool | None:
+                        if self.admission_hook is None:
+                            return None
+                        try:
+                            hook_loop = self.admission_hook_loop
+                            if hook_loop is None or hook_loop is asyncio.get_running_loop():
+                                return await self.admission_hook()
+
+                            async def invoke() -> bool | None:
+                                assert self.admission_hook is not None
+                                return await self.admission_hook()
+
+                            invocation = invoke()
+                            try:
+                                hook_future = asyncio.run_coroutine_threadsafe(
+                                    invocation,
+                                    hook_loop,
+                                )
+                            except BaseException:
+                                invocation.close()
+                                raise
+                            return await asyncio.wrap_future(hook_future)
+                        except Exception as exc:
+                            raise SubagentCapacityRejected(
+                                f"Subagent execution admission hook failed: {exc}",
+                            ) from exc
+
+                    async def execute_admitted() -> SubagentResult:
+                        try:
+                            capacity = self.execution_capacity or get_subagent_execution_capacity()
+                            async with capacity.slot(after_acquire=run_admission_hook):
+                                with result._state_lock:
+                                    if not result.status.is_terminal:
+                                        result.status = SubagentStatus.RUNNING
+                                        result.started_at = _utcnow()
+                                if attempt_gate is not None:
+                                    attempt_gate.set_result(True)
+                                return await self._aexecute_admitted(task, result)
+                        finally:
+                            if attempt_gate is not None and not attempt_gate.done():
+                                attempt_gate.set_result(False)
+
+                    execution = asyncio.create_task(
+                        _capture_admitted_execution(execute_admitted),
+                        name=f"subagent-{self.config.name}-admitted",
+                    )
+                    return await _await_admitted_execution(
+                        execution,
+                        cancellation_gate=attempt_gate,
+                    )
+                except SubagentCapacityError as exc:
+                    result.try_set_terminal(
+                        SubagentStatus.FAILED,
+                        error=str(exc),
+                        admission_failure=True,
+                    )
+                    return result
+            finally:
+                if not result._background_execution:
+                    _mark_background_execution_done(result)
 
     async def _aexecute_admitted(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -1517,41 +1790,86 @@ class SubagentExecutor:
                 )
                 return result
 
-            async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
-                # A yielded values chunk is already executed state.  Retain it
-                # before observing cooperative cancellation so terminal receipt
-                # harvesting includes a tool result that completed while the
-                # cancellation request was in flight.
-                final_state = chunk
-                result.update_tool_receipts(terminal_receipts())
-                result.update_bash_executions(current_bash_executions())
+            stream = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
+            cancelled_during_stream = False
+            try:
+                async for chunk in stream:
+                    # A yielded values chunk is already executed state.  Retain it
+                    # before observing cooperative cancellation so terminal receipt
+                    # harvesting includes a tool result that completed while the
+                    # cancellation request was in flight.
+                    final_state = chunk
+                    result.update_tool_receipts(terminal_receipts())
+                    result.update_bash_executions(current_bash_executions())
 
-                # Cooperative cancellation: check if parent requested stop.
-                # Note: cancellation is only detected at astream iteration boundaries,
-                # so long-running tool calls within a single iteration will not be
-                # interrupted until the next chunk is yielded.
-                if result.cancel_event.is_set():
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
-                    result.try_set_terminal(
-                        SubagentStatus.CANCELLED,
-                        error="Cancelled by user",
-                        token_usage_records=collector.snapshot_records(),
-                        tool_receipts=terminal_receipts(),
+                    # Cooperative cancellation: check if parent requested stop.
+                    # Note: cancellation is only detected at astream iteration boundaries,
+                    # so long-running tool calls within a single iteration will not be
+                    # interrupted until the next chunk is yielded.
+                    if result.cancel_event.is_set():
+                        cancelled_during_stream = True
+                        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
+                        break
+
+                    result.update_token_usage_records(collector.snapshot_records())
+
+                    # Capture every step message (assistant turns AND tool outputs)
+                    # appended since the last chunk. A single super-step can append
+                    # several ToolMessages when the model emits multiple tool calls in
+                    # one turn, so capturing only messages[-1] would drop all but the
+                    # last output (#3779). Dedup/serialization live in capture_step_message.
+                    messages = chunk.get("messages", [])
+                    previous_count = len(ai_messages)
+                    processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
+                    if len(ai_messages) > previous_count:
+                        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
+            finally:
+                stream_error = sys.exception()
+                cancelled_during_stream = cancelled_during_stream or result.cancel_event.is_set()
+                deferred_cancellation = None
+                if isinstance(stream_error, asyncio.CancelledError):
+                    deferred_cancellation = _defer_subagent_cancellation(None, stream_error)
+                deferred_cancellation, close_error = await _close_agent_stream(
+                    stream,
+                    cancellation=deferred_cancellation,
+                )
+                cancelled_during_stream = cancelled_during_stream or result.cancel_event.is_set()
+                if close_error is not None:
+                    if not isinstance(close_error, (asyncio.CancelledError, Exception)):
+                        preferred_error = _prefer_cleanup_error(stream_error, close_error)
+                        if preferred_error is close_error:
+                            raise close_error
+                        logger.critical(
+                            "[trace=%s] Subagent %s stream close also failed while propagating an earlier fatal error",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=(
+                                type(close_error),
+                                close_error,
+                                close_error.__traceback__,
+                            ),
+                        )
+                    interrupted = stream_error is not None or deferred_cancellation is not None or cancelled_during_stream
+                    if not interrupted:
+                        raise close_error
+                    logger.log(
+                        logging.WARNING if cancelled_during_stream else logging.DEBUG,
+                        "[trace=%s] Could not close interrupted subagent stream for %s",
+                        self.trace_id,
+                        self.config.name,
+                        exc_info=(type(close_error), close_error, close_error.__traceback__),
                     )
-                    return result
+                if stream_error is None and deferred_cancellation is not None:
+                    raise deferred_cancellation
 
-                result.update_token_usage_records(collector.snapshot_records())
-
-                # Capture every step message (assistant turns AND tool outputs)
-                # appended since the last chunk. A single super-step can append
-                # several ToolMessages when the model emits multiple tool calls in
-                # one turn, so capturing only messages[-1] would drop all but the
-                # last output (#3779). Dedup/serialization live in capture_step_message.
-                messages = chunk.get("messages", [])
-                previous_count = len(ai_messages)
-                processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
-                if len(ai_messages) > previous_count:
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
+            if cancelled_during_stream:
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled by user",
+                    token_usage_records=collector.snapshot_records(),
+                    tool_receipts=terminal_receipts(),
+                )
+                return result
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
@@ -1655,6 +1973,8 @@ class SubagentExecutor:
             )
 
         finally:
+            active_error = sys.exception()
+            cleanup_error: BaseException | None = None
             if execution_context is not None and execution_context.get("sandbox_id") is not None:
                 try:
                     from deerflow.sandbox import get_sandbox_provider
@@ -1662,13 +1982,16 @@ class SubagentExecutor:
 
                     provider = get_sandbox_provider()
                     await get_sandbox_lease_manager(provider).release_async(sandbox_lease_owner_id)
-                except Exception:
-                    logger.warning(
-                        "[trace=%s] Failed to release sandbox execution lease for subagent %s",
-                        self.trace_id,
-                        self.config.name,
-                        exc_info=True,
-                    )
+                except BaseException as exc:
+                    if isinstance(exc, Exception):
+                        logger.warning(
+                            "[trace=%s] Failed to release sandbox execution lease for subagent %s",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
+                    else:
+                        cleanup_error = _prefer_cleanup_error(cleanup_error, exc)
             if task_info is not None and task_store is not None:
                 try:
                     await notify_task_stop(
@@ -1681,13 +2004,33 @@ class SubagentExecutor:
                         ),
                         timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
                     )
-                except Exception:
-                    logger.warning(
-                        "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
-                        self.trace_id,
-                        self.config.name,
-                        exc_info=True,
-                    )
+                except BaseException as exc:
+                    if isinstance(exc, Exception):
+                        logger.warning(
+                            "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
+                    else:
+                        cleanup_error = _prefer_cleanup_error(cleanup_error, exc)
+            if cleanup_error is not None:
+                preferred_error = _prefer_cleanup_error(
+                    active_error,
+                    cleanup_error,
+                )
+                if preferred_error is cleanup_error:
+                    raise cleanup_error
+                logger.critical(
+                    "[trace=%s] Subagent %s cleanup also failed while propagating an earlier fatal error",
+                    self.trace_id,
+                    self.config.name,
+                    exc_info=(
+                        type(cleanup_error),
+                        cleanup_error,
+                        cleanup_error.__traceback__,
+                    ),
+                )
 
         return result
 
@@ -1778,6 +2121,7 @@ class SubagentExecutor:
             trace_id=self.trace_id,
             status=SubagentStatus.PENDING,
         )
+        result._background_execution = True
 
         logger.info(
             "[trace=%s] Subagent %s starting async execution, execution_id=%s, external_task_id=%s, timeout=%ss",
@@ -1795,25 +2139,78 @@ class SubagentExecutor:
         # cleanup_background_task() refuses non-terminal entries.
         parent_context = _copy_isolated_subagent_context()
 
+        runner = _BackgroundRunner()
         with _background_tasks_lock:
             _background_tasks[execution_id] = result
+            _background_runners[execution_id] = runner
 
         async def run_with_timeout() -> SubagentResult:
+            execution: asyncio.Task[SubagentResult] | None = None
             try:
-                return await asyncio.wait_for(
-                    self._aexecute(task, result),
+                runner_task = asyncio.current_task()
+                if runner_task is None:
+                    raise RuntimeError("Background subagent runner has no current task")
+                with _background_tasks_lock:
+                    # The closure, not the externally cleanable registry, owns
+                    # this handshake object for the runner's full lifetime.
+                    runner.loop = asyncio.get_running_loop()
+                    runner.task = runner_task
+                    cancel_requested = runner.cancel_requested or result.cancel_event.is_set()
+                execution = asyncio.create_task(
+                    _capture_admitted_execution(lambda: self._aexecute(task, result)),
+                    name=f"subagent-{self.config.name}-background",
+                )
+                if cancel_requested:
+                    # Deliver cancellation only after this coroutine is running
+                    # and owns its child. Cancelling the concurrent Future
+                    # before this handshake can bypass this finally block.
+                    runner_task.cancel()
+                done, _pending = await asyncio.wait(
+                    {execution},
                     timeout=self.config.timeout_seconds,
                 )
-            except TimeoutError:
+                if execution in done:
+                    return await _await_admitted_execution(execution)
+
+                # Publish the business timeout immediately. The execution task
+                # remains owned here until stream, sandbox, extension, and
+                # capacity teardown have all completed.
                 result.cancel_event.set()
                 result.try_set_terminal(
                     SubagentStatus.TIMED_OUT,
                     error=f"Execution timed out after {self.config.timeout_seconds} seconds",
                     tool_receipts=result.snapshot_tool_receipts(),
                 )
+                execution.cancel()
+                try:
+                    await _await_admitted_execution(execution)
+                except asyncio.CancelledError:
+                    pass
                 return result
             except asyncio.CancelledError:
                 result.cancel_event.set()
+                if execution is not None:
+                    if not execution.done():
+                        execution.cancel()
+                    try:
+                        await _await_admitted_execution(execution)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as exc:
+                        logger.exception(
+                            "[trace=%s] Subagent %s cancellation teardown failed",
+                            self.trace_id,
+                            self.config.name,
+                        )
+                        result.record_background_error(exc)
+                    except BaseException as exc:
+                        logger.exception(
+                            "[trace=%s] Subagent %s cancellation teardown aborted",
+                            self.trace_id,
+                            self.config.name,
+                        )
+                        result.record_fatal_error(exc)
+                        raise SubagentBackgroundFatalError(f"{type(exc).__name__}: {str(exc) or 'fatal background execution error'}") from exc
                 result.try_set_terminal(
                     SubagentStatus.CANCELLED,
                     error="Cancelled by user",
@@ -1822,12 +2219,28 @@ class SubagentExecutor:
                 return result
             except Exception as exc:
                 logger.exception("[trace=%s] Subagent %s async execution failed", self.trace_id, self.config.name)
-                result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
+                result.record_background_error(exc)
                 return result
+            except BaseException as exc:
+                logger.exception(
+                    "[trace=%s] Subagent %s background execution aborted",
+                    self.trace_id,
+                    self.config.name,
+                )
+                result.record_fatal_error(exc)
+                raise SubagentBackgroundFatalError(f"{type(exc).__name__}: {str(exc) or 'fatal background execution error'}") from exc
+            finally:
+                with _background_tasks_lock:
+                    current_runner = _background_runners.get(execution_id)
+                    if current_runner is runner:
+                        _background_runners.pop(execution_id, None)
+                    runner.loop = None
+                    runner.task = None
+                _mark_background_execution_done(result)
 
         try:
             execution_future = _submit_to_isolated_loop_in_context(parent_context, run_with_timeout)
-        except Exception:
+        except BaseException:
             # Submitting can fail before any coroutine starts (e.g. the
             # persistent loop failed to spin up). The caller then sees the
             # exception and never polls this execution_id, and
@@ -1835,12 +2248,17 @@ class SubagentExecutor:
             # just-registered entry must be dropped here, not left as a
             # PENDING zombie nothing will ever remove.
             with _background_tasks_lock:
-                _background_tasks.pop(execution_id, None)
+                _remove_background_task_locked(execution_id)
             raise
         with _background_tasks_lock:
             _background_futures[execution_id] = execution_future
 
-        def forget_future(_future: Future[SubagentResult]) -> None:
+        def forget_future(completed_future: Future[SubagentResult]) -> None:
+            # Production consumers propagate the original fatal through
+            # SubagentResult after the execution fence. Still retrieve the
+            # transport Future's exception so it never remains unobserved.
+            if not completed_future.cancelled():
+                completed_future.exception()
             with _background_tasks_lock:
                 _background_futures.pop(execution_id, None)
 
@@ -1864,13 +2282,33 @@ def request_cancel_background_task(execution_id: str) -> None:
     """
     with _background_tasks_lock:
         result = _background_tasks.get(execution_id)
-        future = _background_futures.get(execution_id) if result is not None else None
+        runner = _background_runners.get(execution_id) if result is not None else None
+        if runner is not None:
+            runner.cancel_requested = True
+            loop = runner.loop
+            task = runner.task
+        else:
+            loop = None
+            task = None
     if result is not None:
         result.cancel_event.set()
-        # Future.cancel() may invoke forget_future synchronously; keep it out of
-        # _background_tasks_lock because that callback acquires the same lock.
-        if future is not None:
-            future.cancel()
+        # Never cancel the concurrent Future: before the isolated-loop runner
+        # starts, Future.cancel() can bypass its try/finally entirely. The
+        # registration handshake above either records this request for startup
+        # or targets the already-running asyncio task.
+        if loop is not None and task is not None:
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                # A stale runner can outlive its persistent loop during process
+                # teardown or loop replacement. The cooperative cancel flag is
+                # already set; one stale runner must not abort cancellation of
+                # the remaining batch executions.
+                logger.warning(
+                    "Could not schedule cancellation for background execution %s",
+                    execution_id,
+                    exc_info=True,
+                )
         logger.info("Requested cancellation for background execution %s", execution_id)
 
 
@@ -1897,14 +2335,40 @@ def list_background_tasks() -> list[SubagentResult]:
         return list(_background_tasks.values())
 
 
+def _remove_background_task_locked(execution_id: str) -> None:
+    _background_tasks.pop(execution_id, None)
+    _background_futures.pop(execution_id, None)
+    _background_runners.pop(execution_id, None)
+    _background_cleanup_requested.discard(execution_id)
+
+
+def _mark_background_execution_done(result: SubagentResult) -> None:
+    result.execution_done_event.set()
+    _complete_deferred_background_cleanup(result.task_id, result)
+
+
+def _complete_deferred_background_cleanup(
+    execution_id: str,
+    result: SubagentResult,
+) -> None:
+    """Fulfil a terminal cleanup request after execution teardown completes."""
+    with _background_tasks_lock:
+        if execution_id not in _background_cleanup_requested or _background_tasks.get(execution_id) is not result or not result.execution_done_event.is_set() or not (result.status.is_terminal or result.completed_at is not None):
+            return
+        _remove_background_task_locked(execution_id)
+    logger.debug("Completed deferred cleanup for background execution: %s", execution_id)
+
+
 def cleanup_background_task(execution_id: str) -> None:
     """Remove a completed task from background tasks.
 
     Should be called by task_tool after it finishes polling and returns the result.
     This prevents memory leaks from accumulated completed tasks.
 
-    Only removes tasks that are in a terminal state (COMPLETED/FAILED/TIMED_OUT)
-    to avoid race conditions with the background executor still updating the task entry.
+    Only removes tasks that are terminal and whose execution teardown has
+    completed. A terminal result may be published before sandbox/extension
+    cleanup and capacity release; cleanup requested in that window is deferred
+    and completed by ``_aexecute`` after its lifecycle fence is set.
 
     Args:
         execution_id: The execution ID to remove.
@@ -1913,15 +2377,29 @@ def cleanup_background_task(execution_id: str) -> None:
         result = _background_tasks.get(execution_id)
         if result is None:
             # Nothing to clean up; may have been removed already.
+            _background_cleanup_requested.discard(execution_id)
             logger.debug("Requested cleanup for unknown background execution %s", execution_id)
             return
 
-        # Only clean up tasks that are in a terminal state to avoid races with
-        # the background executor still updating the task entry.
-        if result.status.is_terminal or result.completed_at is not None:
-            del _background_tasks[execution_id]
-            _background_futures.pop(execution_id, None)
-            logger.debug("Cleaned up background execution: %s", execution_id)
+        terminal = result.status.is_terminal or result.completed_at is not None
+        if terminal and result.execution_done_event.is_set():
+            _remove_background_task_locked(execution_id)
+            logger.debug(
+                "Cleaned up background execution: %s",
+                execution_id,
+            )
+        elif terminal:
+            _background_cleanup_requested.add(execution_id)
+            logger.debug(
+                "Deferred cleanup for background execution %s until teardown completes",
+                execution_id,
+            )
+        elif result.cancel_event.is_set():
+            _background_cleanup_requested.add(execution_id)
+            logger.debug(
+                "Deferred cleanup for cancelled background execution %s until teardown and terminalization complete",
+                execution_id,
+            )
         else:
             logger.debug(
                 "Skipping cleanup for non-terminal background execution %s (status=%s)",
@@ -1946,6 +2424,5 @@ def force_cleanup_background_task(execution_id: str) -> None:
         execution_id: The execution ID to remove.
     """
     with _background_tasks_lock:
-        _background_tasks.pop(execution_id, None)
-        _background_futures.pop(execution_id, None)
+        _remove_background_task_locked(execution_id)
     logger.warning("Force-cleaned background execution %s after unreadable status", execution_id)

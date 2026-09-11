@@ -298,8 +298,37 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.warning("Upload staging file cleanup skipped", exc_info=True)
 
+    shutdown_fatal: BaseException | None = None
+    shutdown_cancelled: asyncio.CancelledError | None = None
+
+    def remember_shutdown_error(exc: BaseException, component: str) -> None:
+        nonlocal shutdown_fatal, shutdown_cancelled
+        if isinstance(exc, asyncio.CancelledError):
+            if shutdown_cancelled is None:
+                shutdown_cancelled = exc
+        elif shutdown_fatal is None:
+            shutdown_fatal = exc
+        logger.critical(
+            "Fatal error while %s; continuing Gateway resource cleanup",
+            component,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+    @asynccontextmanager
+    async def guarded_langgraph_runtime() -> AsyncGenerator[None, None]:
+        try:
+            async with langgraph_runtime(app, startup_config):
+                yield
+        except BaseException as exc:
+            if shutdown_fatal is None and shutdown_cancelled is None:
+                raise
+            if isinstance(exc, Exception):
+                logger.exception("Failed to close LangGraph runtime")
+            else:
+                remember_shutdown_error(exc, "closing LangGraph runtime")
+
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
-    async with langgraph_runtime(app, startup_config):
+    async with guarded_langgraph_runtime():
         logger.info("LangGraph runtime initialised")
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.
@@ -435,6 +464,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await auth.close_oidc_service()
         except Exception:
             logger.exception("Failed to close OIDC service")
+        except BaseException as exc:
+            remember_shutdown_error(exc, "closing OIDC service")
 
         # Stop channel service on shutdown (bounded to prevent worker hang)
         try:
@@ -451,19 +482,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         except Exception:
             logger.exception("Failed to stop channel service")
+        except BaseException as exc:
+            remember_shutdown_error(exc, "stopping channel service")
 
         if getattr(app.state, "scheduled_task_service", None) is not None:
             try:
-                await app.state.scheduled_task_service.stop()
+                await asyncio.wait_for(
+                    app.state.scheduled_task_service.stop(),
+                    timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Scheduled task service shutdown exceeded %.1fs; proceeding with worker exit.",
+                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
             except Exception:
                 logger.exception("Failed to stop scheduled task service")
+            except BaseException as exc:
+                remember_shutdown_error(exc, "stopping scheduled task service")
 
         if getattr(app.state, "mcp_task_service", None) is not None:
             app.state.mcp_tasks_available = False
             try:
-                await app.state.mcp_task_service.stop()
+                await asyncio.wait_for(
+                    app.state.mcp_task_service.stop(),
+                    timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "MCP task service shutdown exceeded %.1fs; proceeding with worker exit.",
+                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
             except Exception:
                 logger.exception("Failed to stop MCP task service")
+            except BaseException as exc:
+                remember_shutdown_error(exc, "stopping MCP task service")
             finally:
                 from deerflow.mcp.tasks.runtime import set_mcp_task_submitter
 
@@ -475,9 +528,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if getattr(app.state, "subagent_batch_service", None) is not None:
             app.state.subagent_batches_available = False
             try:
-                await app.state.subagent_batch_service.stop()
+                await asyncio.wait_for(
+                    app.state.subagent_batch_service.stop(),
+                    timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "Subagent batch service shutdown exceeded %.1fs; proceeding with worker exit.",
+                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+                )
             except Exception:
                 logger.exception("Failed to stop subagent batch service")
+            except BaseException as exc:
+                remember_shutdown_error(exc, "stopping subagent batch service")
             finally:
                 from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
 
@@ -499,6 +562,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         except Exception:
             logger.exception("Failed to close browser sessions")
+        except BaseException as exc:
+            remember_shutdown_error(exc, "closing browser sessions")
 
         # Drain the memory backend's pending-update buffer before the worker
         # exits (best-effort, bounded). IM channels and the scheduler are
@@ -523,7 +588,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # The retrieval index is derived from canonical memory files, so its
         # wait is independently capped and never consumes the flush budget.
         retrieval_warm_finished = True
-        if retrieval_warm_task is not None and not retrieval_warm_task.done():
+        if retrieval_warm_task is not None:
             try:
                 await asyncio.wait_for(
                     asyncio.shield(retrieval_warm_task),
@@ -535,6 +600,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             except TimeoutError:
                 retrieval_warm_finished = False
                 logger.warning("Memory retrieval index rebuild is still running; leaving its connection open during shutdown")
+            except BaseException as exc:
+                retrieval_warm_finished = retrieval_warm_task.done()
+                remember_shutdown_error(exc, "waiting for memory retrieval index rebuild")
 
         manager = None
         try:
@@ -547,6 +615,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             suspend_extension_system_observations()
         except Exception:
             logger.debug("Failed to suspend extension system observations (non-fatal)", exc_info=True)
+        except BaseException as exc:
+            remember_shutdown_error(exc, "suspending extension system observations")
 
         try:
             app_cfg = get_app_config()
@@ -565,6 +635,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     )
         except Exception:
             logger.exception("Failed to flush memory queue on shutdown")
+        except BaseException as exc:
+            remember_shutdown_error(exc, "flushing memory queue on shutdown")
         finally:
             close = getattr(manager, "close", None)
             if callable(close) and retrieval_warm_finished:
@@ -572,7 +644,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     await asyncio.to_thread(close)
                 except Exception:
                     logger.exception("Failed to close memory backend on shutdown")
-
+                except BaseException as exc:
+                    remember_shutdown_error(exc, "closing memory backend on shutdown")
+    if shutdown_fatal is not None:
+        raise shutdown_fatal
+    if shutdown_cancelled is not None:
+        raise shutdown_cancelled
     logger.info("Shutting down API Gateway")
 
 

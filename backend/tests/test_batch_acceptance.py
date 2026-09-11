@@ -25,13 +25,14 @@ from deerflow.tools.builtins.batch_task_tool import BatchTaskItem, bind_batch_to
 
 
 class SubagentStatus(Enum):
+    PENDING = "pending"
     COMPLETED = "completed"
     FAILED = "failed"
     RUNNING = "running"
 
     @property
     def is_terminal(self):
-        return self is not SubagentStatus.RUNNING
+        return self in {SubagentStatus.COMPLETED, SubagentStatus.FAILED}
 
 
 @pytest_asyncio.fixture
@@ -51,15 +52,36 @@ async def env(monkeypatch, tmp_path):
         repo=repo,
         provider=provider,
         calls=[],
-        result=SimpleNamespace(status=SubagentStatus.COMPLETED, result="Report claims everything is done", error=None, stop_reason=None, token_usage_records=[], bash_executions=[]),
+        executor_tasks=[],
+        result=SimpleNamespace(
+            status=SubagentStatus.PENDING,
+            result="Report claims everything is done",
+            error=None,
+            stop_reason=None,
+            token_usage_records=[],
+            bash_executions=[],
+            admission_failure=False,
+            execution_done_event=asyncio.Event(),
+        ),
     )
 
     class Executor:
         def __init__(self, **kwargs):
             state.calls.append(kwargs)
+            self._admission_hook = kwargs["admission_hook"]
 
         def execute_async(self, prompt, task_id=None):
             state.prompt = prompt
+
+            async def run():
+                try:
+                    admitted = await self._admission_hook()
+                    if admitted and state.result.status is SubagentStatus.PENDING:
+                        state.result.status = SubagentStatus.COMPLETED
+                finally:
+                    state.result.execution_done_event.set()
+
+            state.executor_tasks.append(asyncio.create_task(run()))
             return task_id
 
     monkeypatch.setattr(batch_service, "SubagentExecutor", Executor)
@@ -71,6 +93,7 @@ async def env(monkeypatch, tmp_path):
         yield state
     finally:
         await state.service.stop()
+        await asyncio.gather(*state.executor_tasks, return_exceptions=True)
         await close_engine()
 
 
@@ -235,9 +258,12 @@ async def test_slow_checker_renews_lease_and_stops_after_losing_it(env, monkeypa
     monkeypatch.setattr(env.repo, "renew_item_lease", renew)
     await asyncio.wait_for(execution, timeout=5)
     renew.assert_awaited_once()
+    claim_owner = renew.await_args.kwargs["lease_owner"]
+    assert claim_owner.startswith(f"{env.service._lease_owner}:")
+    assert claim_owner != env.service._lease_owner
     assert drained.is_set()
     item = (await env.repo.list_items(batch["id"], user_id="user-1"))[0]
-    assert item["status"] == "leased"
+    assert item["status"] == "running"
     assert item["acceptance_verdict"] is None
 
 

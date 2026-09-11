@@ -17,6 +17,7 @@ the real implementation in isolation.
 import asyncio
 import importlib
 import inspect
+import logging
 import sys
 import threading
 import time
@@ -172,6 +173,8 @@ def _setup_executor_classes():
         sys.modules["deerflow.sandbox.overwrite"] = original_sandbox_overwrite
     else:
         sys.modules.pop("deerflow.sandbox.overwrite", None)
+
+    executor_module._shutdown_isolated_subagent_loop()
 
 
 # Helper classes that wrap real classes for testing
@@ -1125,7 +1128,26 @@ class TestAsyncExecutionPath:
                 final_message,
             ]
         }
-        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        class CloseTrackingStream:
+            def __init__(self):
+                self.closed = False
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                return final_state
+
+            async def aclose(self):
+                self.closed = True
+
+        stream = CloseTrackingStream()
+        mock_agent.astream.return_value = stream
 
         executor = SubagentExecutor(
             config=base_config,
@@ -1142,6 +1164,238 @@ class TestAsyncExecutionPath:
         assert result.error is None
         assert result.started_at is not None
         assert result.completed_at is not None
+        assert stream.closed is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_stream_close_failure_marks_execution_failed(self, classes, base_config, mock_agent, msg):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        class FailingCloseStream:
+            def __init__(self):
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                return {"messages": [msg.human("Do something"), msg.ai("Done", "msg-1")]}
+
+            async def aclose(self):
+                raise RuntimeError("close failed")
+
+        mock_agent.astream.return_value = FailingCloseStream()
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="test-trace",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Do something")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.error == "close failed"
+
+    @pytest.mark.anyio
+    async def test_aexecute_stream_close_base_exception_propagates_from_parent(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        msg,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        class FatalCloseStream:
+            def __init__(self):
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                return {"messages": [msg.human("Do something"), msg.ai("Done", "msg-1")]}
+
+            async def aclose(self):
+                raise KeyboardInterrupt("fatal close")
+
+        mock_agent.astream.return_value = FatalCloseStream()
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            with pytest.raises(KeyboardInterrupt, match="fatal close"):
+                await executor._aexecute("Do something")
+
+    @pytest.mark.anyio
+    async def test_stream_close_fatal_outranks_prior_cleanup_error(
+        self,
+        classes,
+    ):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+
+        class FatalClose(BaseException):
+            pass
+
+        prior_cleanup = asyncio.get_running_loop().create_future()
+        prior_cleanup.set_exception(RuntimeError("exit task failed"))
+        cancellation = asyncio.CancelledError(prior_cleanup)
+        fatal = FatalClose("fatal close")
+
+        class Stream:
+            async def aclose(self):
+                raise fatal
+
+        deferred, close_error = await executor_module._close_agent_stream(
+            Stream(),
+            cancellation=cancellation,
+        )
+
+        assert deferred is cancellation
+        assert close_error is fatal
+
+    @pytest.mark.anyio
+    async def test_aexecute_preserves_original_fatal_when_stream_close_is_also_fatal(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+    ):
+        class OriginalFatal(BaseException):
+            pass
+
+        class CloseFatal(BaseException):
+            pass
+
+        original = OriginalFatal("original stream fatal")
+        close_fatal = CloseFatal("close fatal")
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise original
+
+            async def aclose(self):
+                raise close_fatal
+
+        mock_agent.astream.return_value = Stream()
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            with pytest.raises(OriginalFatal) as raised:
+                await executor._aexecute("Do something")
+
+        assert raised.value is original
+
+    @pytest.mark.anyio
+    async def test_aexecute_preserves_base_exception_at_parent_boundary(self, classes, base_config):
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(
+            executor,
+            "_aexecute_admitted",
+            new=AsyncMock(side_effect=KeyboardInterrupt("host shutdown")),
+        ):
+            with pytest.raises(KeyboardInterrupt, match="host shutdown"):
+                await executor._aexecute("Task")
+
+    @pytest.mark.anyio
+    async def test_aexecute_preserves_fatal_base_exception_during_cancellation(self, classes, base_config):
+        SubagentExecutor = classes["SubagentExecutor"]
+        admitted = asyncio.Event()
+        teardown_started = asyncio.Event()
+        teardown_release = asyncio.Event()
+
+        class FatalExecutionError(BaseException):
+            pass
+
+        async def fatal_during_teardown(_task, _result):
+            admitted.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                teardown_started.set()
+                await teardown_release.wait()
+                raise FatalExecutionError("fatal during teardown")
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+        with patch.object(
+            executor,
+            "_aexecute_admitted",
+            side_effect=fatal_during_teardown,
+        ):
+            execution = asyncio.create_task(executor._aexecute("Task"))
+            await asyncio.wait_for(admitted.wait(), timeout=1)
+            execution.cancel()
+            await asyncio.wait_for(teardown_started.wait(), timeout=1)
+            teardown_release.set()
+            with pytest.raises(FatalExecutionError, match="fatal during teardown"):
+                await execution
+
+    @pytest.mark.anyio
+    async def test_external_cancellation_is_not_converted_to_timeout_during_teardown(self, classes, base_config):
+        SubagentExecutor = classes["SubagentExecutor"]
+        admitted = asyncio.Event()
+        teardown_started = asyncio.Event()
+        teardown_release = asyncio.Event()
+
+        async def slow_teardown(_task, _result):
+            admitted.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                teardown_started.set()
+                await teardown_release.wait()
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        async def run_with_timeout():
+            async with asyncio.timeout(0.01):
+                return await executor._aexecute("Task")
+
+        with patch.object(
+            executor,
+            "_aexecute_admitted",
+            side_effect=slow_teardown,
+        ):
+            execution = asyncio.create_task(run_with_timeout())
+            await asyncio.wait_for(admitted.wait(), timeout=1)
+            await asyncio.wait_for(teardown_started.wait(), timeout=1)
+            execution.cancel()
+            teardown_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await execution
 
     @pytest.mark.anyio
     async def test_aexecute_marks_capacity_rejection_as_admission_failure(self, classes, base_config):
@@ -1156,7 +1410,7 @@ class TestAsyncExecutionPath:
                 return False
 
         class RejectingCapacity:
-            def slot(self):
+            def slot(self, **_kwargs):
                 return RejectingSlot()
 
         executor = SubagentExecutor(
@@ -1171,6 +1425,91 @@ class TestAsyncExecutionPath:
         assert result.status == SubagentStatus.FAILED
         assert result.admission_failure is True
         assert "capacity is full" in result.error
+
+    @pytest.mark.anyio
+    async def test_aexecute_runs_admission_hook_on_its_owner_loop_after_capacity_acquire(
+        self,
+        classes,
+        base_config,
+    ):
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        owner_loop = asyncio.get_running_loop()
+        hook_loops = []
+        events: list[str] = []
+
+        async def admission_hook() -> bool:
+            hook_loops.append(asyncio.get_running_loop())
+            events.append("admission")
+            return True
+
+        async def admitted(_task, result):
+            events.append("execution")
+            result.try_set_terminal(SubagentStatus.COMPLETED, result="done")
+            return result
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=SubagentExecutionCapacity(
+                SubagentRuntimeConfig(max_running=1),
+            ),
+            admission_hook=admission_hook,
+            admission_hook_loop=owner_loop,
+        )
+
+        with patch.object(executor, "_aexecute_admitted", side_effect=admitted):
+            result = await asyncio.to_thread(
+                lambda: asyncio.run(executor._aexecute("Do something")),
+            )
+
+        assert result.status is SubagentStatus.COMPLETED
+        assert hook_loops == [owner_loop]
+        assert events == ["admission", "execution"]
+
+    @pytest.mark.anyio
+    async def test_aexecute_releases_capacity_when_admission_hook_times_out(
+        self,
+        classes,
+        base_config,
+    ):
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        capacity = SubagentExecutionCapacity(
+            SubagentRuntimeConfig(max_running=1),
+        )
+
+        async def admission_hook() -> bool:
+            assert capacity.snapshot().running == 1
+            raise TimeoutError("Durable subagent admission timed out after 1s")
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=capacity,
+            admission_hook=admission_hook,
+            admission_hook_loop=asyncio.get_running_loop(),
+        )
+
+        with patch.object(
+            executor,
+            "_aexecute_admitted",
+            side_effect=AssertionError("execution must not start"),
+        ):
+            result = await executor._aexecute("Do something")
+
+        assert result.status is SubagentStatus.FAILED
+        assert result.admission_failure is True
+        assert "admission timed out after 1s" in result.error
+        assert capacity.snapshot().running == 0
 
     @pytest.mark.anyio
     async def test_aexecute_marks_structured_llm_error_fallback_as_failed(self, classes, base_config, mock_agent, msg):
@@ -1612,6 +1951,123 @@ class TestAsyncExecutionPath:
 
         manager.release("lead")
         provider.release.assert_called_once_with("shared")
+
+    @pytest.mark.anyio
+    async def test_aexecute_lease_fatal_still_notifies_task_stop(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        msg,
+        monkeypatch,
+    ):
+        class FatalLeaseRelease(BaseException):
+            pass
+
+        fatal = FatalLeaseRelease("lease release failed")
+        extensions = SimpleNamespace(
+            needs_task_store=True,
+            has_task_lifecycle=True,
+        )
+        final_state = {
+            "messages": [
+                msg.human("Do something"),
+                msg.ai("Done", "msg-1"),
+            ]
+        }
+
+        async def stream(*_args, context, **_kwargs):
+            context["sandbox_id"] = "sandbox-1"
+            yield final_state
+
+        manager = SimpleNamespace(
+            release_async=AsyncMock(side_effect=fatal),
+        )
+        notify_module = importlib.import_module("deerflow.extensions.notify")
+        notify_start = AsyncMock()
+        notify_stop = AsyncMock()
+        monkeypatch.setattr(notify_module, "notify_task_start", notify_start)
+        monkeypatch.setattr(notify_module, "notify_task_stop", notify_stop)
+        sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = object()
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(
+            lease_module,
+            "get_sandbox_lease_manager",
+            lambda _provider: manager,
+        )
+        mock_agent.astream = stream
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            run_id="run-1",
+            extensions=extensions,
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            with pytest.raises(FatalLeaseRelease) as raised:
+                await executor._aexecute("Do something")
+
+        assert raised.value is fatal
+        notify_start.assert_awaited_once()
+        notify_stop.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_aexecute_cleanup_fatal_outranks_host_cancellation(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        monkeypatch,
+    ):
+        class FatalLeaseRelease(BaseException):
+            pass
+
+        fatal = FatalLeaseRelease("lease release failed")
+        stream_started = asyncio.Event()
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                stream_started.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                return None
+
+        def stream(*_args, context, **_kwargs):
+            context["sandbox_id"] = "sandbox-1"
+            return Stream()
+
+        manager = SimpleNamespace(
+            release_async=AsyncMock(side_effect=fatal),
+        )
+        sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = object()
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(
+            lease_module,
+            "get_sandbox_lease_manager",
+            lambda _provider: manager,
+        )
+        mock_agent.astream = stream
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            execution = asyncio.create_task(executor._aexecute("Do something"))
+            await asyncio.wait_for(stream_started.wait(), timeout=1)
+            execution.cancel()
+            with pytest.raises(FatalLeaseRelease) as raised:
+                await execution
+
+        assert raised.value is fatal
 
     @pytest.mark.anyio
     async def test_aexecute_fork_restored_state_cleans_scope_without_parking_parent(
@@ -2555,6 +3011,31 @@ class TestCleanupBackgroundTask:
         leftovers = [r for r in executor_module.list_background_tasks() if r.trace_id == "submit-failure-trace"]
         assert leftovers == []
 
+    def test_execute_async_rolls_back_entry_when_submit_raises_base_exception(
+        self,
+        executor_module,
+        classes,
+        base_config,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="submit-base-exception-trace",
+        )
+
+        with patch.object(
+            executor_module,
+            "_submit_to_isolated_loop_in_context",
+            side_effect=KeyboardInterrupt("submit interrupted"),
+        ):
+            with pytest.raises(KeyboardInterrupt, match="submit interrupted"):
+                executor.execute_async("Task")
+
+        leftovers = [result for result in executor_module.list_background_tasks() if result.trace_id == "submit-base-exception-trace"]
+        assert leftovers == []
+
     def test_execute_async_registers_nothing_when_context_copy_fails(self, executor_module, classes, base_config):
         """A context-copy failure must not leave a PENDING entry either.
 
@@ -2658,6 +3139,7 @@ class TestCleanupBackgroundTask:
             completed_at=datetime.now(),
         )
         executor_module._background_tasks[task_id] = result
+        result.execution_done_event.set()
 
         # Cleanup should remove it
         executor_module.cleanup_background_task(task_id)
@@ -2678,6 +3160,7 @@ class TestCleanupBackgroundTask:
             completed_at=datetime.now(),
         )
         executor_module._background_tasks[task_id] = result
+        result.execution_done_event.set()
 
         executor_module.cleanup_background_task(task_id)
 
@@ -2697,6 +3180,7 @@ class TestCleanupBackgroundTask:
             completed_at=datetime.now(),
         )
         executor_module._background_tasks[task_id] = result
+        result.execution_done_event.set()
 
         executor_module.cleanup_background_task(task_id)
 
@@ -2719,6 +3203,7 @@ class TestCleanupBackgroundTask:
             started_at=datetime.now(),
         )
         executor_module._background_tasks[task_id] = result
+        result.execution_done_event.set()
 
         executor_module.cleanup_background_task(task_id)
 
@@ -2737,6 +3222,7 @@ class TestCleanupBackgroundTask:
             status=SubagentStatus.PENDING,
         )
         executor_module._background_tasks[task_id] = result
+        result.execution_done_event.set()
 
         executor_module.cleanup_background_task(task_id)
 
@@ -2764,10 +3250,121 @@ class TestCleanupBackgroundTask:
             completed_at=datetime.now(),  # But completed_at is set
         )
         executor_module._background_tasks[task_id] = result
+        result.execution_done_event.set()
 
         executor_module.cleanup_background_task(task_id)
 
         # Should be removed because completed_at is set
+        assert task_id not in executor_module._background_tasks
+
+    def test_cleanup_defers_terminal_task_until_execution_teardown(self, executor_module, classes):
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        task_id = "test-deferred-terminal-cleanup"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.COMPLETED,
+            result="done",
+            completed_at=datetime.now(),
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.cleanup_background_task(task_id)
+
+        assert executor_module._background_tasks[task_id] is result
+        assert task_id in executor_module._background_cleanup_requested
+        result.execution_done_event.set()
+        executor_module._complete_deferred_background_cleanup(task_id, result)
+
+        assert task_id not in executor_module._background_tasks
+        assert task_id not in executor_module._background_cleanup_requested
+
+    def test_cleanup_defers_cancelled_running_task_until_wrapper_terminalizes(
+        self,
+        executor_module,
+        classes,
+    ):
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        task_id = "test-deferred-running-cleanup"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result.cancel_event.set()
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.cleanup_background_task(task_id)
+
+        assert executor_module._background_tasks[task_id] is result
+        assert task_id in executor_module._background_cleanup_requested
+        result.try_set_terminal(
+            SubagentStatus.CANCELLED,
+            error="Cancelled by user",
+        )
+        executor_module._mark_background_execution_done(result)
+
+        assert task_id not in executor_module._background_tasks
+        assert task_id not in executor_module._background_cleanup_requested
+
+    @pytest.mark.anyio
+    async def test_terminal_cleanup_request_is_completed_after_capacity_release(
+        self,
+        executor_module,
+        classes,
+        base_config,
+        mock_agent,
+        msg,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        release_started = asyncio.Event()
+        release_allowed = asyncio.Event()
+        task_id = "cleanup-after-capacity"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.PENDING,
+        )
+
+        class TrackingSlot:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                release_started.set()
+                await release_allowed.wait()
+
+        class TrackingCapacity:
+            def slot(self, **_kwargs):
+                return TrackingSlot()
+
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([{"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}])
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=TrackingCapacity(),
+        )
+        executor_module._background_tasks[task_id] = result
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            execution = asyncio.create_task(executor._aexecute("Task", result_holder=result))
+            await asyncio.wait_for(release_started.wait(), timeout=1)
+            assert result.status.value == SubagentStatus.COMPLETED.value
+            assert not result.execution_done_event.is_set()
+
+            executor_module.cleanup_background_task(task_id)
+            assert executor_module._background_tasks[task_id] is result
+
+            release_allowed.set()
+            await execution
+
+        assert result.execution_done_event.is_set()
         assert task_id not in executor_module._background_tasks
 
 
@@ -2827,7 +3424,8 @@ class TestCooperativeCancellation:
         assert call_count == 0  # astream was never entered
 
     @pytest.mark.anyio
-    async def test_aexecute_cancelled_mid_stream(self, classes, base_config, msg):
+    @pytest.mark.parametrize("close_fails", [False, True])
+    async def test_aexecute_cancelled_mid_stream(self, classes, base_config, msg, close_fails):
         """Test that _aexecute returns CANCELLED when cancel_event is set during streaming."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentResult = classes["SubagentResult"]
@@ -2835,14 +3433,30 @@ class TestCooperativeCancellation:
 
         cancel_event = threading.Event()
 
-        async def mock_astream(*args, **kwargs):
-            yield {"messages": [msg.human("Task"), msg.ai("Partial", "msg-1")]}
-            # Simulate cancellation during streaming
-            cancel_event.set()
-            yield {"messages": [msg.human("Task"), msg.ai("Should not appear", "msg-2")]}
+        class CloseTrackingStream:
+            def __init__(self):
+                self.closed = False
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                cancel_event.set()
+                return {"messages": [msg.human("Task"), msg.ai("Partial", "msg-1")]}
+
+            async def aclose(self):
+                self.closed = True
+                if close_fails:
+                    raise RuntimeError("close failed")
+
+        stream = CloseTrackingStream()
 
         mock_agent = MagicMock()
-        mock_agent.astream = mock_astream
+        mock_agent.astream.return_value = stream
 
         result_holder = SubagentResult(
             task_id="cancel-mid",
@@ -2858,12 +3472,234 @@ class TestCooperativeCancellation:
             thread_id="test-thread",
         )
 
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
+        original_try_set_terminal = result_holder.try_set_terminal
+
+        def assert_closed_before_terminal(*args, **kwargs):
+            assert stream.closed is True
+            return original_try_set_terminal(*args, **kwargs)
+
+        with (
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+            patch.object(result_holder, "try_set_terminal", side_effect=assert_closed_before_terminal),
+        ):
             result = await executor._aexecute("Task", result_holder=result_holder)
 
         assert result.status == SubagentStatus.CANCELLED
         assert result.error == "Cancelled by user"
         assert result.completed_at is not None
+        assert stream.closed is True
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("close_fails", [False, True])
+    async def test_aexecute_cancellation_at_stream_exhaustion_remains_cancelled(self, classes, base_config, msg, close_fails):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+
+        class ExhaustionRaceStream:
+            def __init__(self):
+                self.closed = False
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    cancel_event.set()
+                    raise StopAsyncIteration
+                self.yielded = True
+                return {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
+
+            async def aclose(self):
+                self.closed = True
+                if close_fails:
+                    raise RuntimeError("close failed")
+
+        stream = ExhaustionRaceStream()
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = stream
+        result_holder = SubagentResult(
+            task_id="cancel-at-exhaustion",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task", result_holder=result_holder)
+
+        assert result.status == SubagentStatus.CANCELLED
+        assert result.error == "Cancelled by user"
+        assert stream.closed is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_cancelled_stream_propagates_fatal_close_error(self, classes, base_config, msg):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+
+        class FatalCloseError(BaseException):
+            pass
+
+        class FatalCloseStream:
+            def __init__(self):
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                cancel_event.set()
+                return {"messages": [msg.human("Task"), msg.ai("Partial", "msg-1")]}
+
+            async def aclose(self):
+                raise FatalCloseError("fatal close")
+
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = FatalCloseStream()
+        result_holder = SubagentResult(
+            task_id="cancel-fatal-close",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with (
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+            pytest.raises(FatalCloseError, match="fatal close"),
+        ):
+            await executor._aexecute("Task", result_holder=result_holder)
+
+    @pytest.mark.anyio
+    async def test_aexecute_repeated_cancellation_waits_for_stream_teardown(self, classes, base_config):
+        SubagentExecutor = classes["SubagentExecutor"]
+        stream_started = asyncio.Event()
+        close_started = asyncio.Event()
+        close_release = asyncio.Event()
+        closed = asyncio.Event()
+
+        class SlowCloseStream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                stream_started.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                close_started.set()
+                await close_release.wait()
+                closed.set()
+
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = SlowCloseStream()
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with (
+            patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+        ):
+            execution = asyncio.create_task(executor._aexecute("Task"))
+            await asyncio.wait_for(stream_started.wait(), timeout=1)
+            execution.cancel()
+            await asyncio.wait_for(close_started.wait(), timeout=1)
+            execution.cancel()
+            await asyncio.sleep(0)
+            assert not execution.done()
+            close_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await execution
+
+        assert closed.is_set()
+
+    @pytest.mark.anyio
+    async def test_aexecute_cancellation_drains_langgraph_exit_task(self, classes, base_config):
+        from langgraph.graph import END, START, MessagesState, StateGraph
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        HumanMessage = classes["HumanMessage"]
+        node_started = asyncio.Event()
+        teardown_started = asyncio.Event()
+        teardown_release = asyncio.Event()
+        teardown_finished = asyncio.Event()
+        capacity_released = asyncio.Event()
+
+        class TrackingSlot:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                assert teardown_finished.is_set()
+                capacity_released.set()
+
+        class TrackingCapacity:
+            def slot(self, **_kwargs):
+                return TrackingSlot()
+
+        async def blocking_node(_state):
+            node_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                teardown_started.set()
+                await teardown_release.wait()
+                teardown_finished.set()
+
+        builder = StateGraph(MessagesState)
+        builder.add_node("blocking", blocking_node)
+        builder.add_edge(START, "blocking")
+        builder.add_edge("blocking", END)
+        graph = builder.compile(checkpointer=False)
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=TrackingCapacity(),
+        )
+
+        with (
+            patch.object(
+                executor,
+                "_build_initial_state",
+                new=AsyncMock(return_value=({"messages": [HumanMessage(content="Task")]}, [], None)),
+            ),
+            patch.object(executor, "_create_agent", return_value=graph),
+        ):
+            execution = asyncio.create_task(executor._aexecute("Task"))
+            await asyncio.wait_for(node_started.wait(), timeout=1)
+            execution.cancel()
+            await asyncio.wait_for(teardown_started.wait(), timeout=1)
+            execution.cancel()
+            await asyncio.sleep(0)
+            assert not execution.done()
+            teardown_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await execution
+
+        assert teardown_finished.is_set()
+        assert capacity_released.is_set()
 
     def test_request_cancel_sets_event(self, executor_module, classes):
         """Test that request_cancel_background_task sets the cancel_event."""
@@ -2888,6 +3724,197 @@ class TestCooperativeCancellation:
     def test_request_cancel_nonexistent_task_is_noop(self, executor_module):
         """Test that requesting cancellation on a nonexistent task does not raise."""
         executor_module.request_cancel_background_task("nonexistent-task")
+
+    def test_request_cancel_tolerates_stale_closed_runner_loop(
+        self,
+        executor_module,
+        classes,
+        caplog,
+    ):
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        execution_id = "closed-runner-loop"
+        result = SubagentResult(
+            task_id=execution_id,
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        loop = asyncio.new_event_loop()
+        loop.close()
+        runner = executor_module._BackgroundRunner(
+            loop=loop,
+            task=MagicMock(),
+        )
+        executor_module._background_tasks[execution_id] = result
+        executor_module._background_runners[execution_id] = runner
+
+        try:
+            with caplog.at_level(logging.WARNING):
+                executor_module.request_cancel_background_task(execution_id)
+
+            assert result.cancel_event.is_set()
+            assert runner.cancel_requested is True
+            assert any("Could not schedule cancellation" in record.getMessage() for record in caplog.records)
+        finally:
+            executor_module.force_cleanup_background_task(execution_id)
+
+    def test_execute_async_cancellation_finishes_teardown_before_terminal(
+        self,
+        executor_module,
+        classes,
+        base_config,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        stream_started = threading.Event()
+        teardown_started = threading.Event()
+        teardown_release = threading.Event()
+        teardown_finished = threading.Event()
+        capacity_released = threading.Event()
+
+        class TrackingSlot:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                assert teardown_finished.is_set()
+                capacity_released.set()
+
+        class TrackingCapacity:
+            def slot(self, **_kwargs):
+                return TrackingSlot()
+
+        class SlowCloseStream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                stream_started.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                teardown_started.set()
+                await asyncio.to_thread(teardown_release.wait)
+                teardown_finished.set()
+
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = SlowCloseStream()
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=TrackingCapacity(),
+        )
+
+        execution_id = None
+        try:
+            with (
+                patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
+                patch.object(executor, "_create_agent", return_value=mock_agent),
+            ):
+                execution_id = executor.execute_async("Task")
+                assert stream_started.wait(timeout=3)
+                executor_module.request_cancel_background_task(execution_id)
+                assert teardown_started.wait(timeout=3)
+                result = executor_module.get_background_task_result(execution_id)
+                assert result is not None
+                assert not result.status.is_terminal
+                assert not capacity_released.is_set()
+                teardown_release.set()
+
+                deadline = time.monotonic() + 3
+                while not result.status.is_terminal and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                assert result.status.value == SubagentStatus.CANCELLED.value
+                assert teardown_finished.is_set()
+                assert capacity_released.is_set()
+                assert result.execution_done_event.is_set()
+        finally:
+            teardown_release.set()
+            if execution_id is not None:
+                executor_module.cleanup_background_task(execution_id)
+
+    def test_execute_async_contains_fatal_base_exception(
+        self,
+        executor_module,
+        classes,
+        base_config,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+        fatal = KeyboardInterrupt("background fatal")
+
+        execution_id = None
+        try:
+            with patch.object(
+                executor,
+                "_aexecute_admitted",
+                new=AsyncMock(side_effect=fatal),
+            ):
+                execution_id = executor.execute_async("Task")
+                deadline = time.monotonic() + 3
+                result = executor_module.get_background_task_result(execution_id)
+                while result is not None and not result.status.is_terminal and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+            assert result is not None
+            assert result.status.value == SubagentStatus.FAILED.value
+            assert result.error == "background fatal"
+            assert result.execution_done_event.is_set()
+            assert result.get_fatal_error() is fatal
+            assert execution_id not in executor_module._background_futures
+        finally:
+            if execution_id is not None:
+                executor_module.cleanup_background_task(execution_id)
+
+    def test_subagent_result_fatal_channel_is_thread_safe_first_wins(
+        self,
+        classes,
+    ):
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        result = SubagentResult(
+            task_id="fatal-first-wins",
+            trace_id="test-trace",
+            status=SubagentStatus.COMPLETED,
+            result="provisional",
+        )
+        first = KeyboardInterrupt("first fatal")
+        second = SystemExit("second fatal")
+        barrier = threading.Barrier(3)
+
+        def record(exc: BaseException) -> None:
+            barrier.wait()
+            result.record_fatal_error(exc)
+
+        threads = [
+            threading.Thread(target=record, args=(first,)),
+            threading.Thread(target=record, args=(second,)),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=1)
+            assert not thread.is_alive()
+
+        captured = result.get_fatal_error()
+        assert captured in {first, second}
+        assert result.status is SubagentStatus.FAILED
+        assert result.result is None
+        assert result.error == str(captured)
+
+        later = GeneratorExit("later fatal")
+        result.record_fatal_error(later)
+        assert result.get_fatal_error() is captured
+        assert result.error == str(captured)
 
     def test_execute_async_runs_without_calling_execute(self, executor_module, classes, base_config):
         """Regression: execute_async should not route through execute()/asyncio.run()."""
@@ -3279,6 +4306,7 @@ class TestCooperativeCancellation:
             completed_at=datetime.now(),
         )
         executor_module._background_tasks[task_id] = result
+        result.execution_done_event.set()
 
         executor_module.cleanup_background_task(task_id)
 
@@ -4171,7 +5199,7 @@ class TestToolReceiptHarvest:
             return False
 
     class _ImmediateCapacity:
-        def slot(self):
+        def slot(self, **_kwargs):
             return TestToolReceiptHarvest._ImmediateSlot()
 
     class _ThreadSubmitter:
@@ -5003,3 +6031,821 @@ def test_utcnow_helper_returns_utc_aware_datetime(classes):
     assert now.tzinfo is not None
     assert now.utcoffset() is not None
     assert now.utcoffset().total_seconds() == 0.0
+
+
+def test_admission_hook_parameters_preserve_existing_positional_order(classes):
+    parameters = list(
+        inspect.signature(classes["SubagentExecutor"].__init__).parameters,
+    )
+
+    assert parameters.index("acceptance_criteria") < parameters.index(
+        "admission_hook",
+    )
+    assert parameters.index("loop_detection_recorder") < parameters.index(
+        "admission_hook",
+    )
+    assert parameters.index("tool_promotion_recorder") < parameters.index(
+        "admission_hook",
+    )
+
+
+@pytest.mark.anyio
+async def test_await_admitted_execution_defers_repeated_cancellation_until_attempt_gate(
+    _setup_executor_classes,
+):
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    gate = asyncio.get_running_loop().create_future()
+    child_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    child_cancellations = 0
+
+    async def admitted():
+        nonlocal child_cancellations
+        child_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancellations += 1
+            child_cancelled.set()
+            raise
+
+    child = asyncio.create_task(
+        executor_module._capture_admitted_execution(admitted),
+    )
+    host = asyncio.create_task(
+        executor_module._await_admitted_execution(
+            child,
+            cancellation_gate=gate,
+        ),
+    )
+    await asyncio.wait_for(child_started.wait(), timeout=1)
+
+    host.cancel("original cancellation")
+    await asyncio.sleep(0)
+    host.cancel("duplicate cancellation")
+    await asyncio.sleep(0)
+    assert not child.done()
+    assert child_cancellations == 0
+
+    gate.set_result(True)
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await host
+
+    assert raised.value.args == ("original cancellation",)
+    assert child_cancelled.is_set()
+    assert child_cancellations == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("gate_outcome", "fatal_wins"),
+    [
+        pytest.param("rejected", False, id="gate-false-rejection"),
+        pytest.param("hook-error", False, id="gate-false-hook-error"),
+        pytest.param("fatal", True, id="gate-false-fatal"),
+    ],
+)
+async def test_await_admitted_execution_gate_false_error_priority_and_cleanup(
+    _setup_executor_classes,
+    monkeypatch,
+    gate_outcome,
+    fatal_wins,
+):
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+    gate = asyncio.get_running_loop().create_future()
+    hook_started = asyncio.Event()
+    finish_hook = asyncio.Event()
+    cancel_payload = ("original cancellation", 17)
+    original_cancellations = []
+    unobserved = []
+    child = None
+
+    class FatalAdmission(BaseException):
+        pass
+
+    fatal = FatalAdmission("fatal admission")
+    original_defer = executor_module._defer_subagent_cancellation
+
+    def capture_original_cancellation(deferred, interrupt):
+        if deferred is None:
+            original_cancellations.append(interrupt)
+        return original_defer(deferred, interrupt)
+
+    monkeypatch.setattr(
+        executor_module,
+        "_defer_subagent_cancellation",
+        capture_original_cancellation,
+    )
+
+    async def admission_hook():
+        hook_started.set()
+        await finish_hook.wait()
+        if gate_outcome == "rejected":
+            return False
+        if gate_outcome == "hook-error":
+            try:
+                raise ValueError("hook failed")
+            except Exception as exc:
+                raise executor_module.SubagentCapacityRejected(
+                    "Subagent execution admission hook failed: hook failed",
+                ) from exc
+        raise fatal
+
+    async def admitted():
+        try:
+            async with capacity.slot(after_acquire=admission_hook):
+                raise AssertionError("admission body must not start")
+        finally:
+            gate.set_result(False)
+
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unobserved.append(context))
+    try:
+        child = asyncio.create_task(
+            executor_module._capture_admitted_execution(admitted),
+        )
+        host = asyncio.create_task(
+            executor_module._await_admitted_execution(
+                child,
+                cancellation_gate=gate,
+            ),
+        )
+        await asyncio.wait_for(hook_started.wait(), timeout=1)
+
+        host.cancel(cancel_payload)
+        await asyncio.sleep(0)
+        finish_hook.set()
+
+        if fatal_wins:
+            with pytest.raises(FatalAdmission) as raised:
+                await host
+            assert raised.value is fatal
+        else:
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await host
+            assert original_cancellations
+            assert raised.value is original_cancellations[0]
+            assert raised.value.args == (cancel_payload,)
+            assert raised.value.args[0] is cancel_payload
+
+        assert child.done()
+        assert gate.done()
+        assert gate.result() is False
+        assert capacity.snapshot().running == 0
+        await asyncio.sleep(0)
+        assert unobserved == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("child_outcome", "fatal_wins"),
+    [
+        pytest.param("normal", False, id="task-done-normal"),
+        pytest.param("cancelled", False, id="task-done-child-cancelled"),
+        pytest.param("fatal", True, id="task-done-fatal"),
+    ],
+)
+async def test_await_admitted_execution_task_done_race_priority_and_cleanup(
+    _setup_executor_classes,
+    monkeypatch,
+    child_outcome,
+    fatal_wins,
+):
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+    gate = asyncio.get_running_loop().create_future()
+    gate.set_result(False)
+    child_release = asyncio.Event()
+    shield_entered = asyncio.Event()
+    shield_release = asyncio.Event()
+    cancel_payload = ("host cancellation", 29)
+    original_cancellations = []
+    unobserved = []
+
+    class FatalExecution(BaseException):
+        pass
+
+    child_cancellation = asyncio.CancelledError("child cancellation", 23)
+    fatal = FatalExecution("fatal execution")
+    original_defer = executor_module._defer_subagent_cancellation
+    original_shield = asyncio.shield
+
+    def capture_original_cancellation(deferred, interrupt):
+        if deferred is None:
+            original_cancellations.append(interrupt)
+        return original_defer(deferred, interrupt)
+
+    async def controlled_shield(awaitable):
+        if awaitable is not child:
+            return await original_shield(awaitable)
+        shield_entered.set()
+        await shield_release.wait()
+        return await original_shield(awaitable)
+
+    monkeypatch.setattr(
+        executor_module,
+        "_defer_subagent_cancellation",
+        capture_original_cancellation,
+    )
+    monkeypatch.setattr(executor_module.asyncio, "shield", controlled_shield)
+
+    async def admitted():
+        async with capacity.slot():
+            await child_release.wait()
+            if child_outcome == "cancelled":
+                raise child_cancellation
+            if child_outcome == "fatal":
+                raise fatal
+            return "done"
+
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unobserved.append(context))
+    try:
+        child = asyncio.create_task(
+            executor_module._capture_admitted_execution(admitted),
+        )
+        host = asyncio.create_task(
+            executor_module._await_admitted_execution(
+                child,
+                cancellation_gate=gate,
+            ),
+        )
+        await asyncio.wait_for(shield_entered.wait(), timeout=1)
+        child_release.set()
+        while not child.done():
+            await asyncio.sleep(0)
+        assert capacity.snapshot().running == 0
+
+        host.cancel(cancel_payload)
+        await asyncio.sleep(0)
+        shield_release.set()
+
+        if fatal_wins:
+            with pytest.raises(FatalExecution) as raised:
+                await host
+            assert raised.value is fatal
+        else:
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await host
+            assert original_cancellations
+            assert raised.value is original_cancellations[0]
+            assert raised.value.args == (cancel_payload,)
+            assert raised.value.args[0] is cancel_payload
+            if child_outcome == "cancelled":
+                assert raised.value is not child_cancellation
+
+        assert child.done()
+        assert gate.done()
+        assert gate.result() is False
+        assert capacity.snapshot().running == 0
+        await asyncio.sleep(0)
+        assert unobserved == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.anyio
+async def test_aexecute_cancellation_after_hook_commit_before_completion_callback_starts_one_attempt(
+    classes,
+    base_config,
+):
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+    SubagentExecutor = classes["SubagentExecutor"]
+    capacity = SubagentExecutionCapacity(
+        SubagentRuntimeConfig(max_running=1),
+    )
+    hook_loop = asyncio.get_running_loop()
+    worker_ready = threading.Event()
+    worker_done = threading.Event()
+    execution_loop = None
+    execution_task = None
+    hook_attempts = 0
+    execution_attempts = 0
+    worker_error: BaseException | None = None
+
+    async def admission_hook() -> bool:
+        nonlocal hook_attempts
+        hook_attempts += 1
+        assert execution_loop is not None
+        assert execution_task is not None
+        execution_loop.call_soon_threadsafe(
+            execution_task.cancel,
+            "hook committed",
+        )
+        return True
+
+    async def admitted(_task, _result):
+        nonlocal execution_attempts
+        execution_attempts += 1
+        assert _result.status is classes["SubagentStatus"].RUNNING
+        await asyncio.Event().wait()
+
+    executor = SubagentExecutor(
+        config=base_config,
+        tools=[],
+        thread_id="test-thread",
+        execution_capacity=capacity,
+        admission_hook=admission_hook,
+        admission_hook_loop=hook_loop,
+    )
+
+    def run() -> None:
+        nonlocal execution_loop, execution_task, worker_error
+
+        async def execute() -> None:
+            nonlocal execution_loop, execution_task
+            execution_loop = asyncio.get_running_loop()
+            execution_task = asyncio.current_task()
+            worker_ready.set()
+            await executor._aexecute("Do something")
+
+        try:
+            asyncio.run(execute())
+        except BaseException as exc:
+            worker_error = exc
+        finally:
+            worker_done.set()
+
+    with patch.object(executor, "_aexecute_admitted", side_effect=admitted):
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        assert await asyncio.to_thread(worker_ready.wait, 1)
+        assert await asyncio.to_thread(worker_done.wait, 3)
+        worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert isinstance(worker_error, asyncio.CancelledError)
+    assert worker_error.args == ("hook committed",)
+    assert hook_attempts == 1
+    assert execution_attempts == 1
+    assert capacity.snapshot().running == 0
+
+
+@pytest.mark.parametrize(
+    "initial_status_name",
+    ["PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"],
+)
+def test_record_fatal_error_promotes_every_existing_status_to_failed(
+    classes,
+    initial_status_name,
+):
+    SubagentResult = classes["SubagentResult"]
+    SubagentStatus = classes["SubagentStatus"]
+    result = SubagentResult(
+        task_id="fatal-promotion",
+        trace_id="trace-1",
+        status=getattr(SubagentStatus, initial_status_name),
+        result="provisional result",
+        error="previous outcome",
+        stop_reason="turn_capped",
+    )
+
+    class FatalTeardown(BaseException):
+        pass
+
+    result.record_fatal_error(FatalTeardown("fatal teardown"))
+
+    assert result.status is SubagentStatus.FAILED
+    assert result.result is None
+    assert result.stop_reason is None
+    assert result.error == "fatal teardown"
+    assert result.completed_at is not None
+
+
+def test_execute_async_publishes_timeout_before_teardown_and_capacity_release(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentConfig = classes["SubagentConfig"]
+    SubagentExecutor = classes["SubagentExecutor"]
+    SubagentStatus = classes["SubagentStatus"]
+    admitted = threading.Event()
+    teardown_started = threading.Event()
+    teardown_release = threading.Event()
+    teardown_finished = threading.Event()
+    capacity_released = threading.Event()
+
+    class TrackingSlot:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            assert teardown_finished.is_set()
+            capacity_released.set()
+
+    class TrackingCapacity:
+        def slot(self, **_kwargs):
+            return TrackingSlot()
+
+    async def slow_admitted(_task, _result):
+        admitted.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            teardown_started.set()
+            await asyncio.to_thread(teardown_release.wait)
+            teardown_finished.set()
+
+    executor = SubagentExecutor(
+        config=SubagentConfig(
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=0.05,
+        ),
+        tools=[],
+        thread_id="test-thread",
+        execution_capacity=TrackingCapacity(),
+    )
+    execution_id = None
+    try:
+        with patch.object(executor, "_aexecute_admitted", side_effect=slow_admitted):
+            execution_id = executor.execute_async("Task")
+            assert admitted.wait(timeout=3)
+            assert teardown_started.wait(timeout=3)
+            result = executor_module.get_background_task_result(execution_id)
+            assert result is not None
+            assert result.status.value == SubagentStatus.TIMED_OUT.value
+            assert not result.execution_done_event.is_set()
+            assert not capacity_released.is_set()
+            teardown_release.set()
+            assert result.execution_done_event.wait(timeout=3)
+
+        assert teardown_finished.is_set()
+        assert capacity_released.is_set()
+    finally:
+        teardown_release.set()
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)
+
+
+def test_execute_async_does_not_swallow_fatal_base_exception_after_terminal(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentExecutor = classes["SubagentExecutor"]
+    SubagentStatus = classes["SubagentStatus"]
+    submitted = {}
+
+    class FatalTeardown(BaseException):
+        pass
+
+    async def terminal_then_fatal(_task, result_holder):
+        result_holder.try_set_terminal(
+            SubagentStatus.COMPLETED,
+            result="apparently complete",
+        )
+        raise FatalTeardown("fatal after terminal")
+
+    original_submit = executor_module._submit_to_isolated_loop_in_context
+
+    def capture_submit(context, coroutine_factory):
+        future = original_submit(context, coroutine_factory)
+        submitted["future"] = future
+        return future
+
+    executor = SubagentExecutor(
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with (
+            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=capture_submit),
+            patch.object(executor, "_aexecute", side_effect=terminal_then_fatal),
+        ):
+            execution_id = executor.execute_async("Task")
+            with pytest.raises(
+                executor_module.SubagentBackgroundFatalError,
+                match="FatalTeardown: fatal after terminal",
+            ) as raised:
+                submitted["future"].result(timeout=3)
+            assert isinstance(raised.value.__cause__, FatalTeardown)
+
+        result = executor_module.get_background_task_result(execution_id)
+        assert result is not None
+        assert result.status.value == SubagentStatus.FAILED.value
+        assert result.result is None
+        assert result.error == "fatal after terminal"
+        assert result.execution_done_event.is_set()
+    finally:
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)
+
+
+def test_execute_async_cancelled_child_fatal_teardown_fails_and_opens_fence(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    started = threading.Event()
+    submitted = {}
+
+    class FatalTeardown(BaseException):
+        pass
+
+    async def fatal_on_cancel(_task, _result):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise FatalTeardown("fatal cancellation teardown")
+
+    original_submit = executor_module._submit_to_isolated_loop_in_context
+
+    def capture_submit(context, coroutine_factory):
+        future = original_submit(context, coroutine_factory)
+        submitted["future"] = future
+        return future
+
+    executor = classes["SubagentExecutor"](
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with (
+            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=capture_submit),
+            patch.object(executor, "_aexecute", side_effect=fatal_on_cancel),
+        ):
+            execution_id = executor.execute_async("Task")
+            assert started.wait(timeout=3)
+            executor_module.request_cancel_background_task(execution_id)
+            with pytest.raises(executor_module.SubagentBackgroundFatalError) as raised:
+                submitted["future"].result(timeout=3)
+
+        result = executor_module.get_background_task_result(execution_id)
+        assert result.status is classes["SubagentStatus"].FAILED
+        assert result.execution_done_event.is_set()
+        assert isinstance(raised.value.__cause__, FatalTeardown)
+    finally:
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)
+
+
+def test_execute_async_cancelled_child_ordinary_teardown_is_not_fatal(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    started = threading.Event()
+    submitted = {}
+
+    async def ordinary_failure_on_cancel(_task, _result):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            _result.try_set_terminal(
+                classes["SubagentStatus"].CANCELLED,
+                error="Cancelled by user",
+            )
+            raise RuntimeError("ordinary cancellation teardown")
+
+    original_submit = executor_module._submit_to_isolated_loop_in_context
+
+    def capture_submit(context, coroutine_factory):
+        future = original_submit(context, coroutine_factory)
+        submitted["future"] = future
+        return future
+
+    executor = classes["SubagentExecutor"](
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with (
+            patch.object(
+                executor_module,
+                "_submit_to_isolated_loop_in_context",
+                side_effect=capture_submit,
+            ),
+            patch.object(
+                executor,
+                "_aexecute",
+                side_effect=ordinary_failure_on_cancel,
+            ),
+        ):
+            execution_id = executor.execute_async("Task")
+            assert started.wait(timeout=3)
+            executor_module.request_cancel_background_task(execution_id)
+            completed = submitted["future"].result(timeout=3)
+
+        result = executor_module.get_background_task_result(execution_id)
+        assert completed is result
+        assert result.status is classes["SubagentStatus"].FAILED
+        assert result.error == "ordinary cancellation teardown"
+        assert result.get_fatal_error() is None
+        assert result.execution_done_event.is_set()
+    finally:
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)
+
+
+def test_execute_async_immediate_cancel_still_runs_runner_finally(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentExecutor = classes["SubagentExecutor"]
+    SubagentStatus = classes["SubagentStatus"]
+    loop_blocked = threading.Event()
+    release_loop = threading.Event()
+    loop = executor_module._get_isolated_subagent_loop()
+
+    def block_loop() -> None:
+        loop_blocked.set()
+        release_loop.wait(timeout=3)
+
+    loop.call_soon_threadsafe(block_loop)
+    assert loop_blocked.wait(timeout=3)
+
+    async def should_not_finish_normally(_task, _result):
+        await asyncio.Event().wait()
+
+    executor = SubagentExecutor(
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with patch.object(
+            executor,
+            "_aexecute",
+            side_effect=should_not_finish_normally,
+        ):
+            execution_id = executor.execute_async("Task")
+            executor_module.request_cancel_background_task(execution_id)
+            result = executor_module.get_background_task_result(execution_id)
+            assert result is not None
+            assert not result.execution_done_event.is_set()
+
+            release_loop.set()
+            assert result.execution_done_event.wait(timeout=3)
+
+        assert result.status.value == SubagentStatus.CANCELLED.value
+    finally:
+        release_loop.set()
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)
+
+
+def test_execute_async_force_cleanup_cannot_destroy_runner_owner(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentExecutor = classes["SubagentExecutor"]
+    SubagentStatus = classes["SubagentStatus"]
+    loop_blocked = threading.Event()
+    release_loop = threading.Event()
+    loop = executor_module._get_isolated_subagent_loop()
+
+    def block_loop() -> None:
+        loop_blocked.set()
+        release_loop.wait(timeout=3)
+
+    loop.call_soon_threadsafe(block_loop)
+    assert loop_blocked.wait(timeout=3)
+
+    async def should_not_finish_normally(_task, _result):
+        await asyncio.Event().wait()
+
+    executor = SubagentExecutor(
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with patch.object(
+            executor,
+            "_aexecute",
+            side_effect=should_not_finish_normally,
+        ):
+            execution_id = executor.execute_async("Task")
+            result = executor_module.get_background_task_result(execution_id)
+            assert result is not None
+            with executor_module._background_tasks_lock:
+                runner = executor_module._background_runners[execution_id]
+
+            executor_module.request_cancel_background_task(execution_id)
+            executor_module.force_cleanup_background_task(execution_id)
+
+            assert executor_module.get_background_task_result(execution_id) is None
+            assert execution_id not in executor_module._background_runners
+            assert not result.execution_done_event.is_set()
+
+            release_loop.set()
+            assert result.execution_done_event.wait(timeout=3)
+
+        assert result.status.value == SubagentStatus.CANCELLED.value
+        assert runner.loop is None
+        assert runner.task is None
+    finally:
+        release_loop.set()
+        if execution_id is not None:
+            executor_module.force_cleanup_background_task(execution_id)
+
+
+def test_execute_async_child_creation_failure_sets_done_fence(
+    _setup_executor_classes,
+):
+    classes = _setup_executor_classes
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    SubagentExecutor = classes["SubagentExecutor"]
+    SubagentStatus = classes["SubagentStatus"]
+    submitted = {}
+
+    original_submit = executor_module._submit_to_isolated_loop_in_context
+
+    def capture_submit(context, coroutine_factory):
+        future = original_submit(context, coroutine_factory)
+        submitted["future"] = future
+        return future
+
+    def fail_child_creation(coroutine, **_kwargs):
+        coroutine.close()
+        raise RuntimeError("child creation failed")
+
+    executor = SubagentExecutor(
+        config=classes["SubagentConfig"](
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+        ),
+        tools=[],
+        thread_id="test-thread",
+    )
+    execution_id = None
+    try:
+        with (
+            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=capture_submit),
+            patch.object(executor_module.asyncio, "create_task", side_effect=fail_child_creation),
+        ):
+            execution_id = executor.execute_async("Task")
+            completed = submitted["future"].result(timeout=3)
+
+        result = executor_module.get_background_task_result(execution_id)
+        assert result is completed
+        assert result is not None
+        assert result.status.value == SubagentStatus.FAILED.value
+        assert result.error == "child creation failed"
+        assert result.execution_done_event.is_set()
+        assert execution_id not in executor_module._background_runners
+    finally:
+        if execution_id is not None:
+            executor_module.cleanup_background_task(execution_id)

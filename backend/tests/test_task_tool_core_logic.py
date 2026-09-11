@@ -9,7 +9,7 @@ import time
 import weakref
 from enum import Enum
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -868,6 +868,348 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert events[0]["description"] == "collect diagnostics"
     assert events[0]["model_name"] == "ark-model"
     assert events[-1]["result"] == "all done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provisional_status",
+    [
+        FakeSubagentStatus.COMPLETED,
+        FakeSubagentStatus.FAILED,
+        FakeSubagentStatus.CANCELLED,
+        FakeSubagentStatus.TIMED_OUT,
+    ],
+)
+async def test_task_tool_repolls_every_terminal_status_after_execution_teardown(
+    monkeypatch,
+    provisional_status,
+) -> None:
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    events: list[dict] = []
+    reported_statuses: list[FakeSubagentStatus] = []
+    cleaned: list[str] = []
+    first_poll = asyncio.Event()
+    execution_done = asyncio.Event()
+    result = _make_result(
+        provisional_status,
+        result="provisional success",
+        error="provisional terminal outcome",
+        token_usage_records=[{"total_tokens": 10}],
+    )
+    result.execution_done_event = execution_done
+
+    class DummyExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def execute_async(self, _prompt, task_id=None):
+            return "execution-teardown-fatal"
+
+    def get_result(_execution_id):
+        first_poll.set()
+        return result
+
+    async def emit(event, *, writer):
+        writer(event)
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        get_result,
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module, "aemit_custom_event", emit)
+    monkeypatch.setattr(
+        task_tool_module,
+        "_report_subagent_usage",
+        lambda _runtime, current: reported_statuses.append(current.status),
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "cleanup_background_task",
+        cleaned.append,
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+
+    coroutine = task_tool_module.task_tool.coroutine
+    assert coroutine is not None
+    invocation = asyncio.create_task(
+        coroutine(
+            runtime=runtime,
+            description="test teardown",
+            prompt="p",
+            subagent_type="general-purpose",
+            tool_call_id="tc-teardown-fatal",
+        )
+    )
+    await asyncio.wait_for(first_poll.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert not invocation.done()
+    assert [event["type"] for event in events] == ["task_started"]
+    assert reported_statuses == []
+
+    # Any executor terminal state can be published before leaving teardown. A
+    # fatal teardown rewrites that provisional outcome before opening the fence.
+    result.status = FakeSubagentStatus.FAILED
+    result.result = None
+    result.error = "fatal during teardown"
+    execution_done.set()
+
+    output = await asyncio.wait_for(invocation, timeout=1)
+    message = _task_tool_message(output)
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == "fatal during teardown"
+    assert [event["type"] for event in events] == [
+        "task_started",
+        "task_failed",
+    ]
+    assert reported_statuses == [FakeSubagentStatus.FAILED]
+    assert cleaned == ["execution-teardown-fatal"]
+
+
+@pytest.mark.asyncio
+async def test_task_tool_propagates_original_fatal_after_execution_fence(
+    monkeypatch,
+) -> None:
+    class ExecutionFatal(BaseException):
+        pass
+
+    fatal = ExecutionFatal("original task fatal")
+    result = _make_result(
+        FakeSubagentStatus.FAILED,
+        error="original task fatal",
+    )
+    result.execution_done_event = asyncio.Event()
+    result.get_fatal_error = lambda: fatal
+    first_poll = asyncio.Event()
+    cleaned: list[str] = []
+
+    class DummyExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def execute_async(self, _prompt, task_id=None):
+            return "execution-original-fatal"
+
+    def get_result(_execution_id):
+        first_poll.set()
+        return result
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_subagent_config",
+        lambda _: _make_subagent_config(),
+    )
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_stream_writer",
+        lambda: lambda _event: None,
+    )
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_args: None)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", cleaned.append)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+
+    coroutine = task_tool_module.task_tool.coroutine
+    assert coroutine is not None
+    invocation = asyncio.create_task(
+        coroutine(
+            runtime=_make_runtime(),
+            prompt="p",
+            subagent_type="general-purpose",
+            tool_call_id="tc-original-fatal",
+        ),
+    )
+    await asyncio.wait_for(first_poll.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert not invocation.done()
+
+    result.execution_done_event.set()
+    with pytest.raises(ExecutionFatal) as raised:
+        await asyncio.wait_for(invocation, timeout=1)
+
+    assert raised.value is fatal
+    assert cleaned == ["execution-original-fatal"]
+
+
+@pytest.mark.asyncio
+async def test_threading_execution_fence_wait_does_not_use_default_executor(
+    monkeypatch,
+) -> None:
+    done_event = threading.Event()
+    sleep_calls: list[float] = []
+
+    async def set_fence_after_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+        done_event.set()
+
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", set_fence_after_sleep)
+    monkeypatch.setattr(
+        task_tool_module.asyncio,
+        "to_thread",
+        AsyncMock(side_effect=AssertionError("threading fence must not use to_thread")),
+    )
+
+    assert await task_tool_module._wait_for_execution_done_event(
+        done_event,
+        timeout=1.0,
+    )
+    assert sleep_calls == [task_tool_module._EXECUTION_FENCE_POLL_INTERVAL_SECONDS]
+
+
+@pytest.mark.asyncio
+async def test_threading_execution_fence_wait_respects_zero_timeout() -> None:
+    assert not await task_tool_module._wait_for_execution_done_event(
+        threading.Event(),
+        timeout=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_threading_execution_fence_wait_is_cancellable() -> None:
+    waiter = asyncio.create_task(
+        task_tool_module._wait_for_execution_done_event(
+            threading.Event(),
+            timeout=60,
+        ),
+    )
+    await asyncio.sleep(0)
+    waiter.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+
+def test_task_tool_terminal_fence_wait_stays_within_polling_budget(
+    monkeypatch,
+) -> None:
+    config = _make_subagent_config()
+    runtime = _make_runtime()
+    result = _make_result(
+        FakeSubagentStatus.FAILED,
+        error="provisional failure",
+    )
+    result.execution_done_event = asyncio.Event()
+    poll_count = 0
+    deferred_cleanups: list[tuple[str, int]] = []
+
+    class DummyExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def execute_async(self, _prompt, task_id=None):
+            return "execution-stuck-fence"
+
+    def get_result(_execution_id):
+        nonlocal poll_count
+        poll_count += 1
+        return result
+
+    async def fence_still_closed(_done_event, *, timeout):
+        assert timeout == task_tool_module._SUBAGENT_POLL_INTERVAL_SECONDS
+        return False
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
+    monkeypatch.setattr(
+        task_tool_module,
+        "_wait_for_execution_done_event",
+        fence_still_closed,
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_args: None)
+    monkeypatch.setattr(
+        task_tool_module,
+        "request_cancel_background_task",
+        lambda _execution_id: None,
+    )
+    monkeypatch.setattr(
+        task_tool_module,
+        "_schedule_deferred_subagent_cleanup",
+        lambda _runtime, execution_id, _trace_id, max_polls: deferred_cleanups.append((execution_id, max_polls)),
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="stuck terminal fence",
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-stuck-fence",
+    )
+
+    message = _task_tool_message(output)
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "polling_timed_out"
+    max_polls = (config.timeout_seconds + 60) // 5
+    assert poll_count == max_polls + 2
+    assert deferred_cleanups == [("execution-stuck-fence", max_polls)]
+
+
+def test_task_tool_returns_terminal_when_fence_opens_on_last_budget_wait(
+    monkeypatch,
+) -> None:
+    config = _make_subagent_config()
+    result = _make_result(FakeSubagentStatus.RUNNING)
+    result.execution_done_event = threading.Event()
+    max_polls = (config.timeout_seconds + 60) // 5
+    polls = 0
+
+    class DummyExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def execute_async(self, _prompt, task_id=None):
+            return "execution-last-fence"
+
+    def get_result(_execution_id):
+        nonlocal polls
+        polls += 1
+        if polls == max_polls + 1:
+            result.status = FakeSubagentStatus.COMPLETED
+            result.result = "provisional"
+        return result
+
+    async def open_fence(_done_event, *, timeout):
+        assert timeout == task_tool_module._SUBAGENT_POLL_INTERVAL_SECONDS
+        result.status = FakeSubagentStatus.FAILED
+        result.result = None
+        result.error = "fatal during final teardown"
+        result.execution_done_event.set()
+        return True
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
+    monkeypatch.setattr(task_tool_module, "_wait_for_execution_done_event", open_fence)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_args: None)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _execution_id: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+
+    message = _task_tool_message(
+        _run_task_tool(
+            runtime=_make_runtime(),
+            description="final fence",
+            prompt="p",
+            subagent_type="general-purpose",
+            tool_call_id="tc-final-fence",
+        )
+    )
+
+    assert polls == max_polls + 2
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == "fatal during final teardown"
 
 
 def test_task_tool_emits_cumulative_usage_on_running_event(monkeypatch):

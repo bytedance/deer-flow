@@ -5,11 +5,31 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+
+
+async def _release_after_cancellation(release) -> None:
+    """Finish slot release before propagating any cancellation."""
+    release_task = asyncio.create_task(release())
+    host = asyncio.current_task()
+    observed_cancellations = host.cancelling() if host is not None else 0
+    deferred: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(release_task)
+            break
+        except asyncio.CancelledError as exc:
+            current_cancellations = host.cancelling() if host is not None else 0
+            if current_cancellations <= observed_cancellations:
+                raise
+            observed_cancellations = current_cancellations
+            deferred = deferred or exc
+    if deferred is not None:
+        raise deferred
 
 
 class SubagentCapacityError(RuntimeError):
@@ -106,12 +126,22 @@ class SubagentExecutionCapacity:
             self._release_locked()
 
     @asynccontextmanager
-    async def slot(self) -> AsyncIterator[None]:
+    async def slot(
+        self,
+        *,
+        after_acquire: Callable[[], Awaitable[bool | None]] | None = None,
+    ) -> AsyncIterator[None]:
         await self._acquire()
         try:
+            if after_acquire is not None:
+                admitted = await after_acquire()
+                if admitted is False:
+                    raise SubagentCapacityRejected(
+                        "Subagent execution admission hook rejected the execution",
+                    )
             yield
         finally:
-            await self._release()
+            await _release_after_cancellation(self._release)
 
 
 _config = SubagentRuntimeConfig()
