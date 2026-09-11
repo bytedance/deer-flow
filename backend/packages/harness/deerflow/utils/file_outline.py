@@ -38,6 +38,10 @@ MAX_OUTLINE_ENTRIES = 50
 
 _OUTLINE_PREVIEW_LINES = 5
 
+# Root-level Markdown fences allow up to three leading spaces. The rest of
+# the line is an info string when opening, or whitespace only when closing.
+_CODE_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
 
 def _clean_bold_title(raw: str) -> str:
     """Normalise a title string that may contain pymupdf4llm bold artefacts.
@@ -88,9 +92,27 @@ def extract_outline(md_path: Path) -> list[dict]:
         Returns an empty list if the file cannot be read or has no headings.
     """
     outline: list[dict] = []
+    fence_char = ""
+    fence_length = 0
     try:
         with md_path.open(encoding="utf-8") as f:
             for lineno, line in enumerate(f, 1):
+                fence = _CODE_FENCE_RE.match(line.rstrip("\r\n"))
+                if fence_char:
+                    if fence:
+                        marker, suffix = fence.groups()
+                        if marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip(" \t"):
+                            fence_char = ""
+                    continue
+                if fence:
+                    marker, info = fence.groups()
+                    # Backtick info strings cannot contain backticks; tilde
+                    # info strings have no such restriction.
+                    if marker[0] == "~" or "`" not in info:
+                        fence_char = marker[0]
+                        fence_length = len(marker)
+                        continue
+
                 stripped = line.strip()
                 if not stripped:
                     continue

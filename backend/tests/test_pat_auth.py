@@ -570,6 +570,46 @@ def test_pat_runs_policy_admits_exactly_the_mounted_routes():
         assert not is_pat_allowed_route(method, path), f"{method} {path} is not implemented and must stay denied"
 
 
+def test_pat_projects_policy_admits_exactly_the_mounted_routes():
+    """Projects subtree (and the thread move endpoint) follow the same
+    enumerated-no-dead-methods discipline as the runs subtree: every
+    method/path the projects router actually implements is admitted (derived
+    from the mounted router, not a hand-maintained list), and deliberately
+    unimplemented neighbors stay default-denied. A new projects route fails
+    here until explicitly allowlisted; a removed one leaves a dead rule
+    visible."""
+    from fastapi.routing import APIRoute
+
+    from app.gateway.auth.pat import is_pat_allowed_route
+    from app.gateway.routers.projects import router
+
+    def concrete(path: str) -> str:
+        return path.replace("{project_id}", "p1")
+
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        path = concrete(route.path)
+        for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
+            assert is_pat_allowed_route(method, path), f"{method} {path} is implemented but PAT-denied"
+
+    for method, path in [
+        ("PUT", "/api/projects"),
+        ("DELETE", "/api/projects"),
+        ("PUT", "/api/projects/p1"),
+        ("GET", "/api/projects/p1/archive"),
+        ("GET", "/api/projects/p1/restore"),
+        ("POST", "/api/projects/p1/threads"),
+    ]:
+        assert not is_pat_allowed_route(method, path), f"{method} {path} is not implemented and must stay denied"
+
+    # Thread move (POST /api/threads/{id}/move) is admitted for PATs holding
+    # threads:write; other methods on the same path stay denied.
+    move_path = "/api/threads/6f1c2f0e-3b7a-4d2e-9c1a-2b5f0e8a1d3c/move"
+    assert is_pat_allowed_route("POST", move_path) is True
+    assert is_pat_allowed_route("GET", move_path) is False
+
+
 def test_pat_scopes_enforced_on_stateless_run_entry(client):
     """Follow-up to the review's P1-1: the stateless run entrypoints now
     carry @require_permission("runs", "create"), so a threads:read-only PAT

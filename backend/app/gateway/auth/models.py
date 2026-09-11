@@ -40,5 +40,9 @@ class UserResponse(BaseModel):
     system_role: Literal["admin", "user"]
     needs_setup: bool = False
     oauth_provider: str | None = Field(None, description="OAuth/SSO provider ID if the user logged in via SSO (e.g. 'keycloak')")
+    permissions: list[str] | None = Field(
+        None,
+        description=("Effective route permissions granted to this credential (RFC #4063 Phase 4). Only GET /api/v1/auth/me resolves them; credential-creation responses leave it None."),
+    )
     auth_disabled: bool = Field(False, description="Runtime DEER_FLOW_AUTH_DISABLED state, so clients can hide session-only affordances")
     session_generation: int | None = Field(None, description="Epoch-second iat of the current session token — the identity fence's generation tag; None for non-session sources")

@@ -201,14 +201,24 @@ async def _ensure_thread_metadata(
     if existing is None:
         if require_existing_thread:
             raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
+        from deerflow.persistence.thread_meta import THREAD_PROJECT_METADATA_KEY
+
+        run_metadata = record.metadata or {}
+        metadata = {
+            key: value
+            for key, value in run_metadata.items()
+            # Strip the run-scoped trace id (existing) and the reserved
+            # membership key: run admission never modifies project membership —
+            # the column is written only by POST /api/threads and
+            # /threads/{id}/move — so the key must not persist either.
+            if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
+        }
         await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
-            # Seeded from the run that created the thread, minus the run-scoped
-            # trace id: a thread spans many runs and as many trace ids, so
-            # pinning the first one here would be misleading rather than useful.
-            metadata={key: value for key, value in (record.metadata or {}).items() if key != DEERFLOW_TRACE_METADATA_KEY},
+            metadata=metadata,
         )
+        return
 
 
 async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
@@ -447,7 +457,27 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 #   ``disable_clarification`` — set for non-interactive channels (GitHub
 #                              webhooks) so ClarificationMiddleware proceeds
 #                              instead of dead-ending the run.
+#
+# Both are produced server-side by the channel run policies
+# (``ChannelManager._apply_channel_policy`` and ``app.gateway.github.run_policy``),
+# which reach the Gateway over the internally-authenticated request channel, so
+# they are internal-only as well — see :data:`_INTERNAL_ONLY_CONTEXT_KEYS`.
 _CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification"})
+
+# Every run-context key an external client may never supply, in either section.
+# The two sets differ only in *where* a legitimate internal caller's value lands
+# (both sections vs. ``context`` alone); their trust requirement is identical.
+#
+# ``disable_clarification`` is not a milder cousin of ``non_interactive``:
+# ``ClarificationMiddleware`` answers every clarification — ``risk_confirmation``
+# included — with "proceed without asking" instead of interrupting, and
+# ``SandboxMiddleware`` reads the two keys as the same non-interactive signal.
+# Accepting it from a client therefore reproduces the effect the
+# ``non_interactive`` gate exists to prevent. ``github_token`` is a live
+# credential that ``bash`` exports as ``GH_TOKEN``/``GITHUB_TOKEN``, and a copy
+# smuggled through ``body.config['configurable']`` would be written to the
+# checkpoint store.
+_INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS
 
 
 def strip_internal_context_keys(config: dict[str, Any]) -> None:
@@ -461,7 +491,7 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
     for section in ("context", "configurable"):
         value = config.get(section)
         if isinstance(value, dict):
-            for key in _CONTEXT_INTERNAL_CALLER_KEYS:
+            for key in _INTERNAL_ONLY_CONTEXT_KEYS:
                 value.pop(key, None)
 
 
@@ -482,10 +512,11 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     by :func:`strip_internal_context_keys`.
 
     A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``,
-    ``disable_clarification``) is forwarded into ``config['context']`` only, never
-    ``configurable``. These are secrets / runtime flags read by tools and middlewares
-    from ``runtime.context``; keeping them out of ``configurable`` avoids persisting a
-    short-lived token in the checkpoint store.
+    ``disable_clarification``) is likewise forwarded only when ``internal`` is True,
+    and then into ``config['context']`` only, never ``configurable``. These are
+    secrets / runtime flags read by tools and middlewares from ``runtime.context``;
+    keeping them out of ``configurable`` avoids persisting a short-lived token in the
+    checkpoint store.
     """
     if not context:
         return
@@ -499,10 +530,12 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
     # Context-only keys (secrets / runtime flags) land in ``config['context']``
-    # only — never ``configurable`` (which is persisted in checkpoints).
-    for key in _CONTEXT_RUNTIME_ONLY_KEYS:
-        if key in context and isinstance(runtime_context, dict):
-            runtime_context.setdefault(key, context[key])
+    # only — never ``configurable`` (which is persisted in checkpoints) — and only
+    # for internal callers, the sole legitimate producers.
+    if internal:
+        for key in _CONTEXT_RUNTIME_ONLY_KEYS:
+            if key in context and isinstance(runtime_context, dict):
+                runtime_context.setdefault(key, context[key])
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
 
@@ -1479,6 +1512,12 @@ async def start_run(
                 )
 
                 if record.idempotency_reused:
+                    stored = record.kwargs or {}
+                    if stored.get("input") != body.input or record.assistant_id != body.assistant_id:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Idempotency-Key already used with a different request",
+                        )
                     return record
 
                 worker = run_after_metadata(record)
@@ -1673,6 +1712,7 @@ async def sse_consumer(
     run_mgr: RunManager,
     *,
     apply_on_disconnect: bool = True,
+    emit_gap_on_missing_stream: bool = False,
 ):
     """Async generator that yields SSE frames from the bridge.
 
@@ -1687,9 +1727,31 @@ async def sse_consumer(
     connection, and a read-only observer closing a join must not cancel the
     run (a runs:read-only credential would otherwise cancel without
     runs:cancel just by disconnecting).
+
+    ``emit_gap_on_missing_stream`` is a separate creating-retry signal, default
+    ``False``. ``create_or_reject`` sets ``record.idempotency_reused`` on the
+    shared cached record and never clears it, so this function must not read
+    that flag. Thread-scoped ``/runs/stream`` passes True only for this
+    request's reuse; default callers (joins, stateless ``/api/runs/stream``,
+    tests) keep ``end`` when a terminal record's stream is gone.
     """
     last_event_id = request.headers.get("Last-Event-ID")
     if await _terminal_record_stream_missing(bridge, record):
+        if emit_gap_on_missing_stream:
+            # Creating-endpoint retry: a bare `end` looks like the run
+            # produced nothing. Point the client at durable state instead.
+            yield format_sse(
+                "gap",
+                {
+                    "code": "stream_replay_gap",
+                    "run_id": record.run_id,
+                    "requested_event_id": last_event_id,
+                    "earliest_available_event_id": None,
+                    "latest_available_event_id": None,
+                    "recovery": "reload_durable_state",
+                },
+            )
+            return
         yield format_sse("end", None)
         return
 
