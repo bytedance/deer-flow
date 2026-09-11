@@ -38,6 +38,7 @@ export const enUS: Translations = {
     custom: "Custom",
     notAvailableInDemoMode: "Not available in demo mode",
     loading: "Loading...",
+    error: "Error:",
     version: "Version",
     lastUpdated: "Last updated",
     code: "Code",
@@ -450,6 +451,7 @@ export const enUS: Translations = {
     scheduleType: {
       cron: "Recurring",
       once: "One-time",
+      interval: "Interval",
     },
     preset: {
       label: "Repeat",
@@ -468,6 +470,11 @@ export const enUS: Translations = {
       cronPlaceholder: "0 9 * * *",
       runAt: "Run at",
       timezone: "Timezone",
+      intervalAmount: "Every",
+      intervalUnitSeconds: "seconds",
+      intervalUnitMinutes: "minutes",
+      intervalUnitHours: "hours",
+      intervalMinHint: "Minimum 60 seconds (the default server floor).",
     },
     weekdays: {
       mon: "Mon",
@@ -484,6 +491,8 @@ export const enUS: Translations = {
       title: "Create scheduled task",
       taskTitle: "Task title",
       prompt: "Prompt",
+      agent: "Agent",
+      leadAgent: "Default agent (lead_agent)",
       submit: "Create",
       fillRequired: "Fill all required fields",
     },
@@ -504,9 +513,11 @@ export const enUS: Translations = {
       allTypes: "All types",
       cron: "Cron",
       once: "Once",
+      interval: "Interval",
     },
     detail: {
       contextMode: "Context mode",
+      agent: "Agent",
       thread: "Thread",
       lastThread: "Last thread",
       schedule: "Schedule",
