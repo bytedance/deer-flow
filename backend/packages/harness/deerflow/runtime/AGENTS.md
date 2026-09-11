@@ -143,7 +143,9 @@ the middleware releases its state lock, matching LoopDetectionMiddleware, so a
 slow recorder cannot stall tool-state updates. Cross-thread middleware
 producers (currently slash-skill activation via `asyncio.to_thread`) schedule
 journal mutation directly onto its owning event loop; they never mutate or
-flush `RunJournal._buffer` from the worker thread.
+flush `RunJournal._buffer` from the worker thread. The task-tool subagent proxy
+rejects a loop that differs from the journal owner, so its close fence always
+drains the only scheduling hop.
 The persisted projection accepts
 only framework-defined error/action values and strict booleans (using null for
 invalid values) from the producer-supplied tool stamp; tool content, args,
