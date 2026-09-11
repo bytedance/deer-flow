@@ -51,7 +51,16 @@ def _make_client(monkeypatch, user: User, admissions: dict[str, RunRecord]) -> T
     app = make_authed_test_app(user_factory=lambda: user)
     app.include_router(thread_runs.router)
     app.state.stream_bridge = MagicMock(stream_exists=AsyncMock(return_value=False))
-    app.state.run_manager = MagicMock()
+    manager = MagicMock()
+
+    async def get_durable(run_id, *, user_id=None):
+        del user_id
+        return next((record for record in admissions.values() if record.run_id == run_id), None)
+
+    manager.get_durable = AsyncMock(side_effect=get_durable)
+    manager.has_durable_run_delivery = AsyncMock(return_value=True)
+    manager.has_durable_authoritative_run_end = AsyncMock(return_value=False)
+    app.state.run_manager = manager
     return TestClient(app)
 
 
@@ -187,6 +196,14 @@ class _LocalBridge:
     async def stream_exists(self, run_id):
         del run_id
         return False
+
+
+def _manager_with_terminal_delivery(record: RunRecord):
+    manager = MagicMock()
+    manager.get_durable = AsyncMock(return_value=record)
+    manager.has_durable_run_delivery = AsyncMock(return_value=True)
+    manager.has_durable_authoritative_run_end = AsyncMock(return_value=False)
+    return manager
 
 
 class _StaleSnapshot:
@@ -471,7 +488,7 @@ async def test_sse_consumer_reused_terminal_missing_stream_yields_gap():
             _LocalBridge(),
             record,
             request,
-            MagicMock(),
+            _manager_with_terminal_delivery(record),
             emit_gap_on_missing_stream=True,
         )
     ]
@@ -498,7 +515,16 @@ async def test_sse_consumer_observer_join_keeps_end_after_sticky_reuse_flag():
     )
     request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
 
-    frames = [frame async for frame in sse_consumer(_LocalBridge(), record, request, MagicMock(), apply_on_disconnect=False)]
+    frames = [
+        frame
+        async for frame in sse_consumer(
+            _LocalBridge(),
+            record,
+            request,
+            _manager_with_terminal_delivery(record),
+            apply_on_disconnect=False,
+        )
+    ]
 
     assert len(frames) == 1
     assert frames[0].startswith("event: end\n")
@@ -524,7 +550,7 @@ async def test_sse_consumer_default_path_keeps_end_after_sticky_reuse_flag():
     )
     request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
 
-    frames = [frame async for frame in sse_consumer(_LocalBridge(), record, request, MagicMock())]
+    frames = [frame async for frame in sse_consumer(_LocalBridge(), record, request, _manager_with_terminal_delivery(record))]
 
     assert len(frames) == 1
     assert frames[0].startswith("event: end\n")
@@ -546,14 +572,15 @@ async def test_sse_consumer_missing_stream_gap_requires_explicit_flag():
     )
     request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
 
-    default_frames = [frame async for frame in sse_consumer(_LocalBridge(), record, request, MagicMock(), apply_on_disconnect=True)]
+    manager = _manager_with_terminal_delivery(record)
+    default_frames = [frame async for frame in sse_consumer(_LocalBridge(), record, request, manager, apply_on_disconnect=True)]
     gap_frames = [
         frame
         async for frame in sse_consumer(
             _LocalBridge(),
             record,
             request,
-            MagicMock(),
+            manager,
             apply_on_disconnect=False,
             emit_gap_on_missing_stream=True,
         )
@@ -575,13 +602,21 @@ async def test_observer_join_stays_end_after_real_manager_reuse():
     from app.gateway.services import sse_consumer
 
     store = MemoryRunStore()
-    manager = RunManager(store=store, worker_id="worker-a")
+    events = MemoryRunEventStore()
+    manager = RunManager(store=store, event_store=events, worker_id="worker-a")
     first = await manager.create_or_reject(
         "thread-1",
         user_id=None,
         idempotency_key="http-run:same",
     )
     await manager.set_status(first.run_id, RunStatus.success)
+    await events.put_if_absent(
+        thread_id=first.thread_id,
+        run_id=first.run_id,
+        event_type="run.delivery",
+        category="outputs",
+        content={"presented": 0, "paths": [], "by_tool": {}},
+    )
     request = SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False))
 
     async def _frames(*, apply_on_disconnect: bool = True, emit_gap_on_missing_stream: bool = False):
