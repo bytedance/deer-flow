@@ -81,11 +81,16 @@ _INDENTED_SECTION_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*$")
 _KEY_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*(\S.*?)\s*$")
 _LIST_ITEM_NAME_RE = re.compile(r"^\s*-\s+name\s*:\s*(\S.*?)\s*$")
 # `use:` on a models list item, whether it is the first key (`- use: X`) or a
-# later one (`    use: X`). Matching is pinned to the item's own key indent by
-# the caller, so a `use` nested in a sub-mapping (e.g. `when_thinking_enabled`)
-# is not mistaken for the model's provider.
-_MODEL_USE_RE = re.compile(r"^\s+(?:-\s+)?use\s*:\s*(\S.*?)\s*$")
-_LIST_ITEM_RE = re.compile(r"^(\s*)-\s+\S")
+# later one (`  use: X`). Leading whitespace is optional because
+# `yaml.safe_dump` (the setup wizard, config-upgrade.sh) writes list items
+# unindented. The caller pins matching to the model's own key indent, so a
+# `use` nested in a sub-mapping (e.g. `when_thinking_enabled`) is not mistaken
+# for the model's provider.
+_MODEL_USE_RE = re.compile(r"^\s*(?:-\s+)?use\s*:\s*(\S.*?)\s*$")
+# A sequence item: group 1 is the dash's indent, group 2 the dash plus the
+# spaces before the item's first key, so their combined length is where that
+# item's keys sit.
+_LIST_ITEM_RE = re.compile(r"^(\s*)(-\s+)\S")
 
 # Provider module (the part before `:` in `models[].use`) -> uv extra that
 # ships it. Mirrors `[project.optional-dependencies]` in the harness package.
@@ -265,12 +270,20 @@ def tools_include_name(lines: list[str], tool_name: str) -> bool:
 def models_use_providers(lines: list[str]) -> set[str]:
     """Return provider modules referenced by `models[].use`.
 
-    `models:` has the same top-level list-of-mappings shape as `tools:`, so this
-    mirrors :func:`tools_include_name`. Commented-out example blocks are dropped
-    by ``_strip_comment`` before matching, which keeps the fully-commented
-    `models:` section shipped in config.example.yaml from enabling an extra.
+    Only each model's own `use` counts. The first sequence item under `models:`
+    fixes the indent of the model list; later items at that indent start a new
+    model and set where its keys sit. That handles both the indented layout in
+    config.example.yaml and the unindented one `yaml.safe_dump` emits. Deeper
+    content — a sub-mapping such as `when_thinking_enabled`, or a sequence
+    inside a model option such as `stop:` — is skipped and never moves the key
+    indent, so key order within a model does not change the result.
+
+    Commented-out example blocks are dropped by ``_strip_comment`` before
+    matching, which keeps the fully-commented `models:` section shipped in
+    config.example.yaml from enabling an extra.
     """
     inside = False
+    item_indent: int | None = None
     key_indent: int | None = None
     providers: set[str] = set()
     for raw in lines:
@@ -280,23 +293,26 @@ def models_use_providers(lines: list[str]) -> set[str]:
         sect_match = _SECTION_RE.match(line)
         if sect_match:
             inside = sect_match.group(1) == "models"
-            key_indent = None
+            item_indent = key_indent = None
             continue
         if not inside:
             continue
         stripped = line.lstrip()
         indent = len(line) - len(stripped)
-        if indent == 0:
-            inside = False
-            key_indent = None
-            continue
         item_match = _LIST_ITEM_RE.match(line)
-        if item_match:
-            # `- name: x` puts the item's keys at the dash's indent + 2.
-            key_indent = len(item_match.group(1)) + 2
-        elif key_indent is not None and indent != key_indent:
-            # Deeper (a sub-mapping such as `when_thinking_enabled`) or
-            # shallower: not one of this model's own keys.
+        if item_match and (item_indent is None or len(item_match.group(1)) == item_indent):
+            # A model entry. Checked before the section-end test below because
+            # `yaml.safe_dump` puts these at column 0.
+            item_indent = len(item_match.group(1))
+            key_indent = item_indent + len(item_match.group(2))
+        elif indent == 0 or (item_indent is not None and indent <= item_indent):
+            # A new top-level key, or a dedent past the model list.
+            inside = False
+            item_indent = key_indent = None
+            continue
+        elif item_match or indent != key_indent:
+            # A sequence item inside a model option, or content nested deeper
+            # than the model's own keys. Neither is the model's provider.
             continue
         use_match = _MODEL_USE_RE.match(line)
         if use_match:

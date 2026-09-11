@@ -244,6 +244,52 @@ def test_detect_from_config_ignores_use_in_nested_model_mapping(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
+def test_detect_from_config_ollama_in_setup_wizard_output(tmp_path):
+    """`make setup` writes config.yaml with yaml.safe_dump, which leaves list items unindented."""
+    from wizard.writer import build_minimal_config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        build_minimal_config(
+            provider_use="langchain_ollama:ChatOllama",
+            model_name="qwen3:32b",
+            display_name="Qwen3 32B (Ollama)",
+            api_key_field="api_key",
+            env_var=None,
+            base_url="http://localhost:11434",
+        ),
+        encoding="utf-8",
+    )
+    # Pin the layout under test, so a writer change fails here rather than silently passing.
+    assert "\nmodels:\n- " in cfg.read_text(encoding="utf-8")
+    assert "ollama" in detect.detect_from_config(cfg)
+
+
+def test_detect_from_config_ollama_via_indentless_models_list(tmp_path):
+    """Same shape as the setup wizard, and as scripts/config-upgrade.sh emits."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n- name: qwen3-local\n  use: langchain_ollama:ChatOllama\n  model: qwen3:32b\n")
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ollama_when_use_follows_a_nested_list(tmp_path):
+    """A sequence inside a model option must not move the key indent; key order is irrelevant."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: local\n    model: qwen3:32b\n    stop:\n      - END\n    use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ignores_use_in_nested_indentless_sequence(tmp_path):
+    """A `- use:` item inside a model option is not that model's provider."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n- name: x\n  use: deerflow.models.patched_deepseek:PatchedChatDeepSeek\n  fallbacks:\n  - use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
 def test_detect_from_config_non_ollama_model_returns_no_extras(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("models:\n  - name: gpt\n    use: langchain_openai:ChatOpenAI\n    model: gpt-4o\n")
