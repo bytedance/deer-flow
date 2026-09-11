@@ -57,7 +57,7 @@ Then **restart deer-flow** - the memory manager is a process-level singleton; a 
 - **Tier 2 (management, with defaults)** -- `add_nowait` (delegates to `add`), `search` / `get_memory` / `clear_memory` / `import_memory` / `export_memory` / `delete_memory` (default `raise NotImplementedError`), `shutdown_flush` (default `True`). Override the ones your backend supports.
 - **Tier 3 (optional hooks, with defaults)** -- `warm` (default `True`), `reload_memory` / `create_fact` / `delete_fact` / `update_fact` (default raise), `on_pre_compress` / `on_turn_start` (default no-op).
 
-A new backend implements `from_config` + `add` + `get_context` and overrides only what it supports; the rest inherits defaults. Signatures must match (parameter names, keyword-only args). `noop` is the minimal reference.
+A new backend implements `from_config` + `add` + `get_context` and overrides only what it supports; the rest inherits defaults. Signatures must match (parameter names, keyword-only args). `get_context` and `aget_context` accept an optional plain-string `query`; existing backends can ignore it. A backend that wants the host's per-turn query path sets `supports_query_aware_context = True`. Capability-off backends are never called with the query keyword. `noop` is the minimal reference.
 
 ### 2. Return shape (critical, easy to get wrong)
 
@@ -107,11 +107,12 @@ These are backend-agnostic. Don't touch them when swapping backends (unless you'
 | File | Role |
 |---|---|
 | `packages/harness/deerflow/agents/memory/manager.py` | ABC + factory + scanner |
+| `packages/harness/deerflow/agents/memory/context.py` | Shared injection gates, manager calls, and `<memory>` wrapping |
 | `packages/harness/deerflow/agents/middlewares/memory_middleware.py` | `after_agent` -> `manager.add` |
 | `packages/harness/deerflow/agents/memory/summarization_hook.py` | summarization -> `manager.add_nowait` |
-| `packages/harness/deerflow/agents/lead_agent/prompt.py` | `_get_memory_context` -> `manager.get_context` |
+| `packages/harness/deerflow/agents/middlewares/dynamic_context_middleware.py` | Session snapshot plus request-only per-turn recall |
 | `app/gateway/routers/memory.py` | HTTP endpoints -> `manager.*` (direct call + try/except `NotImplementedError`) |
-| `packages/harness/deerflow/config/memory_config.py` | shared 4 fields (`enabled` / `injection_enabled` / `manager_class` / `backend_config`) |
+| `packages/harness/deerflow/config/memory_config.py` | Shared host controls and backend selector/config |
 | `frontend/src/components/workspace/settings/memory-settings-page.tsx` | frontend memory page (assumes DeerMem shape) |
 
 > [!NOTE]

@@ -12,6 +12,7 @@ DeerMem-private symbols (``format_memory_for_injection``, ``get_memory_data``,
 them directly from ``deerflow.agents.memory.backends.deermem.deermem.core.*``.
 """
 
+from deerflow.agents.memory.context import aload_memory_context, load_memory_context
 from deerflow.agents.memory.manager import (
     MemoryConflictError,
     MemoryCorruptionError,
@@ -29,6 +30,8 @@ __all__ = [
     "MemoryReadError",
     "MemoryConflictError",
     "MemoryCorruptionError",
+    "load_memory_context",
+    "aload_memory_context",
     "get_memory_manager",
     "memory_read_failures_are_fatal",
     "reset_memory_manager",

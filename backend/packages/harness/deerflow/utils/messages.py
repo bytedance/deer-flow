@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 SUMMARY_MESSAGE_NAME = "summary"
@@ -16,6 +16,16 @@ SUMMARY_MESSAGE_NAME = "summary"
 #: importing the middleware from there closes a cycle
 #: (middleware -> deerflow.runtime -> worker -> events -> middleware).
 INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
+
+# Shared by dynamic-context injection and model-start audit. Keep these neutral
+# message markers here so the journal need not import the middleware chain.
+DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
+DYNAMIC_TURN_MEMORY_KEY = "dynamic_turn_memory"
+
+
+def is_dynamic_context_reminder(message: object) -> bool:
+    """Recognize marked date reminders and untrusted human-role memory blocks."""
+    return isinstance(message, (HumanMessage, SystemMessage)) and bool(message.additional_kwargs.get(DYNAMIC_CONTEXT_REMINDER_KEY))
 
 
 def strip_injected_user_message_id_suffix(message_id: str | None) -> str | None:

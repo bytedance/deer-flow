@@ -190,9 +190,20 @@ def _make_system_message_coalescing_middleware():
 
 
 def _make_dynamic_context_middleware():
+    from types import SimpleNamespace
+
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
-    return DynamicContextMiddleware()
+    return DynamicContextMiddleware(
+        app_config=SimpleNamespace(
+            memory=SimpleNamespace(
+                enabled=True,
+                injection_enabled=True,
+                session_injection_enabled=False,
+                turn_injection_enabled=True,
+            )
+        )
+    )
 
 
 def _make_subagent_date_context_middleware():
@@ -228,6 +239,20 @@ _MIDDLEWARE_DECLARATIONS = [
     ("deerflow.agents.middlewares.dynamic_context_middleware", "DynamicContextMiddleware", _make_dynamic_context_middleware),
     ("deerflow.agents.middlewares.dynamic_context_middleware", "SubagentDateContextMiddleware", _make_subagent_date_context_middleware),
 ]
+
+
+def test_dynamic_context_release_policy_declares_effective_injection_controls():
+    from deerflow.agents.middlewares.dynamic_context_middleware import _effective_date_timezone_name
+
+    middleware = _make_dynamic_context_middleware()
+
+    assert middleware.release_policy_parameters() == {
+        "current_date_timezone": _effective_date_timezone_name(),
+        "memory_enabled": True,
+        "injection_enabled": True,
+        "session_injection_enabled": False,
+        "turn_injection_enabled": True,
+    }
 
 
 @pytest.mark.parametrize("import_path,class_name,make_instance", _MIDDLEWARE_DECLARATIONS)
