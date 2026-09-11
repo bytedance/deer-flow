@@ -43,12 +43,12 @@ import {
   useDeleteScheduledTask,
   usePauseScheduledTask,
   useResumeScheduledTask,
-  useScheduledTaskRuns,
   useScheduledTasks,
   useTriggerScheduledTask,
   useThreadScheduledTasks,
 } from "@/core/scheduled-tasks/hooks";
 import { RECIPES, type Recipe } from "@/core/scheduled-tasks/recipes";
+import { useScheduledTaskRunHistory } from "@/core/scheduled-tasks/run-history";
 import type {
   ScheduledTask,
   ScheduledTaskRun,
@@ -187,7 +187,7 @@ export default function ScheduledTasksPage() {
   });
   const selectedTask =
     filteredData.find((task) => task.id === selectedTaskId) ?? filteredData[0];
-  const taskRunsQuery = useScheduledTaskRuns(selectedTask?.id);
+  const taskRunsQuery = useScheduledTaskRunHistory(selectedTask?.id);
   const createTask = useCreateScheduledTask();
   const updateTask = useUpdateScheduledTask(selectedTask?.id ?? "");
   const pauseTask = usePauseScheduledTask();
@@ -711,6 +711,67 @@ export default function ScheduledTasksPage() {
                       {st.actions.delete}
                     </Button>
                   </div>
+                  <nav
+                    aria-label={st.history.navigation}
+                    className="flex flex-wrap items-center gap-2"
+                  >
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={
+                        taskRunsQuery.page === 0 || taskRunsQuery.isFetching
+                      }
+                      onClick={taskRunsQuery.newer}
+                    >
+                      {st.history.newer}
+                    </Button>
+                    <span className="text-muted-foreground text-sm">
+                      {st.history.page.replace(
+                        "{page}",
+                        String(taskRunsQuery.page + 1),
+                      )}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={
+                        !taskRunsQuery.hasOlder || taskRunsQuery.isFetching
+                      }
+                      onClick={taskRunsQuery.older}
+                    >
+                      {st.history.older}
+                    </Button>
+                    {taskRunsQuery.page > 0 && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={taskRunsQuery.latest}
+                      >
+                        {st.history.latest}
+                      </Button>
+                    )}
+                  </nav>
+                  {taskRunsQuery.page > 0 && (
+                    <p className="text-muted-foreground text-xs">
+                      {st.history.paused}
+                    </p>
+                  )}
+                  {taskRunsQuery.isPending && (
+                    <p role="status">{st.history.loading}</p>
+                  )}
+                  {taskRunsQuery.isError && (
+                    <div role="alert">
+                      <p>{st.history.loadFailed}</p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={taskRunsQuery.isFetching}
+                        onClick={() => void taskRunsQuery.refetch()}
+                      >
+                        {st.history.retry}
+                      </Button>
+                    </div>
+                  )}
                   <div data-testid="scheduled-task-runs">
                     {(taskRunsQuery.data ?? []).length === 1
                       ? st.detail.runsCountOne.replace(
@@ -746,11 +807,11 @@ export default function ScheduledTasksPage() {
                           )}
                         </div>
                       ))
-                    ) : (
+                    ) : !taskRunsQuery.isPending && !taskRunsQuery.isError ? (
                       <div className="text-muted-foreground text-sm">
                         {st.detail.noRuns}
                       </div>
-                    )}
+                    ) : null}
                   </div>
                 </div>
               ) : (

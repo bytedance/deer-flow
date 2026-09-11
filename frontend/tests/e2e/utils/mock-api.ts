@@ -676,15 +676,18 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
-  void page.route("**/api/scheduled-tasks/*/runs", (route) => {
+  void page.route(/\/api\/scheduled-tasks\/[^/]+\/runs(?:\?|$)/, (route) => {
     if (route.request().method() === "GET") {
-      const taskId = decodeURIComponent(
-        new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
-      );
+      const url = new URL(route.request().url());
+      const taskId = decodeURIComponent(url.pathname.split("/").at(-2) ?? "");
+      const offset = Number(url.searchParams.get("offset") ?? 0);
+      const limit = Number(url.searchParams.get("limit") ?? 50);
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(mutableTaskRuns[taskId] ?? []),
+        body: JSON.stringify(
+          (mutableTaskRuns[taskId] ?? []).slice(offset, offset + limit),
+        ),
       });
     }
     return route.fallback();

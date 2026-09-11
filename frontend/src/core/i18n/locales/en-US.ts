@@ -565,6 +565,18 @@ export const enUS: Translations = {
       failed: "Failed",
       cancelled: "Cancelled",
     },
+    history: {
+      navigation: "Run history pages",
+      newer: "Newer runs",
+      older: "Older runs",
+      latest: "Latest runs",
+      page: "Page {page}",
+      paused:
+        "Automatic refresh is paused on older pages. Return to latest for current runs.",
+      loading: "Loading runs…",
+      loadFailed: "Could not load run history.",
+      retry: "Retry history",
+    },
     runTrigger: { scheduled: "scheduled", manual: "manual" },
     runStatus: {
       queued: "Queued",

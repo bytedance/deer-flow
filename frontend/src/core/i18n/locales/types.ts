@@ -472,6 +472,17 @@ export interface Translations {
       failed: string;
       cancelled: string;
     };
+    history: {
+      navigation: string;
+      newer: string;
+      older: string;
+      latest: string;
+      page: string;
+      paused: string;
+      loading: string;
+      loadFailed: string;
+      retry: string;
+    };
     runTrigger: { scheduled: string; manual: string };
     runStatus: {
       queued: string;
