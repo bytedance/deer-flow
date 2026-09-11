@@ -102,6 +102,12 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Added
 
+#### Scheduler
+- **scheduler:** Scheduled tasks accept `interval` (`schedule_spec.every_seconds`)
+  in addition to `once` and `cron`. Cadence is UTC `now + N` with no missed-beat
+  catch-up. N is at least `scheduler.min_once_delay_seconds` (default 60s) and at
+  most 30 days.
+
 #### Authentication
 - **auth:** Personal access tokens (PAT) for programmatic API access:
   `POST/GET/DELETE /api/v1/auth/pats` manage tokens (shown once, stored as
@@ -118,6 +124,10 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Agents & runtime
 
+- **scheduler:** Scheduled tasks can pin `assistant_id` to `lead_agent` (the
+  default) or a custom agent the owner already has. Unknown or malformed names
+  return 422. The workspace create/edit form exposes the same choice.
+  ([#5286])
 - **gateway:** `GET /api/threads/{thread_id}/runs/page` walks thread run history
   with a `(created_at, run_id)` keyset cursor (`{data, has_more,
   next_before_created_at, next_before_run_id}`). `GET /api/threads/{thread_id}/runs`
@@ -558,6 +568,30 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **gateway:** Honor `disable_clarification` and `github_token` only for
+  internally-authenticated callers, the way `non_interactive` already was.
+  Both keys were forwarded from `body.context` regardless of the caller and
+  were not scrubbed from the free-form `body.config` that the run config
+  copies verbatim, so any session or PAT caller could set them.
+  `disable_clarification` is the stronger of the two: `ClarificationMiddleware`
+  answers every clarification — `risk_confirmation` included — with "proceed
+  without asking", and `SandboxMiddleware` reads it as the same
+  non-interactive signal as `non_interactive`. `github_token` reached
+  `runtime.context`, where the bash tool exports it as `GH_TOKEN`/`GITHUB_TOKEN`,
+  and a copy smuggled through `body.config['configurable']` was persisted in
+  the checkpoint store. The scheduler, IM channels, and the GitHub webhook
+  channel authenticate over the internal request channel and are unaffected.
+  ([#5338])
+- **artifacts:** Keep `PUT /api/threads/{id}/artifacts/{path}` confined to
+  `/mnt/user-data/outputs`. The outputs-only guard was a string-prefix check on
+  the raw path, so a percent-encoded `..` (`outputs/%2e%2e/uploads/x.txt`) —
+  which nginx forwards untouched and Starlette decodes — passed it, and the
+  resolver only confines to `user-data/`, letting a caller overwrite a sibling
+  upload or workspace file in their own thread. Dot segments are now collapsed
+  before the prefix check, and the resolved host path is re-checked against the
+  resolved outputs root so a symlink planted inside `outputs/` cannot redirect
+  the write either. The rule now lives in one shared helper that IM-channel
+  attachment delivery uses as well, so the two copies cannot drift. ([#5321])
 - **gateway:** Stop persisting a caller-supplied `deerflow_trace_id` on the run
   record. `body.metadata` reaches both the live run config, which the run
   worker restamps, and the run record echoed verbatim by the runs API; only the
@@ -2688,3 +2722,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5282]: https://github.com/bytedance/deer-flow/pull/5282
 [#5284]: https://github.com/bytedance/deer-flow/pull/5284
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
+[#5321]: https://github.com/bytedance/deer-flow/pull/5321
+[#5338]: https://github.com/bytedance/deer-flow/pull/5338
