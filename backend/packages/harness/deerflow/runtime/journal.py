@@ -251,7 +251,6 @@ class RunJournal(BaseCallbackHandler):
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
-        self._owner_thread_id = threading.get_ident()
         try:
             self._owner_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
@@ -261,6 +260,7 @@ class RunJournal(BaseCallbackHandler):
         self._buffer: list[dict] = []
         self._pending_llm_response: _PendingLlmResponse | None = None
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
+        self._explicit_flush_in_progress = False
         self._pending_progress_task: asyncio.Task[None] | None = None
         self._pending_progress_delayed = False
         self._progress_dirty = False
@@ -835,7 +835,7 @@ class RunJournal(BaseCallbackHandler):
             return
         # Skip if a flush is already in flight — avoids concurrent writes
         # to the same SQLite file from multiple fire-and-forget tasks.
-        if self._pending_flush_tasks:
+        if self._pending_flush_tasks or self._explicit_flush_in_progress:
             return
         try:
             loop = asyncio.get_running_loop()
@@ -1001,20 +1001,23 @@ class RunJournal(BaseCallbackHandler):
             action: Specific action performed (e.g., "generate_title").
             changes: Dict describing the state changes made.
         """
-        if threading.get_ident() != self._owner_thread_id:
-            owner_loop = self._owner_loop
-            if owner_loop is None or owner_loop.is_closed() or not owner_loop.is_running():
+        event_type = MIDDLEWARE_EVENT_PATTERN.event_type(tag)
+        owner_loop = self._owner_loop
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if owner_loop is not None and running_loop is not owner_loop:
+            if owner_loop.is_closed() or not owner_loop.is_running():
                 logger.warning("Dropping cross-thread middleware event after run loop shutdown")
                 return
             try:
                 owner_loop.call_soon_threadsafe(
                     partial(
-                        self.record_middleware,
-                        tag,
-                        name=name,
-                        hook=hook,
-                        action=action,
-                        changes=dict(changes),
+                        self._put,
+                        event_type=event_type,
+                        category=MIDDLEWARE_EVENT_PATTERN.category,
+                        content={"name": name, "hook": hook, "action": action, "changes": dict(changes)},
                     )
                 )
             except RuntimeError:
@@ -1022,7 +1025,7 @@ class RunJournal(BaseCallbackHandler):
             return
 
         self._put(
-            event_type=MIDDLEWARE_EVENT_PATTERN.event_type(tag),
+            event_type=event_type,
             category=MIDDLEWARE_EVENT_PATTERN.category,
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
@@ -1094,39 +1097,43 @@ class RunJournal(BaseCallbackHandler):
         """Force flush remaining buffer. Called in worker's finally block."""
         if self._closed:
             return
-        self._commit_pending_llm_response()
-        if self._pending_flush_tasks:
-            await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
-        while self._pending_progress_task is not None:
-            pending_progress_task = self._pending_progress_task
-            if pending_progress_task.done():
-                if self._pending_progress_task is pending_progress_task:
-                    self._pending_progress_task = None
-                break
-            if self._pending_progress_delayed:
-                pending_progress_task.cancel()
+        self._explicit_flush_in_progress = True
+        try:
+            self._commit_pending_llm_response()
+            if self._pending_flush_tasks:
+                await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
+            while self._pending_progress_task is not None:
+                pending_progress_task = self._pending_progress_task
+                if pending_progress_task.done():
+                    if self._pending_progress_task is pending_progress_task:
+                        self._pending_progress_task = None
+                    break
+                if self._pending_progress_delayed:
+                    pending_progress_task.cancel()
+                    await asyncio.gather(pending_progress_task, return_exceptions=True)
+                    if self._pending_progress_task is pending_progress_task:
+                        self._pending_progress_task = None
+                    self._progress_dirty = False
+                    self._pending_progress_delayed = False
+                    break
                 await asyncio.gather(pending_progress_task, return_exceptions=True)
                 if self._pending_progress_task is pending_progress_task:
                     self._pending_progress_task = None
-                self._progress_dirty = False
-                self._pending_progress_delayed = False
-                break
-            await asyncio.gather(pending_progress_task, return_exceptions=True)
-            if self._pending_progress_task is pending_progress_task:
-                self._pending_progress_task = None
 
-        while self._buffer:
-            batch = self._buffer[: self._flush_threshold]
-            del self._buffer[: self._flush_threshold]
-            try:
-                store = self._store
-                if store is None:
-                    return
-                await store.put_batch(batch)
-                self._feed_generation += 1
-            except Exception:
-                self._buffer = batch + self._buffer
-                raise
+            while self._buffer:
+                batch = self._buffer[: self._flush_threshold]
+                del self._buffer[: self._flush_threshold]
+                try:
+                    store = self._store
+                    if store is None:
+                        return
+                    await store.put_batch(batch)
+                    self._feed_generation += 1
+                except Exception:
+                    self._buffer = batch + self._buffer
+                    raise
+        finally:
+            self._explicit_flush_in_progress = False
 
     def _detach_runtime_dependencies(self) -> None:
         """Drop every external or potentially cyclic run-scoped reference."""
@@ -1136,6 +1143,7 @@ class RunJournal(BaseCallbackHandler):
         self._buffer.clear()
         self._pending_llm_response = None
         self._pending_flush_tasks.clear()
+        self._explicit_flush_in_progress = False
         self._pending_progress_task = None
         self._pending_progress_delayed = False
         self._progress_dirty = False

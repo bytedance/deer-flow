@@ -137,11 +137,13 @@ for one graph execution, so the claim needs no persisted catalog hash.
 
 **Tool-progress phase events** (`agents/middlewares/tool_progress_middleware.py`):
 effective ACTIVE → WARNED, WARNED/ACTIVE → BLOCKED, WARNED → ACTIVE recovery,
-and new-run WARNED/BLOCKED → ACTIVE resets append `middleware:tool_progress`
-through `RunJournal`. The append shares the middleware's state lock so parallel
-completions cannot publish BLOCK before the WARN transition that preceded it.
-Sync lead-tool callbacks schedule journal mutation onto its owning event-loop
-thread; they never mutate or flush `RunJournal._buffer` from an executor thread.
+and later-invocation WARNED/BLOCKED → ACTIVE resets append
+`middleware:tool_progress` through `RunJournal`. Recorder calls happen after
+the middleware releases its state lock, matching LoopDetectionMiddleware, so a
+slow recorder cannot stall tool-state updates. Cross-thread middleware
+producers (currently slash-skill activation via `asyncio.to_thread`) schedule
+journal mutation directly onto its owning event loop; they never mutate or
+flush `RunJournal._buffer` from the worker thread.
 The persisted projection accepts
 only framework-defined error/action values and strict booleans (using null for
 invalid values) from the producer-supplied tool stamp; tool content, args,

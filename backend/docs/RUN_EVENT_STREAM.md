@@ -98,18 +98,21 @@ event.
 `middleware:tool_progress` records effective result-quality state transitions
 from `ToolProgressMiddleware`: `warn` for ACTIVE → WARNED, `block` for a
 transition to BLOCKED, `recover` for WARNED → ACTIVE after a useful result,
-and `reset` when a new run deliberately clears a prior WARNED/BLOCKED phase.
+and `reset` when a later agent invocation (for example, goal continuation)
+deliberately clears a prior WARNED/BLOCKED phase.
 The bounded `changes` object contains the tool name, source and destination
-phases, consecutive-problem count, normalized error classification and recovery
-advice, effective transition threshold (null when no threshold fired), and
+phases, consecutive-problem count, normalized result status, error
+classification and recovery advice, effective count threshold (null when no
+count threshold fired), and
 subagent attribution. Tool
 arguments, prompts, message content, tool results, and content-derived hashes
 are never copied into this event. Producer-supplied metadata is projected onto
 fixed error/action vocabularies and a strict boolean-or-null before persistence,
 so a custom tool cannot smuggle arbitrary values through its result stamp.
-Transition publication is serialized with the state mutation so concurrent tool
-completions cannot persist WARN and BLOCK in reverse order. Recorder failures
-are fail-open and do not change guard behavior.
+Recorder calls happen after the state lock is released, so a slow custom
+recorder cannot stall unrelated tool-state updates. Recorder failures are
+fail-open and do not change guard behavior. These events are emitted only when
+`tool_progress.enabled` is true (the default is false).
 
 `middleware:tool_promotion` records deferred MCP schemas newly promoted for
 the active catalog. `changes.source` distinguishes automatic `routing_hint`

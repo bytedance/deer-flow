@@ -639,6 +639,7 @@ def test_before_agent_resets_blocked_states_for_new_run():
         "from_phase": "blocked",
         "to_phase": "active",
         "consecutive_problems": 0,
+        "status": None,
         "error_type": None,
         "recoverable_by_model": None,
         "recommended_next_action": None,
@@ -1452,6 +1453,7 @@ class TestToolProgressRunEvents:
             "from_phase": "active",
             "to_phase": "warned",
             "consecutive_problems": 2,
+            "status": "error",
             "error_type": "no_results",
             "recoverable_by_model": True,
             "recommended_next_action": "rewrite_query",
@@ -1476,6 +1478,7 @@ class TestToolProgressRunEvents:
             "from_phase": "warned",
             "to_phase": "active",
             "consecutive_problems": 0,
+            "status": "success",
             "error_type": None,
             "recoverable_by_model": True,
             "recommended_next_action": "continue",
@@ -1525,11 +1528,45 @@ class TestToolProgressRunEvents:
             "from_phase": "active",
             "to_phase": "blocked",
             "consecutive_problems": 1,
+            "status": "error",
             "error_type": "auth",
             "recoverable_by_model": False,
             "recommended_next_action": "stop",
-            "threshold": 1,
+            "threshold": None,
         }
+
+    def test_zero_warn_escalation_still_records_active_to_warned(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        middleware = _make_mw(stagnation_threshold=1, warn_escalation_count=0)
+        request = _make_tool_request(runtime=runtime)
+
+        result = _make_error_message()
+        assert middleware.wrap_tool_call(request, lambda _request: result) is result
+
+        journal.record_middleware.assert_called_once()
+        recorded = journal.record_middleware.call_args.kwargs
+        assert recorded["action"] == "warn"
+        assert recorded["changes"]["from_phase"] == "active"
+        assert recorded["changes"]["to_phase"] == "warned"
+        assert recorded["changes"]["threshold"] == 1
+
+    def test_near_duplicate_warn_records_success_status(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        middleware = _make_mw(stagnation_threshold=1)
+        request = _make_tool_request(runtime=runtime)
+        content = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda"
+        result = _make_tool_message(content)
+
+        middleware.wrap_tool_call(request, lambda _request: result)
+        middleware.wrap_tool_call(request, lambda _request: result)
+
+        recorded = journal.record_middleware.call_args.kwargs
+        assert recorded["action"] == "warn"
+        assert recorded["changes"]["status"] == "success"
+        assert recorded["changes"]["error_type"] is None
+        assert recorded["changes"]["recommended_next_action"] == "continue"
 
     def test_producer_supplied_meta_is_projected_onto_bounded_audit_values(self):
         journal = MagicMock()
@@ -1554,6 +1591,7 @@ class TestToolProgressRunEvents:
         assert recorded.kwargs["changes"]["error_type"] == "unknown"
         assert recorded.kwargs["changes"]["recoverable_by_model"] is None
         assert recorded.kwargs["changes"]["recommended_next_action"] == "unknown"
+        assert recorded.kwargs["changes"]["status"] == "error"
         assert secret not in repr(recorded)
 
     def test_recorder_failure_is_fail_open(self, caplog):
@@ -1617,34 +1655,23 @@ class TestToolProgressRunEvents:
         journal.record_middleware.assert_called_once()
         assert journal.record_middleware.call_args.kwargs["hook"] == "awrap_tool_call"
 
-    def test_concurrent_warn_and_block_transitions_keep_durable_order(self):
-        """The state lock must also serialize transition publication.
-
-        Parallel calls can both pass the pre-execution block gate while the
-        phase is ACTIVE.  Delaying publication of the first WARN transition
-        makes an implementation that records outside the state lock publish
-        BLOCK before WARN; the durable trace must retain state-machine order.
-        """
+    def test_slow_recorder_does_not_hold_the_state_lock(self):
+        """A custom recorder cannot stall a second state-machine transition."""
 
         class DelayingRecorder:
             def __init__(self):
-                self.actions: list[str] = []
-                self.calls: list[dict] = []
                 self.warn_started = threading.Event()
                 self.release_warn = threading.Event()
                 self.block_seen = threading.Event()
-                self.block_overtook_warn = False
+                self.warn_timed_out = False
 
             def record_middleware(self, **kwargs):
                 action = kwargs["action"]
                 if action == "warn":
                     self.warn_started.set()
-                    assert self.release_warn.wait(timeout=5)
+                    self.warn_timed_out = not self.release_warn.wait(timeout=5)
                 elif action == "block":
-                    self.block_overtook_warn = not self.release_warn.is_set()
                     self.block_seen.set()
-                self.actions.append(action)
-                self.calls.append(kwargs)
 
         recorder = DelayingRecorder()
         runtime = self._runtime_with_journal(recorder)
@@ -1659,19 +1686,13 @@ class TestToolProgressRunEvents:
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(middleware.wrap_tool_call, request, complete_tool) for _ in range(2)]
-            warn_started = recorder.warn_started.wait(timeout=5)
-            if warn_started:
-                # Give the second completion a deterministic opportunity to
-                # overtake an out-of-lock WARN publication.
-                recorder.block_seen.wait(timeout=0.25)
+            assert recorder.warn_started.wait(timeout=5)
+            assert recorder.block_seen.wait(timeout=5)
             recorder.release_warn.set()
             results = [future.result(timeout=5) for future in futures]
 
-        assert warn_started, "the first concurrent problem must publish WARN"
         assert results == [result, result]
-        assert recorder.block_overtook_warn is False
-        assert recorder.actions == ["warn", "block"]
-        assert [call["changes"]["threshold"] for call in recorder.calls] == [1, 2]
+        assert recorder.warn_timed_out is False
         assert middleware._phase_states["t1"]["web_search"].phase == "blocked"
 
 

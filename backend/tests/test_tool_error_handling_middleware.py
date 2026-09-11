@@ -1245,3 +1245,17 @@ def test_subagent_summarization_fires_mid_run_and_produces_usable_result(monkeyp
     ai_finals = [m for m in final_messages if isinstance(m, AIMessage)]
     assert ai_finals, "the run must produce a final AIMessage after compaction"
     assert ai_finals[-1].content == "final answer after compaction"
+
+
+def test_build_lead_runtime_middlewares_passes_read_before_write_config():
+    """The gate's model-bound payload elision is configured from app_config.read_before_write."""
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
+
+    app_config = _make_app_config().model_copy(update={"read_before_write": ReadBeforeWriteConfig(elide_min_chars=321)})
+    middlewares = build_lead_runtime_middlewares(app_config=app_config)
+
+    gates = [m for m in middlewares if isinstance(m, ReadBeforeWriteMiddleware)]
+    assert len(gates) == 1
+    # Only the wired value is under test; the full policy identity is covered by the middleware's own tests.
+    assert gates[0].release_policy_parameters()["config"]["elide_min_chars"] == 321

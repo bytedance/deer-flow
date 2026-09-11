@@ -2356,6 +2356,20 @@ def test_build_runtime_context_ignores_caller_sandbox_execution_identities():
     assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in ctx
 
 
+def test_build_runtime_context_ignores_caller_audit_attribution_and_recorders():
+    caller_context = {
+        "is_subagent": True,
+        "agent_id": "forged-agent",
+        "__run_loop_detection_recorder": object(),
+        "__run_tool_promotion_recorder": object(),
+        "__run_tool_progress_recorder": object(),
+    }
+
+    ctx = _build_runtime_context("thread-1", "run-1", caller_context)
+
+    assert set(caller_context).isdisjoint(ctx)
+
+
 def test_build_runtime_context_ignores_non_dict_caller_context():
     ctx = _build_runtime_context("thread-1", "run-1", "not-a-dict")
     assert ctx == {"thread_id": "thread-1", "run_id": "run-1"}

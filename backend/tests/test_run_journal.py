@@ -4,6 +4,7 @@ Uses MemoryRunEventStore as the backend for direct event inspection.
 """
 
 import asyncio
+import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -41,6 +42,15 @@ def test_tool_promotion_claim_is_atomic_across_parallel_sync_wrappers():
 async def test_cross_thread_middleware_events_are_serialized_on_owner_loop():
     store = MemoryRunEventStore()
     journal = RunJournal("r-thread", "t-thread", store, flush_threshold=1)
+    owner_thread_id = threading.get_ident()
+    put_thread_ids: list[int] = []
+    original_put = journal._put
+
+    def tracked_put(**kwargs) -> None:
+        put_thread_ids.append(threading.get_ident())
+        original_put(**kwargs)
+
+    journal._put = tracked_put
 
     def record_from_tool_worker() -> None:
         journal.record_middleware(
@@ -52,13 +62,111 @@ async def test_cross_thread_middleware_events_are_serialized_on_owner_loop():
         )
 
     await asyncio.to_thread(record_from_tool_worker)
-    # Yield so the owner loop can apply the queued append before terminal flush.
-    await asyncio.sleep(0)
     await journal.flush()
 
+    assert put_thread_ids == [owner_thread_id]
     events = await store.list_events("t-thread", "r-thread")
     assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
     assert events[0]["content"]["changes"]["to_phase"] == "warned"
+
+
+def test_middleware_event_without_owner_loop_keeps_cross_thread_append():
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-sync", "t-sync", store, flush_threshold=100)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(
+            journal.record_middleware,
+            "tool_progress",
+            name="ToolProgressMiddleware",
+            hook="wrap_tool_call",
+            action="warn",
+            changes={"from_phase": "active", "to_phase": "warned"},
+        ).result(timeout=5)
+
+    asyncio.run(journal.flush())
+    events = asyncio.run(store.list_events("t-sync", "r-sync"))
+    assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
+
+
+def test_middleware_event_uses_owner_loop_identity_after_loop_moves_threads():
+    loop = asyncio.new_event_loop()
+
+    async def build_journal():
+        return RunJournal("r-moved", "t-moved", MemoryRunEventStore(), flush_threshold=100)
+
+    journal = loop.run_until_complete(build_journal())
+
+    async def record_on_current_loop() -> int:
+        journal.record_middleware(
+            "tool_progress",
+            name="ToolProgressMiddleware",
+            hook="wrap_tool_call",
+            action="warn",
+            changes={},
+        )
+        return len(journal._buffer)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        buffered = pool.submit(loop.run_until_complete, record_on_current_loop()).result(timeout=5)
+
+    assert buffered == 1
+    loop.run_until_complete(journal.flush())
+    loop.close()
+
+
+@pytest.mark.anyio
+async def test_cross_thread_append_during_explicit_flush_is_not_flushed_concurrently():
+    class BlockingStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.active_writes = 0
+            self.max_active_writes = 0
+
+        async def put_batch(self, events):
+            self.active_writes += 1
+            self.max_active_writes = max(self.max_active_writes, self.active_writes)
+            if not self.started.is_set():
+                self.started.set()
+                await self.release.wait()
+            try:
+                await super().put_batch(events)
+            finally:
+                self.active_writes -= 1
+
+    store = BlockingStore()
+    journal = RunJournal("r-flush", "t-flush", store, flush_threshold=1)
+    journal._buffer.append(
+        journal._make_event(
+            event_type="middleware:test",
+            category="middleware",
+            content={},
+        )
+    )
+    flush_task = asyncio.create_task(journal.flush())
+    await store.started.wait()
+
+    await asyncio.to_thread(
+        journal.record_middleware,
+        "tool_progress",
+        name="ToolProgressMiddleware",
+        hook="wrap_tool_call",
+        action="warn",
+        changes={},
+    )
+    await asyncio.sleep(0)
+    assert store.max_active_writes == 1
+
+    store.release.set()
+    await flush_task
+    assert store.max_active_writes == 1
+    events = await store.list_events("t-flush", "r-flush")
+    assert [event["event_type"] for event in events] == [
+        "middleware:test",
+        "middleware:tool_progress",
+    ]
 
 
 @pytest.mark.anyio

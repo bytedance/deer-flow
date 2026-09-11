@@ -14,6 +14,7 @@ from langchain_core.runnables import Runnable
 from langchain_core.tools import tool as as_tool
 from pydantic import PrivateAttr
 
+from deerflow.agents.middlewares import loop_detection_middleware as loop_detection_module
 from deerflow.agents.middlewares.loop_detection_middleware import (
     _HARD_STOP_MSG,
     _MAX_PENDING_WARNINGS_PER_RUN,
@@ -30,6 +31,10 @@ def _make_runtime(thread_id="test-thread", run_id="test-run"):
 
 
 def _pending_key(thread_id="test-thread", run_id="test-run"):
+    return (thread_id, run_id)
+
+
+def _scope_key(thread_id="test-thread", run_id="test-run"):
     return (thread_id, run_id)
 
 
@@ -307,21 +312,20 @@ class TestLoopDetection:
 
     def test_missing_run_id_uses_per_runtime_pending_scope(self):
         """When runtime.context has no ``run_id`` key at all, warning handling
-        falls back to a key scoped to the runtime object's identity —
-        mirroring ``TokenBudgetMiddleware._get_run_id``'s fallback — instead
-        of a shared literal like the old ``"default"``, which would collide
-        across concurrent runs that both lack a run_id (the ``_stop_reason``
-        dict this same key derivation feeds is keyed by run_id alone, with
-        no thread scoping)."""
+        falls back to a key scoped to the LangGraph invocation instead of a
+        shared literal like the old ``"default"``."""
         mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
-        runtime = MagicMock()
-        runtime.context = {"thread_id": "test-thread"}
+        runtime = SimpleNamespace(
+            context={"thread_id": "test-thread"},
+            control=object(),
+            execution_info=None,
+        )
         call = [_bash_call("ls")]
 
         for _ in range(3):
             mw._apply(_make_state(tool_calls=call), runtime)
 
-        fallback_run_id = str(id(runtime))
+        fallback_run_id = mw._get_run_id(runtime)
         assert mw._pending_warnings.get(_pending_key(run_id=fallback_run_id))
 
         request = _make_request([AIMessage(content="hi")], runtime)
@@ -333,8 +337,59 @@ class TestLoopDetection:
         assert "LOOP DETECTED" in loop_warnings[0].content
         assert not mw._pending_warnings.get(_pending_key(run_id=fallback_run_id))
 
-    def test_before_agent_clears_stale_pending_warnings_for_thread(self):
-        """Starting a new run drops stale warnings from prior runs in the same thread."""
+    def test_missing_run_id_shares_scope_across_runtime_wrappers(self):
+        """LangGraph replaces ``Runtime`` per node but preserves ``control``."""
+        mw = LoopDetectionMiddleware()
+        invocation_control = object()
+        first_runtime = SimpleNamespace(
+            context={"thread_id": "test-thread"},
+            control=invocation_control,
+            execution_info=None,
+        )
+        later_runtime = SimpleNamespace(
+            context={"thread_id": "test-thread"},
+            control=invocation_control,
+            execution_info=None,
+        )
+
+        assert mw._get_run_id(first_runtime) == mw._get_run_id(later_runtime)
+
+    def test_missing_run_id_fallback_survives_reused_object_address(self, monkeypatch):
+        """A later invocation must not inherit a freed anchor's fallback key."""
+        mw = LoopDetectionMiddleware()
+        monkeypatch.setattr(loop_detection_module, "id", lambda _value: 42, raising=False)
+        first_runtime = SimpleNamespace(
+            context={"thread_id": "test-thread"},
+            control=object(),
+            execution_info=None,
+        )
+        first_run_id = mw._get_run_id(first_runtime)
+        mw.after_agent({"messages": []}, first_runtime)
+        assert not mw._fallback_run_ids
+
+        later_runtime = SimpleNamespace(
+            context={"thread_id": "test-thread"},
+            control=object(),
+            execution_info=None,
+        )
+
+        assert mw._get_run_id(later_runtime) != first_run_id
+
+    def test_missing_run_id_fallback_map_is_bounded_on_abnormal_exits(self):
+        mw = LoopDetectionMiddleware(max_tracked_threads=2)
+
+        for _ in range(10):
+            runtime = SimpleNamespace(
+                context={"thread_id": "test-thread"},
+                control=object(),
+                execution_info=None,
+            )
+            mw._get_run_id(runtime)
+
+        assert len(mw._fallback_run_ids) == mw._max_fallback_run_ids == 4
+
+    def test_before_agent_preserves_pending_warning_for_sibling_run(self):
+        """An overlapping run must not erase a warning owned by another run."""
         mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
         runtime_a = _make_runtime(run_id="run-A")
         runtime_b = _make_runtime(run_id="run-B")
@@ -345,6 +400,13 @@ class TestLoopDetection:
 
         assert mw._pending_warnings.get(_pending_key(run_id="run-A"))
         mw.before_agent({"messages": []}, runtime_b)
+        assert mw._pending_warnings.get(_pending_key(run_id="run-A"))
+
+        request = _make_request([AIMessage(content="hi")], runtime_a)
+        captured, handler = _capture_handler()
+        mw.wrap_model_call(request, handler)
+        loop_warnings = [message for message in captured[0].messages if isinstance(message, HumanMessage) and message.name == "loop_warning"]
+        assert len(loop_warnings) == 1
         assert not mw._pending_warnings.get(_pending_key(run_id="run-A"))
 
     def test_after_agent_clears_current_run_pending_warnings(self):
@@ -580,9 +642,9 @@ class TestLoopDetection:
         runtime_new = _make_runtime("thread-new")
         mw._apply(_make_state(tool_calls=call), runtime_new)
 
-        assert "thread-0" not in mw._history
-        assert "thread-0" not in mw._tool_name_history
-        assert "thread-new" in mw._history
+        assert _scope_key("thread-0") not in mw._history
+        assert _scope_key("thread-0") not in mw._tool_name_history
+        assert _scope_key("thread-new") in mw._history
         assert len(mw._history) == 3
 
     def test_warned_hashes_are_pruned_to_sliding_window(self):
@@ -595,9 +657,9 @@ class TestLoopDetection:
             mw._apply(_make_state(tool_calls=call), runtime)
             mw._apply(_make_state(tool_calls=call), runtime)
 
-        assert len(mw._history["test-thread"]) <= 4
-        assert set(mw._warned["test-thread"]).issubset(set(mw._history["test-thread"]))
-        assert len(mw._warned["test-thread"]) <= 4
+        assert len(mw._history[_scope_key()]) <= 4
+        assert set(mw._warned[_scope_key()]).issubset(set(mw._history[_scope_key()]))
+        assert len(mw._warned[_scope_key()]) <= 4
 
     def test_pending_warning_keys_are_capped(self):
         """Abnormal same-thread runs cannot grow pending-warning keys forever."""
@@ -644,12 +706,190 @@ class TestLoopDetection:
     def test_fallback_thread_id_when_missing(self):
         """When runtime context has no thread_id, should use 'default'."""
         mw = LoopDetectionMiddleware(warn_threshold=2)
-        runtime = MagicMock()
-        runtime.context = {}
+        runtime = SimpleNamespace(context={}, control=object(), execution_info=None)
         call = [_bash_call("ls")]
 
         mw._apply(_make_state(tool_calls=call), runtime)
-        assert "default" in mw._history
+        assert ("default", mw._get_run_id(runtime)) in mw._history
+
+
+class TestRunScopedTracking:
+    def test_identical_call_history_isolated_between_runs_on_same_thread(self):
+        """Separate user runs on a cached graph must not share repeat counts."""
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=3,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        first_run = _make_runtime("shared-thread", "run-1")
+        second_run = _make_runtime("shared-thread", "run-2")
+        state = _make_state(tool_calls=[_bash_call("pwd")])
+
+        assert mw._apply(state, first_run) is None
+        mw.after_agent({"messages": []}, first_run)
+        assert mw._apply(state, second_run) is None
+
+        assert not mw._pending_warnings.get(_pending_key("shared-thread", "run-2"))
+        assert mw._history[_scope_key("shared-thread", "run-1")] == mw._history[_scope_key("shared-thread", "run-2")]
+        assert len(mw._history[_scope_key("shared-thread", "run-1")]) == 1
+
+    def test_same_run_accumulates_across_agent_hook_cycles_for_goal_continuation(self):
+        """One Gateway run may re-enter the graph for hidden goal continuations."""
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=10,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        runtime = _make_runtime("goal-thread", "goal-run")
+        state = _make_state(tool_calls=[_bash_call("pwd")])
+
+        assert mw._apply(state, runtime) is None
+        mw.after_agent({"messages": []}, runtime)
+        assert mw._apply(state, runtime) is None
+
+        assert mw._pending_warnings.get(_pending_key("goal-thread", "goal-run"))
+        assert len(mw._history[_scope_key("goal-thread", "goal-run")]) == 2
+
+    def test_tool_frequency_history_isolated_between_runs_on_same_thread(self):
+        mw = LoopDetectionMiddleware(
+            warn_threshold=100,
+            hard_limit=200,
+            tool_freq_warn=2,
+            tool_freq_hard_limit=3,
+        )
+        first_run = _make_runtime("shared-thread", "run-1")
+        second_run = _make_runtime("shared-thread", "run-2")
+
+        assert mw._apply(_make_state(tool_calls=[_bash_call("first")]), first_run) is None
+        mw.after_agent({"messages": []}, first_run)
+        assert mw._apply(_make_state(tool_calls=[_bash_call("second")]), second_run) is None
+
+        assert not mw._pending_warnings.get(_pending_key("shared-thread", "run-2"))
+        assert mw._tool_name_counter[_scope_key("shared-thread", "run-1")]["bash"] == 1
+        assert mw._tool_name_counter[_scope_key("shared-thread", "run-2")]["bash"] == 1
+
+    def test_warned_hash_is_run_scoped(self):
+        """A warning in one run must not suppress the same warning in a later run."""
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=100,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        state = _make_state(tool_calls=[_bash_call("pwd")])
+
+        for run_id in ("run-1", "run-2"):
+            runtime = _make_runtime("shared-thread", run_id)
+            assert mw._apply(state, runtime) is None
+            assert mw._apply(state, runtime) is None
+            assert mw._pending_warnings.get(_pending_key("shared-thread", run_id))
+            mw.after_agent({"messages": []}, runtime)
+
+        assert len(mw._warned[_scope_key("shared-thread", "run-1")]) == 1
+        assert len(mw._warned[_scope_key("shared-thread", "run-2")]) == 1
+
+    def test_tool_frequency_warning_suppression_is_run_scoped(self):
+        mw = LoopDetectionMiddleware(
+            warn_threshold=100,
+            hard_limit=200,
+            tool_freq_warn=2,
+            tool_freq_hard_limit=100,
+        )
+
+        for run_id in ("run-1", "run-2"):
+            runtime = _make_runtime("shared-thread", run_id)
+            for suffix in ("first", "second"):
+                assert mw._apply(_make_state(tool_calls=[_bash_call(f"{run_id}-{suffix}")]), runtime) is None
+            assert mw._pending_warnings.get(_pending_key("shared-thread", run_id))
+            mw.after_agent({"messages": []}, runtime)
+
+        assert mw._tool_freq_warned[_scope_key("shared-thread", "run-1")] == {"bash"}
+        assert mw._tool_freq_warned[_scope_key("shared-thread", "run-2")] == {"bash"}
+
+    def test_reset_thread_clears_every_run_scope_and_preserves_other_threads(self):
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=100,
+            tool_freq_warn=3,
+            tool_freq_hard_limit=100,
+        )
+        target_runs = [
+            _make_runtime("thread-A", "run-A1"),
+            _make_runtime("thread-A", "run-A2"),
+        ]
+        other_run = _make_runtime("thread-B", "run-B1")
+        state = _make_state(tool_calls=[_bash_call("pwd")])
+        for runtime in [*target_runs, other_run]:
+            mw._apply(state, runtime)
+            mw._apply(state, runtime)
+
+        mw.reset(thread_id="thread-A")
+
+        expected_keys = {_scope_key("thread-B", "run-B1")}
+        for mapping in (
+            mw._history,
+            mw._warned,
+            mw._tool_name_history,
+            mw._tool_name_counter,
+            mw._tool_freq_warned,
+            mw._pending_warnings,
+            mw._pending_warning_touch_order,
+        ):
+            assert set(mapping) == expected_keys
+
+    def test_reset_thread_clears_its_unconsumed_stop_reasons_only(self):
+        mw = LoopDetectionMiddleware(
+            warn_threshold=1,
+            hard_limit=2,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        runtimes = [
+            _make_runtime("thread-A", "run-A1"),
+            _make_runtime("thread-A", "run-A2"),
+            _make_runtime("thread-B", "run-B1"),
+        ]
+        state = _make_state(tool_calls=[_bash_call("pwd")])
+        for runtime in runtimes:
+            assert mw._apply(state, runtime) is None
+            result = mw._apply(state, runtime)
+            assert result is not None
+
+        mw.reset(thread_id="thread-A")
+
+        assert mw.consume_stop_reason("run-A1") is None
+        assert mw.consume_stop_reason("run-A2") is None
+        assert mw.consume_stop_reason("run-B1") == "loop_capped"
+
+    def test_lru_evicts_one_run_scope_without_dropping_sibling_run_warning(self):
+        mw = LoopDetectionMiddleware(
+            warn_threshold=100,
+            hard_limit=200,
+            max_tracked_threads=2,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        run_1 = _make_runtime("shared-thread", "run-1")
+        run_2 = _make_runtime("shared-thread", "run-2")
+        run_3 = _make_runtime("shared-thread", "run-3")
+
+        mw._apply(_make_state(tool_calls=[_bash_call("one")]), run_1)
+        mw._queue_pending_warning(run_1, "run-1 warning")
+        mw._apply(_make_state(tool_calls=[_bash_call("two")]), run_2)
+        mw._queue_pending_warning(run_2, "run-2 warning")
+        mw._apply(_make_state(tool_calls=[_bash_call("one-again")]), run_1)
+        mw._apply(_make_state(tool_calls=[_bash_call("three")]), run_3)
+
+        assert list(mw._history) == [
+            _scope_key("shared-thread", "run-1"),
+            _scope_key("shared-thread", "run-3"),
+        ]
+        assert _scope_key("shared-thread", "run-2") not in mw._tool_name_history
+        assert _scope_key("shared-thread", "run-2") not in mw._tool_name_counter
+        assert _pending_key("shared-thread", "run-1") in mw._pending_warnings
+        assert _pending_key("shared-thread", "run-2") not in mw._pending_warnings
 
 
 class TestLoopDetectionRunEvents:
@@ -883,6 +1123,94 @@ class TestLoopDetectionRunEvents:
 
 
 class TestLoopDetectionAgentGraphIntegration:
+    def test_reused_agent_graph_without_run_id_gets_one_budget_per_invocation(self):
+        """Library embedders may omit run_id while reusing one compiled graph."""
+
+        @as_tool
+        def bash(command: str) -> str:
+            """Run a fake shell command."""
+            return f"ran: {command}"
+
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=3,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                AIMessage(content="", tool_calls=[{"name": "bash", "id": "run-1-a", "args": {"command": "pwd"}}]),
+                AIMessage(content="", tool_calls=[{"name": "bash", "id": "run-1-b", "args": {"command": "pwd"}}]),
+                AIMessage(content="first final answer"),
+                AIMessage(content="", tool_calls=[{"name": "bash", "id": "run-2-a", "args": {"command": "pwd"}}]),
+                AIMessage(content="", tool_calls=[{"name": "bash", "id": "run-2-b", "args": {"command": "pwd"}}]),
+                AIMessage(content="second final answer"),
+            ],
+        )
+        graph = create_agent(model=model, tools=[bash], middleware=[mw])
+        shared_context = {"thread_id": "library-thread"}
+
+        first = graph.invoke(
+            {"messages": [("user", "where am I?")]},
+            context=shared_context,
+            config={"recursion_limit": 15},
+        )
+        second = graph.invoke(
+            {"messages": [("user", "where am I now?")]},
+            context=shared_context,
+            config={"recursion_limit": 15},
+        )
+
+        assert first["messages"][-1].content == "first final answer"
+        assert second["messages"][-1].content == "second final answer"
+        loop_warnings_by_call = [[message for message in messages if isinstance(message, HumanMessage) and message.name == "loop_warning"] for messages in model.seen_messages]
+        assert [len(warnings) for warnings in loop_warnings_by_call] == [0, 0, 1, 0, 0, 1]
+        assert not mw._fallback_run_ids
+
+    def test_reused_agent_graph_isolates_loop_history_between_runs(self):
+        """A cached graph must give each new run a fresh loop-detection budget."""
+
+        @as_tool
+        def bash(command: str) -> str:
+            """Run a fake shell command."""
+            return f"ran: {command}"
+
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=3,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                AIMessage(content="", tool_calls=[{"name": "bash", "id": "run-1-call", "args": {"command": "pwd"}}]),
+                AIMessage(content="first final answer"),
+                AIMessage(content="", tool_calls=[{"name": "bash", "id": "run-2-call", "args": {"command": "pwd"}}]),
+                AIMessage(content="second final answer"),
+            ],
+        )
+        graph = create_agent(model=model, tools=[bash], middleware=[mw])
+
+        first = graph.invoke(
+            {"messages": [("user", "where am I?")]},
+            context={"thread_id": "cached-thread", "run_id": "run-1"},
+            config={"recursion_limit": 10},
+        )
+        second = graph.invoke(
+            {"messages": [("user", "where am I now?")]},
+            context={"thread_id": "cached-thread", "run_id": "run-2"},
+            config={"recursion_limit": 10},
+        )
+
+        assert first["messages"][-1].content == "first final answer"
+        assert second["messages"][-1].content == "second final answer"
+        assert len(model.seen_messages) == 4
+        assert not any(isinstance(message, HumanMessage) and message.name == "loop_warning" for request_messages in model.seen_messages for message in request_messages)
+        assert set(mw._history) == {
+            _scope_key("cached-thread", "run-1"),
+            _scope_key("cached-thread", "run-2"),
+        }
+
     def test_loop_warning_is_transient_in_real_agent_graph(self):
         """after_model queues the warning; wrap_model_call injects it request-only."""
 
@@ -1282,7 +1610,7 @@ class TestToolFrequencyDetection:
         # Reset only thread-A
         mw.reset(thread_id="thread-A")
 
-        assert "thread-A" not in mw._tool_name_history
+        assert _scope_key("thread-A") not in mw._tool_name_history
 
         # thread-B state should still be intact — 3rd call queues a warn.
         result = mw._apply(_make_state(tool_calls=[self._read_call("/b_2.py")]), runtime_b)
@@ -1329,8 +1657,8 @@ class TestToolFrequencyDetection:
         # Two other threads push it out of the LRU window (max_tracked_threads=2).
         mw._apply(_make_state(tool_calls=[_bash_call("ls")]), _make_runtime("thread-a"))
         mw._apply(_make_state(tool_calls=[_bash_call("ls")]), _make_runtime("thread-b"))
-        assert "thread-evicted" not in mw._tool_name_history
-        assert "thread-evicted" not in mw._tool_name_counter
+        assert _scope_key("thread-evicted") not in mw._tool_name_history
+        assert _scope_key("thread-evicted") not in mw._tool_name_counter
 
         # Thread id reused: its first fresh read_file must not force-stop.
         result = mw._apply(_make_state(tool_calls=[self._read_call("/fresh.py")]), evicted)
@@ -1346,7 +1674,7 @@ class TestToolFrequencyDetection:
         for i in range(2):
             mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
         mw.reset(thread_id="thread-A")
-        assert "thread-A" not in mw._tool_name_counter
+        assert _scope_key("thread-A") not in mw._tool_name_counter
         result = mw._apply(_make_state(tool_calls=[self._read_call("/fresh.py")]), runtime)
         assert result is None
 
@@ -1463,7 +1791,7 @@ class TestToolCallBatchDecisions:
         assert result["messages"][0].tool_calls == []
         assert mw.consume_stop_reason("test-run") == "loop_capped"
         assert not mw._pending_warnings
-        assert not mw._tool_freq_warned.get("test-thread")
+        assert not mw._tool_freq_warned.get(_scope_key())
         journal.record_middleware.assert_called_once()
         recorded = journal.record_middleware.call_args.kwargs
         assert recorded["action"] == "hard_stop"
@@ -1485,7 +1813,7 @@ class TestToolCallBatchDecisions:
         assert decision is not None and decision.hard_stop
         assert decision.tool_names == ("bash",)
         assert decision.count == 3
-        assert "read_file" not in mw._tool_freq_warned["test-thread"]
+        assert "read_file" not in mw._tool_freq_warned[_scope_key()]
 
     def test_identical_call_warning_cannot_mask_frequency_hard_stop(self):
         mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=5, tool_freq_warn=2, tool_freq_hard_limit=3)
@@ -1498,7 +1826,7 @@ class TestToolCallBatchDecisions:
         assert decision is not None and decision.hard_stop
         assert decision.detection_layer == "tool_frequency"
         assert decision.count == 3
-        assert not mw._warned.get("test-thread")
+        assert not mw._warned.get(_scope_key())
 
     def test_warning_batch_counts_all_calls_and_only_marks_selected_warning(self):
         mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=10)
@@ -1509,9 +1837,9 @@ class TestToolCallBatchDecisions:
 
         assert first is not None and first.action == "warn"
         assert first.tool_names == ("read_file",)
-        assert list(mw._tool_name_history["test-thread"]) == ["read_file"] * 3 + ["bash"] * 2
-        assert dict(mw._tool_name_counter["test-thread"]) == {"read_file": 3, "bash": 2}
-        assert mw._tool_freq_warned["test-thread"] == {"read_file"}
+        assert list(mw._tool_name_history[_scope_key()]) == ["read_file"] * 3 + ["bash"] * 2
+        assert dict(mw._tool_name_counter[_scope_key()]) == {"read_file": 3, "bash": 2}
+        assert mw._tool_freq_warned[_scope_key()] == {"read_file"}
 
         second = mw._track_and_check(_make_state(tool_calls=[self._call("bash", 2)]), runtime)
         assert second is not None and second.action == "warn"
@@ -1527,8 +1855,8 @@ class TestToolCallBatchDecisions:
         hash_warning = mw._track_and_check(_make_state(tool_calls=calls), runtime)
 
         assert hash_warning is not None and hash_warning.detection_layer == "identical_call_set"
-        assert mw._tool_name_counter["test-thread"]["read_file"] == 2
-        assert not mw._tool_freq_warned.get("test-thread")
+        assert mw._tool_name_counter[_scope_key()]["read_file"] == 2
+        assert not mw._tool_freq_warned.get(_scope_key())
 
         freq_warning = mw._track_and_check(_make_state(tool_calls=[self._call("read_file", 1)]), runtime)
         assert freq_warning is not None and freq_warning.detection_layer == "tool_frequency"
@@ -1542,8 +1870,8 @@ class TestToolCallBatchDecisions:
         first = mw._track_and_check(_make_state(tool_calls=calls), runtime)
 
         assert first is not None and first.tool_names == ("a",)
-        assert mw._tool_name_counter["test-thread"]["a"] == 1
-        assert "a" not in mw._tool_freq_warned["test-thread"]
+        assert mw._tool_name_counter[_scope_key()]["a"] == 1
+        assert "a" not in mw._tool_freq_warned[_scope_key()]
         second = mw._track_and_check(_make_state(tool_calls=[self._call("a", 5)]), runtime)
         assert second is not None and second.action == "warn"
         assert second.tool_names == ("a",)
@@ -1560,8 +1888,8 @@ class TestToolCallBatchDecisions:
 
         second = mw._track_and_check(_make_state(tool_calls=[self._call("b", 3)]), runtime)
         assert second is not None and second.tool_names == ("b",)
-        assert mw._tool_name_counter["test-thread"]["a"] == 1
-        assert "a" not in mw._tool_freq_warned["test-thread"]
+        assert mw._tool_name_counter[_scope_key()]["a"] == 1
+        assert "a" not in mw._tool_freq_warned[_scope_key()]
 
         third = mw._track_and_check(_make_state(tool_calls=[self._call("a", 4)]), runtime)
         assert third is not None and third.tool_names == ("a",)
@@ -1580,15 +1908,15 @@ class TestToolCallBatchDecisions:
             runtime,
         )
         assert first is not None and first.tool_names == ("bash",)
-        assert mw._tool_freq_warned["test-thread"] == {"bash"}
+        assert mw._tool_freq_warned[_scope_key()] == {"bash"}
 
         second = mw._track_and_check(
             _make_state(tool_calls=[self._call("read_file", i) for i in range(3)]),
             runtime,
         )
         assert second is not None and second.tool_names == ("read_file",)
-        assert mw._tool_name_counter["test-thread"]["bash"] == 2
-        assert "bash" not in mw._tool_freq_warned["test-thread"]
+        assert mw._tool_name_counter[_scope_key()]["bash"] == 2
+        assert "bash" not in mw._tool_freq_warned[_scope_key()]
 
         third = mw._track_and_check(
             _make_state(tool_calls=[self._call("bash", i) for i in range(3, 6)]),
