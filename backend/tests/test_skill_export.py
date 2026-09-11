@@ -6,6 +6,14 @@ import pytest
 from deerflow.skills import export
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
+# Mirrors the feature guard in export._capture: platforms without fd-based
+# directory walking reject every export with 422 skill_export_unsupported.
+_SAFE_CAPTURE_REASON = "skill export capture needs os.O_NOFOLLOW and dir_fd directory walking, which this platform does not provide; export_manifest/build_skill_export return 422 skill_export_unsupported there"
+requires_safe_capture = pytest.mark.skipif(
+    not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd,
+    reason=_SAFE_CAPTURE_REASON,
+)
+
 
 @pytest.fixture
 def package(tmp_path):
@@ -16,6 +24,7 @@ def package(tmp_path):
     return storage, root
 
 
+@requires_safe_capture
 def test_snapshot_revision_and_zip_roundtrip(package, tmp_path):
     storage, root = package
     (root / "empty").mkdir()
@@ -42,6 +51,7 @@ def test_snapshot_revision_and_zip_roundtrip(package, tmp_path):
 
 
 @pytest.mark.parametrize("kind", ["symlink", "hardlink", "nested", "reserved", "binary", "collision"])
+@requires_safe_capture
 def test_structural_blockers(package, kind):
     storage, root = package
     if kind == "symlink":
@@ -65,6 +75,7 @@ def test_structural_blockers(package, kind):
     assert manifest["blockers"]
 
 
+@requires_safe_capture
 def test_limits_are_not_truncated(package, monkeypatch):
     storage, root = package
     monkeypatch.setattr(export, "MAX_ENTRIES", 1)
@@ -73,6 +84,7 @@ def test_limits_are_not_truncated(package, monkeypatch):
     assert error.value.status == 413
 
 
+@requires_safe_capture
 def test_root_link_and_missing_ownership(package):
     storage, root = package
     root.rename(root.with_name("other"))
@@ -107,6 +119,7 @@ def test_local_writer_waits_for_export_lock(package):
     assert finished.is_set()
 
 
+@requires_safe_capture
 def test_snapshot_source_race(package, monkeypatch):
     storage, root = package
     original = export._walk
@@ -122,6 +135,7 @@ def test_snapshot_source_race(package, monkeypatch):
     assert error.value.status == 409
 
 
+@requires_safe_capture
 def test_zip_uses_only_snapshot(package, monkeypatch):
     storage, root = package
     manifest = export.export_manifest(storage, "sample")
@@ -143,6 +157,7 @@ def test_zip_uses_only_snapshot(package, monkeypatch):
 
 
 @pytest.mark.parametrize("limit", ["MAX_FILE_BYTES", "MAX_TOTAL_BYTES", "MAX_PATH_BYTES", "MAX_DEPTH"])
+@requires_safe_capture
 def test_resource_limits(package, monkeypatch, limit):
     storage, root = package
     (root / "deep").mkdir()
@@ -153,6 +168,7 @@ def test_resource_limits(package, monkeypatch, limit):
     assert error.value.status == 413
 
 
+@requires_safe_capture
 def test_zip_limit_and_cancellation_close_files(package, monkeypatch):
     import threading
 
@@ -180,6 +196,7 @@ def test_zip_limit_and_cancellation_close_files(package, monkeypatch):
     assert all(file.closed for file in files)
 
 
+@requires_safe_capture
 def test_diagnostics_requirements_do_not_expose_contents(package):
     import json
 
@@ -193,6 +210,7 @@ def test_diagnostics_requirements_do_not_expose_contents(package):
 
 
 @pytest.mark.parametrize("skill_name", ["code-documentation", "skill-creator"])
+@requires_safe_capture
 def test_public_skill_real_install_roundtrip(tmp_path, monkeypatch, skill_name):
     import shutil
     from pathlib import Path
@@ -250,6 +268,7 @@ def test_import_permissions_from_independent_zip(tmp_path, mode, expected):
         assert (tmp_path / "script").stat().st_mode & 0o7777 == expected
 
 
+@requires_safe_capture
 def test_cross_process_lock_timeout(package, monkeypatch):
     import subprocess
     import sys
@@ -269,6 +288,7 @@ def test_cross_process_lock_timeout(package, monkeypatch):
         child.stdout.close()
 
 
+@requires_safe_capture
 def test_user_read_lock_no_projection_mutation_and_owned_only(tmp_path, monkeypatch):
     from deerflow.config.paths import Paths
     from deerflow.skills.projection import get_skill_projection_paths
@@ -341,6 +361,7 @@ def test_temp_creation_and_cleanup_within_mutation(tmp_path, monkeypatch, user_s
     assert not active
 
 
+@requires_safe_capture
 def test_ancestor_symlink_is_not_followed(package, tmp_path):
     storage, root = package
     # A user scope ancestor is also an ownership boundary, even if custom itself is real.
@@ -353,6 +374,7 @@ def test_ancestor_symlink_is_not_followed(package, tmp_path):
     assert manifest["blockers"][0]["code"] == "skill_export_link"
 
 
+@requires_safe_capture
 def test_nofollow_file_replacement_is_changed(package, monkeypatch):
     storage, root = package
     original = export.os.open
@@ -373,6 +395,7 @@ def test_nofollow_file_replacement_is_changed(package, monkeypatch):
     assert error.value.status == 409
 
 
+@requires_safe_capture
 def test_large_body_and_bounded_frontmatter(package):
     storage, root = package
     header = (root / "SKILL.md").read_bytes()
@@ -384,6 +407,7 @@ def test_large_body_and_bounded_frontmatter(package):
     assert error.value.status == 413
 
 
+@requires_safe_capture
 def test_invalid_utf8_in_large_body_is_blocked(package):
     storage, root = package
     (root / "SKILL.md").write_bytes((root / "SKILL.md").read_bytes() + b"x" * (1024 * 1024 + 1) + b"\xff")
@@ -391,6 +415,7 @@ def test_invalid_utf8_in_large_body_is_blocked(package):
 
 
 @pytest.mark.parametrize("name", ["con", "aux", "com1"])
+@requires_safe_capture
 def test_windows_reserved_root_is_blocked(tmp_path, name):
     storage = LocalSkillStorage(host_path=str(tmp_path))
     root = storage.get_custom_skill_dir(name)
@@ -399,6 +424,7 @@ def test_windows_reserved_root_is_blocked(tmp_path, name):
     assert not export.export_manifest(storage, name)["can_export"]
 
 
+@requires_safe_capture
 def test_required_secrets_normalization_and_invalid_warning(package):
     storage, root = package
     (root / "SKILL.md").write_text('---\nname: sample\ndescription: Example\nrequired-secrets:\n - " API_KEY "\n - name: API_KEY\n - name: " OPTIONAL_KEY "\n   optional: true\n - name: []\n - 123\n---\n', encoding="utf-8")
@@ -407,6 +433,7 @@ def test_required_secrets_normalization_and_invalid_warning(package):
     assert any(warning["code"] == "skill_export_invalid_declaration" for warning in manifest["warnings"])
 
 
+@requires_safe_capture
 def test_mtime_does_not_change_revision(package):
     storage, root = package
     before = export.export_manifest(storage, "sample")["revision"]
@@ -414,6 +441,7 @@ def test_mtime_does_not_change_revision(package):
     assert export.export_manifest(storage, "sample")["revision"] == before
 
 
+@requires_safe_capture
 def test_deep_yaml_is_bounded_without_source_diagnostics(package):
     storage, root = package
     (root / "SKILL.md").write_text("---\nname: sample\ndescription: " + "[" * 5000 + "secret" + "]" * 5000 + "\n---\n", encoding="utf-8")
@@ -422,6 +450,7 @@ def test_deep_yaml_is_bounded_without_source_diagnostics(package):
     assert "secret" not in str(manifest["blockers"])
 
 
+@requires_safe_capture
 def test_invalid_unicode_nodes_still_consume_entry_budget(package, monkeypatch):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -449,6 +478,7 @@ def test_invalid_unicode_nodes_still_consume_entry_budget(package, monkeypatch):
 
 
 @pytest.mark.parametrize("metadata", ["metadata: {base: &base {x: 1}, copy: *base}", "description: &text Example\nmetadata: {copy: *text}"])
+@requires_safe_capture
 def test_yaml_alias_is_rejected_before_constructor(package, monkeypatch, metadata):
     storage, root = package
     (root / "SKILL.md").write_text("---\nname: sample\ndescription: Example\n" + metadata + "\n---\n", encoding="utf-8")
@@ -463,6 +493,7 @@ def test_yaml_alias_is_rejected_before_constructor(package, monkeypatch, metadat
     assert "aliases" in manifest["blockers"][0]["message"]
 
 
+@requires_safe_capture
 def test_yaml_merge_alias_bomb_is_blocked_without_expansion(package):
     storage, root = package
     levels = ["  a0: &a0 {x: 1}"]
@@ -475,6 +506,7 @@ def test_yaml_merge_alias_bomb_is_blocked_without_expansion(package):
 
 
 @pytest.mark.parametrize("kind", ["depth", "events"])
+@requires_safe_capture
 def test_yaml_structural_budget_precedes_constructor(package, monkeypatch, kind):
     storage, root = package
     extra = "metadata: " + "[" * 40 + "x" + "]" * 40 if kind == "depth" else "metadata: [" + ",".join("x" for _ in range(20)) + "]"
@@ -491,6 +523,7 @@ def test_yaml_structural_budget_precedes_constructor(package, monkeypatch, kind)
     assert manifest["blockers"][0]["code"] == "skill_export_yaml_complexity"
 
 
+@requires_safe_capture
 def test_yaml_event_preflight_observes_cancellation(package, monkeypatch):
     import threading
 

@@ -1,6 +1,7 @@
 """Real archive/router contracts; auth is stamped only for this isolated test app."""
 
 import asyncio
+import os
 import threading
 from io import BytesIO
 from types import SimpleNamespace
@@ -18,6 +19,14 @@ from app.gateway.deps import get_config
 from app.gateway.routers import skills
 from deerflow.skills.export import SkillExportArchive
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+# Mirrors the feature guard in deerflow.skills.export._capture: platforms
+# without fd-based directory walking reject every export with 422
+# skill_export_unsupported, so these end-to-end export routes cannot run here.
+requires_safe_capture = pytest.mark.skipif(
+    not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd,
+    reason="skill export capture needs os.O_NOFOLLOW and dir_fd directory walking, which this platform does not provide; export routes return 422 skill_export_unsupported there",
+)
 
 
 @pytest.fixture
@@ -46,6 +55,7 @@ def app(tmp_path, monkeypatch):
     return app
 
 
+@requires_safe_capture
 def test_manifest_download_and_changed_revision(app):
     with TestClient(app) as client:
         preview = client.get("/api/skills/custom/demo/export-manifest")
@@ -132,6 +142,7 @@ async def test_cancel_drains_worker_and_closes_unclaimed_archive():
         lease.release()
 
 
+@requires_safe_capture
 def test_same_name_stays_in_current_user_and_missing_does_not_fall_back(app, monkeypatch):
     with TestClient(app) as client:
         alice = client.get("/api/skills/custom/demo/export-manifest").json()
@@ -200,6 +211,7 @@ async def test_client_disconnect_signals_worker_and_preserves_user_context():
         owner.reset(token)
 
 
+@requires_safe_capture
 def test_export_upload_roundtrip_uses_existing_scanner_and_rejects_conflict(app, monkeypatch):
     """Actual public skill, production routes/scanner; only remote model decision stubbed."""
     import shutil
