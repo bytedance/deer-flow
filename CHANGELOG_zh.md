@@ -398,6 +398,16 @@
 ### 修复
 
 - **上传：** 把转换后的 Markdown companion 暴露给 `<current_uploads>` 与 `list_uploaded_files`，并转发前端的 `markdown_file`，使智能体对 UTF-8 文本调用 `read_file`，而不是去读二进制原件。转换时写入的 `.deer-flow-companions.json` 保留碰撞改名映射（`a.pdf` → `a_1.md`）；身份用私有 hard-link 钉住转换时 inode，原地编辑仍挂在原文件上，删后同名重建（含 Linux inode 复用）则失效。sidecar 读取有字节/条目上限；转换用 temp+`os.replace` 写出，不跟随预占后被换成的 symlink。([#4981]，相关 [#3750])
+- **Gateway：** `disable_clarification` 与 `github_token` 现在与 `non_interactive`
+  一样，仅对内部认证的调用方生效。此前这两个键无论调用方身份都会从 `body.context`
+  透传，而且不会从被逐字复制进 run config 的自由格式 `body.config` 中清除，因此任何
+  会话或 PAT 调用方都能设置它们。其中 `disable_clarification` 影响更大：
+  `ClarificationMiddleware` 会把包括 `risk_confirmation` 在内的所有澄清请求替换为
+  "无需确认，继续执行"，`SandboxMiddleware` 也把它与 `non_interactive` 视作同一个
+  非交互信号。`github_token` 则会进入 `runtime.context`，被 bash 工具导出为
+  `GH_TOKEN`/`GITHUB_TOKEN`；若经由 `body.config['configurable']` 夹带，还会被写入
+  checkpoint 存储。定时任务、IM 渠道与 GitHub webhook 渠道走内部请求通道，不受影响。
+  ([#5338])
 - **Artifact：** `PUT /api/threads/{id}/artifacts/{path}` 现在严格限制在
   `/mnt/user-data/outputs` 之内。此前 outputs-only 校验只是对原始路径做字符串前缀
   检查，百分号编码的 `..`（`outputs/%2e%2e/uploads/x.txt`，nginx 原样转发、Starlette
@@ -2092,3 +2102,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5284]: https://github.com/bytedance/deer-flow/pull/5284
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
 [#5321]: https://github.com/bytedance/deer-flow/pull/5321
+[#5338]: https://github.com/bytedance/deer-flow/pull/5338

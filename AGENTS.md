@@ -31,24 +31,21 @@ A single `make dev` / Docker stack runs four cooperating services:
 | **Frontend**    | `3000` | Next.js web interface                                               |
 | **Provisioner** | `8002` | Optional — only when sandbox is configured for provisioner/K8s mode |
 
-Nginx is the single public entry: it serves the frontend and proxies `/api/langgraph/*`
-to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` routes; all
-other `/api/*` go straight to the Gateway REST routers. See
-[backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail.
-It compresses HTML and configured textual assets, while deliberately leaving SSE,
-fonts, images, audio, and video uncompressed at the proxy layer.
+Nginx is the single public entry: it proxies `/api/*` to the Gateway, rewriting
+`/api/langgraph/*` onto the Gateway's native routes, and serves the frontend — see
+[backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail. It compresses
+HTML and configured textual assets, deliberately leaving SSE, fonts, images, audio, and
+video uncompressed at the proxy layer.
 
 Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
-— **loopback by default**, matching the README's documented deployment model. A bare
-`"${PORT}:2026"` binds `0.0.0.0`, which does not.
-The root `PORT` value is Docker ingress configuration only; local orchestration pins
-Next.js to `3000` so loading `.env` cannot make `make dev` wait on the wrong port.
-Nginx itself listens `default_server` on IPv4+IPv6 and the
-Gateway binds `0.0.0.0:8001` inside the container on purpose — both are container-
-internal; the published nginx port is the entire external surface, and the Gateway's
-`8001` is deliberately not published. Any new published port needs an explicit bind
-address; `backend/tests/test_compose_default_bind_host.py` pins this for every service
-in both compose files.
+— **loopback by default**, matching the README's documented deployment model; a bare
+`"${PORT}:2026"` binds `0.0.0.0`, which does not. The root `PORT` value is Docker ingress
+configuration only; local orchestration pins Next.js to `3000` so loading `.env` cannot
+make `make dev` wait on the wrong port. Nginx listening `default_server` on IPv4+IPv6 and
+the Gateway binding `0.0.0.0:8001` are container-internal on purpose: the published nginx
+port is the entire external surface. Any new published port needs an explicit bind
+address; `backend/tests/test_compose_default_bind_host.py` pins this for every service in
+both compose files.
 
 ## Repository Map
 
@@ -105,19 +102,16 @@ Skill quality review note:
   edits from their head revision, but only the manifest from the trusted base
   revision can suppress that run. Entries match one error finding exactly,
   include the reviewed file's SHA-256 and an expiry date, remain visible in CI
-  output, and can never waive blocker findings. An entry may also preapprove a
-  bounded list of future full-file SHA-256 values. Those hashes become effective
-  only after the manifest change lands in the trusted base. Adding or changing a
-  waiver and relying on it therefore requires two steps: merge the reviewed
-  manifest change first, then update the affected public skill in a later pull
-  request. After that skill change lands, promote its hash to `file_sha256` and
-  remove the consumed preapproval in a follow-up manifest cleanup.
+  output, and can never waive blocker findings. An entry may also preapprove
+  future full-file SHA-256 values, effective only once the manifest change lands
+  in the trusted base — so relying on a waiver takes two merges: the manifest
+  first, the skill change after, then promote the consumed hash to `file_sha256`
+  in a follow-up cleanup.
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
-- Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.
+- Scheduled background runs are intentionally non-interactive: the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. That key, `disable_clarification`, and `github_token` are honored only for internally-authenticated callers; client-supplied copies are dropped from both `body.context` and `body.config`.
 - Busy scheduled occurrences are persisted as `queued`; `launching` is a short lease-fenced claim, `running` remains the normal Gateway run lifecycle, and `scheduler.queue_timeout_seconds` bounds the durable wait. Do not reintroduce skip-on-overlap or count waiting rows against `max_concurrent_runs`.
-- Scheduled launches use `scheduler.recursion_limit` (default 1000, matching the web UI's `recursion_limit: 1000`, clamped by `max_recursion_limit`). The value is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
 
 ## Commands: Root vs. Module
 
@@ -172,7 +166,10 @@ cd frontend && pnpm test      # Unit tests
 Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
 (`pnpm`) = per-module work.**
 
-Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. Diagnostic scripts resolve the runner and frontend directory to absolute paths before changing the child process working directory, so they remain independent of the caller's current directory. The runner preserves direct `pnpm`/`pnpm.cmd` priority, falls back to `corepack pnpm`, and is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
+Host pnpm calls use `scripts/pnpm.py`: native Windows tries `pnpm.cmd` before
+`pnpm`; POSIX reverses the order. Its Corepack fallback applies the same ordering
+to `corepack.cmd` and `corepack`. The runner operates from `frontend/` so
+Corepack honors its pinned package-manager version.
 
 ### Prerequisites before `make dev`
 
