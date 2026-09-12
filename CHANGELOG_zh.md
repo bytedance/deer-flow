@@ -397,6 +397,14 @@
 
 ### 修复
 
+- **Skills：** 切换 skill 启用状态时不再把解析后的密钥写入 `extensions_config.json`。
+  此前 Gateway 的 skill 开关与 `DeerFlowClient.update_skill` 通过
+  `ExtensionsConfig.from_file()` 读取配置（该方法会把所有 `$VAR` 值替换为环境变量的
+  实际值），再把模型整体写回，于是 `"$GITHUB_TOKEN"` 引用会被持久化为明文令牌，未设置
+  的变量则被永久写成 `""`。`DeerFlowClient.update_mcp_config` 对 `mcpServers` 以外的
+  所有键也存在同样问题。现在这些写入方直接修改磁盘上的原始 JSON，并按运行时的加载方式
+  校验候选配置后再写入，占位符与手写结构保持不变；MCP 路由也复用同一个原始读取函数。
+  已被旧版本改写过的文件仍保留明文值，请恢复 `$VAR` 引用并轮换已暴露的凭据。([#5357])
 - **Gateway：** `disable_clarification` 与 `github_token` 现在与 `non_interactive`
   一样，仅对内部认证的调用方生效。此前这两个键无论调用方身份都会从 `body.context`
   透传，而且不会从被逐字复制进 run config 的自由格式 `body.config` 中清除，因此任何
@@ -2119,4 +2127,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5321]: https://github.com/bytedance/deer-flow/pull/5321
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
 [#5353]: https://github.com/bytedance/deer-flow/pull/5353
+[#5357]: https://github.com/bytedance/deer-flow/pull/5357
 [#5375]: https://github.com/bytedance/deer-flow/pull/5375

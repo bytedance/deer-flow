@@ -47,6 +47,8 @@ import {
 } from "@/components/ui/sidebar";
 import { resetThreadChatAfterDelete } from "@/components/workspace/chats/use-thread-chat";
 import { getAPIClient } from "@/core/api";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { useProjects } from "@/core/projects";
@@ -98,6 +100,8 @@ export function ThreadSidebarItem({
   recentThreadId?: string | undefined;
 }) {
   const { t } = useI18n();
+  const { user } = useAuth();
+  const canDeleteThreads = hasPermission(user, PERMISSIONS.THREADS_DELETE);
   const router = useRouter();
   const pathname = usePathname();
   const { thread_id: threadIdFromPath, agent_name: agentNameFromPath } =
@@ -372,11 +376,15 @@ export function ThreadSidebarItem({
               onNewProject={() => setNewProjectDialogOpen(true)}
               onMoveProject={handleMoveProject}
             />
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={handleDelete}>
-              <Trash2 className="text-muted-foreground" />
-              <span>{t.common.delete}</span>
-            </DropdownMenuItem>
+            {canDeleteThreads && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={handleDelete}>
+                  <Trash2 className="text-muted-foreground" />
+                  <span>{t.common.delete}</span>
+                </DropdownMenuItem>
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       )}
