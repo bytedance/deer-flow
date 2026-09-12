@@ -838,6 +838,18 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 
 后台调度器默认是单实例。多 Pod 部署时，请设置 `scheduler.multi_instance: true`，并使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`；启动和周期性恢复会保留仍由对端持有的运行，把过期的 launch claim 原子退回队列，只接管过期的 run lease，并隔离过期的 launch 写入。`max_concurrent_runs` 是跨 Pod 共享的全局上限，只计入 `launching` / `running` 的执行；等待中的 `queued` 行不占用该配额。没有这些配置时，请只在一个 Gateway Pod 上启用调度器。这些 scheduler 字段只在启动时生效；修改后需要一起重启所有 Gateway Pod。
 
+### 通过 API 预览 cron 执行时间
+
+已认证且具有 `threads:read` 权限的客户端，可在创建任务前调用 `POST /api/scheduled-tasks/preview-cron`：
+
+```json
+{"cron":"0 9 * * 1-5","timezone":"Asia/Shanghai","count":3,"start_at":"2026-09-12T00:00:00Z"}
+```
+
+响应包含规范化的 `cron`、`timezone`、生效的 UTC `start_at`，以及 `occurrences` 列表中的 UTC `run_at` 和带偏移量的 `local_time`。此例的首次执行时间为 `2026-09-14T01:00:00Z` / `2026-09-14T09:00:00+08:00`。
+
+`count` 为 1–10 的整数，默认 5。`start_at` 必须带时区，省略时只读取一次服务器当前时间。cron 沿用调度器的五字段语法，最长 256 字符；时区名称最长 128 字符。输入无效或无法计算所需未来时间时返回 422。预览沿用实际调度器的夏令时语义，不创建任务、thread 或 run，也不预留执行资源。此能力目前通过 API 提供，workspace 表单尚未展示这些时间。
+
 ### 升级说明
 
 - 升级 `GATEWAY_WORKERS > 1` 且 `scheduler.enabled: true` 的部署前，要么只在一个 Gateway worker 上启用调度器，要么配置 `scheduler.multi_instance: true`，并同时使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`。升级后的 Gateway 会在启动时拒绝这种不安全组合，而不是静默启动。

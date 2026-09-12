@@ -1589,6 +1589,18 @@ Scheduled runs use `scheduler.recursion_limit` in `config.yaml` (default `1000`,
 
 The background scheduler is single-instance by default. For a multi-pod deployment, set `scheduler.multi_instance: true` and use shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; startup and periodic recovery then preserve live peer runs, atomically return expired launch claims to the queue, take over only expired run leases, and fence stale launch writes. `max_concurrent_runs` is a shared global cap across Pods for `launching`/`running` occurrences; waiting `queued` rows do not consume it. Without those settings, enable the scheduler on exactly one Gateway pod. These scheduler fields are startup-only; restart all Gateway Pods together when changing them.
 
+### Preview cron occurrences through the API
+
+Authenticated clients with `threads:read` can call `POST /api/scheduled-tasks/preview-cron` before creating a task:
+
+```json
+{"cron":"0 9 * * 1-5","timezone":"Asia/Shanghai","count":3,"start_at":"2026-09-12T00:00:00Z"}
+```
+
+The response contains normalized `cron`, `timezone`, the effective UTC `start_at`, and `occurrences` with UTC `run_at` and offset-bearing `local_time`. In this example the first occurrence is `2026-09-14T01:00:00Z` / `2026-09-14T09:00:00+08:00`.
+
+`count` is an integer from 1 to 10 (default 5). `start_at` must include a timezone; omit it to capture server time once. Cron expressions use the scheduler's five-field syntax (maximum 256 characters); timezone names are at most 128 characters. Invalid inputs or schedules without the requested future occurrences return 422. Preview shares the scheduler's DST behavior, creates no task, thread or run, and does not reserve execution. This is an API capability; the workspace form does not yet display these occurrences.
+
 ### Upgrade Notes
 
 - Occurrence ordering applies to rows admitted by upgraded Gateway instances, which project only sequenced occurrences onto the parent task and defer recovery while any occurrence is still live, whichever instance admitted it; a task whose history is entirely unsequenced keeps the previous timestamp ordering until its first sequenced admission. During a rolling upgrade, rows admitted by pre-upgrade instances are projected by those instances themselves, as before the upgrade, and the ordering guarantees hold once every Gateway writer runs the upgraded version. Existing history is not backfilled; the upgrade does not reconstruct past order or repair historical counts.
