@@ -37,6 +37,9 @@ Summarization declares enabled `task_continuity` retention settings (otherwise
 `None`). DurableContext declares its normalized skills root, sorted read-tool
 names and continuity switch, so each capture/injection policy affects assembly
 identity without depending on private-field probing.
+Continuity history readers share shape validation, including the capture failure
+path and DurableContext rendering, so malformed persisted metadata cannot abort
+ordinary compaction or a model call.
 
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 

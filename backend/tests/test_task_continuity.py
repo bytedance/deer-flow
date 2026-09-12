@@ -452,3 +452,156 @@ def test_initial_note_deletions_do_not_persist_tombstones():
     state = graph.invoke(normalize_input({"messages": [HumanMessage(content="continue")], "task_notes": {f"note{i}": None for i in range(20)}}), config)
     assert state["task_notes"] == {}
     assert graph.get_state(config).values["task_notes"] == {}
+
+
+@pytest.mark.parametrize("bad_value", ["bad", ["bad"], [], 0, False, 1, {"batches": None}, {"batches": 1}, {"batches": [None]}, {"status": []}, {"omitted_records": -1}, {"omitted_records": True}, {"scope": []}])
+def test_malformed_history_is_unavailable_and_compaction_recovers(scoped, monkeypatch, bad_value):
+    from deerflow.agents.middlewares.durable_context_middleware import _render_durable_context_data
+
+    value = {"scope": archive.scope(scoped)[1], **bad_value} if isinstance(bad_value, dict) else bad_value
+    state = {"messages": conversation(), "task_history": value}
+    result = archive.lookup(state, scoped, query="Citrine")
+    assert result["status"] == "unavailable"
+    assert result["results"][0]["text"].startswith("Project Citrine")
+    rendered = _render_durable_context_data(None, [], [], {}, value)
+    assert '"history_status": "unavailable"' in rendered
+    with monkeypatch.context() as patcher:
+        patcher.setattr(archive.sqlite3, "connect", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("synthetic unavailable storage")))
+        failed = compacting(TaskContinuityConfig(enabled=True))._maybe_summarize(state, scoped)
+    assert failed["summary_text"]
+    assert failed["task_history"]["status"] == "unavailable"
+    assert archive.lookup({"task_history": failed["task_history"]}, scoped, query="Citrine")["status"] == "unavailable"
+    recovered = compacting(TaskContinuityConfig(enabled=True))._maybe_summarize(state, scoped)
+    assert recovered["task_history"]["status"] == "available"
+    assert archive.lookup({"task_history": recovered["task_history"]}, scoped, query="Citrine")["results"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_malformed_persisted_history_allows_resume_with_and_without_compaction(scoped, async_mode):
+    saver = InMemorySaver()
+    config = {"configurable": {"thread_id": "thread-a"}}
+    graph = create_agent(StaticModel(), tools=[], middleware=[DurableContextMiddleware(task_continuity_enabled=True)], state_schema=ThreadState, checkpointer=saver)
+    graph.update_state(config, {"messages": conversation(), "task_history": "bad"})
+    for _ in range(2):
+        result = await graph.ainvoke({}, config=config, context=scoped.context) if async_mode else graph.invoke({}, config=config, context=scoped.context)
+        assert result["messages"][-1].content
+    resumed = create_agent(StaticModel(), tools=[], middleware=[DurableContextMiddleware(task_continuity_enabled=True), compacting(TaskContinuityConfig(enabled=True))], state_schema=ThreadState, checkpointer=saver)
+    result = await resumed.ainvoke({}, config=config, context=scoped.context) if async_mode else resumed.invoke({}, config=config, context=scoped.context)
+    assert result["task_history"]["status"] == "available"
+    assert archive.lookup(result, scoped, query="Citrine")["results"]
+
+
+def test_capacity_eviction_and_failed_replacement_rollback(scoped, monkeypatch):
+    import sqlite3
+
+    real_connect = sqlite3.connect
+
+    class LimitedConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=(), /):
+            if sql == "PRAGMA max_page_count=32768":
+                sql = "PRAGMA max_page_count=1024"
+            return super().execute(sql, parameters)
+
+    monkeypatch.setattr(archive.sqlite3, "connect", lambda *args, **kwargs: real_connect(*args, **{**kwargs, "factory": LimitedConnection}))
+    config = TaskContinuityConfig(enabled=True, max_batches=1, max_record_chars=64000)
+    body = " ".join(f"term{i:05d}" for i in range(6000))
+
+    def messages(label, count=16):
+        return [HumanMessage(content=f"{label} {body}", id=f"{label}-{i}") for i in range(count)]
+
+    state = {}
+    for label in ("FIRST", "SECOND", "THIRD"):
+        state = {"task_history": archive.capture(state, scoped, messages(label), config)}
+        assert state["task_history"]["status"] == "available"
+        assert archive.lookup(state, scoped, query=label)["results"]
+    before = state["task_history"]
+    failed = archive.capture(state, scoped, messages("OVERSIZED", count=80), config)
+    assert failed["status"] == "unavailable"
+    assert failed["batches"] == before["batches"]
+    assert archive.lookup({"task_history": failed}, scoped, query="THIRD")["results"]
+    path = archive.scope(scoped)[0]
+    with real_connect(path) as db:
+        assert [row[0] for row in db.execute("SELECT id FROM batches")] == before["batches"]
+        assert db.execute("PRAGMA page_count").fetchone()[0] <= 1024
+    recovered = archive.capture({"task_history": failed}, scoped, messages("RECOVERED"), config)
+    assert recovered["status"] == "available"
+    assert archive.lookup({"task_history": recovered}, scoped, query="RECOVERED")["results"]
+
+
+def test_duplicate_capture_survives_retention_reduction(scoped):
+    import sqlite3
+
+    state = {}
+    config = TaskContinuityConfig(enabled=True, max_batches=3)
+    messages = [HumanMessage(content=word, id=word) for word in ("oldest", "middle", "newest")]
+    for message in messages:
+        state = {"task_history": archive.capture(state, scoped, [message], config)}
+    middle_id = state["task_history"]["batches"][1]
+    reduced = archive.capture(state, scoped, [messages[1]], TaskContinuityConfig(enabled=True, max_batches=1))
+    assert reduced["batches"] == [middle_id]
+    assert archive.lookup({"task_history": reduced}, scoped, query="middle")["results"]
+    with sqlite3.connect(archive.scope(scoped)[0]) as db:
+        assert db.execute("SELECT count(*) FROM batches").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM sources").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_concurrent_capture_serializes_retention_decisions(scoped, monkeypatch, duplicate):
+    import sqlite3
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    real_connect = sqlite3.connect
+    first_locked, second_ready, release_first = threading.Event(), threading.Event(), threading.Event()
+    config = TaskContinuityConfig(enabled=True, max_batches=1)
+    # Create the schema before exercising competing transactions.
+    state = {"task_history": archive.capture({}, scoped, [HumanMessage(content="initial", id="initial")], config)}
+    calls = 0
+
+    class GatedConnection(sqlite3.Connection):
+        ordinal = 0
+
+        def execute(self, sql, parameters=(), /):
+            if sql == "BEGIN IMMEDIATE" and self.ordinal == 2:
+                second_ready.set()
+            result = super().execute(sql, parameters)
+            if sql == "BEGIN IMMEDIATE" and self.ordinal == 1:
+                first_locked.set()
+                assert release_first.wait(5)
+            return result
+
+    def connect(*args, **kwargs):
+        nonlocal calls
+        db = real_connect(*args, **{**kwargs, "factory": GatedConnection})
+        calls += 1
+        db.ordinal = calls
+        return db
+
+    monkeypatch.setattr(archive.sqlite3, "connect", connect)
+    first_message = HumanMessage(content="first", id="first")
+    second_message = first_message if duplicate else HumanMessage(content="second", id="second")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(archive.capture, state, scoped, [first_message], config)
+        try:
+            assert first_locked.wait(3)
+            second = pool.submit(archive.capture, state, scoped, [second_message], config)
+            assert second_ready.wait(3)
+        finally:
+            release_first.set()
+        first_result, second_result = first.result(), second.result()
+    assert first_result["status"] == second_result["status"] == "available"
+    with real_connect(archive.scope(scoped)[0]) as db:
+        assert [row[0] for row in db.execute("SELECT id FROM batches")] == second_result["batches"]
+        assert db.execute("SELECT count(*) FROM sources").fetchone()[0] == 1
+    assert archive.lookup({"task_history": second_result}, scoped, query=second_message.content)["results"]
+    assert archive.lookup({"task_history": first_result}, scoped, query="first")["status"] == ("available" if duplicate else "partially_expired")
+
+
+@pytest.mark.parametrize("empty", [None, {}])
+def test_absent_history_remains_uninitialized(scoped, empty):
+    from deerflow.agents.middlewares.durable_context_middleware import _render_durable_context_data
+
+    rendered = _render_durable_context_data(None, [], [], {}, empty)
+    assert '"history_status": "no_compaction_yet"' in rendered
+    assert archive.lookup({"task_history": empty}, scoped, query="missing") == {"results": [], "status": "available"}

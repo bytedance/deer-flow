@@ -3,7 +3,36 @@
 These checks exercise the implementation and review fixes. They are separate
 from the historical prototype A/B/C/D quality scores.
 
-## Latest follow-up: review 5185827206
+## Latest follow-up: review 5185922053
+
+Malformed history metadata is validated by all four consuming sites, including
+capture failure recovery and durable-context rendering. Existing bad checkpoints
+can continue before compaction; a successful capture repairs their metadata.
+SQLite captures now serialize retention decisions and evict before inserting a
+replacement in the same transaction. Failed replacements preserve old sources;
+duplicate capture also retains the right reference when retention is reduced.
+
+The initial regressions had **13 failures and 57 passing controls**. After the
+fix and additional transaction/concurrency controls, **270 focused tests pass**
+(including 78 continuity tests); format, lint and diff checks pass. Full backend:
+**15,520 passed, 15 failed, 182 skipped, 3 deselected**. The 15 failure IDs
+match the earlier full clean-base result and a fresh rerun of all those IDs on
+the unchanged clean base. There are no branch-only failures.
+
+Capacity tests use a real SQLite database with a scaled 1024-page ceiling;
+the production ceiling remains 32768 pages. An isolated autocommit mutation
+fails the old-source preservation assertion after `SQLITE_FULL`, confirming the
+rollback check observes persisted data. Two gated writer threads cover both
+distinct and duplicate batches. The guide checker reports no errors and the
+existing chain-size soft warning. No live model experiment was rerun.
+
+The previous remote shard-3 failure occurred in `Install uv` (`fetch failed`);
+dependency installation and unit tests were skipped. It provides no test-failure
+evidence against this implementation. Remote results for the follow-up commit
+are tracked separately on the PR.
+[Follow-up metadata and source/log hashes](review3-validation.json).
+
+## Earlier follow-up: review 5185827206
 
 The second review at `fac6a37e` exposed mixed-content extraction and missing
 release-policy declarations. The regressions produced **20 failures before the

@@ -19,6 +19,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.config import get_config
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.task_continuity.state import normalize_task_history
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.utils.file_io import run_file_io
@@ -96,14 +97,15 @@ def index_text(text: str) -> str:
 
 
 def reachable(state: dict, owner: str) -> list[str]:
-    history = state.get("task_history") or {}
+    history = normalize_task_history(state.get("task_history"))
     if history.get("scope") != owner:
         return []
-    return [b for b in history.get("batches", [])[-64:] if isinstance(b, str) and re.fullmatch(r"[a-f0-9]{64}", b)]
+    return history.get("batches", [])
 
 
 def capture(state: dict, runtime, messages, config) -> dict:
     """Publish a batch only via the returned checkpoint update; rollback stays isolated."""
+    history = normalize_task_history(state.get("task_history"))
     try:
         path, owner = scope(runtime)
         old = reachable(state, owner)
@@ -116,18 +118,24 @@ def capture(state: dict, runtime, messages, config) -> dict:
             db.execute("PRAGMA max_page_count=32768")  # 128 MiB at SQLite's default page size.
             db.execute("CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, created INTEGER)")
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS sources USING fts5(batch UNINDEXED, id UNINDEXED, payload UNINDEXED, words)")
-            if not db.execute("SELECT 1 FROM batches WHERE id=?", (batch,)).fetchone():
-                db.execute("INSERT INTO batches VALUES (?, COALESCE((SELECT MAX(created) + 1 FROM batches), 1))", (batch,))
-                db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"])) for r in sources])
-            expired = db.execute("SELECT id FROM batches ORDER BY created DESC LIMIT -1 OFFSET ?", (config.max_batches,)).fetchall()
+            # Lock before selecting victims, so concurrent captures cannot plan
+            # against stale retention state. Rollback restores evicted rows if
+            # the replacement still cannot fit within SQLite's page ceiling.
+            db.execute("BEGIN IMMEDIATE")
+            exists = db.execute("SELECT 1 FROM batches WHERE id=?", (batch,)).fetchone()
+            created = db.execute("SELECT COALESCE(MAX(created) + 1, 1) FROM batches").fetchone()[0]
+            expired = db.execute("SELECT id FROM batches WHERE id != ? ORDER BY created DESC LIMIT -1 OFFSET ?", (batch, config.max_batches - 1)).fetchall()
             for (expired_id,) in expired:
                 db.execute("DELETE FROM sources WHERE batch=?", (expired_id,))
                 db.execute("DELETE FROM batches WHERE id=?", (expired_id,))
-        batches = list(dict.fromkeys([*old, batch]))[-config.max_batches :]
+            if not exists:
+                db.execute("INSERT INTO batches VALUES (?, ?)", (batch, created))
+                db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"])) for r in sources])
+        batches = [*[previous for previous in old if previous != batch], batch][-config.max_batches :]
         return {"scope": owner, "batches": batches, "omitted_records": omitted, "status": "available"}
     except (OSError, sqlite3.Error, ValueError):
         logger.warning("Task history capture unavailable; preserving ordinary compaction", exc_info=False)
-        return {**(state.get("task_history") or {}), "status": "unavailable"}
+        return {**history, "status": "unavailable"}
 
 
 async def acapture(*args) -> dict:
@@ -152,7 +160,7 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     if query is not None and not keywords:
         return {"results": [], "status": "empty_query"}
     found = {}
-    history = state.get("task_history") or {}
+    history = normalize_task_history(state.get("task_history"))
     status = "unavailable" if history.get("status") == "unavailable" else "available"
     if batches:
         try:

@@ -68,6 +68,11 @@ there is no cross-thread search or separate global index. On multiple hosts,
 workers need the same thread filesystem to read these local archives.
 
 Checkpoint state holds batch references and the user/thread scope binding.
+Every history reader validates this metadata, including source lookup, capture
+failure recovery and durable-context rendering. Malformed history reports
+`unavailable` rather than aborting the task; a successful capture replaces it
+with valid metadata. Existing valid references can still be checked, subject to
+the same scope and retention rules. Missing history remains uninitialized.
 Rolling back to an old checkpoint cannot reveal future batches. Copying a
 checkpoint to another user or thread does not grant access to the original
 archive. A fork may inherit ordinary notes/messages through existing checkpoint
@@ -80,7 +85,12 @@ SQLite ceiling (128 MiB for the default page size). The oldest physical batches
 expire as new ones are captured, even if an older checkpoint still refers to
 them. Read/search report `partially_expired` or `unavailable`; missing sources must
 be re-verified. `omitted_records` describes the latest capture's record limit,
-and each shortened source carries `truncated: true`. Storage failure preserves
+and each shortened source carries `truncated: true`.
+Eviction happens before replacement insertion in one write transaction.
+Competing captures serialize retention decisions; if insertion still exceeds
+capacity, rollback preserves the previous batches. Duplicate capture protects
+the current batch even when the configured retention limit is reduced.
+Storage failure preserves
 ordinary compaction and marks history unavailable; it does not undo a successful
 summary. Async writes are offloaded and drained before cancellation returns.
 History tools preserve `unavailable` after a capture failure, even when older

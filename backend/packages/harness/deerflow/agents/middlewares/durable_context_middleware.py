@@ -25,7 +25,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
 from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
 from deerflow.agents.middlewares.skill_context import extract_skills, render_skill_context
-from deerflow.agents.task_continuity.state import normalize_task_notes
+from deerflow.agents.task_continuity.state import normalize_task_history, normalize_task_notes
 from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, TERMINAL_STATUSES
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
@@ -78,7 +78,7 @@ def _render_durable_context_data(summary_text: str | None, ledger: list, skills:
         data_parts.append(skill_block)
 
     if task_notes is not None:
-        history = task_history or {}
+        history = normalize_task_history(task_history)
         note_data = json.dumps({"notes": normalize_task_notes(task_notes), "history_status": history.get("status", "no_compaction_yet"), "omitted_records": history.get("omitted_records", 0)}, ensure_ascii=False)
         data_parts.append("## Task working notes\n" + escape(note_data[:12000], quote=False))
 

@@ -1,4 +1,4 @@
-"""Checkpointed working notes. Values are model reports, never authority."""
+"""Normalize checkpointed continuity metadata; notes remain model reports."""
 
 import re
 from collections.abc import Sequence
@@ -10,6 +10,43 @@ MAX_NOTE_CHARS = 750
 MAX_NOTE_SOURCES = 4
 NOTE_KEY_PATTERN = re.compile(r"[a-zA-Z0-9_-]{1,40}")
 SOURCE_ID_PATTERN = re.compile(r"r[a-f0-9]{32}")
+BATCH_ID_PATTERN = re.compile(r"[a-f0-9]{64}")
+
+
+def normalize_task_history(value: object) -> dict:
+    """Bound and validate persisted history before any reader uses it.
+
+    Keep valid references for diagnostics, but mark malformed history unavailable.
+    Scope authorization and physical source availability remain the archive's job.
+    """
+    if value is None or (isinstance(value, dict) and not value):
+        return {}
+    if not isinstance(value, dict):
+        return {"batches": [], "omitted_records": 0, "status": "unavailable"}
+    invalid = False
+    scope = value.get("scope")
+    if scope is not None and (not isinstance(scope, str) or not scope):
+        scope, invalid = None, True
+    batches = value.get("batches", [])
+    if not isinstance(batches, list):
+        batches, invalid = [], True
+    valid_batches = [batch for batch in batches[-64:] if isinstance(batch, str) and BATCH_ID_PATTERN.fullmatch(batch)]
+    if len(valid_batches) != len(batches):
+        invalid = True
+    if valid_batches and scope is None:
+        valid_batches, invalid = [], True
+    omitted = value.get("omitted_records", 0)
+    if type(omitted) is not int or omitted < 0:
+        omitted, invalid = 0, True
+    status = value.get("status", "available")
+    if status not in ("available", "unavailable"):
+        invalid = True
+    return {
+        **({"scope": scope} if scope is not None else {}),
+        "batches": list(dict.fromkeys(valid_batches)),
+        "omitted_records": omitted,
+        "status": "unavailable" if invalid else status,
+    }
 
 
 def normalize_task_notes(value: object) -> dict:
