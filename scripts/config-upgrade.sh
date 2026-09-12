@@ -92,9 +92,6 @@ RAGFLOW_PROVIDER_KEYS = (
 def migrate_knowledge_provider_settings(data):
     # Move legacy RAGFlow settings to the provider tool and remove them from the generic block.
     knowledge_base = data.get('knowledge_base')
-    if not isinstance(knowledge_base, dict):
-        return []
-
     tools = data.get('tools')
     target = None
     if isinstance(tools, list):
@@ -110,6 +107,19 @@ def migrate_knowledge_provider_settings(data):
         )
 
     changes = []
+    # Before v42, a tools-only knowledge configuration was valid and enabled by
+    # the presence of the provider tool itself. Preserve that behavior when the
+    # v42 merge would otherwise add the example's ``enabled: false`` gate.
+    if not isinstance(knowledge_base, dict):
+        if target is not None and any(key in target for key in RAGFLOW_PROVIDER_KEYS):
+            data['knowledge_base'] = {'enabled': True}
+            changes.append('knowledge_base.enabled set to true (preserved tools.knowledge_search configuration)')
+        return changes
+
+    if 'enabled' not in knowledge_base and target is not None and any(key in target for key in RAGFLOW_PROVIDER_KEYS):
+        knowledge_base['enabled'] = True
+        changes.append('knowledge_base.enabled set to true (preserved tools.knowledge_search configuration)')
+
     for key in RAGFLOW_PROVIDER_KEYS:
         if key not in knowledge_base:
             continue

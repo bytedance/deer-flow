@@ -231,6 +231,52 @@ def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
     assert tool["api_key"] == "$CURRENT_RAGFLOW_API_KEY"
 
 
+def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_path):
+    """Tools-only legacy configs must not be disabled by the new capability gate."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
+    assert expected_version >= 42
+
+    config_path = tmp_path / "config.yaml"
+    legacy = {
+        "config_version": 41,
+        "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        # This was the documented enablement path before knowledge_base existed.
+        "tools": [
+            {
+                "name": "knowledge_search",
+                "group": "knowledge",
+                "use": "deerflow.community.ragflow.tools:knowledge_search_tool",
+                "base_url": "http://legacy-ragflow:9380",
+                "api_key": "$RAGFLOW_API_KEY",
+            }
+        ],
+    }
+    config_path.write_text(yaml.dump(legacy), encoding="utf-8")
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "knowledge_base.enabled set to true" in result.stdout
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+    assert upgraded["knowledge_base"] == {
+        "enabled": True,
+        "scope_selection_enabled": False,
+    }
+    assert upgraded["tools"][0]["base_url"] == "http://legacy-ragflow:9380"
+
+
 def _load_repo_example() -> dict:
     """Load the real repo config.example.yaml (first-run template)."""
     example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
