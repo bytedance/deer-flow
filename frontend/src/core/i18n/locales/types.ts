@@ -245,6 +245,7 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    stopStreamingUnavailable: string;
   };
 
   // Sidebar

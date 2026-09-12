@@ -327,6 +327,8 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    stopStreamingUnavailable:
+      "Stopping the running turn is not permitted for your role.",
   },
 
   // Sidebar

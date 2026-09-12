@@ -10,6 +10,7 @@ CHECKER_PATH = REPO_ROOT / "scripts" / "check_agent_guidance.py"
 EXPECTED_GUIDANCE_PATHS = {
     "AGENTS.md",
     "backend/AGENTS.md",
+    "backend/tests/AGENTS.md",
     "frontend/AGENTS.md",
     "backend/app/gateway/AGENTS.md",
     "backend/app/channels/AGENTS.md",
@@ -129,14 +130,14 @@ def test_repository_has_the_approved_scoped_guidance_shape() -> None:
     assert actual == EXPECTED_GUIDANCE_PATHS
 
 
-def test_repository_guidance_stays_below_soft_budgets_and_avoids_doc_indexes() -> None:
+def test_repository_guidance_stays_below_hard_budgets_and_avoids_doc_indexes() -> None:
     for relative_text in EXPECTED_GUIDANCE_PATHS:
         relative = PurePosixPath(relative_text)
         path = REPO_ROOT / relative_text
         assert path.is_file(), relative
-        soft, _ = checker.agent_budget(relative)
+        _, hard = checker.agent_budget(relative)
         text = path.read_text(encoding="utf-8")
-        assert checker.normalized_utf8_size(text) <= soft, relative
+        assert checker.normalized_utf8_size(text) <= hard, relative
         assert "Subsystem Index" not in text
 
 
