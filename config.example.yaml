@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 41
+config_version: 42
 
 # ============================================================================
 # Logging
@@ -1187,6 +1187,13 @@ tool_search:
 #
 # `exempt_tools` prevents persist→read→persist infinite loops for read tools.
 # `tool_overrides` allows per-tool threshold customization.
+#
+# The same middleware also elides the `content` argument of successful
+# write_file calls from model-bound requests once the same path was read or
+# modified again later (issue #5328): the file on disk is then the source of
+# truth, and the read-before-write gate forces a read_file before the next
+# modification anyway, so the historical copy only costs context. Stored
+# history, receipts, and the run journal keep the original arguments.
 
 tool_output:
   enabled: true
@@ -1205,6 +1212,18 @@ tool_output:
   # tool_overrides:
   #   web_search: 8000
   #   bash: 20000
+  # Replace a successful write_file call's `content` with a short placeholder
+  # pointing at read_file once a later successful read_file / write_file /
+  # str_replace of the same path exists. Only the model-bound request changes.
+  elide_superseded_writes: true
+  # Only elide content at least this many characters long (a character count,
+  # not tokens: CJK text costs ~3-4x more per character than ASCII). 0 elides
+  # every non-empty content.
+  superseded_write_min_chars: 2000
+  # The newest N successful write_file calls (across all paths) always stay
+  # visible, even when superseded, so the model can still say what it just
+  # wrote without a read. 0 keeps none.
+  keep_recent_writes: 1
 
 # ============================================================================
 # Suggestions Configuration

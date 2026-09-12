@@ -4,7 +4,7 @@ import json
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
-from deerflow.agents.middlewares.tool_call_args import rewrite_messages_tool_call_args, rewrite_tool_call_args
+from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results, rewrite_messages_tool_call_args, rewrite_tool_call_args
 
 ARGS = {"path": "/mnt/user-data/outputs/report.md", "content": "x" * 50}
 NEW_ARGS = {"path": "/mnt/user-data/outputs/report.md", "content": "[elided]"}
@@ -385,3 +385,71 @@ class TestResponseChainInvalidation:
         assert calls[0]["id"] == "fc_1"
         assert any(item.get("type") == "function_call_output" for item in payload["input"])
         assert self.PAYLOAD not in json.dumps(payload, ensure_ascii=False)
+
+
+class TestPairToolCallResults:
+    """Per-occurrence pairing of AIMessage tool calls with the ToolMessage that answered them."""
+
+    @staticmethod
+    def _call(call_id, name="bash", args=None):
+        return {"name": name, "id": call_id, "args": {"command": "ls"} if args is None else args}
+
+    def test_pairs_each_call_with_the_result_that_answered_it(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1"), self._call("call-2")])
+        first = ToolMessage(content="1", tool_call_id="call-1")
+        second = ToolMessage(content="2", tool_call_id="call-2")
+
+        occurrences = pair_tool_call_results([HumanMessage(content="go"), ai, second, first])
+
+        assert [(o.index, o.message is ai, o.call_id, o.result) for o in occurrences] == [(1, True, "call-1", first), (1, True, "call-2", second)]
+        assert occurrences[0].name == "bash"
+        assert occurrences[0].args == {"command": "ls"}
+
+    def test_unanswered_call_gets_no_result(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+
+        occurrences = pair_tool_call_results([ai])
+
+        assert len(occurrences) == 1
+        assert occurrences[0].result is None
+
+    def test_reused_ids_pair_per_occurrence_in_history_order(self):
+        first_ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        first_result = ToolMessage(content="first", tool_call_id="call-1")
+        second_ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        second_result = ToolMessage(content="second", tool_call_id="call-1")
+
+        occurrences = pair_tool_call_results([first_ai, first_result, second_ai, second_result])
+
+        assert [(o.index, o.result) for o in occurrences] == [(0, first_result), (2, second_result)]
+
+    def test_calls_without_a_string_id_are_skipped(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1"), {"name": "bash", "id": None, "args": {}}, {"name": "bash", "id": "", "args": {}}])
+        ai.tool_calls.append({"name": "bash", "id": ["not", "a", "string"], "args": {}})
+
+        occurrences = pair_tool_call_results([ai, ToolMessage(content="1", tool_call_id="call-1")])
+
+        assert [o.call_id for o in occurrences] == ["call-1"]
+
+    def test_non_ai_messages_and_non_dict_calls_are_ignored(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        ai.tool_calls.append("not-a-dict")  # malformed provider payload
+
+        occurrences = pair_tool_call_results([HumanMessage(content="go"), ToolMessage(content="stray", tool_call_id="call-9"), ai])
+
+        assert [o.call_id for o in occurrences] == ["call-1"]
+
+    def test_accessors_tolerate_malformed_calls(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        # Malformed provider payloads can only get here past construction-time validation.
+        ai.tool_calls[0]["args"] = "not-a-dict"
+        del ai.tool_calls[0]["name"]
+
+        (occurrence,) = pair_tool_call_results([ai])
+
+        assert occurrence.name == ""
+        assert occurrence.args == {}
+        assert occurrence.call_id == "call-1"
+
+    def test_empty_history_pairs_nothing(self):
+        assert pair_tool_call_results([]) == []

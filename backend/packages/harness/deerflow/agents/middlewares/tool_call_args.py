@@ -26,7 +26,11 @@ that touched ``tool_calls`` alone would still send the original payload.
 ``model_copy`` (or the same object when nothing matched), so callers never
 mutate state and the result is identical across model calls. Policy — which
 calls, and what replaces their arguments — stays with the caller; see
-``read_before_write_middleware.elide_blocked_write_payloads`` for one.
+``read_before_write_middleware.elide_blocked_write_payloads`` and
+``tool_output_budget_middleware.elide_superseded_write_payloads``. Both decide
+per call *occurrence*, pairing each AIMessage call with the ToolMessage that
+answered it through :func:`pair_tool_call_results`, because tool-call ids may
+repeat across assistant turns.
 
 A rewrite also invalidates server-side continuation. With
 ``use_previous_response_id`` the OpenAI adapter sends only the messages after
@@ -44,10 +48,12 @@ billed either way, so replay costs no more).
 from __future__ import annotations
 
 import json
+from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 #: Replacement args keyed by tool-call id.
 ArgsReplacements = Mapping[str, dict[str, Any]]
@@ -88,6 +94,62 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
     if not changed:
         return None
     return [_without_response_chain_id(message) for message in updated]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallOccurrence:
+    """One tool call on one AIMessage, paired with the ToolMessage that answered it (``None`` if unanswered)."""
+
+    #: Position of ``message`` in the history it was paired from.
+    index: int
+    message: AIMessage
+    tool_call: dict[str, Any]
+    result: ToolMessage | None
+
+    @property
+    def call_id(self) -> str:
+        return self.tool_call["id"]
+
+    @property
+    def name(self) -> str:
+        name = self.tool_call.get("name")
+        return name if isinstance(name, str) else ""
+
+    @property
+    def args(self) -> dict[str, Any]:
+        args = self.tool_call.get("args")
+        return args if isinstance(args, dict) else {}
+
+
+def pair_tool_call_results(messages: Sequence[Any]) -> list[ToolCallOccurrence]:
+    """Pair every AIMessage tool call carrying a non-empty string id with the ToolMessage that answered it.
+
+    Tool-call ids may repeat across assistant turns, so a history-wide id lookup
+    would pair a call with an earlier (or later) result for the same id. Results
+    are paired per *occurrence* the way ``DanglingToolCallMiddleware`` does:
+    ToolMessages queue per id in history order and each AIMessage call consumes
+    the next one for its id. ``index`` is the AIMessage's position in
+    ``messages``, so callers can order events across turns; the calls of one
+    AIMessage share an index because they ran concurrently, in no fixed order.
+    """
+    results_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
+    for message in messages:
+        if isinstance(message, ToolMessage) and isinstance(message.tool_call_id, str) and message.tool_call_id:
+            results_by_id[message.tool_call_id].append(message)
+
+    occurrences: list[ToolCallOccurrence] = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, AIMessage):
+            continue
+        for tool_call in message.tool_calls or ():
+            if not isinstance(tool_call, dict):
+                continue
+            call_id = tool_call.get("id")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            queue = results_by_id.get(call_id)
+            occurrences.append(ToolCallOccurrence(index, message, tool_call, queue.popleft() if queue else None))
+    return occurrences
 
 
 def _without_response_chain_id(message: Any) -> Any:
