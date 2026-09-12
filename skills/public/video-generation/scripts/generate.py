@@ -143,10 +143,13 @@ def download(url: str, output_file: str) -> None:
 
 
 def _generate_video_gemini(
-    prompt: str, reference_images: list[str], output_file: str
+    prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str = "16:9"
 ) -> str:
     reference_payload = []
-    request_json = {"instances": [{"prompt": prompt}]}
+    request_json = {
+        "instances": [{"prompt": prompt}],
+        "parameters": {"aspectRatio": aspect_ratio},
+    }
     for reference_image in reference_images:
         with open(reference_image, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -199,7 +202,9 @@ def generate_video(
         # MiniMax video uses resolution/duration, not aspect_ratio; aspect_ratio ignored.
         return _generate_video_minimax(prompt, reference_images, output_file)
     if provider in ("gemini", "google"):
-        return _generate_video_gemini(prompt, reference_images, output_file)
+        return _generate_video_gemini(
+            prompt, reference_images, output_file, aspect_ratio
+        )
     raise ValueError(f"Unknown video provider: {provider!r} (use 'gemini' or 'minimax')")
 
 

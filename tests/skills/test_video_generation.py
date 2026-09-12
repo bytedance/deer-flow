@@ -185,3 +185,42 @@ def test_gemini_post_raises_on_http_error(monkeypatch, tmp_path):
     pf.write_text("a cat", encoding="utf-8")
     with pytest.raises(requests.HTTPError):
         vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
+
+
+def test_gemini_forwards_aspect_ratio_to_predict_request(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, **kw):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResp(json_data={"name": "operations/op"})
+
+    def fake_get(url, headers=None, **kw):
+        return FakeResp(
+            json_data={
+                "done": True,
+                "response": {
+                    "generateVideoResponse": {
+                        "generatedSamples": [
+                            {"video": {"uri": "https://example.test/v.mp4"}}
+                        ]
+                    }
+                },
+            },
+        )
+
+    def fake_download(uri, output_file):
+        with open(output_file, "wb") as f:
+            f.write(b"video")
+
+    monkeypatch.setattr(vid.requests, "post", fake_post)
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+    monkeypatch.setattr(vid, "download", fake_download)
+    pf = tmp_path / "p.json"
+    pf.write_text("a tall cat", encoding="utf-8")
+
+    vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "9:16")
+
+    assert "predictLongRunning" in captured["url"]
+    assert captured["json"]["parameters"]["aspectRatio"] == "9:16"
