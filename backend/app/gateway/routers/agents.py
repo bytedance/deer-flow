@@ -12,6 +12,7 @@ from deerflow.agents.memory.manager import get_memory_manager
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import (
     AgentConfig,
+    AgentDisplayName,
     AgentModelSettings,
     list_custom_agents,
     load_agent_config,
@@ -40,6 +41,7 @@ class AgentResponse(BaseModel):
     """Response model for a custom agent."""
 
     name: str = Field(..., description="Agent name (hyphen-case)")
+    display_name: AgentDisplayName | None = Field(default=None, description="Optional Unicode display name; name remains the stable identifier")
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -61,6 +63,7 @@ class AgentCreateRequest(BaseModel):
     """Request body for creating a custom agent."""
 
     name: str = Field(..., description="Agent name (must match ^[A-Za-z0-9-]+$, stored as lowercase)")
+    display_name: AgentDisplayName | None = None
     description: str = Field(default="", description="Agent description")
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
@@ -75,6 +78,7 @@ class AgentCreateRequest(BaseModel):
 class AgentUpdateRequest(BaseModel):
     """Request body for updating a custom agent."""
 
+    display_name: AgentDisplayName | None = Field(default=None, description="Updated display name; null clears it")
     description: str | None = Field(default=None, description="Updated description")
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
@@ -189,6 +193,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
 
     return AgentResponse(
         name=agent_cfg.name,
+        display_name=agent_cfg.display_name,
         description=agent_cfg.description,
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
@@ -328,6 +333,8 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     # Config document — only the fields the caller set, matching the historical
     # writer (an omitted field stays absent rather than being materialized).
     config_data: dict = {"name": normalized_name}
+    if request.display_name:
+        config_data["display_name"] = request.display_name
     if request.description:
         config_data["description"] = request.description
     if request.tool_groups is not None:
@@ -415,7 +422,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
         # This is critical for skills where None means "inherit all" (not "don't change").
         fields_set = request.model_fields_set
-        config_changed = bool(fields_set & ({"description", "tool_groups", "skills", "allowed_subagents"} | set(_MODEL_BEHAVIOR_FIELDS)))
+        config_changed = bool(fields_set & ({"display_name", "description", "tool_groups", "skills", "allowed_subagents"} | set(_MODEL_BEHAVIOR_FIELDS)))
 
         updated: dict | None = None
         if config_changed:
@@ -423,6 +430,8 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
                 "name": agent_cfg.name,
                 "description": request.description if "description" in fields_set else agent_cfg.description,
             }
+            if "display_name" in fields_set:
+                updated["display_name"] = request.display_name or None
 
             new_tool_groups = request.tool_groups if "tool_groups" in fields_set else agent_cfg.tool_groups
             if new_tool_groups is not None:

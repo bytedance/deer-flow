@@ -21,6 +21,79 @@ const MOCK_AGENTS = [
 ];
 
 test.describe("Agent chat", () => {
+  test("display name length counts emoji as code points", async ({ page }) => {
+    mockLangGraphAPI(page, { agents: [MOCK_AGENTS[0]!] });
+    let savedName: string | undefined;
+    await page.route("**/api/agents/test-agent", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      const request = route.request().postDataJSON() as {
+        display_name: string;
+      };
+      savedName = request.display_name;
+      await route.fulfill({ json: { ...MOCK_AGENTS[0], ...request } });
+    });
+    await page.goto("/workspace/agents");
+    await page.getByTitle("Agent settings", { exact: true }).click();
+    const input = page.getByLabel("Display name", { exact: true });
+    await input.fill("🦌".repeat(101));
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(
+      page.getByText("Display name must be at most 100 Unicode code points."),
+    ).toBeVisible();
+    expect(savedName).toBeUndefined();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await input.fill("🦌".repeat(100));
+    await expect(input).toHaveValue("🦌".repeat(100));
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => savedName).toBe("🦌".repeat(100));
+    await expect(page.getByRole("dialog")).toBeHidden();
+  });
+
+  test("Unicode display names keep the stable agent route and run context", async ({
+    page,
+  }, testInfo) => {
+    let streamBody: Record<string, unknown> | undefined;
+    const agent = { ...MOCK_AGENTS[0]!, display_name: "" };
+    mockLangGraphAPI(page, {
+      agents: [agent],
+      runStreamHandler: async (route) => {
+        streamBody = route.request().postDataJSON() as Record<string, unknown>;
+        await handleRunStream(route);
+      },
+    });
+    await page.route("**/api/agents/test-agent", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      const request = route.request().postDataJSON() as {
+        display_name: string;
+      };
+      expect(request.display_name).toBe("代码审查助手");
+      agent.display_name = request.display_name;
+      await route.fulfill({ json: agent });
+    });
+    await page.goto("/workspace/agents");
+    await page.getByTitle("Agent settings", { exact: true }).click();
+    await page.getByLabel("Display name", { exact: true }).fill("代码审查助手");
+    await page.screenshot({
+      path: testInfo.outputPath("display-name-settings.png"),
+    });
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.getByRole("dialog")).toBeHidden();
+    await expect(page.getByText("代码审查助手", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Chat", exact: true }).click();
+    await page.waitForURL("**/workspace/agents/test-agent/chats/**");
+    await expect(
+      page.getByText("代码审查助手", { exact: true }).first(),
+    ).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("display-name-gallery.png"),
+    });
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await textarea.fill("Review this code");
+    await textarea.press("Enter");
+    await expect.poll(() => streamBody).toBeDefined();
+    expect(streamBody).toMatchObject({ context: { agent_name: "test-agent" } });
+  });
+
   test("agent gallery page loads and shows agents", async ({ page }) => {
     mockLangGraphAPI(page, { agents: MOCK_AGENTS });
 
@@ -30,6 +103,51 @@ test.describe("Agent chat", () => {
     await expect(page.getByText("test-agent")).toBeVisible({
       timeout: 15_000,
     });
+  });
+
+  for (const { label, toolGroups } of [
+    { label: "empty", toolGroups: [] },
+    { label: "unrestricted", toolGroups: null },
+  ]) {
+    test(`agent gallery shows skill badges with ${label} tool groups`, async ({
+      page,
+    }) => {
+      mockLangGraphAPI(page, {
+        agents: [
+          {
+            ...MOCK_AGENTS[0]!,
+            tool_groups: toolGroups,
+            skills: ["data-analysis"],
+          },
+        ],
+      });
+
+      await page.goto("/workspace/agents");
+
+      const card = page.locator('[data-slot="card"]').filter({
+        has: page.getByText("test-agent", { exact: true }),
+      });
+      await expect(card).toBeVisible({ timeout: 15_000 });
+      await expect(
+        card.getByText("data-analysis", { exact: true }),
+      ).toBeVisible();
+    });
+  }
+
+  test("agent gallery hides the badge block with no tool groups or skills", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      agents: [{ ...MOCK_AGENTS[0]!, tool_groups: [], skills: [] }],
+    });
+
+    await page.goto("/workspace/agents");
+
+    const card = page.locator('[data-slot="card"]').filter({
+      has: page.getByText("test-agent", { exact: true }),
+    });
+    await expect(card).toBeVisible({ timeout: 15_000 });
+    await expect(card.locator('[data-slot="card-content"]')).toHaveCount(0);
   });
 
   test("agent chat page loads with input box and AI disclaimer", async ({

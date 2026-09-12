@@ -52,9 +52,10 @@ export async function fetchScheduledTaskRuns(
 export type ScheduledTaskPayload = {
   context_mode: "fresh_thread_per_run" | "reuse_thread";
   thread_id?: string | null;
+  assistant_id?: string | null;
   title: string;
   prompt: string;
-  schedule_type: "once" | "cron";
+  schedule_type: "once" | "cron" | "interval";
   schedule_spec: Record<string, unknown>;
   timezone: string;
 };
