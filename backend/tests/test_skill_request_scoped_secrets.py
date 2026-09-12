@@ -1055,7 +1055,7 @@ class TestBashToolInjectsActiveSecrets:
             out = tools_mod.bash_tool.func(runtime=runtime, command="echo hi", description="run local skill")
 
         assert out == "done"
-        assert captured["command"] == "echo hi"
+        assert captured["command"] == "export DEERFLOW_USER_ID=test-user-autouse; echo hi"
         assert captured["env"] == {"ERP_TOKEN": "tok-456"}
         assert captured["timeout"] == 42
 
