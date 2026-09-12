@@ -154,9 +154,7 @@ config: |
   knowledge_base:
     enabled: true
     scope_selection_enabled: false
-    base_url: http://ragflow:9380
-    api_key: $RAGFLOW_API_KEY
-    # Retrieval defaults are optional.
+    # Provider connection/retrieval settings belong on the knowledge_search tool.
   # Tools MUST be listed explicitly - the agent gets none otherwise
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The chart
   # default in values.yaml enables the sandbox tools + web tools (web_search,

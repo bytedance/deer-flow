@@ -1,20 +1,15 @@
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class KnowledgeBaseConfig(BaseModel):
-    """Hot-reloadable RAGFlow retrieval settings."""
+    """Hot-reloadable DeerFlow knowledge capability settings.
+
+    Provider connection and retrieval options belong to the provider tool
+    entry (for example ``tools[].use: ...ragflow...``), not this generic
+    capability block.
+    """
 
     model_config = ConfigDict(validate_default=True)
 
     enabled: bool = Field(default=False)
     scope_selection_enabled: bool = Field(default=False)
-    base_url: AnyHttpUrl = Field(default="http://localhost:9380")
-    api_key: SecretStr | None = Field(default=None)
-    timeout: float = Field(default=30, gt=0, le=600)
-
-    page_size: int = Field(default=8, ge=1, le=100)
-    similarity_threshold: float = Field(default=0.2, ge=0, le=1)
-    vector_similarity_weight: float = Field(default=0.3, ge=0, le=1)
-    top_k: int = Field(default=256, ge=1, le=1024)
-    max_chars_per_chunk: int = Field(default=800, ge=1, le=100_000)
-    max_total_chars: int = Field(default=8000, ge=1, le=1_000_000)

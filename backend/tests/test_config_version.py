@@ -177,6 +177,60 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     assert upgraded["verification"]["judge_model_name"] is None
 
 
+def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
+    """The v42 migration keeps provider settings on the RAGFlow tool entry."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
+    assert expected_version >= 42
+
+    config_path = tmp_path / "config.yaml"
+    legacy = {
+        "config_version": 41,
+        "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        "knowledge_base": {
+            "enabled": True,
+            "scope_selection_enabled": True,
+            "base_url": "http://legacy-ragflow:9380",
+            "api_key": "$LEGACY_RAGFLOW_API_KEY",
+            "page_size": 12,
+        },
+        "tools": [
+            {
+                "name": "knowledge_search",
+                "group": "knowledge",
+                "use": "deerflow.community.ragflow.tools:knowledge_search_tool",
+                # Explicit tool values win over the legacy global value.
+                "api_key": "$CURRENT_RAGFLOW_API_KEY",
+            }
+        ],
+    }
+    config_path.write_text(yaml.dump(legacy), encoding="utf-8")
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version, result.stdout + result.stderr
+    assert upgraded["knowledge_base"] == {
+        "enabled": True,
+        "scope_selection_enabled": True,
+    }
+    tool = upgraded["tools"][0]
+    assert tool["base_url"] == "http://legacy-ragflow:9380"
+    assert tool["page_size"] == 12
+    assert tool["api_key"] == "$CURRENT_RAGFLOW_API_KEY"
+
+
 def _load_repo_example() -> dict:
     """Load the real repo config.example.yaml (first-run template)."""
     example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"

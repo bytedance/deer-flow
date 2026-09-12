@@ -1046,6 +1046,12 @@ snapshot for replay and history. Ordinary chats never show or submit this
 selector. The Gateway validates every snapshot, intersects it with the
 operator's dataset allowlist, propagates the execution-only scope to native and
 durable subagents, and removes it from model inputs and external traces.
+The `knowledge_base` block is provider-neutral and only controls whether the
+knowledge capability and selector are enabled. RAGFlow connection, dataset
+allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,
+`page_size`, thresholds, and output limits) must be configured on the
+`tools[].name: knowledge_search` entry; they are never read from
+`knowledge_base`.
 When answering a pending clarification, an explicitly submitted current
 selector snapshot wins; clients that omit it inherit the prior turn's accepted
 scope. Edit-and-regenerate follows the same fallback, and the file catalog is

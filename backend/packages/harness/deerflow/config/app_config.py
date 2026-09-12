@@ -240,7 +240,10 @@ class AppConfig(BaseModel):
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
     task_continuity: TaskContinuityConfig = Field(default_factory=TaskContinuityConfig, description="Thread-local notes and compacted-source recall")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
-    knowledge_base: KnowledgeBaseConfig = Field(default_factory=KnowledgeBaseConfig, description="RAGFlow knowledge-base retrieval and management configuration")
+    knowledge_base: KnowledgeBaseConfig = Field(
+        default_factory=KnowledgeBaseConfig,
+        description="Provider-agnostic knowledge capability and custom-agent scope-selection configuration",
+    )
     agents_api: AgentsApiConfig = Field(default_factory=AgentsApiConfig, description="Custom-agent management API configuration")
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")

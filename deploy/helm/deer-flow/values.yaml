@@ -252,19 +252,11 @@ config: |
   config_version: 42
   log_level: info
 
-  # Optional tenant-shared RAGFlow retrieval and custom-agent scope selector.
+  # Optional provider-agnostic knowledge capability and custom-agent scope selector.
+  # RAGFlow connection/retrieval settings belong on the knowledge_search tool.
   knowledge_base:
     enabled: false
     scope_selection_enabled: false
-    base_url: http://ragflow:9380
-    api_key: null
-    timeout: 30
-    page_size: 8
-    similarity_threshold: 0.2
-    vector_similarity_weight: 0.3
-    top_k: 256
-    max_chars_per_chunk: 800
-    max_total_chars: 8000
 
   models: []
   # Example (uncomment & set the matching secret in `secrets`):
