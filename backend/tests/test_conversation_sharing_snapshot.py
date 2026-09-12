@@ -2802,3 +2802,95 @@ def test_strip_gfm_table_cells_never_pair_backticks_across_rows():
     # A pipe-less one-column header is a table too (micromark accepts it).
     out = strip("head\n| --- |\n| <think>onecol-secret</think> ` |")
     assert "onecol-secret" not in out
+
+
+def test_strip_gfm_table_inside_quote_and_list_containers_splits_cells():
+    """Round-21 (bot 09-12 11:35): remarkGfm peels list markers and item
+    continuation indentation along with the quote prefix before its table
+    tokenizer classifies a row. The prefix peel kept the ``- `` marker on
+    the header while the greedy quote peel ate the delimiter row's
+    continuation indent, the cell counts never matched, and backticks
+    paired across rows to preserve reasoning the renderer serves as
+    separate cells."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    # The reported shape: a table inside a blockquote inside a list item.
+    out = strip("> - | a ` |\n>   | --- |\n>   | <think>secret</think> ` tail |")
+    assert "secret" not in out
+    assert "tail" in out
+
+    # A bare list item carries the same marker-vs-indent asymmetry.
+    out = strip("- | a ` |\n  | --- |\n  | <think>list-secret</think> ` tail |")
+    assert "list-secret" not in out
+    assert "tail" in out
+
+    # Balanced spans inside one cell remain code (no over-strip).
+    out = strip("> - | `<think>keep-in-code</think>` |\n>   | --- |\n>   | plain |")
+    assert "keep-in-code" in out
+
+
+def test_strip_skips_markdown_scan_when_no_think_opener_exists(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Round-21 (bot 09-12 11:35): without a case-insensitive ``<think``
+    opener nothing can be removed — masking can only hide openers, never
+    add one — so the strip must not pair a single inline code span. A 2 MiB
+    backtick-dense message paid ~2 s / ~164 MiB per call on create and on
+    every anonymous read."""
+    from app.gateway.shares import snapshot as snapshot_module
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    paired_lengths = []
+    real_pairing = snapshot_module._commonmark_inline_code_spans
+
+    def spy(text):
+        paired_lengths.append(len(text))
+        return real_pairing(text)
+
+    monkeypatch.setattr(snapshot_module, "_commonmark_inline_code_spans", spy)
+    big = "`x`" * 400_000  # ~1.2 MiB of dense balanced inline-code spans
+    out = strip(big)
+    assert paired_lengths == []
+    assert out == big
+
+
+def test_strip_no_opener_fast_path_trim_matches_the_shadow_exactly():
+    """Round-21: the no-opener fast path must reproduce the shadow-based
+    trim byte for byte. Whitespace inside an edge code region is masked
+    (not strippable), so a plain ``text.strip()`` would silently dedent
+    served indented code or drop a closing fence's trailing terminator."""
+    from app.gateway.shares.snapshot import (
+        _code_regions,
+    )
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    corpus = [
+        "    code line   \n",
+        "```\ncode\n```   \n",
+        "```\ncode",
+        "  hello world  \n",
+        "  `x` `x`  ",
+        "> - list\n  continuation  ",
+        "text\n\n    ind\n\nmore",
+        "| a |\n| --- |\n| b |  ",
+        "tail </think> end  ",
+        "\tTab-indented tail\t",
+    ]
+    for text in corpus:
+        shadow_parts = []
+        cursor = 0
+        for begin, end in _code_regions(text):
+            shadow_parts.append(text[cursor:begin])
+            shadow_parts.append("\x00" * (end - begin))
+            cursor = end
+        shadow_parts.append(text[cursor:])
+        shadow = "".join(shadow_parts)
+        trim_begin = len(shadow) - len(shadow.lstrip())
+        trim_end = len(shadow.rstrip())
+        assert strip(text) == text[trim_begin:trim_end], (text, strip(text))

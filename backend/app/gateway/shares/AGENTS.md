@@ -34,7 +34,13 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   containers, and lazy paragraphs); nested reasoning tags match to their
   outer close by depth; and GFM table rows and cells are separate inline
   contexts (remarkGfm splits them at the block level before inline parsing,
-  so backticks never pair across a row or an unescaped pipe). Once a list
+  so backticks never pair across a row or an unescaped pipe; each row's
+  prefix peels the full container stack — quote markers, list markers, and
+  item continuation indentation — the way the renderer's containers do).
+  Messages with no case-insensitive `<think` opener skip Markdown pairing
+  entirely: masking can only hide openers, never add one, so nothing can
+  be removed and the edge trim is computed from the line-level walk alone.
+  Once a list
   or quote appears, document-level fence/indent protection is suppressed:
   item indentation is not modeled, so possible code is over-stripped rather
   than reasoning leaked.

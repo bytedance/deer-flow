@@ -591,12 +591,36 @@ _GFM_TABLE_DELIMITER_RE = re.compile(r"[ \t]{0,4}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]
 # Blockquote-marker run (0-3 leading spaces, then one or more ``>`` markers)
 # consumed by the container construct before the table tokenizer sees a row.
 _GFM_QUOTE_MARKER_RE = re.compile(r"[ \t]{0,3}(?:>[ \t]*)+")
+# List marker (0-3 leading spaces, bullet or ordered, at least one
+# separator) peeled the same way: remarkGfm consumes the whole container
+# stack, so a row inside ``> -`` reaches the tokenizer with neither the
+# ``> `` nor the ``- ``. Continuation rows of the opened item carry its
+# content indentation instead of the marker.
+_GFM_LIST_MARKER_RE = re.compile(r"[ \t]{0,3}(?:[-+*]|\d{1,9}[.)])[ \t]+")
+_GFM_ROW_INDENT_RE = re.compile(r"[ \t]*")
 
 
 def _gfm_row_prefix(line: str) -> int:
-    """Length of the leading blockquote-marker run on one segment line."""
-    match = _GFM_QUOTE_MARKER_RE.match(line)
-    return match.end() if match is not None else 0
+    """Length of the leading container run plus continuation indentation.
+
+    The renderer peels blockquote markers, list markers, and the opened
+    item's content indentation before its table tokenizer classifies the
+    row, so the cell split must peel the same prefix on every row: keeping
+    a list marker on the header while the greedy quote peel eats the
+    delimiter row's continuation indent left the cell counts permanently
+    unequal — the table went undetected and backticks paired across rows.
+    Leading whitespace is never cell content, so consuming it after the
+    markers cannot move a pipe.
+    """
+    offset = 0
+    while True:
+        marker = _GFM_QUOTE_MARKER_RE.match(line, offset)
+        if marker is None:
+            marker = _GFM_LIST_MARKER_RE.match(line, offset)
+        if marker is None:
+            break
+        offset = marker.end()
+    return _GFM_ROW_INDENT_RE.match(line, offset).end()
 
 
 def _gfm_unescaped_pipes(content: str) -> list[int]:
@@ -665,6 +689,9 @@ def _segment_gfm_inline_contexts(segment):
     across rows or unescaped pipes; scanning the whole segment would pair
     them and preserve ``<think>`` reasoning the renderer serves as prose. A
     table interrupts a paragraph, so spans never bridge into or out of one.
+    Every row's prefix peels the renderer's full container stack — quote
+    markers, list markers, and the opened item's continuation indentation —
+    before classification, mirroring what reaches remarkGfm's tokenizer.
     When the renderer would NOT split (e.g. a lazy delimiter line inside a
     quote), the split still happens — over-stripping, the module's
     leak-vs-loss safe direction. Body rows run to the segment end: the walk
@@ -955,7 +982,7 @@ def _iter_line_spans(text: str):
         yield line_start, content_end, line_end
 
 
-def _code_regions(text: str) -> list[tuple[int, int]]:
+def _code_regions(text: str, *, inline_spans: bool = True) -> list[tuple[int, int]]:
     """Byte extents the Markdown renderer will treat as code: fenced code
     blocks (CommonMark opener/closer rules — backtick fences reject info
     strings containing backticks, closers need at least the opener's
@@ -966,7 +993,15 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
     The walk is line-structured (linear in the text; the old DOTALL fence
     regex was quadratic per line start) and yields disjoint regions, which
     is what makes the single-layer marker restore in
-    `_strip_think_blocks_outside_markdown_code` safe."""
+    `_strip_think_blocks_outside_markdown_code` safe.
+
+    With ``inline_spans=False`` the inline code-span pairing is skipped and
+    only the line-level regions (fences, indented code) are returned. This
+    serves callers that need only region extents: an inline span starts
+    and ends on a backtick, so it can never reach into edge whitespace,
+    while pairing spans on a backtick-dense message costs the full
+    index/tuple/materialization pass that a 2 MiB input measures at
+    ~2 s / ~164 MiB."""
     regions: list[tuple[int, int]] = []
     n = len(text)
 
@@ -1017,10 +1052,11 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
         nonlocal segment_start
         if segment_start is None:
             return
-        segment = text[segment_start:segment_end]
-        for begin, end in _segment_gfm_inline_contexts(segment):
-            for cbegin, cend in _commonmark_inline_code_spans(segment[begin:end]):
-                regions.append((segment_start + begin + cbegin, segment_start + begin + cend))
+        if inline_spans:
+            segment = text[segment_start:segment_end]
+            for begin, end in _segment_gfm_inline_contexts(segment):
+                for cbegin, cend in _commonmark_inline_code_spans(segment[begin:end]):
+                    regions.append((segment_start + begin + cbegin, segment_start + begin + cend))
         segment_start = None
 
     def close_indented() -> None:
@@ -1149,7 +1185,7 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
                 # already suppresses code-block protection in such messages.
                 saw_quotelike = True
                 flush_segment()
-                if preserve_inline:
+                if preserve_inline and inline_spans:
                     for begin, end in _commonmark_inline_code_spans(leaf_body):
                         regions.append((start + leaf_offset + begin, start + leaf_offset + end))
                 kind, tag, ends_at_blank, closes_on_open = _html_open(leaf_body)
@@ -1197,7 +1233,7 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
             # code is still code to the renderer, so it is protected too
             # (thematic/setext lines carry no backticks by shape).
             flush_segment()
-            if _HEADING_RE.match(content) is not None:
+            if _HEADING_RE.match(content) is not None and inline_spans:
                 for begin, end in _commonmark_inline_code_spans(content):
                     regions.append((start + begin, start + end))
             indented_eligible = True
@@ -1273,6 +1309,24 @@ def _find_matching_think_close(text: str, start: int) -> tuple[int, int] | None:
 
 def _strip_think_blocks_outside_markdown_code(text: str) -> str:
     """Remove model reasoning while preserving literal tags in code examples."""
+    if _THINK_OPEN_PREFIX_RE.search(text) is None:
+        # No opener anywhere — code masking can only hide openers, never
+        # add one, so nothing can be removed. Reproduce the shadow trim
+        # below without pairing a single span: only line-level regions
+        # (fences, indented code) can reach the text's edges, because an
+        # inline span starts and ends on a backtick, and whitespace inside
+        # an edge region is masked and therefore not strippable — a plain
+        # ``text.strip()`` would dedent served indented code or drop a
+        # closing fence's trailing terminator.
+        regions = _code_regions(text, inline_spans=False)
+        begin = len(text) - len(text.lstrip())
+        end = len(text.rstrip())
+        for region_begin, region_end in regions:
+            if region_begin < begin:
+                begin = region_begin
+            if region_end > end:
+                end = region_end
+        return text[begin:end]
     # Build an equal-length classification shadow whose NULs cannot introduce
     # ``<think>`` syntax. Exact source offsets then remain valid without any
     # collision-prone sentinel selection or per-code-region restoration.
