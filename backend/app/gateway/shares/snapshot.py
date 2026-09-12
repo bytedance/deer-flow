@@ -271,6 +271,11 @@ _ENTITY_NAMES = {
     "comma": ",",
     "period": ".",
     "sol": "/",
+    # The only multi-character pure-ASCII entity in the HTML5 table
+    # (enumerated over html.entities.html5): "fj" extends an identifier,
+    # so the renderer turns ``&fjlig;secret`` into ``fjsecret`` and the
+    # classification shadow must decode it too.
+    "fjlig": "fj",
     "colon": ":",
     "semi": ";",
     "lt": "<",
@@ -666,57 +671,85 @@ def _segment_gfm_inline_contexts(segment):
     never leaves a blank line inside a segment, and micromark accepts any
     non-blank line as a body row.
     """
-    # No table can exist without a pipe and a dash somewhere: skip the
-    # per-line materialization entirely for pipe-free (or dash-free)
-    # segments — a permitted many-short-lines message is one inline
-    # context, not one tuple-and-string pair per line.
-    if "|" not in segment or "-" not in segment:
+    # Sound non-table short-circuit (a behavior contract, not a hint): a
+    # delimiter cell needs at least one dash, and a table needs a pipe or a
+    # colon somewhere — micromark renders ``ab\n:-`` as a real pipe-less
+    # table, so pipe-absence alone would pair backticks across its rows.
+    # A lone colon in prose just forfeits the fast path.
+    if "-" not in segment or ("|" not in segment and ":" not in segment):
         yield 0, len(segment)
         return
-    lines: list[tuple[int, int, int]] = []
-    for match in re.finditer(r"[^\r\n]*(?:\r\n|\r|\n|$)", segment):
-        line_start, line_end = match.span()
-        if line_start == len(segment):
-            break
-        content_end = line_end
-        if content_end > line_start and segment[content_end - 1] == "\n":
-            content_end -= 1
-            if content_end > line_start and segment[content_end - 1] == "\r":
-                content_end -= 1
-        elif content_end > line_start and segment[content_end - 1] == "\r":
-            content_end -= 1
-        lines.append((line_start, content_end, line_end))
-    views = [segment[start:end] for start, end, _ in lines]
 
-    pre_start = 0
-    i = 0
-    while i + 1 < len(lines):
-        header_prefix = _gfm_row_prefix(views[i])
-        delimiter_prefix = _gfm_row_prefix(views[i + 1])
-        header_content = views[i][header_prefix:]
-        delimiter_content = views[i + 1][delimiter_prefix:]
+    # Streaming walk: only the current and next line are retained (a
+    # permitted many-short-lines message with one ``|-`` measured ~4.8 s /
+    # ~115 MiB when every line kept a tuple and a string), and the table
+    # scan is the original pairwise algorithm expressed over an iterator.
+    line_iterator = iter(_iter_line_spans(segment))
+    buffered = None
+    last_line_end = 0
+
+    def advance():
+        nonlocal buffered
+        if buffered is not None:
+            span = buffered
+            buffered = None
+            return span
+        return next(line_iterator, None)
+
+    pre_start: int | None = None
+    current = advance()
+    while current is not None:
+        start, content_end, line_end = current
+        last_line_end = line_end
+        view = segment[start:content_end]
+        following = advance()
+        if following is None:
+            # Last line: no header/delimiter pair can start here; it joins
+            # the pending pre-table range.
+            if pre_start is None:
+                pre_start = start
+            current = None
+            continue
+        f_start, f_end, f_line_end = following
+        last_line_end = f_line_end
+        following_view = segment[f_start:f_end]
+        header_prefix = _gfm_row_prefix(view)
+        delimiter_prefix = _gfm_row_prefix(following_view)
+        header_content = view[header_prefix:]
+        delimiter_content = following_view[delimiter_prefix:]
         header_pipes = _gfm_unescaped_pipes(header_content)
         if not _gfm_table_starts(header_content, header_pipes, delimiter_content):
-            i += 1
+            if pre_start is None:
+                pre_start = start
+            current = following
             continue
-        if pre_start < i:
-            yield lines[pre_start][0], lines[i][0]
-        yield from _gfm_row_cell_ranges(lines[i][0], header_prefix, header_content, header_pipes)
-        k = i + 2
-        while k < len(lines) and not _is_commonmark_blank(views[k]):
-            body_prefix = _gfm_row_prefix(views[k])
-            body_content = views[k][body_prefix:]
+        if pre_start is not None and pre_start < start:
+            yield pre_start, start
+        pre_start = None
+        yield from _gfm_row_cell_ranges(start, header_prefix, header_content, header_pipes)
+        # Body rows run until a blank line or the segment end (the walk
+        # never leaves a blank inside a segment; the check is defensive).
+        while True:
+            row = advance()
+            if row is None:
+                current = None
+                break
+            r_start, r_end, r_line_end = row
+            last_line_end = r_line_end
+            row_view = segment[r_start:r_end]
+            if _is_commonmark_blank(row_view):
+                current = None
+                break
+            body_prefix = _gfm_row_prefix(row_view)
+            body_content = row_view[body_prefix:]
             yield from _gfm_row_cell_ranges(
-                lines[k][0],
+                r_start,
                 body_prefix,
                 body_content,
                 _gfm_unescaped_pipes(body_content),
             )
-            k += 1
-        i = k
-        pre_start = k
-    if pre_start < len(lines):
-        yield lines[pre_start][0], lines[-1][2]
+    if pre_start is not None:
+        yield pre_start, last_line_end
 
 
 def _quote_depth(content: str) -> int:
@@ -1302,7 +1335,10 @@ def _collapse_separators_once(
             if entity is not None:
                 decoded, end = entity
                 normalized.append(decoded)
-                spans.append((i, end - 1))
+                # One span per OUTPUT character: a multi-character decode
+                # (``&fjlig;`` -> ``fj``) must keep the spans list
+                # position-aligned with the normalized text.
+                spans.extend([(i, end - 1)] * len(decoded))
                 i = end
                 continue
         if char == "\\":
@@ -1449,18 +1485,23 @@ class _SparseSpans:
     otherwise materialize.
     """
 
-    __slots__ = ("_length", "_indexes", "_firsts", "_lasts", "_prefix_shrinks")
+    __slots__ = ("_length", "_indexes", "_firsts", "_lasts", "_output_lengths", "_prefix_shrinks")
 
-    def __init__(self, length: int, decodes: list[tuple[int, int, int]] | tuple[tuple[int, int, int], ...]) -> None:
+    def __init__(self, length: int, decodes) -> None:
         decodes = sorted(decodes)
         self._length = length
         self._indexes = [record[0] for record in decodes]
         self._firsts = [record[1] for record in decodes]
         self._lasts = [record[2] for record in decodes]
+        # Output length per record (1 for single-character decodes, 2 for
+        # ``&fjlig;``): interior positions of a multi-character decode share
+        # the record's span, exactly like the materialized path's per-char
+        # fill, and the shrink a record applies is span_len - output_len.
+        self._output_lengths = [record[3] for record in decodes]
         prefix: list[int] = []
         running = 0
-        for _, first, last in decodes:
-            running += last - first
+        for _, first, last, output_length in decodes:
+            running += last - first + 1 - output_length
             prefix.append(running)
         self._prefix_shrinks = prefix
 
@@ -1471,7 +1512,10 @@ class _SparseSpans:
         position = bisect_left(self._indexes, index)
         if position < len(self._indexes) and self._indexes[position] == index:
             return (self._firsts[position], self._lasts[position])
-        shrink = self._prefix_shrinks[position - 1] if position > 0 else 0
+        previous = position - 1
+        if previous >= 0 and index < self._indexes[previous] + self._output_lengths[previous]:
+            return (self._firsts[previous], self._lasts[previous])
+        shrink = self._prefix_shrinks[previous] if previous >= 0 else 0
         return (index + shrink, index + shrink)
 
 
@@ -1498,13 +1542,13 @@ def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _Sp
     anonymous resolution.
     """
     current = text
-    records: list[tuple[int, int, int]] = []
+    records: list[tuple[int, int, int, int]] = []
     for _ in range(_COLLAPSE_MAX_PASSES):
         if _HTML_ENTITY_RE.search(current) is None and not (decode_percent and "%" in current):
             break
         spans = _SparseSpans(len(current), records)
         out: list[str] = []
-        new_records: list[tuple[int, int, int]] = []
+        new_records: list[tuple[int, int, int, int]] = []
         carried = 0
         cursor = 0
         out_index = 0
@@ -1535,12 +1579,12 @@ def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _Sp
                 # their positions move LEFT by the cumulative shrink of the
                 # decodes before them (a decode shortens everything after it).
                 while carried < len(records) and records[carried][0] < i:
-                    record_index, first, last = records[carried]
-                    new_records.append((record_index - delta, first, last))
+                    record_index, first, last, output_length = records[carried]
+                    new_records.append((record_index - delta, first, last, output_length))
                     carried += 1
                 first = spans[i][0]
                 last = spans[end - 1][1]
-                new_records.append((out_index, first, last))
+                new_records.append((out_index, first, last, len(decoded)))
                 out.append(decoded)
                 out_index += len(decoded)
                 delta += (end - i) - len(decoded)
@@ -1556,8 +1600,8 @@ def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _Sp
         if not changed:
             break
         while carried < len(records):
-            record_index, first, last = records[carried]
-            new_records.append((record_index - delta, first, last))
+            record_index, first, last, output_length = records[carried]
+            new_records.append((record_index - delta, first, last, output_length))
             carried += 1
         out.append(current[cursor:])
         current = "".join(out)

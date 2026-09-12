@@ -2485,6 +2485,51 @@ def test_plain_workspace_word_token_memory_stays_bounded():
     assert peak < 64 * 1024 * 1024, f"peak {peak / 1024 / 1024:.0f} MiB"
 
 
+def test_colon_delimiter_table_still_splits_inline_contexts():
+    """A pipe-less segment can be a real GFM table: micromark renders
+    ``ab\n:-`` as one, so the fast path must not pair backticks across the
+    rows (willem's 09-12 repro — a behavior change, not a shortcut)."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    out = strip("x`\n:-\n<think>secret-colon-table</think> y`")
+    assert "secret-colon-table" not in out
+
+
+def test_many_short_lines_with_table_introducers_stay_bounded():
+    """One ``|-`` anywhere must not defeat the bounded-line guarantee: the
+    slow path retains no per-line tuples or strings either (bot's 09-12
+    measurement: ~4.8 s / ~115 MiB for the defeated shape)."""
+    import tracemalloc
+
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    attack = "a\n" * 500_000 + "|-"
+    tracemalloc.start()
+    try:
+        out = strip(attack + "\n<think>secret-introducers</think>\n")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert "secret-introducers" not in out
+    assert peak < 48 * 1024 * 1024, f"peak {peak / 1024 / 1024:.0f} MiB"
+
+
+def test_multichar_ascii_entity_fjlig_manufactures_route_syntax():
+    """``&fjlig;`` is the only multi-character pure-ASCII entity in the
+    HTML5 table (enumerated; the set is provably complete), and it extends
+    an identifier: the renderer turns ``&fjlig;secret`` into ``fjsecret``,
+    so the classification shadow must decode it too (bot's 09-12 P1)."""
+    neutralize = _neutralize_private_references
+    result = neutralize("[x](/workspace/chats/&fjlig;secret)")
+    assert "fjsecret" not in result
+    assert "&fjlig;" not in result
+    assert "[private artifact omitted]" in result
+
+
 def test_many_short_lines_strip_memory_stays_bounded():
     """A many-short-lines message must not materialize per-line tuples.
 
@@ -2688,6 +2733,8 @@ def test_sparse_escape_decode_matches_materialized_collapse():
         "x&amp; x&amp; &amp;#47;api&amp;#47;threads&amp;#47;id",
         "x&amp;amp; y&Tab; &#37;2Fmnt%2Fuser-data",
         "x%2541 y&amp;#47;workspace&#47;chats&#47;id",
+        "/workspace/chats/&fjlig;secret",
+        "x&amp; &fjlig; &amp;#47;api&amp;#47;threads&amp;#47;fjid",
     ]
 
     def reference(text, decode_percent):
