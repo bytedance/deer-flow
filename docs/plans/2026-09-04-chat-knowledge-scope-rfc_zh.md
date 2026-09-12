@@ -61,6 +61,12 @@ knowledge_base:
   scope_selection_enabled: false  # 是否开放对话输入框的知识库范围选择按钮；默认 false
 ```
 
+`knowledge_base` 只描述 DeerFlow 自身的、与 provider 无关的知识能力和
+范围选择开关。RAGFlow 的连接信息、dataset allowlist 以及检索参数必须配置
+在 `tools[].name: knowledge_search` 条目中；实现不得从 `knowledge_base` 回退
+读取这些 provider-specific 字段。未来接入其他知识 provider 时，也应由各自
+的工具条目承载连接和检索配置。
+
 `scope_selection_enabled` 是部署级 UI 开关，缺省为 `false`，由运维通过配置文件控制，不提供用户设置页或新的配置写入 API。
 
 - `false`：隐藏选择按钮，不初始化 selector 状态、不加载选择目录，也不为新消息自动附加 scope；历史消息仍按已保存的 display 回显。

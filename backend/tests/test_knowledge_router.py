@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
 
 from app.gateway.auth.models import User
 from app.gateway.deps import get_config
@@ -23,15 +22,17 @@ def _config(
 ) -> SimpleNamespace:
     tool = SimpleNamespace(
         use=provider,
-        model_extra={"datasets": datasets} if datasets is not None else {},
+        model_extra={
+            "base_url": "http://ragflow.test",
+            "api_key": api_key,
+            "timeout": 30,
+            **({"datasets": datasets} if datasets is not None else {}),
+        },
     )
     return SimpleNamespace(
         knowledge_base=SimpleNamespace(
             enabled=enabled,
             scope_selection_enabled=scope_selection_enabled,
-            base_url="http://ragflow.test",
-            api_key=SecretStr(api_key) if api_key is not None else None,
-            timeout=30,
         ),
         get_tool_config=lambda name: tool if name == "knowledge_search" else None,
     )
@@ -216,6 +217,7 @@ def test_retrieval_catalog_documents_marks_only_searchable_files_selectable(
 @pytest.mark.parametrize(
     "config",
     [
+        _config(enabled=False, scope_selection_enabled=True),
         _config(scope_selection_enabled=False),
         _config(
             scope_selection_enabled=True,

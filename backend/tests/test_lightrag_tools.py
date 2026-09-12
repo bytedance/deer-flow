@@ -362,6 +362,7 @@ def test_tool_assembly_hides_credentials_without_network_io(monkeypatch: pytest.
     )
     config = SimpleNamespace(
         tools=[tool_config],
+        knowledge_base=SimpleNamespace(enabled=True),
         sandbox=SimpleNamespace(use="example.remote:Sandbox"),
         skill_evolution=SimpleNamespace(enabled=False),
         models=[],

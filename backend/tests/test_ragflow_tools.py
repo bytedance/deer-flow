@@ -963,6 +963,27 @@ def test_retrieval_settings_allow_omitting_dataset_ids(monkeypatch: pytest.Monke
     assert config.datasets is None
 
 
+def test_retrieval_settings_do_not_fall_back_to_knowledge_capability_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_global = SimpleNamespace(
+        enabled=True,
+        base_url="http://legacy-ragflow.test",
+        api_key="legacy-secret",
+        timeout=60,
+    )
+    app_config = SimpleNamespace(
+        knowledge_base=legacy_global,
+        get_tool_config=lambda _name: None,
+    )
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: app_config)
+
+    settings, error = ragflow_tools._settings_or_error()
+
+    assert settings is None
+    assert error == "Error: knowledge_search is not configured; add its RAGFlow settings to the tools list in config.yaml."
+
+
 @pytest.mark.anyio
 async def test_explicitly_empty_dataset_allowlist_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(all_datasets=[_dataset(DATASET_ID_1, "Must remain inaccessible")])
@@ -998,6 +1019,7 @@ def test_tool_assembly_hides_bound_dataset_ids_without_network_io(monkeypatch: p
     )
     config = SimpleNamespace(
         tools=[tool_config],
+        knowledge_base=SimpleNamespace(enabled=True),
         sandbox=SimpleNamespace(use="example.remote:Sandbox"),
         skill_evolution=SimpleNamespace(enabled=False),
         models=[],
@@ -1014,6 +1036,29 @@ def test_tool_assembly_hides_bound_dataset_ids_without_network_io(monkeypatch: p
     assert DATASET_ID_2 not in assembled.description
     assert "ragflow-secret" not in assembled.description
     assert {tool.name for tool in tools}.isdisjoint({"list_knowledge_bases"})
+
+
+def test_tool_assembly_hides_configured_knowledge_provider_when_capability_is_disabled() -> None:
+    tool_config = ToolConfig(
+        name="knowledge_search",
+        group="knowledge",
+        use="deerflow.community.ragflow.tools:knowledge_search_tool",
+        base_url="http://ragflow.test",
+        api_key="ragflow-secret",
+    )
+    config = SimpleNamespace(
+        tools=[tool_config],
+        knowledge_base=SimpleNamespace(enabled=False),
+        sandbox=SimpleNamespace(use="example.remote:Sandbox"),
+        skill_evolution=SimpleNamespace(enabled=False),
+        models=[],
+        acp_agents={},
+        get_model_config=lambda _name: None,
+    )
+
+    tools = get_available_tools(include_mcp=False, app_config=config)
+
+    assert {tool.name for tool in tools}.isdisjoint({"knowledge_search"})
 
 
 def test_ragflow_package_has_explicit_init_file() -> None:
