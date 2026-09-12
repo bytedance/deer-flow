@@ -1,6 +1,9 @@
 "use client";
 
-import { Client as LangGraphClient } from "@langchain/langgraph-sdk/client";
+import {
+  Client as LangGraphClient,
+  RunsClient,
+} from "@langchain/langgraph-sdk/client";
 
 import { getLangGraphBaseURL } from "../config";
 import { isStaticWebsiteOnly } from "../static-mode";
@@ -323,6 +326,14 @@ async function* handleInactiveRunStream({
   }
 }
 
+// Reuse the SDK's retry budget, backoff and HTTP error handling for recovery
+// requests that have already been prepared by the run-creation client.
+class StreamRecoveryClient extends RunsClient {
+  fetchWithRetries(...args: Parameters<typeof fetch>): Promise<Response> {
+    return this.asyncCaller.fetch(...args);
+  }
+}
+
 function createCompatibleClient(isMock?: boolean): LangGraphClient {
   if (isStaticWebsiteOnly() && !isMock) {
     return createStaticClient();
@@ -334,7 +345,23 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
     onRequest: injectCsrfHeader,
   });
 
-  const originalRunStream = client.runs.stream.bind(client.runs);
+  // Creating a run is not idempotent. Retrying an ambiguous gateway failure
+  // can create the same run more than once after the backend accepted the
+  // original request. The SDK also uses this client's transport for recovery
+  // GETs, which must retain normal HTTP retries (including transient 5xx).
+  const streamRecoveryClient = new StreamRecoveryClient({ apiUrl });
+  const runCreationClient = new RunsClient({
+    apiUrl,
+    callerOptions: {
+      maxRetries: 0,
+      fetch: (...args: Parameters<typeof fetch>) =>
+        args[1]?.method === "GET"
+          ? streamRecoveryClient.fetchWithRetries(...args)
+          : fetch(...args),
+    },
+    onRequest: injectCsrfHeader,
+  });
+  const originalRunStream = runCreationClient.stream.bind(runCreationClient);
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
   // Preserve the SDK's lazy AsyncIterable contract. Its StreamManager consumes
   // this return value with `for await`, so run creation still starts on first
