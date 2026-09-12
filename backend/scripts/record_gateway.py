@@ -119,7 +119,7 @@ def main() -> int:
     import uvicorn
 
     print(f"[record-gw] model={model} out={out} port={port}", flush=True)
-    uvicorn.run("app.gateway.app:app", host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run("app.gateway.app:app", host="127.0.0.1", port=port, log_level="warning", proxy_headers=False)
     return 0
 
 
