@@ -99,10 +99,10 @@ def lexical_relevance(
     *,
     idf: dict[str, float] | None = None,
 ) -> float:
-    """Query-normalized idf-weighted token overlap in ``[0, 1]``.
+    """IDF-weighted query coverage in ``[0, 1]``.
 
     A containment signal (whole query inside the content, or vice versa)
-    joins both vectors as a synthetic token so unsegmented text such as CJK
+    contributes one matched unit so unsegmented text such as CJK
     content still scores above zero without a segmenter.
     """
     query_text = (query or "")[:_TEXT_CHAR_BUDGET].strip().lower()
@@ -110,7 +110,7 @@ def lexical_relevance(
 
 
 def _lexical_relevance(query_text: str, query_tokens: list[str], content: str, *, idf: dict[str, float] | None) -> float:
-    """Score with a prepared query and an indexed, bounded content vector."""
+    """Score coverage of a prepared query against bounded content tokens."""
     content_text = (content or "")[:_TEXT_CHAR_BUDGET].strip().lower()
     if not query_text or not content_text:
         return 0.0
@@ -121,47 +121,19 @@ def _lexical_relevance(query_text: str, query_tokens: list[str], content: str, *
         return 0.0
 
     weights = idf or {}
-    default_weight = 1.0
-
-    def weighted_vector(tokens: list[str], synthetic: bool) -> dict[str, float]:
-        vector: dict[str, float] = {}
-        for token in tokens:
-            vector[token] = vector.get(token, 0.0) + weights.get(token, default_weight)
-        if synthetic:
-            vector[query_text] = vector.get(query_text, 0.0) + default_weight
-        return vector
-
-    query_vector = weighted_vector(query_tokens, synthetic=containment)
-    content_vector = weighted_vector(content_tokens, synthetic=containment)
-    if not content_vector:
-        return 0.0
-
-    overlap = 0.0
-    # Shared stems are exactly four-character prefixes. Preserve the original
-    # first-match tie rule, but avoid scanning every content token per query token.
-    prefix_weights: dict[str, float] = {}
-    for token, weight in content_vector.items():
-        if len(token) >= _PREFIX_MATCH_MIN_CHARS:
-            prefix_weights.setdefault(token[:_PREFIX_MATCH_MIN_CHARS], weight)
-    for token, query_weight in query_vector.items():
-        content_weight = content_vector.get(token, 0.0)
-        if content_weight > 0.0:
-            overlap += query_weight * content_weight
-            continue
-        if len(token) >= _PREFIX_MATCH_MIN_CHARS:
-            overlap += query_weight * prefix_weights.get(token[:_PREFIX_MATCH_MIN_CHARS], 0.0)
-
-    if overlap <= 0.0:
-        return 0.0
-
-    # Query-side normalization only: the score measures how much of the query
-    # a fact covers and applies no length penalty to longer facts. For a
-    # fixed query this is monotone in the matched weight, so ranking order
-    # follows the idf-weighted overlap.
-    query_norm = math.sqrt(sum(weight * weight for weight in query_vector.values()))
-    if query_norm == 0.0:
-        return 0.0
-    return min(1.0, overlap / query_norm)
+    content_set = set(content_tokens)
+    prefixes = {token[:_PREFIX_MATCH_MIN_CHARS] for token in content_set if len(token) >= _PREFIX_MATCH_MIN_CHARS}
+    # Each distinct query token contributes its squared IDF at most once.
+    # Compare the matched-query norm to the complete-query norm: repetition
+    # cannot replace missing terms, and the result needs no clipping. The
+    # norm ratio keeps useful partial matches competitive in confidence blends.
+    matched_weight = total_weight = 1.0 if containment else 0.0
+    for token in dict.fromkeys(query_tokens):
+        weight = weights.get(token, 1.0) ** 2
+        total_weight += weight
+        if token in content_set or (len(token) >= _PREFIX_MATCH_MIN_CHARS and token[:_PREFIX_MATCH_MIN_CHARS] in prefixes):
+            matched_weight += weight
+    return math.sqrt(matched_weight / total_weight) if total_weight > 0.0 else 0.0
 
 
 def _coerce_confidence(fact: dict[str, Any]) -> float:
