@@ -816,20 +816,21 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 
 - 在 `/workspace/scheduled-tasks` 管理任务
 - 每个定时任务可以选择复用同一个 thread 及其历史对话，也可以选择每次运行新建一个 thread
+- 每个任务可以固定使用 `lead_agent`（默认）或当前用户已有的自定义 agent；未知名字会被拒绝
 - 将现有任务复制到创建表单中作为可编辑草稿，不复制运行历史
-- 支持 `once` 和 `cron` 两种调度方式
+- 支持 `once`、`cron` 和 `interval` 三种调度方式
 - 后台定时执行以非交互式 DeerFlow run 运行（那里不会暴露 `ask_clarification`）
 - 当所复用的 thread 或全局执行配额正忙时，到期执行会持久化为 `queued`，并在可用后启动；队列项在 Gateway 重启后保留，超过 `scheduler.queue_timeout_seconds` 后标记为失败
 - 当某次执行处于 `queued`、`launching` 或 `running` 时冻结任务定义，避免持久化的执行意外换用新的 prompt、thread 或调度；将任务切换为暂停或删除任务会取消已在等待的执行，而 `launching`/`running` 执行结束后才能重试这些变更；显式手动触发在调度已暂停时仍可等待并执行，且不会自动恢复调度
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
+- 按每页 50 条浏览执行历史；历史页暂停自动刷新，可随时返回最新记录。 仅在读取成功后显示条数，加载中或失败不会误显示为零条。
 
 当前 MVP 限制：
 
 - 暂时还没有可在对话中创建任务的 `schedule_task` 工具
 - 没有纯文本通知任务
 - 没有渠道或 GitHub 分发目标
-- 第一版没有 `interval` 调度类型
 
 通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
 

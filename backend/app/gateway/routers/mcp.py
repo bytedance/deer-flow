@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import re
@@ -20,7 +19,9 @@ from deerflow.config.extensions_config import (
     extensions_config_write_lock,
     get_extensions_config,
     normalize_mcp_transport_alias,
+    read_raw_extensions_config,
     reload_extensions_config,
+    validate_raw_extensions_config,
 )
 from deerflow.config.runtime_paths import project_root
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
@@ -1165,8 +1166,7 @@ def _mcp_server_response_from_raw(server_name: str, raw_server: Any) -> McpServe
 def _validate_extensions_config_candidate(raw_data: dict) -> None:
     """Reject a runtime-invalid candidate without changing its placeholders."""
     try:
-        resolved_data = ExtensionsConfig.resolve_env_variables(raw_data)
-        ExtensionsConfig.model_validate(resolved_data)
+        validate_raw_extensions_config(raw_data)
     except ValidationError as exc:
         _raise_invalid_mcp_configuration(_validation_error_summary(exc), cause=exc)
 
@@ -1296,16 +1296,9 @@ def _mcp_config_path(*, create: bool) -> Path:
 def _load_raw_extensions_config(config_path: Path, *, create: bool) -> dict:
     if config_path.exists():
         try:
-            with open(config_path, encoding="utf-8") as f:
-                raw_data = json.load(f)
-        except json.JSONDecodeError as exc:
-            _raise_invalid_mcp_configuration(
-                f"Extensions configuration is not valid JSON: {exc.msg} at line {exc.lineno} column {exc.colno}",
-                cause=exc,
-            )
-        if not isinstance(raw_data, dict):
-            _raise_invalid_mcp_configuration("Extensions configuration must be a JSON object")
-        return raw_data
+            return read_raw_extensions_config(config_path)
+        except ValueError as exc:
+            _raise_invalid_mcp_configuration(str(exc), cause=exc)
     if not create:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

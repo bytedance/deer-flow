@@ -990,6 +990,67 @@ def test_state_accessor_graph_cache_honors_configured_cap():
         gateway_services._state_accessor_graph_cache.clear()
 
 
+def test_state_accessor_graph_serializes_same_key_cold_construction():
+    """Overlapping first reads with the same factory object and app-config
+    identity must run the factory exactly once (per-key construction
+    serialization, PR #5224 review), while a changed factory identity still
+    rebuilds instead of reusing the stored graph."""
+    import threading
+    import time
+    from typing import Any
+
+    from app.gateway import services as gateway_services
+
+    builds = []
+    first_inside = threading.Event()
+    release_first = threading.Event()
+
+    def slow_factory(*, config):
+        graph = object()
+        builds.append(graph)
+        first_inside.set()
+        release_first.wait(timeout=10)
+        return graph
+
+    gateway_services._state_accessor_graph_cache.clear()
+    results: list[Any] = []
+    errors: list[BaseException] = []
+
+    def reader() -> None:
+        try:
+            results.append(gateway_services._state_accessor_graph(slow_factory, None, "full", None, {}))
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    try:
+        first = threading.Thread(target=reader)
+        second = threading.Thread(target=reader)
+        first.start()
+        assert first_inside.wait(timeout=5)
+        second.start()
+        # The second reader blocks on the per-key lock while the first is
+        # still inside the factory: no duplicate construction.
+        deadline = time.monotonic() + 5
+        while second.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(builds) == 1, errors
+        assert second.is_alive(), "second cold reader must wait for the in-flight construction"
+
+        release_first.set()
+        first.join(timeout=10)
+        second.join(timeout=10)
+        assert not (first.is_alive() or second.is_alive())
+        assert len(builds) == 1
+        assert len(results) == 2 and results[0] is results[1]
+
+        # A different factory object is an identity change: rebuild, not reuse.
+        other = gateway_services._state_accessor_graph(lambda *, config: object(), None, "full", None, {})
+        assert other is not results[0]
+        assert len(builds) == 1
+    finally:
+        gateway_services._state_accessor_graph_cache.clear()
+
+
 def test_build_run_config_configurable_custom_agent_dual_writes_agent_name():
     """Regression for issue #3549: even when the caller uses the legacy
     ``configurable`` path, ``agent_name`` must also land in
@@ -1673,6 +1734,7 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
             "disable_clarification": True,
             "agent_name": "coding-llm-gateway",
         },
+        internal=True,
     )
 
     # Forwarded into runtime context — what tools/middlewares read.
@@ -1685,15 +1747,46 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
     assert "disable_clarification" not in config.get("configurable", {})
 
 
+def test_context_only_keys_are_internal_only():
+    """``github_token`` / ``disable_clarification`` are produced by the channel run
+    policies, which reach the Gateway over the internally-authenticated channel. A
+    non-internal caller must not be able to supply either through ``body.context``.
+
+    ``disable_clarification`` is not a milder cousin of ``non_interactive``:
+    ``ClarificationMiddleware`` answers every clarification — ``risk_confirmation``
+    included — with "proceed without asking", and ``SandboxMiddleware`` reads the two
+    keys as the same non-interactive signal. Forwarding it ungated reopened exactly
+    the gate ``_CONTEXT_INTERNAL_CALLER_KEYS`` exists to close.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(
+        config,
+        {
+            "github_token": "attacker-supplied",
+            "disable_clarification": True,
+            "agent_name": "coding-llm-gateway",
+        },
+    )
+
+    assert "github_token" not in config["context"]
+    assert "disable_clarification" not in config["context"]
+    assert "github_token" not in config.get("configurable", {})
+    assert "disable_clarification" not in config.get("configurable", {})
+    # Whitelisted agent-config keys still come through for ordinary callers.
+    assert config["context"]["agent_name"] == "coding-llm-gateway"
+
+
 def test_merge_run_context_overrides_context_only_keys_do_not_override_existing():
-    """A token already in ``config['context']`` must not be clobbered by a
-    client-supplied one (defense in depth — the manager is the only legitimate
-    source, but ``setdefault`` keeps the contract explicit)."""
+    """A token already in ``config['context']`` must not be clobbered by one supplied
+    in ``body.context`` (defense in depth — ``setdefault`` keeps the contract explicit
+    even now that only internal callers reach this branch)."""
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
     config["context"] = {"github_token": "pre-existing"}
-    merge_run_context_overrides(config, {"github_token": "attacker-supplied"})
+    merge_run_context_overrides(config, {"github_token": "later-supplied"}, internal=True)
 
     assert config["context"]["github_token"] == "pre-existing"
 
@@ -2914,6 +3007,71 @@ def test_strip_internal_context_keys_scrubs_config_smuggled_non_interactive():
     via_configurable = build_run_config("thread-1", {"configurable": {"non_interactive": True}}, None)
     strip_internal_context_keys(via_configurable)
     assert "non_interactive" not in via_configurable["configurable"]
+
+
+def test_strip_internal_context_keys_scrubs_config_smuggled_context_only_keys():
+    """The context-only internal keys need the same ``body.config`` scrub as
+    ``non_interactive``: ``build_run_config`` copies both sections verbatim, so gating
+    ``merge_run_context_overrides`` alone still leaves ``body.config['context']`` open.
+
+    The ``configurable`` half matters on its own — that dict is persisted in
+    checkpoints, so a smuggled ``github_token`` would write a live credential into the
+    checkpoint store even though no tool reads it from there.
+    """
+    from app.gateway.services import build_run_config, strip_internal_context_keys
+
+    via_context = build_run_config(
+        "thread-1",
+        {"context": {"github_token": "attacker-supplied", "disable_clarification": True, "model_name": "gpt"}},
+        None,
+    )
+    strip_internal_context_keys(via_context)
+    assert "github_token" not in via_context["context"]
+    assert "disable_clarification" not in via_context["context"]
+    assert via_context["context"]["model_name"] == "gpt"
+
+    via_configurable = build_run_config(
+        "thread-1",
+        {"configurable": {"github_token": "attacker-supplied", "disable_clarification": True}},
+        None,
+    )
+    strip_internal_context_keys(via_configurable)
+    assert "github_token" not in via_configurable["configurable"]
+    assert "disable_clarification" not in via_configurable["configurable"]
+
+
+def test_start_run_sequence_drops_context_only_keys_for_session_caller():
+    """Replay the real ``start_run`` assembly order for a session-authenticated caller
+    that pushes the keys through *both* smuggling surfaces at once."""
+    request = _make_request_with_auth_source("session")
+    config = _assemble_authz_run_config(
+        {"context": {"github_token": "via-config", "disable_clarification": True}},
+        request,
+        body_context={"github_token": "via-body-context", "disable_clarification": True},
+    )
+
+    assert "github_token" not in config["context"]
+    assert "disable_clarification" not in config["context"]
+    assert "github_token" not in config.get("configurable", {})
+    assert "disable_clarification" not in config.get("configurable", {})
+
+
+def test_start_run_sequence_keeps_context_only_keys_for_internal_caller():
+    """The channel path (internal auth) must keep carrying the minted token and the
+    non-interactive flag, and neither may land in checkpoint-persisted ``configurable``."""
+    from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+
+    request = _make_request_with_auth_source(AUTH_SOURCE_INTERNAL, system_role=INTERNAL_SYSTEM_ROLE)
+    config = _assemble_authz_run_config(
+        {},
+        request,
+        body_context={"github_token": "ghs_installation_token", "disable_clarification": True},
+    )
+
+    assert config["context"]["github_token"] == "ghs_installation_token"
+    assert config["context"]["disable_clarification"] is True
+    assert "github_token" not in config.get("configurable", {})
+    assert "disable_clarification" not in config.get("configurable", {})
 
 
 # --- Authorization identity anti-forgery tests ---
