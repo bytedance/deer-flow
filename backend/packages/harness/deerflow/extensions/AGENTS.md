@@ -58,7 +58,7 @@ All install/upgrade/remove/enable/disable mutations for a checkout hold the cros
 declaration, and rollback preserves a concurrent external config edit instead of replacing
 it. Upgrade replaces a managed local snapshot (or re-pins a package requirement that is already
 in the `extensions` group) and adopts the existing `plugins:` record so private `config`,
-`required`, and `enabled` stay put. It fails closed if that local snapshot or requirement is not
+`required`, and `enabled` stay put. It fails closed if that local snapshot, requirement, or Git source is not
 already installed; a plain `install` still refuses an already-snapshotted local directory.
 Failed upgrades restore the previous snapshot even when a concurrent dependency-file edit
 blocks lock/pyproject rollback, then leave that operator edit in place.

@@ -359,6 +359,23 @@ def test_upgrade_rejects_a_requirement_that_is_not_installed(tmp_path: Path) -> 
         ExtensionManager(root).upgrade("deerflow-extension-demo==2.0.0", yes=True)
 
 
+def test_upgrade_rejects_a_git_source_that_is_not_installed(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    root.mkdir()
+    _write_host_project(root)
+    pyproject = root / "backend" / "pyproject.toml"
+    before = pyproject.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not installed"):
+        ExtensionManager(root).upgrade(
+            "git+https://github.com/acme/deerflow-extension-demo.git@main",
+            yes=True,
+        )
+
+    assert pyproject.read_text(encoding="utf-8") == before
+    assert yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")).get("plugins") is None
+
+
 def test_upgrade_repins_an_installed_git_source_and_preserves_private_config(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-git-source"

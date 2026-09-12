@@ -175,8 +175,13 @@ class ExtensionManager:
                     remote_distribution = _normalize_distribution(Requirement(source).name)
                 except InvalidRequirement:
                     remote_distribution = None
-                if remote_distribution is not None and remote_distribution not in _extension_dependency_names(self.pyproject_path):
-                    raise ValueError(f"extension {remote_distribution!r} is not installed; use install")
+                if remote_distribution is not None:
+                    if remote_distribution not in _extension_dependency_names(self.pyproject_path):
+                        raise ValueError(f"extension {remote_distribution!r} is not installed; use install")
+                elif _installed_git_distribution(source, self.pyproject_path) is None:
+                    # Bare git+ URLs are not named Requirements; resolve them
+                    # against the already-installed extensions group instead.
+                    raise ValueError("extension source is not installed; use install")
         # uv add/sync execute the package's build backend. A config this manager
         # could never write to must fail before that code runs, not afterwards
         # through rollback.
@@ -656,6 +661,22 @@ def _strip_git_prefix(reference: str) -> str:
     return reference[4:] if reference.lower().startswith("git+") else reference
 
 
+def _git_repository_identity(reference: str) -> tuple[str, int | None, str] | None:
+    """Host, port, and path that identify a Git repo, ignoring ref and fragment."""
+    parsed = urllib.parse.urlsplit(_strip_git_prefix(reference.strip()))
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return None
+    host = parsed.hostname
+    if host is None:
+        return None
+    path = parsed.path.rsplit("@", 1)[0].rstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    if not path:
+        return None
+    return (host.lower(), parsed.port, path)
+
+
 def _is_scp_like_reference(source: str) -> bool:
     # The bare shorthand is checked directly; a PEP 508 direct reference keeps
     # it behind the requirement name, which packaging strips off the URL.
@@ -735,6 +756,26 @@ def _extension_dependency_names(pyproject: Path) -> set[str]:
         if name is not None:
             names.add(name)
     return names
+
+
+def _installed_git_distribution(source: str, pyproject: Path) -> str | None:
+    """Return the extensions-group distribution already pinned to this Git repo."""
+    requested = _git_repository_identity(source)
+    if requested is None:
+        return None
+    installed = _extension_dependency_names(pyproject)
+    for name, declared in _uv_sources(pyproject).items():
+        if not isinstance(name, str) or not isinstance(declared, dict):
+            continue
+        git_url = declared.get("git")
+        if not isinstance(git_url, str):
+            continue
+        if _git_repository_identity(git_url) != requested:
+            continue
+        normalized = _normalize_distribution(name)
+        if normalized in installed:
+            return normalized
+    return None
 
 
 _LOCK_LOCAL_PATH_KEYS = frozenset({"path", "directory", "editable", "virtual"})
