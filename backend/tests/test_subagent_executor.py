@@ -600,6 +600,15 @@ class TestAgentConstruction:
                 AIMessage(content=[{"type": "output_text", "text": "The implementation must use SQLite."}]) if history_format == "output_text" else HumanMessage(content="The implementation must use SQLite."),
                 AIMessage(content="Parent investigation", tool_calls=[{"name": "bash", "args": {"command": "pytest"}, "id": "parent-only"}]),
                 ToolMessage(content="parent tests passed [r1]", name="bash", tool_call_id="parent-only"),
+                HumanMessage(content="PRIVATE_PARENT_MEMORY", additional_kwargs={"hide_from_ui": True}),
+                HumanMessage(content="PRIVATE_PARENT_PLAN", name="todo_reminder", additional_kwargs={"hide_from_ui": True}),
+                HumanMessage(
+                    content="Clarified user requirement",
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        "human_input_response": {"version": 1, "kind": "human_input_response", "source": "ask_clarification", "request_id": "clarification:parent", "response_kind": "text", "value": "Clarified user requirement"},
+                    },
+                ),
             ],
             "summary_text": "Preserve offline operation.",
         }
@@ -648,6 +657,8 @@ class TestAgentConstruction:
         assert bound and all(names == ["save_decision"] for names in bound)
         assert all(not isinstance(message, (AIMessage, ToolMessage)) for message in observed[0])
         assert "Changed parent" not in str(observed)
+        assert "PRIVATE_PARENT" not in str(observed)
+        assert ("Clarified user requirement" in str(observed)) is inherit
         assert result.tool_receipts and {receipt["tool_call_id"] for receipt in result.tool_receipts} == {"child-call"}
         assert not result.bash_executions
         assert "parent-only" not in str(result.ai_messages)

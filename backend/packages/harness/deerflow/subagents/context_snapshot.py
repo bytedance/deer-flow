@@ -10,6 +10,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, convert_to_messages
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 
 SNAPSHOT_SYSTEM_NOTE = (
     "## Parent conversation snapshot\n"
@@ -27,6 +28,14 @@ SNAPSHOT_SYSTEM_NOTE = (
 _MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "audio", "input_audio", "video", "file"})
 
 
+def _is_conversation_message(message: Any) -> bool:
+    if isinstance(message, HumanMessage):
+        # Hidden clarification responses are user input; memory/todo reminders
+        # and other framework-injected HumanMessages are not.
+        return is_genuine_user_message(message)
+    return isinstance(message, (AIMessage, ToolMessage)) and not message.additional_kwargs.get("hide_from_ui")
+
+
 @dataclass(frozen=True)
 class ParentContextSnapshot:
     """Serialized content has no aliases to parent state or sibling executions."""
@@ -39,9 +48,10 @@ class ParentContextSnapshot:
 
         A single background HumanMessage avoids replaying parent tool protocol
         frames into child receipts, step events, skill policy, or turn budgets.
-        Runtime state, parent system instructions, artifacts and message metadata
-        never cross this boundary. No extra truncation hides retained history;
-        the caller opts into its input-token cost and normal child compaction.
+        Runtime state, parent system instructions, hidden framework messages,
+        artifacts and message metadata never cross this boundary. No extra
+        truncation hides retained history; the caller opts into its input-token
+        cost and normal child compaction.
         """
         blocks: list[dict[str, Any]] = []
 
@@ -53,8 +63,10 @@ class ParentContextSnapshot:
         if isinstance(summary, str) and summary.strip():
             add_text(f"Historical conversation summary:\n{summary}")
         messages = convert_to_messages(state.get("messages") or [])
+        retained_positions = {index for index, message in enumerate(messages) if _is_conversation_message(message)}
         # Providers may reuse call ids across turns. Match each result to the
-        # preceding call, not to every historical occurrence of its id.
+        # preceding call, including hidden frames so their results cannot be
+        # reassigned to a visible call. Only retained pairs count as completed.
         call_positions: dict[str, int] = {}
         completed_calls: set[tuple[int, str]] = set()
         for index, message in enumerate(messages):
@@ -62,10 +74,10 @@ class ParentContextSnapshot:
                 call_positions.update((call["id"], index) for call in message.tool_calls)
             elif isinstance(message, ToolMessage):
                 call_index = call_positions.pop(message.tool_call_id, None)
-                if call_index is not None:
+                if call_index is not None and call_index in retained_positions and index in retained_positions:
                     completed_calls.add((call_index, message.tool_call_id))
         for index, message in enumerate(messages):
-            if not isinstance(message, (HumanMessage, AIMessage, ToolMessage)):
+            if index not in retained_positions:
                 continue
             history: list[dict[str, Any]] = []
             content = [message.content] if isinstance(message.content, str) else message.content

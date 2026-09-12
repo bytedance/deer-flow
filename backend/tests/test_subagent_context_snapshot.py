@@ -96,6 +96,76 @@ def test_snapshot_keeps_tool_content_normalized_by_message_constructor(content, 
     assert all(value in text for value in expected)
 
 
+@pytest.mark.parametrize("injection", ["memory", "todo"])
+def test_snapshot_excludes_real_framework_injections(injection):
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+
+    original = HumanMessage(content="VISIBLE_USER_REQUEST", id="user-turn")
+    if injection == "memory":
+        messages = DynamicContextMiddleware._make_reminder_and_user_messages(original, "PRIVATE_DATE_CONTEXT", "PRIVATE_PARENT_MEMORY")
+    else:
+        update = TodoMiddleware().before_model({"messages": [original], "todos": [{"content": "PRIVATE_PARENT_PLAN", "status": "in_progress"}]}, None)
+        messages = [original, *update["messages"]]
+
+    snapshot = ParentContextSnapshot.from_state({"messages": messages, "summary_text": "VISIBLE_SUMMARY"})
+    assert "VISIBLE_USER_REQUEST" in snapshot.content_json
+    assert "VISIBLE_SUMMARY" in snapshot.content_json
+    assert "PRIVATE" not in snapshot.content_json
+
+
+@pytest.mark.parametrize("message_type", [AIMessage, ToolMessage])
+@pytest.mark.parametrize("hidden", [False, True])
+def test_snapshot_excludes_other_hidden_message_content_and_calls(message_type, hidden):
+    kwargs = {"tool_call_id": "result-id"} if message_type is ToolMessage else {"tool_calls": [{"name": "bash", "args": {"command": "FRAMEWORK_COMMAND"}, "id": "call-id"}]}
+    message = message_type(content="FRAMEWORK_CONTENT", additional_kwargs={"hide_from_ui": hidden}, **kwargs)
+    snapshot = ParentContextSnapshot.from_state({"messages": [HumanMessage(content="Keep the user request"), message]})
+    assert ("FRAMEWORK_CONTENT" in snapshot.content_json) is not hidden
+    if message_type is AIMessage:
+        assert ("FRAMEWORK_COMMAND" in snapshot.content_json) is not hidden
+
+
+@pytest.mark.parametrize("response_kind", ["text", "option", "invalid-version", "missing-value"])
+def test_snapshot_keeps_only_valid_hidden_user_responses(response_kind):
+    response = {"version": 1, "kind": "human_input_response", "source": "ask_clarification", "request_id": "PRIVATE_REQUEST_ID", "response_kind": "text", "value": "Clarified requirement"}
+    if response_kind == "option":
+        response.update(response_kind="option", option_id="choice-a")
+    elif response_kind == "invalid-version":
+        response["version"] = 0
+    elif response_kind == "missing-value":
+        response.pop("value")
+    reply = HumanMessage(content="<system>Clarified requirement</system>", additional_kwargs={"hide_from_ui": True, "human_input_response": response})
+    snapshot = ParentContextSnapshot.from_state({"messages": [HumanMessage(content="Original request"), reply]})
+
+    assert ("Clarified requirement" in snapshot.content_json) is (response_kind in {"text", "option"})
+    assert "PRIVATE_REQUEST_ID" not in snapshot.content_json
+    assert "<system>" not in snapshot.content_json
+
+
+@pytest.mark.parametrize("injection", ["legacy-summary", "previous-snapshot"])
+def test_framework_only_history_has_no_snapshot(injection):
+    message = HumanMessage(content="PRIVATE_SUMMARY", name="summary") if injection == "legacy-summary" else ParentContextSnapshot.from_state({"messages": [HumanMessage(content="PRIVATE_ANCESTOR_CONTEXT")]}).to_message()
+    assert ParentContextSnapshot.from_state({"messages": [message]}) is None
+
+
+@pytest.mark.parametrize("hidden_part", ["call", "result"])
+def test_hidden_tool_frames_do_not_complete_visible_delegations(hidden_part):
+    messages = [
+        HumanMessage(content="Visible user request"),
+        AIMessage(content="", tool_calls=[{"name": "task", "args": {"prompt": "UNFINISHED_DELEGATION"}, "id": "reused-id"}]),
+    ]
+    if hidden_part == "call":
+        # Removing this frame before matching IDs would attach its result to
+        # the preceding visible delegation, which never actually completed.
+        messages.append(AIMessage(content="PRIVATE_CALL", tool_calls=[{"name": "task", "args": {"prompt": "PRIVATE_PROMPT"}, "id": "reused-id"}], additional_kwargs={"hide_from_ui": True}))
+    messages.append(ToolMessage(content="TOOL_RESULT", tool_call_id="reused-id", additional_kwargs={"hide_from_ui": hidden_part == "result"}))
+    snapshot = ParentContextSnapshot.from_state({"messages": messages})
+
+    assert "UNFINISHED_DELEGATION" not in snapshot.content_json
+    assert "PRIVATE" not in snapshot.content_json
+    assert ("TOOL_RESULT" in snapshot.content_json) is (hidden_part == "call")
+
+
 @pytest.mark.parametrize("state", [{}, {"messages": [], "summary_text": ""}, {"messages": [SystemMessage(content="system only")]}])
 def test_empty_context_has_no_snapshot(state):
     assert ParentContextSnapshot.from_state(state) is None

@@ -75,6 +75,10 @@ deer-flow/
     └── custom/                # Custom skills (gitignored)
 ```
 
+ATX outline closing markers use a linear suffix scan; do not use unanchored
+whitespace regex searches on unbounded uploaded headings. The long-heading
+regression exercises the production extractor under a generous process deadline.
+
 ## Important Development Guidelines
 
 ### Documentation Update Policy
@@ -265,9 +269,8 @@ make test-live
 PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
 ```
 
-Direct pytest collection or execution of `tests/test_client_live.py` remains
-skipped unless `DEER_FLOW_RUN_LIVE_TESTS=1` is set. Do not add that opt-in to
-default CI workflows.
+Keep live tests opt-in via `DEER_FLOW_RUN_LIVE_TESTS=1`; guard POSIX-only
+markers with `os.name` for Windows collection.
 
 Jina logging tests use dummy keys (`tests/test_jina_client.py`).
 Jina/Browserless/InfoQuest resolve URLs without rebuilding HTML.
@@ -337,17 +340,17 @@ Title fallback: result URL, then request URL.
 
 ### File Upload
 
-Multi-file uploads convert documents; outlines skip fenced code:
+Outlines use ATX syntax (1–6 hashes, space/tab separator, ≤3 leading spaces), strip closing hashes and skip fenced code.
 - Endpoint: `POST /api/threads/{thread_id}/uploads`
 - Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
-- Rejects directory inputs before copying so uploads stay all-or-nothing
-- Reuses one conversion worker per request when called from an active event loop
+- Rejects directories before copying to keep uploads all-or-nothing
+- One conversion worker per request when called from an active event loop
 - Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
-- Duplicate filenames in a single upload request are auto-renamed with `_N` suffixes so later files do not truncate earlier files
+- Duplicate filenames within one request get `_N` suffixes to prevent overwrites.
 - Gateway HTTP uploads stage bytes as `.upload-*.part` files and atomically replace the destination only after size validation. These staging files are hidden from upload listings, agent upload context, and sandbox listing/search tools, and swept on Gateway startup if a hard crash leaves one behind.
 - Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
-- Mounted upload paths skip both sandbox acquisition and per-file synchronization. For AIO remote/provisioner deployments this requires an explicit, accurate `sandbox.thread_data_mounts: true`; omission preserves backend auto-detection.
-- Agent receives uploaded file list via `UploadsMiddleware`; title generation continues to use the original user request rather than the injected upload-context wrapper, with attachment-only messages falling back to `New Conversation`
+- Mounted uploads skip sandbox acquire/sync. AIO remote/provisioner requires accurate `sandbox.thread_data_mounts: true`; omission keeps backend auto-detection.
+- `UploadsMiddleware` supplies file lists. Titles use original user text, not upload context; attachment-only titles use a sanitized, bounded filename or count.
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 

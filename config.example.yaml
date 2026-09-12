@@ -43,9 +43,13 @@ logging:
 # Optional AgentMiddleware classes loaded into the lead and subagent runtime
 # middleware chains after built-in runtime middlewares, but before the
 # safety/clarification tail. Missing packages, invalid classes, and broken
-# modules fail loudly at agent creation with an actionable import error.
-# The same zero-argument class list applies to both lead and subagent runtimes;
-# lead-only vs subagent-only configuration is not expressible yet. Treat these
+# modules fail at agent creation with an actionable import error; constructor
+# errors fail at agent creation with the underlying exception.
+# The same list applies to both lead and subagent runtimes; lead-only vs
+# subagent-only configuration is not expressible yet. Each entry is a class
+# path or `{class, kwargs}` for constructor arguments. kwargs values must be
+# JSON types (object, array, string, number, boolean, or null); YAML dates
+# and timestamps are coerced to ISO strings so they match JSON. Treat these
 # files as trusted operator config because middleware classes execute code.
 # Uncomment this block to define middlewares in config.yaml. Leaving it commented
 # lets extensions_config.json remain the source of truth for this fixed-slot
@@ -53,7 +57,9 @@ logging:
 # extensions:
 #   middlewares:
 #     - my_company.deerflow_middlewares:DomainGuardMiddleware
-#     - my_company.deerflow_middlewares:LatencyStampingMiddleware
+#     - class: my_company.deerflow_middlewares:LatencyStampingMiddleware
+#       kwargs:
+#         header: X-DeerFlow-Latency
 
 # ============================================================================
 # Tracing / Observability (Monocle)
