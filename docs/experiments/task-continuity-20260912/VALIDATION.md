@@ -14,6 +14,7 @@ from the historical prototype A/B/C/D quality scores.
 | Published per-case metadata versus all five aggregate tables | Matched; scores unchanged |
 | Live production-middleware recovery check after review fixes | 3/3 passed |
 | Real config-upgrade script on temporary version-41 configs | Upgraded to 42; default disabled and explicit enabled both preserved |
+| Helm lint, template render, sandbox/ingress checks and config-version alignment | Passed; rendered task continuity remains disabled by default |
 
 The 15 remaining failures have identical test IDs on the clean base and feature;
 there are no branch-only failures. They are existing browser/URL-validation/web
@@ -63,3 +64,10 @@ the earlier attempts from [the review rerun](integration/review-network.json).
 The original successful A/B/C/D model samples were not regenerated. The replay
 suite now includes two artifact-audit regressions; its original 12 tests and the
 historical experiment scores remain intact.
+
+The first remote chart check caught an omitted version alignment: the root
+example was 42 while the chart still embedded 41. The chart values and README
+example now both use 42. All five local chart checks passed, and the rendered
+configuration retains disabled task-continuity defaults. This follow-up changes
+chart metadata and validation records; the backend code and test fingerprints
+above are unchanged.

@@ -130,5 +130,19 @@
     "red_audit": "901d91ea3bed702437826b7ba60d55a23e0464c9ce8eaf54116deecab10ed855",
     "channel_red": "f97b5ead21ee616225c2d37daf7014107749754454f7d67514ae60eb55366358",
     "intermediate_branch": "a68e6487284a428998f67eaf98753086df73b0bdeeb326ace827bb77d7612cd3"
+  },
+  "chart_validation": {
+    "initial_remote_commit": "2c884ab98ffdc40d34099abc9ec1a5eda98b39e6",
+    "initial_remote_failure": "config_version drift: example 42, chart 41",
+    "local_checks": {
+      "helm_lint": "passed",
+      "helm_template": "passed",
+      "sandbox_service_gating": "passed",
+      "skill_upload_ingress": "passed",
+      "config_version_drift": "passed"
+    },
+    "config_version": 42,
+    "rendered_task_continuity_default_enabled": false,
+    "scope": "Chart values and README version alignment only; backend code and its validated source fingerprints are unchanged."
   }
 }
