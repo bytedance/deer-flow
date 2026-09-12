@@ -52,7 +52,8 @@ def test_long_whitespace_without_closing_hashes_finishes_promptly(tmp_path):
         [
             sys.executable,
             "-c",
-            "from pathlib import Path; import sys; from deerflow.utils.file_outline import extract_outline; result = extract_outline(Path(sys.argv[1])); assert len(result) == 1 and result[0]['line'] == 1 and result[0]['title'].startswith('Title')",
+            "from pathlib import Path; import sys; from deerflow.utils.file_outline import extract_outline; result = extract_outline(Path(sys.argv[1])); "
+            "assert len(result) == 1 and result[0]['line'] == 1 and result[0]['title'].startswith('Title')",
             str(path),
         ],
         check=True,
