@@ -101,15 +101,48 @@ def test_retention_is_explicit_and_duplicate_capture_is_idempotent(scoped):
 
 def test_serialization_allowlist_omits_reasoning_and_binary():
     source = AIMessage(
-        content=[{"type": "text", "text": "visible"}, {"type": "reasoning", "reasoning": "private-thought"}, {"type": "image_url", "image_url": {"url": "data:secret"}}],
+        content=[
+            "visible string",
+            {"type": "text", "text": "visible"},
+            {"type": "reasoning", "reasoning": "private-thought", "text": "private-reasoning-text"},
+            {"type": "image_url", "image_url": {"url": "data:secret"}, "text": "private-image-text"},
+            {"type": "unknown", "text": "private-unknown-text"},
+        ],
         additional_kwargs={"reasoning_content": "private"},
         tool_calls=[{"id": "call", "name": "probe", "args": {"part": "bolt"}}],
     )
     hidden = HumanMessage(content="internal", additional_kwargs={"hide_from_ui": True})
     result = archive.records([SystemMessage(content="system-secret"), source, hidden, ToolMessage(content="tool-visible", tool_call_id="call", artifact={"secret": "artifact"})])
     assert len(result) == 2
+    assert result[0]["text"].startswith("visible string\nvisible\nTool calls:")
     assert "probe" in result[0]["text"] and "bolt" in result[0]["text"]
     assert "secret" not in str(result) and "private" not in str(result) and "internal" not in str(result)
+
+
+@pytest.mark.parametrize("message_type", [HumanMessage, AIMessage, ToolMessage])
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Approved code ZX-731\nKeep backups",
+        ["Approved code ZX-731", "Keep backups"],
+        ["Approved code ZX-731", {"type": "text", "text": "Keep backups"}],
+    ],
+    ids=["plain", "strings", "mixed"],
+)
+def test_text_shapes_are_searchable_and_readable_before_and_after_capture(scoped, message_type, content):
+    import json
+
+    message = message_type(content=content, id="approved", **({"tool_call_id": "call"} if message_type is ToolMessage else {}))
+    scoped.state = {"messages": [message]}
+    active = json.loads(history_search.func(scoped, "ZX-731"))["results"]
+    assert len(active) == 1
+    source_id = active[0]["id"]
+    assert json.loads(history_read.func(scoped, source_id))["text"] == "Approved code ZX-731\nKeep backups"
+
+    scoped.state = {"messages": [], "task_history": archive.capture(scoped.state, scoped, [message], TaskContinuityConfig(enabled=True))}
+    archived = json.loads(history_search.func(scoped, "ZX-731"))["results"]
+    assert [row["id"] for row in archived] == [source_id]
+    assert json.loads(history_read.func(scoped, source_id))["text"] == "Approved code ZX-731\nKeep backups"
 
 
 @pytest.mark.parametrize("query", ["Citrine", "保留备份", 'Citrine" OR "x', '" OR * NOT NEAR( x )'])
@@ -175,19 +208,36 @@ def test_tools_are_opt_in_and_do_not_replace_existing_names():
 
 
 @pytest.mark.asyncio
-async def test_actual_graph_compaction_checkpoint_resume(scoped):
+@pytest.mark.parametrize("content_shape", ["plain", "strings", "mixed"])
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+async def test_actual_graph_compaction_checkpoint_resume(scoped, content_shape, async_mode):
+    import json
+
     saver = InMemorySaver()
     graph = create_agent(StaticModel(), tools=[], middleware=[DurableContextMiddleware(task_continuity_enabled=True), compacting(TaskContinuityConfig(enabled=True))], state_schema=ThreadState, checkpointer=saver)
     config = {"configurable": {"thread_id": "thread-a"}}
-    first = await graph.ainvoke({"messages": conversation(), "task_notes": {"next": {"content": "Verify batch code", "authority": "model_report"}}}, config=config, context=scoped.context)
+    messages = conversation()
+    if content_shape == "strings":
+        messages[0].content = [messages[0].content]
+    elif content_shape == "mixed":
+        messages[0].content = [messages[0].content, {"type": "text", "text": "Approved format JSON."}]
+    expected_text = "Project Citrine batch code ZX-731. 决策保留备份。" + ("\nApproved format JSON." if content_shape == "mixed" else "")
+    initial = {"messages": messages, "task_notes": {"next": {"content": "Verify batch code", "authority": "model_report"}}}
+    first = await graph.ainvoke(initial, config=config, context=scoped.context) if async_mode else graph.invoke(initial, config=config, context=scoped.context)
     assert first["task_history"]["batches"]
     assert all("ZX-731" not in str(m.content) for m in first["messages"])
     # Rebuild the graph against the same saver, as a separate client invocation.
     resumed = create_agent(StaticModel(), tools=[], middleware=[DurableContextMiddleware(task_continuity_enabled=True)], state_schema=ThreadState, checkpointer=saver)
-    second = await resumed.ainvoke({"messages": [HumanMessage(content="Resume the saved task")]}, config=config, context=scoped.context)
+    resume_input = {"messages": [HumanMessage(content="Resume the saved task")]}
+    second = await resumed.ainvoke(resume_input, config=config, context=scoped.context) if async_mode else resumed.invoke(resume_input, config=config, context=scoped.context)
     assert second["task_notes"]["next"]["content"] == "Verify batch code"
-    recovered = archive.lookup(second, scoped, query="Citrine")["results"]
-    assert "ZX-731" in recovered[0]["text"]
+    assert "ZX-731" not in second["summary_text"]
+    assert all("ZX-731" not in str(m.content) for m in second["messages"])
+    scoped.state = second
+    recovered = json.loads(await history_search.coroutine(scoped, "Citrine") if async_mode else history_search.func(scoped, "Citrine"))["results"]
+    assert len(recovered) == 1
+    source = json.loads(await history_read.coroutine(scoped, recovered[0]["id"]) if async_mode else history_read.func(scoped, recovered[0]["id"]))
+    assert source["text"] == expected_text
 
 
 def test_long_source_indexes_late_words(scoped):

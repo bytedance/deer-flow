@@ -3,6 +3,31 @@
 These checks exercise the implementation and review fixes. They are separate
 from the historical prototype A/B/C/D quality scores.
 
+## Latest follow-up: review 5185827206
+
+The second review at `fac6a37e` exposed mixed-content extraction and missing
+release-policy declarations. The regressions produced **20 failures before the
+fix**, with 83 controls passing. After the fix, **249 focused tests pass**,
+including sync/async graph compaction and checkpoint reconstruction, exact source
+search/read, and per-field assembly fingerprint checks. Format and lint pass.
+
+The new full backend run has **15,499 passed, 15 failed, 182 skipped and
+3 deselected**. Its failure IDs exactly match the earlier clean-base full run
+below; all 15 were also rerun and failed on the unchanged clean base this round.
+There are no branch-only failures. A filter-removal negative control confirms
+the serializer test rejects reasoning/image/unknown text entering the archive.
+The guide checker has no errors and one existing chain-size soft warning.
+
+The extraction boundary is plain strings plus `type: text` blocks, in original
+order, for both active lookup and archive capture. The identity boundary covers
+all four continuity configuration fields and all three DurableContext constructor
+settings; normalized equivalent and disabled configurations remain equivalent.
+The live model and historical prototype results below belong to the earlier
+validation phase and were not rerun for this follow-up.
+[Follow-up metadata and source/log hashes](review2-validation.json).
+
+## Earlier validation before the second review
+
 | Check | Result |
 | --- | --- |
 | Backend `make format`, `make lint` | Passed |

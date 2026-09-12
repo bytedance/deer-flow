@@ -33,6 +33,10 @@ messages. Memory only queues extraction; recall uses DynamicContext's
 Use JSON-serialisable values and `canonical_hash` for long text, not prompt
 copies. `collect_release_policies()` gathers stack declarations; update them
 alongside every behaviour-affecting field.
+Summarization declares enabled `task_continuity` retention settings (otherwise
+`None`). DurableContext declares its normalized skills root, sorted read-tool
+names and continuity switch, so each capture/injection policy affects assembly
+identity without depending on private-field probing.
 
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 

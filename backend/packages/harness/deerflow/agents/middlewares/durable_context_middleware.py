@@ -210,6 +210,14 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         self._skills_root = _normalize_skills_root(skills_container_path)
         self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES if skill_file_read_tool_names is None else skill_file_read_tool_names)
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        """Describe the normalized inputs that govern capture and injection."""
+        return {
+            "skills_container_path": self._skills_root,
+            "skill_file_read_tool_names": sorted(self._skill_read_tool_names),
+            "task_continuity_enabled": self._task_continuity_enabled,
+        }
+
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._capture(state, runtime)

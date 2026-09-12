@@ -54,6 +54,9 @@ message list. System messages, framework injections, reasoning fields, artifacts
 images and binary blocks are excluded. Visible attachment references stay as text;
 this feature does not copy attachment bytes. A source ID includes its content and
 message identity, so changing a message produces a different source version.
+Text includes plain string content and mixed lists of strings and `type: text`
+blocks, in their original order. Other typed blocks remain excluded even if they
+carry a `text` field. The same extraction is used for active-history search.
 Valid user answers from clarification cards are included even when their
 `HumanMessage` is hidden from the UI; hidden framework injections remain excluded.
 

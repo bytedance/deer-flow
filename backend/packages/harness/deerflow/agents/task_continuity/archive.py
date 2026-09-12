@@ -22,6 +22,7 @@ from deerflow.agents.human_input import read_human_input_response
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.utils.file_io import run_file_io
+from deerflow.utils.messages import message_content_to_text
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,12 @@ def records(messages, cap: int = 16000) -> list[dict]:
         if hidden_injection or any(message.additional_kwargs.get(key) for key in ("deerflow_content_kind", "dynamic_context_reminder")) or (message.name or "").startswith("__"):
             continue
         content = message.content
-        text = content if isinstance(content, str) else "\n".join(block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
+        # Mixed LangChain content may contain plain strings. Filter typed blocks
+        # before normalization so a reasoning/image/unknown block's text field
+        # cannot enter the archive through the broader shared text extractor.
+        if isinstance(content, list):
+            content = [block for block in content if isinstance(block, str) or (isinstance(block, dict) and block.get("type") == "text")]
+        text = message_content_to_text(content)
         calls = getattr(message, "tool_calls", None)
         if calls:
             text += "\nTool calls: " + json.dumps([{k: c.get(k) for k in ("name", "args", "id")} for c in calls], ensure_ascii=False, default=str)

@@ -181,6 +181,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             # behaviour (token counting/profile inspection and, absent an
             # explicit configured summary model, generation itself).
             "summary_model": self._anchor_model_name,
+            "task_continuity": self._task_continuity_config.model_dump(mode="json") if self._task_continuity_config is not None else None,
         }
 
     def _tag_nostream(self, model: Any) -> Any:
