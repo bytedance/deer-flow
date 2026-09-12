@@ -13,6 +13,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import pytest
 import sqlalchemy as sa
 from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -23,13 +25,15 @@ from deerflow.persistence.bootstrap import (
     _CANONICAL_0019_SCHEMA_FLOOR,
     _FORWARD_COMPATIBLE_REVISION,
     _get_alembic_config,
+    _get_head_revision,
     _upgrade,
     bootstrap_schema,
 )
 from deerflow.persistence.engine import close_engine, get_engine, init_engine_from_config
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 
-CURRENT_HEAD = "0019_thread_incarnations"
+CANONICAL_INCARNATION_REVISION = "0019_thread_incarnations"
+LOCAL_HEAD = _get_head_revision()
 ROLLBACK_HEAD = "0020_threads_meta_project_id"
 INCARNATION_PARENT = "0021_batch_acceptance"
 ORIGINAL_INCARNATION_PARENT = "0018_oauth_identity_pg_partial"
@@ -57,9 +61,18 @@ async def _set_database_revision(engine, revision: str) -> None:
         await conn.execute(sa.text("UPDATE alembic_version SET version_num = :revision"), {"revision": revision})
 
 
-async def _seed_current_head(engine) -> None:
-    await bootstrap_schema(engine, backend="sqlite")
-    assert await _database_revision(engine) == CURRENT_HEAD
+def _rollback_binary_revisions() -> frozenset[str]:
+    """Revisions the published 0020 rollback binary knows: ancestors of its head."""
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location", str(bootstrap_mod._MIGRATIONS_DIR))
+    script = ScriptDirectory.from_config(cfg)
+    return frozenset(revision.revision for revision in script.iterate_revisions(ROLLBACK_HEAD, "base"))
+
+
+async def _seed_canonical_0019(engine) -> None:
+    """Seed the exact canonical-0019 shape; the local head may already lie beyond it."""
+    await asyncio.to_thread(_upgrade, _get_alembic_config(engine), CANONICAL_INCARNATION_REVISION)
+    assert await _database_revision(engine) == CANONICAL_INCARNATION_REVISION
 
 
 async def _seed_rollback_head(engine) -> None:
@@ -82,14 +95,16 @@ async def _add_forward_columns(engine) -> None:
 
 def _simulate_rollback_binary(monkeypatch: pytest.MonkeyPatch) -> None:
     current_head, current_revisions = bootstrap_mod._get_revision_metadata()
-    assert current_head == CURRENT_HEAD == _FORWARD_COMPATIBLE_REVISION
-    assert ROLLBACK_HEAD in current_revisions
-    assert INCARNATION_PARENT in current_revisions
-    assert CURRENT_HEAD in current_revisions
+    assert current_head == LOCAL_HEAD
+    assert CANONICAL_INCARNATION_REVISION == _FORWARD_COMPATIBLE_REVISION
+    assert {ROLLBACK_HEAD, INCARNATION_PARENT, CANONICAL_INCARNATION_REVISION, LOCAL_HEAD} <= current_revisions
+    rollback_revisions = _rollback_binary_revisions()
+    assert ROLLBACK_HEAD in rollback_revisions
+    assert not ({INCARNATION_PARENT, CANONICAL_INCARNATION_REVISION, LOCAL_HEAD} & rollback_revisions)
     monkeypatch.setattr(
         bootstrap_mod,
         "_get_revision_metadata",
-        lambda: (ROLLBACK_HEAD, current_revisions - {INCARNATION_PARENT, CURRENT_HEAD}),
+        lambda: (ROLLBACK_HEAD, rollback_revisions),
     )
 
 
@@ -104,7 +119,7 @@ async def _seed_original_forward_schema(engine) -> None:
 async def test_canonical_0019_floor_matches_migration_schema(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "canonical-floor.db"))
     try:
-        await asyncio.to_thread(_upgrade, _get_alembic_config(engine), CURRENT_HEAD)
+        await asyncio.to_thread(_upgrade, _get_alembic_config(engine), CANONICAL_INCARNATION_REVISION)
         async with engine.connect() as conn:
 
             def reflect(sync_conn):
@@ -191,7 +206,7 @@ async def test_audited_original_forward_schema_can_upgrade_preserving_incarnatio
         await asyncio.to_thread(alembic_command.stamp, _get_alembic_config(engine), ORIGINAL_INCARNATION_PARENT, purge=True)
         await bootstrap_schema(engine, backend="sqlite")
 
-        assert await _database_revision(engine) == CURRENT_HEAD
+        assert await _database_revision(engine) == LOCAL_HEAD
         repository = ThreadMetaRepository(async_sessionmaker(engine, expire_on_commit=False))
         assert [row["thread_id"] for row in await repository.search(user_id=None)] == ["existing"]
         assert (await repository.create("new", user_id=None))["thread_id"] == "new"
@@ -214,7 +229,7 @@ async def test_known_canonical_0019_validates_fixed_floor_then_upgrades_to_futur
     future_table = None
     calls: list[str] = []
     try:
-        await _seed_current_head(engine)
+        await _seed_canonical_0019(engine)
         # Model a future binary whose ORM includes schema that only its next
         # migration can add. Canonical 0019 must not be rejected for lacking it.
         future_table = sa.Table("future_after_0019", Base.metadata, sa.Column("id", sa.String(), primary_key=True))
@@ -273,7 +288,7 @@ async def test_known_older_revision_upgrades_normally(tmp_path: Path) -> None:
 
         await bootstrap_schema(engine, backend="sqlite")
 
-        assert await _database_revision(engine) == CURRENT_HEAD
+        assert await _database_revision(engine) == LOCAL_HEAD
     finally:
         await engine.dispose()
 
@@ -286,7 +301,7 @@ async def test_exact_forward_revision_skips_upgrade_with_warning(
 ) -> None:
     engine = create_async_engine(_url(tmp_path, "forward.db"))
     try:
-        await _seed_current_head(engine)
+        await _seed_canonical_0019(engine)
         _simulate_rollback_binary(monkeypatch)
 
         with caplog.at_level("WARNING", logger="deerflow.persistence.bootstrap"):
@@ -302,7 +317,7 @@ async def test_exact_forward_revision_skips_upgrade_with_warning(
 async def test_other_unknown_revision_fails_closed(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "unknown.db"))
     try:
-        await _seed_current_head(engine)
+        await _seed_canonical_0019(engine)
         await _set_database_revision(engine, "9999_unknown")
 
         with pytest.raises(RuntimeError, match="not known to this build"):
@@ -328,7 +343,7 @@ async def test_sqlite_upgrade_race_recovers_when_other_process_applies_forward_r
         upgrade_started.set()
         if not continue_upgrade.wait(timeout=5):
             raise TimeoutError("timed out waiting for the forward migration")
-        raise CommandError(f"Can't locate revision identified by '{CURRENT_HEAD}'")
+        raise CommandError(f"Can't locate revision identified by '{CANONICAL_INCARNATION_REVISION}'")
 
     try:
         await _seed_rollback_head(old_gateway)
@@ -339,7 +354,7 @@ async def test_sqlite_upgrade_race_recovers_when_other_process_applies_forward_r
         assert await asyncio.to_thread(upgrade_started.wait, 5)
 
         new_cfg = _get_alembic_config(new_gateway)
-        await asyncio.to_thread(_upgrade, new_cfg, CURRENT_HEAD)
+        await asyncio.to_thread(_upgrade, new_cfg, CANONICAL_INCARNATION_REVISION)
 
         with caplog.at_level("WARNING", logger="deerflow.persistence.bootstrap"):
             continue_upgrade.set()
@@ -395,7 +410,7 @@ async def test_local_forward_migration_error_stays_fatal(
 async def test_empty_alembic_version_fails_closed(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "empty-version.db"))
     try:
-        await _seed_current_head(engine)
+        await _seed_canonical_0019(engine)
         async with engine.begin() as conn:
             await conn.execute(sa.text("DELETE FROM alembic_version"))
 
@@ -409,7 +424,7 @@ async def test_empty_alembic_version_fails_closed(tmp_path: Path) -> None:
 async def test_multiple_alembic_versions_fail_closed(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "multiple-versions.db"))
     try:
-        await _seed_current_head(engine)
+        await _seed_canonical_0019(engine)
         async with engine.begin() as conn:
             await conn.execute(
                 sa.text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
@@ -426,7 +441,7 @@ async def test_multiple_alembic_versions_fail_closed(tmp_path: Path) -> None:
 async def test_rollback_batch_writer_tolerates_acceptance_columns(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "batch-repository.db"))
     try:
-        await _seed_current_head(engine)
+        await _seed_canonical_0019(engine)
         old_items = sa.table(
             "subagent_batch_items",
             sa.column("id"),
@@ -485,7 +500,7 @@ async def test_rollback_batch_writer_tolerates_acceptance_columns(tmp_path: Path
 async def test_rollback_thread_writer_tolerates_forward_nullable_column(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "thread-repository.db"))
     try:
-        await _seed_current_head(engine)
+        await _seed_canonical_0019(engine)
         # This is the complete 0020 table shape. Keeping it independent from
         # the current ORM prevents a future model change from silently making
         # this rollback-writer test aware of the forward column.
@@ -543,7 +558,7 @@ async def test_rollback_thread_writer_tolerates_forward_nullable_column(tmp_path
 async def test_rollback_shaped_mcp_task_sql_tolerates_forward_nullable_column(tmp_path: Path) -> None:
     engine = create_async_engine(_url(tmp_path, "mcp-repository.db"))
     try:
-        await _seed_current_head(engine)
+        await _seed_canonical_0019(engine)
         # This is the complete 0020 task table shape, deliberately excluding
         # only the forward thread_incarnation column.
         old_tasks = sa.table(
@@ -690,7 +705,11 @@ async def test_old_gateway_restarts_against_forward_postgres_revision(
         await init_engine_from_config(config)
         engine = get_engine()
         assert engine is not None
-        assert await _database_revision(engine) == CURRENT_HEAD
+        assert await _database_revision(engine) == LOCAL_HEAD
+        # The 0020 rollback binary allowlists canonical 0019 only, so model the
+        # audited window by stepping the schema back to that exact revision.
+        await asyncio.to_thread(alembic_command.downgrade, _get_alembic_config(engine, postgres_schema=schema), CANONICAL_INCARNATION_REVISION)
+        assert await _database_revision(engine) == CANONICAL_INCARNATION_REVISION
 
         await close_engine()
         _simulate_rollback_binary(monkeypatch)

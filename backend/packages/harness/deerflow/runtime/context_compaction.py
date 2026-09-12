@@ -176,6 +176,7 @@ async def compact_thread_context(
     state = {
         "messages": list(messages),
         "summary_text": channel_values.get("summary_text"),
+        "task_history": channel_values.get("task_history"),
     }
 
     runtime_context = {"thread_id": thread_id, "user_id": user_id}
@@ -205,6 +206,7 @@ async def compact_thread_context(
         {
             "messages": Overwrite(list(result.preserved_messages)),
             "summary_text": result.summary_text,
+            **({"task_history": result.task_history} if getattr(result, "task_history", None) is not None else {}),
         },
         as_node="manual_compaction",
     )

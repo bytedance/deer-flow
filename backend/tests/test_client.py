@@ -1173,7 +1173,7 @@ class TestEnsureAgent:
             name = "test"
 
             def filter_resources(self, principal, resource_type, candidates):
-                return [name for name in candidates if name == "safe_tool"]
+                return [name for name in candidates if name in {"safe_tool", "history_read"}]
 
             def authorize(self, request):
                 # Phase 3: model:use is now checked during assembly; allow it so
@@ -1190,6 +1190,9 @@ class TestEnsureAgent:
             provider=AuthorizationProviderConfig(use="unused:Provider"),
         )
         mock_app_config.skills.deferred_discovery = True
+        from deerflow.config.task_continuity_config import TaskContinuityConfig
+
+        mock_app_config.task_continuity = TaskContinuityConfig(enabled=True)
         client._app_config = mock_app_config
 
         safe_tool = StructuredTool.from_function(lambda: "safe", name="safe_tool", description="safe")
@@ -1210,7 +1213,7 @@ class TestEnsureAgent:
         ):
             client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})
 
-        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool"]
+        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool", "history_read"]
         assert mock_build_middlewares.call_args.kwargs["authorization_provider"] is provider
 
     def test_authorization_cache_key_uses_complete_principal(self, client, mock_app_config):
@@ -1955,6 +1958,51 @@ class TestMcpConfig:
         finally:
             tmp_path.unlink()
 
+    def test_update_mcp_config_preserves_raw_sibling_keys(self, client, tmp_path, monkeypatch):
+        """Only ``mcpServers`` is replaced; every other key keeps its on-disk ``$VAR`` form."""
+        monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {"old": {"type": "stdio", "command": "npx"}},
+                    "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+                    "skills": {"kept": {"enabled": False}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config", return_value=ExtensionsConfig()),
+        ):
+            client.update_mcp_config({"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}})
+
+        written_text = config_file.read_text(encoding="utf-8")
+        assert json.loads(written_text) == {
+            "mcpServers": {"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}},
+            "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+            "skills": {"kept": {"enabled": False}},
+        }
+        assert "ghp_live_secret_value" not in written_text
+
+    def test_update_mcp_config_rejects_invalid_candidate_without_writing(self, client, tmp_path):
+        config_file = tmp_path / "extensions_config.json"
+        original = json.dumps({"mcpServers": {}, "skills": {"kept": {"enabled": False}}})
+        config_file.write_text(original, encoding="utf-8")
+        reload = MagicMock()
+
+        with (
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config", reload),
+            pytest.raises(ValueError),
+        ):
+            client.update_mcp_config({"bad": {"enabled": "not-a-bool"}})
+
+        assert config_file.read_text(encoding="utf-8") == original
+        reload.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Skills management
@@ -2038,6 +2086,44 @@ class TestSkillsManagement:
             assert persisted["skills"] == {"test-skill": {"enabled": False}}
         finally:
             tmp_path.unlink()
+
+    @staticmethod
+    def _config_with_placeholders() -> dict:
+        return {
+            "mcpServers": {"github": {"type": "stdio", "command": "npx", "env": {"GITHUB_TOKEN": "$DEERFLOW_TEST_GH_TOKEN", "OPTIONAL": "$DEERFLOW_TEST_UNSET_VAR"}}},
+            "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+            "skills": {},
+        }
+
+    @pytest.mark.parametrize("category", ["public", "custom"])
+    def test_update_skill_preserves_env_placeholders(self, client, tmp_path, monkeypatch, category):
+        """Toggling a skill must not persist resolved ``$VAR`` values or blank unset ones.
+
+        ``public`` covers the shared-state path; ``custom`` with non-user-scoped
+        storage covers the fallback that also writes ``extensions_config.json``.
+        """
+        monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
+        monkeypatch.delenv("DEERFLOW_TEST_UNSET_VAR", raising=False)
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(json.dumps(self._config_with_placeholders()), encoding="utf-8")
+
+        skill = self._make_skill(enabled=True)
+        skill.category = category
+        storage = MagicMock()
+        storage.load_skills.side_effect = [[skill], [self._make_skill(enabled=False)]]
+
+        with (
+            patch("deerflow.client.get_or_new_user_skill_storage", return_value=storage),
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config"),
+        ):
+            client.update_skill("test-skill", enabled=False)
+
+        expected = self._config_with_placeholders()
+        expected["skills"]["test-skill"] = {"enabled": False}
+        written_text = config_file.read_text(encoding="utf-8")
+        assert json.loads(written_text) == expected
+        assert "ghp_live_secret_value" not in written_text
 
     def test_update_skill_not_found(self, client):
         with patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", return_value=[]):

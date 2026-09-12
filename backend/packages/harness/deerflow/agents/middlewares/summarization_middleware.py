@@ -20,6 +20,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import DEFAULT_KEEP
+from deerflow.config.task_continuity_config import TaskContinuityConfig
 from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
 from deerflow.utils.messages import is_real_user_message
@@ -68,6 +69,7 @@ class ContextCompactionResult:
     messages_to_summarize: tuple[AnyMessage, ...]
     preserved_messages: tuple[AnyMessage, ...]
     total_tokens: int
+    task_history: dict | None = None
 
 
 @runtime_checkable
@@ -108,6 +110,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         self,
         *args,
         before_summarization: list[BeforeSummarizationHook] | None = None,
+        task_continuity_config: TaskContinuityConfig | None = None,
         app_config: Any | None = None,
         configured_model_name: str | None = None,
         run_model_name: str | None = None,
@@ -116,6 +119,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+        self._task_continuity_config = task_continuity_config if task_continuity_config is not None and task_continuity_config.enabled is True else None
         self._before_summarization_hooks = before_summarization or []
         # Model-ownership state. The model that actually executes the run is selected
         # per run and is the authoritative source of truth, so the caller (lead /
@@ -177,6 +181,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             # behaviour (token counting/profile inspection and, absent an
             # explicit configured summary model, generation itself).
             "summary_model": self._anchor_model_name,
+            "task_continuity": self._task_continuity_config.model_dump(mode="json") if self._task_continuity_config is not None else None,
         }
 
     def _tag_nostream(self, model: Any) -> Any:
@@ -669,11 +674,17 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             compacted_message_count=len(messages_to_summarize),
             kept_message_count=len(preserved_messages),
         )
+        task_history = None
+        if self._task_continuity_config is not None:
+            from deerflow.agents.task_continuity.archive import capture
+
+            task_history = capture(state, runtime, messages_to_summarize, self._task_continuity_config)
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
             preserved_messages=tuple(preserved_messages),
             total_tokens=total_tokens,
+            task_history=task_history,
         )
 
     async def acompact_state(
@@ -709,11 +720,17 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             compacted_message_count=len(messages_to_summarize),
             kept_message_count=len(preserved_messages),
         )
+        task_history = None
+        if self._task_continuity_config is not None:
+            from deerflow.agents.task_continuity.archive import acapture
+
+            task_history = await acapture(state, runtime, messages_to_summarize, self._task_continuity_config)
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
             preserved_messages=tuple(preserved_messages),
             total_tokens=total_tokens,
+            task_history=task_history,
         )
 
     def _maybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -726,6 +743,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            **({"task_history": result.task_history} if result.task_history is not None else {}),
         }
 
     async def _amaybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -738,6 +756,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            **({"task_history": result.task_history} if result.task_history is not None else {}),
         }
 
     def _preserve_dynamic_context_reminders(
@@ -889,6 +908,7 @@ def create_summarization_middleware(
     app_config: Any | None = None,
     keep: tuple[str, int | float] | None = None,
     skip_memory_flush: bool = False,
+    archive_task_history: bool = True,
     run_model_name: str | None = None,
     extensions=None,
 ) -> DeerFlowSummarizationMiddleware | None:
@@ -904,6 +924,9 @@ def create_summarization_middleware(
     the explicit-summary-model fallback. The middleware does not re-derive it from
     ``runtime.context`` / ``get_config()``, which do not carry a custom agent's or a
     subagent's resolved model.
+
+    ``archive_task_history=False`` keeps subagent-internal messages out of the
+    parent thread archive, independently of the long-term memory opt-out.
 
     ``skip_memory_flush`` omits the ``memory_flush_hook`` that otherwise
     flushes pre-compaction messages into the durable memory queue. The lead
@@ -984,6 +1007,7 @@ def create_summarization_middleware(
     return DeerFlowSummarizationMiddleware(
         **kwargs,
         before_summarization=hooks,
+        task_continuity_config=(resolved_app_config.task_continuity if archive_task_history and getattr(getattr(resolved_app_config, "task_continuity", None), "enabled", False) is True else None),
         app_config=resolved_app_config,
         configured_model_name=config.model_name,
         run_model_name=run_model_name,
