@@ -325,7 +325,12 @@ def _is_human_message_like(message: Any) -> bool:
 
 
 def _strip_external_message_metadata(message: Any) -> Any:
-    """Remove server-owned metadata from an untrusted input message."""
+    """Remove server-owned metadata from an untrusted input message.
+
+    Also stamps ``untrusted_input`` on a human message whose caller-owned markers
+    would skip the input guardrail — see ``_mark_untrusted_framework_markers``.
+    The stamp is applied after the strip loop, so a caller cannot preset it.
+    """
     if not isinstance(message, BaseMessage):
         return message
     additional_kwargs = dict(message.additional_kwargs)
@@ -340,7 +345,8 @@ def _strip_external_message_metadata(message: Any) -> Any:
 
 
 def _strip_external_metadata_from_message_like(item: Any) -> Any:
-    """Strip server-owned keys from a message, in object or raw-dict form.
+    """Strip server-owned keys from a message, in object or raw-dict form, and
+    stamp ``untrusted_input`` where a caller's markers would skip the guardrail.
 
     Callers reach the checkpoint by two different routes and the message is a
     ``BaseMessage`` on one and a plain dict on the other, so both shapes have
@@ -382,7 +388,8 @@ def _strip_external_delegation_verdict(entry: Any) -> Any:
 
 
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
-    """Remove server-owned message metadata from caller-supplied state values.
+    """Remove server-owned message metadata from caller-supplied state values,
+    and mark messages whose caller-owned markers would skip the input guardrail.
 
     ``normalize_input`` does this for the run path. The thread-state mutation
     route writes its values straight into a checkpoint, so without the same
@@ -420,19 +427,24 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     validation errors are the right shape for clients to retry against.
 
     ``original_user_content``, dynamic-context reminder markers, the
-    transient view-image context marker, tool receipts, and delegated receipt
-    metadata/verdicts are server-owned. External callers cannot supply them;
-    trusted internal channel calls may preserve metadata they added before
-    invoking this boundary. The same applies to the ``delegations`` channel:
-    a caller-supplied ledger entry's ``receipt_verdict`` is a forgery and is
-    stripped before the graph runs.
+    transient view-image context marker, tool receipts, delegated receipt
+    metadata/verdicts, and ``untrusted_input`` are server-owned. External callers
+    cannot supply them; trusted internal channel calls may preserve metadata they
+    added before invoking this boundary. The same applies to the ``delegations``
+    channel: a caller-supplied ledger entry's ``receipt_verdict`` is a forgery and
+    is stripped before the graph runs.
 
-    The framework-injection markers ``hide_from_ui`` and a human ``summary``
-    name are server-owned for the same reason but carry extra weight: they tell
-    ``is_genuine_user_message`` the framework authored the message, which skips
-    input sanitization entirely. HumanInputCard replies are the one legitimate
-    external ``hide_from_ui``, so a message carrying a valid
-    ``human_input_response`` keeps it (and is still sanitized).
+    ``hide_from_ui`` and a human ``summary`` name are the exception: they stay
+    caller-owned and are deliberately preserved, because ``hide_from_ui`` is also
+    how three frontend senders (quoted conversation context, sidecar context, the
+    agent save command) keep a context message out of the transcript, and nothing
+    else hides those. What they must not do is tell
+    ``is_genuine_user_message`` the framework authored the message, which would
+    skip input sanitization — so a caller's message carrying either marker is
+    stamped with ``untrusted_input`` instead, and
+    ``requires_input_sanitization`` sanitizes it anyway. That key is stripped
+    first, so a caller can neither forge nor clear it. HumanInputCard replies need
+    no stamp: a valid ``human_input_response`` already makes them genuine.
     """
     if raw_input is None:
         return {}
