@@ -76,7 +76,8 @@ def _scope_catalog(config: AppConfig, agent_name: str):
     except (FileNotFoundError, ValueError):
         raise HTTPException(status_code=404, detail="Custom agent not found.") from None
     if (
-        not knowledge_base.scope_selection_enabled
+        not knowledge_base.enabled
+        or not knowledge_base.scope_selection_enabled
         or getattr(tool, "use", None) != RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
         or not custom_agent_supports_knowledge_scope(
             assistant_id=agent_name,

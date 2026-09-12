@@ -117,27 +117,9 @@ def _settings_or_error(app_config: Any | None = None) -> tuple[_RAGFlowRetrieval
     app_config = app_config or get_app_config()
     get_tool_config = getattr(app_config, "get_tool_config", lambda _name: None)
     tool_config = get_tool_config("knowledge_search") or get_tool_config("list_knowledge_bases")
-    global_config = getattr(app_config, "knowledge_base", None)
-    if tool_config is None and not getattr(global_config, "enabled", False):
-        return None, "Error: knowledge_search is not configured; add its RAGFlow settings to the tools list in config.yaml."
     if tool_config is None:
-        tool_values = {}
-    else:
-        tool_values = dict(tool_config.model_extra or {})
-    if global_config is not None:
-        for field_name in (
-            "base_url",
-            "api_key",
-            "timeout",
-            "page_size",
-            "similarity_threshold",
-            "vector_similarity_weight",
-            "top_k",
-            "max_chars_per_chunk",
-            "max_total_chars",
-        ):
-            if field_name not in tool_values and hasattr(global_config, field_name):
-                tool_values[field_name] = getattr(global_config, field_name)
+        return None, "Error: knowledge_search is not configured; add its RAGFlow settings to the tools list in config.yaml."
+    tool_values = dict(getattr(tool_config, "model_extra", None) or {})
     try:
         settings = _settings_from_extra(tool_values)
     except ValidationError:
