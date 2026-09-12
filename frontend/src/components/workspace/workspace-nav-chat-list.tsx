@@ -1,6 +1,6 @@
 "use client";
 
-import { BotIcon, CalendarClock, MessagesSquare } from "lucide-react";
+import { BotIcon, CalendarClock, MessagesSquare, PlugIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -86,6 +86,20 @@ export function WorkspaceNavChatList() {
             >
               <CalendarClock />
               <span>{t.sidebar.scheduledTasks}</span>
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            isActive={pathname.startsWith("/workspace/connector")}
+            asChild
+          >
+            <Link
+              className="text-muted-foreground group-hover/menu-item:text-sidebar-accent-foreground group-active/menu-item:text-sidebar-accent-foreground"
+              href="/workspace/connector"
+            >
+              <PlugIcon />
+              <span>{t.sidebar.connectedApps}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
