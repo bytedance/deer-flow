@@ -134,3 +134,41 @@ async def test_gateway_checkpoint_state_factory_is_single_flight() -> None:
 
     assert len(factory_calls) == 1
     assert first_accessor[0].graph is second_accessor[0].graph
+
+
+async def test_gateway_checkpoint_state_factory_survives_waiter_cancellation() -> None:
+    """Cancelling one reader cannot make a same-key reader rebuild the graph."""
+    request = SimpleNamespace(state=SimpleNamespace(checkpoint_channel_mode="full"))
+    ctx = SimpleNamespace(checkpointer=object(), store=None, checkpoint_channel_mode="full", app_config=None)
+    factory_started = threading.Event()
+    release_factory = threading.Event()
+    factory_calls: list[int] = []
+
+    def agent_factory(*, config):
+        factory_calls.append(threading.get_ident())
+        factory_started.set()
+        release_factory.wait(timeout=1)
+        return _Agent()
+
+    with (
+        patch.object(services, "get_run_context", return_value=ctx),
+        patch.object(services, "resolve_agent_factory", return_value=agent_factory),
+    ):
+        try:
+            first = asyncio.create_task(services.build_checkpoint_state_accessor(request, thread_id="thread-cancelled-single-flight"))
+            assert await asyncio.to_thread(factory_started.wait, 1)
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+
+            second = asyncio.create_task(services.build_checkpoint_state_accessor(request, thread_id="thread-cancelled-single-flight"))
+            await asyncio.sleep(0)
+            assert len(factory_calls) == 1
+            release_factory.set()
+            second_accessor = await second
+        finally:
+            release_factory.set()
+            services._state_accessor_graph_cache.clear()
+
+    assert len(factory_calls) == 1
+    assert second_accessor[0].graph is not None

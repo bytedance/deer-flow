@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import threading
+import weakref
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -70,7 +71,6 @@ from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
-from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
@@ -876,7 +876,8 @@ def build_checkpoint_state_mutation_accessor(
 _STATE_ACCESSOR_GRAPH_CACHE_MAX = 64
 _state_accessor_graph_cache: dict[tuple[str | None, str, int | None], tuple[Any, Any, Any]] = {}
 _state_accessor_graph_cache_lock = threading.Lock()
-_state_accessor_graph_locks = AsyncKeyedLockTable[tuple[str | None, str, int | None]]()
+_state_accessor_graph_builds_lock = threading.Lock()
+_state_accessor_graph_builds: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str | None, str, int | None], tuple[Any, Any, asyncio.Task[Any]]]] = weakref.WeakKeyDictionary()
 
 
 def _accessor_graph_cache_max(app_config: Any) -> int:
@@ -918,20 +919,79 @@ def _build_state_accessor_graph(agent_factory: Any, config: dict[str, Any]) -> A
         return agent_result
 
 
-async def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
-    app_config = (config.get("context") or {}).get("app_config")
-    key = (assistant_id, mode, snapshot_frequency)
+async def _build_and_cache_state_accessor_graph(
+    key: tuple[str | None, str, int | None],
+    agent_factory: Any,
+    app_config: Any,
+    config: dict[str, Any],
+) -> Any:
     cached = _cached_state_accessor_graph(key, agent_factory, app_config)
     if cached is not None:
         return cached
+    graph = await asyncio.to_thread(_build_state_accessor_graph, agent_factory, config)
+    _cache_state_accessor_graph(key, agent_factory, app_config, graph)
+    return graph
 
-    async with _state_accessor_graph_locks.hold(key):
+
+def _discard_state_accessor_graph_build(
+    loop: asyncio.AbstractEventLoop,
+    builds: dict[tuple[str | None, str, int | None], tuple[Any, Any, asyncio.Task[Any]]],
+    key: tuple[str | None, str, int | None],
+    build: tuple[Any, Any, asyncio.Task[Any]],
+) -> None:
+    with _state_accessor_graph_builds_lock:
+        if builds.get(key) is build:
+            builds.pop(key)
+        if not builds and _state_accessor_graph_builds.get(loop) is builds:
+            _state_accessor_graph_builds.pop(loop, None)
+
+
+def _state_accessor_graph_build(
+    key: tuple[str | None, str, int | None],
+    agent_factory: Any,
+    app_config: Any,
+    config: dict[str, Any],
+) -> tuple[Any, Any, asyncio.Task[Any]]:
+    """Return the current loop's shared build task for ``key``."""
+    loop = asyncio.get_running_loop()
+    with _state_accessor_graph_builds_lock:
+        builds = _state_accessor_graph_builds.get(loop)
+        if builds is None:
+            builds = {}
+            _state_accessor_graph_builds[loop] = builds
+        build = builds.get(key)
+        if build is not None and not build[2].done():
+            return build
+
+        task = asyncio.create_task(_build_and_cache_state_accessor_graph(key, agent_factory, app_config, config))
+        build = (agent_factory, app_config, task)
+        builds[key] = build
+        task.add_done_callback(lambda completed: _discard_state_accessor_graph_build(loop, builds, key, build))
+        return build
+
+
+async def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
+    app_config = (config.get("context") or {}).get("app_config")
+    key = (assistant_id, mode, snapshot_frequency)
+    while True:
         cached = _cached_state_accessor_graph(key, agent_factory, app_config)
         if cached is not None:
             return cached
-        graph = await asyncio.to_thread(_build_state_accessor_graph, agent_factory, config)
-        _cache_state_accessor_graph(key, agent_factory, app_config, graph)
-        return graph
+        build = _state_accessor_graph_build(key, agent_factory, app_config, config)
+        same_identity = build[0] is agent_factory and build[1] is app_config
+        try:
+            graph = await asyncio.shield(build[2])
+        except asyncio.CancelledError:
+            # The shared task owns construction and cache publication. A
+            # cancelled request must not abandon that single-flight slot while
+            # its worker-thread factory continues running.
+            raise
+        except Exception:
+            if same_identity:
+                raise
+        else:
+            if same_identity:
+                return graph
 
 
 class _RawCheckpointSnapshot:
