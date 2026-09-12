@@ -251,6 +251,9 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Skills
 
+- **skills:** The built-in image-generation skill can use OpenAI-compatible
+  Images APIs for generation and reference-image editing, with configurable
+  endpoint, model, size, and output format.
 - **skills:** Native SkillScan (phase 1) statically analyzes skill packages at
   load, and `describe_skill` enables deferred discovery so the model fetches a
   skill's schema on demand instead of loading all skills up front. ([#3033],
