@@ -608,6 +608,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         middlewares therefore guard different failure modes and use different lifetimes.
         """
         thread_id = self._thread_id(runtime)
+        transitions: list[tuple[str, ToolPhaseState, ToolPhaseState]] = []
         with self._lock:
             thread_tools = self._phase_states.get(thread_id)
             if thread_tools is None:
@@ -622,15 +623,18 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 )
                 thread_tools[tool_name] = new_state
                 if tool_state.phase != new_state.phase:
-                    self._record_phase_transition(
-                        runtime=runtime,
-                        tool_name=tool_name,
-                        state=tool_state,
-                        new_state=new_state,
-                        meta=None,
-                        hook=hook,
-                        transition=ToolPhaseTransition(action="reset", threshold=None),
-                    )
+                    transitions.append((tool_name, tool_state, new_state))
+
+        for tool_name, tool_state, new_state in transitions:
+            self._record_phase_transition(
+                runtime=runtime,
+                tool_name=tool_name,
+                state=tool_state,
+                new_state=new_state,
+                meta=None,
+                hook=hook,
+                transition=ToolPhaseTransition(action="reset", threshold=None),
+            )
 
     # ------------------------------------------------------------------
     # wrap_tool_call

@@ -34,6 +34,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="abort Gateway startup when this extension fails to load (default: report and skip)",
     )
+    upgrade = commands.add_parser(
+        "upgrade",
+        help="replace an installed extension source and keep its private config",
+    )
+    upgrade.add_argument("--source-env", action="store_true", help=argparse.SUPPRESS)
+    upgrade.add_argument("source", help="local directory, Python package requirement, or Git URL")
+    upgrade.add_argument(
+        "--yes",
+        action="store_true",
+        help="acknowledge that upgrading an extension executes trusted third-party code",
+    )
     disable = commands.add_parser("disable", help="disable an extension without uninstalling it")
     disable.add_argument("--name-env", action="store_true", help=argparse.SUPPRESS)
     disable.add_argument("name", help="extension name, distribution, or module:install entry point")
@@ -67,6 +78,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return 2
             installed = manager.install(source, yes=trusted, required=args.required)
             print(f"Installed and enabled {installed.name} ({installed.distribution}). Restart DeerFlow to load it.")
+            return 0
+        if args.command == "upgrade":
+            source = _source_argument(args)
+            trusted = args.yes
+            if not trusted:
+                print("Warning: a Python extension executes code with Gateway privileges.")
+                try:
+                    trusted = input("Upgrade this trusted source? [y/N] ").strip().lower() in {"y", "yes"}
+                except EOFError:
+                    trusted = False
+                if not trusted:
+                    print("Extension upgrade cancelled.", file=sys.stderr)
+                    return 2
+            installed = manager.upgrade(source, yes=trusted)
+            print(f"Upgraded {installed.name} ({installed.distribution}). Restart DeerFlow to load it.")
             return 0
         if args.command == "disable":
             name = manager.set_enabled(_name_argument(args), enabled=False)

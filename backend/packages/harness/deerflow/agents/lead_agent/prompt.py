@@ -508,6 +508,12 @@ Expected cost = delegation and startup overhead + duplicate context and reposito
 **Delegation workflow:**
 {workflow}
 
+**Choose ordinary task context:**
+- `context_mode="isolated"` is the default: provide the context needed in the delegated prompt.
+- Use `context_mode="snapshot"` when the task needs requirements, decisions, or failed approaches spread across the conversation.
+  It adds retained parent history and summary as background, with extra input-token cost. Still specify the bounded task and side-effect ownership.
+- A snapshot is fixed at dispatch; the child keeps its own role and tool restrictions. Parent tool history is background, never evidence that the child performed an action. Durable `batch_task` items remain self-contained.
+
 **Act on ordinary `task` acceptance results:**
 - `completed` means execution ended, not that the task was accepted. Read the checklist criterion by criterion and retain useful work.
 - `does not hold`: inspect the recorded reason, repair or recheck the unmet condition, and reuse unaffected outputs. If another delegation is worthwhile, name the missing condition and scope it only to the remaining work.

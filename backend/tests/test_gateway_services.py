@@ -990,6 +990,67 @@ def test_state_accessor_graph_cache_honors_configured_cap():
         gateway_services._state_accessor_graph_cache.clear()
 
 
+def test_state_accessor_graph_serializes_same_key_cold_construction():
+    """Overlapping first reads with the same factory object and app-config
+    identity must run the factory exactly once (per-key construction
+    serialization, PR #5224 review), while a changed factory identity still
+    rebuilds instead of reusing the stored graph."""
+    import threading
+    import time
+    from typing import Any
+
+    from app.gateway import services as gateway_services
+
+    builds = []
+    first_inside = threading.Event()
+    release_first = threading.Event()
+
+    def slow_factory(*, config):
+        graph = object()
+        builds.append(graph)
+        first_inside.set()
+        release_first.wait(timeout=10)
+        return graph
+
+    gateway_services._state_accessor_graph_cache.clear()
+    results: list[Any] = []
+    errors: list[BaseException] = []
+
+    def reader() -> None:
+        try:
+            results.append(gateway_services._state_accessor_graph(slow_factory, None, "full", None, {}))
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    try:
+        first = threading.Thread(target=reader)
+        second = threading.Thread(target=reader)
+        first.start()
+        assert first_inside.wait(timeout=5)
+        second.start()
+        # The second reader blocks on the per-key lock while the first is
+        # still inside the factory: no duplicate construction.
+        deadline = time.monotonic() + 5
+        while second.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(builds) == 1, errors
+        assert second.is_alive(), "second cold reader must wait for the in-flight construction"
+
+        release_first.set()
+        first.join(timeout=10)
+        second.join(timeout=10)
+        assert not (first.is_alive() or second.is_alive())
+        assert len(builds) == 1
+        assert len(results) == 2 and results[0] is results[1]
+
+        # A different factory object is an identity change: rebuild, not reuse.
+        other = gateway_services._state_accessor_graph(lambda *, config: object(), None, "full", None, {})
+        assert other is not results[0]
+        assert len(builds) == 1
+    finally:
+        gateway_services._state_accessor_graph_cache.clear()
+
+
 def test_build_run_config_configurable_custom_agent_dual_writes_agent_name():
     """Regression for issue #3549: even when the caller uses the legacy
     ``configurable`` path, ``agent_name`` must also land in
@@ -1141,7 +1202,7 @@ def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
 
 @pytest.mark.anyio
 async def test_seeded_checkpoint_messages_precede_the_first_new_run_messages():
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from langchain_core.messages import AIMessage, HumanMessage
 
@@ -1171,7 +1232,7 @@ async def test_seeded_checkpoint_messages_precede_the_first_new_run_messages():
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
+        new=MagicMock(return_value=(accessor, {"configurable": {"thread_id": "thread-1"}})),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1211,7 +1272,7 @@ async def test_seeded_checkpoint_messages_precede_the_first_new_run_messages():
 
 @pytest.mark.anyio
 async def test_checkpoint_history_seed_skips_new_thread_without_checkpoint():
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from app.gateway.services import ensure_checkpoint_history_seeded
 
@@ -1231,7 +1292,7 @@ async def test_checkpoint_history_seed_skips_new_thread_without_checkpoint():
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("new threads should not build an accessor"),
+        new=MagicMock(side_effect=AssertionError("new threads should not build an accessor")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1244,7 +1305,7 @@ async def test_checkpoint_history_seed_skips_new_thread_without_checkpoint():
 
 @pytest.mark.anyio
 async def test_checkpoint_history_seed_is_skipped_when_journal_already_has_messages():
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from app.gateway.services import ensure_checkpoint_history_seeded
 
@@ -1256,7 +1317,7 @@ async def test_checkpoint_history_seed_is_skipped_when_journal_already_has_messa
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("checkpoint state should not be loaded"),
+        new=MagicMock(side_effect=AssertionError("checkpoint state should not be loaded")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1315,7 +1376,7 @@ async def test_checkpoint_history_seed_guard_is_thread_scoped_under_user_context
     even when a user is authenticated. Seed rows stamped by another principal
     (or NULL) are invisible to a user-scoped query, which would re-seed a
     duplicate history per principal."""
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from app.gateway.services import ensure_checkpoint_history_seeded
     from deerflow.runtime.user_context import AUTO
@@ -1331,7 +1392,7 @@ async def test_checkpoint_history_seed_guard_is_thread_scoped_under_user_context
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("checkpoint state should not be loaded"),
+        new=MagicMock(side_effect=AssertionError("checkpoint state should not be loaded")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1350,7 +1411,7 @@ async def test_checkpoint_history_seed_runs_exactly_once_across_principals(tmp_p
     user_id=NULL; a later authenticated run on the same thread must still
     see them and skip re-seeding (the MemoryRunEventStore-based tests above
     cannot catch this because the memory store ignores user_id)."""
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from langchain_core.messages import AIMessage, HumanMessage
 
@@ -1386,7 +1447,7 @@ async def test_checkpoint_history_seed_runs_exactly_once_across_principals(tmp_p
 
         with patch(
             "app.gateway.services.build_checkpoint_state_accessor",
-            return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
+            new=MagicMock(return_value=(accessor, {"configurable": {"thread_id": "thread-1"}})),
         ):
             # First seed: ownerless (no user contextvar) — rows stamped NULL.
             await ensure_checkpoint_history_seeded(

@@ -306,6 +306,7 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    stopStreamingUnavailable: "你的角色无权停止正在运行的回合。",
   },
 
   // Sidebar
@@ -539,6 +540,17 @@ export const zhCN: Translations = {
       failed: "已失败",
       cancelled: "已取消",
     },
+    history: {
+      navigation: "执行记录分页",
+      newer: "较新记录",
+      older: "更早记录",
+      latest: "最新记录",
+      page: "第 {page} 页",
+      paused: "浏览历史页时暂停自动刷新，返回最新记录可查看当前执行情况。",
+      loading: "正在加载执行记录…",
+      loadFailed: "无法加载执行记录。",
+      retry: "重试加载",
+    },
     runTrigger: { scheduled: "定时", manual: "手动" },
     runStatus: {
       queued: "排队中",
@@ -614,10 +626,13 @@ export const zhCN: Translations = {
     agentCreated: "智能体已创建！",
     startChatting: "开始对话",
     backToGallery: "返回 Gallery",
-    settings: "模型设置",
-    settingsTitle: "模型设置",
+    settings: "智能体设置",
+    settingsTitle: "智能体设置",
+    settingsDisplayName: "显示名称",
+    settingsDisplayNameTooLong: "显示名称不能超过 100 个 Unicode 码点。",
+    settingsDisplayNameHint: "支持中文等 Unicode 字符，留空时使用智能体标识",
     settingsDescription:
-      "为该智能体选择默认模型和生成参数，修改在下一条消息生效。",
+      "为该智能体设置显示名称和默认模型，模型修改在下一条消息生效。",
     settingsModel: "默认模型",
     settingsModelDefault: "使用全局默认",
     settingsTemperature: "温度",
@@ -629,7 +644,7 @@ export const zhCN: Translations = {
     settingsThinkingOff: "关闭",
     settingsReasoningEffort: "推理强度",
     settingsInherit: "继承",
-    settingsSaved: "模型设置已保存",
+    settingsSaved: "智能体设置已保存",
     settingsInvalidTemperature: "温度必须在 0 到 2 之间",
     settingsInvalidMaxTokens: "最大输出 token 必须为不超过 200,000 的正整数",
   },
@@ -767,6 +782,15 @@ export const zhCN: Translations = {
 
   // Tool calls
   toolCalls: {
+    details: "工具详情",
+    toolName: "工具名称",
+    callId: "调用 ID",
+    input: "输入",
+    result: "结果",
+    error: "错误",
+    noResult: "尚未收到结果",
+    emptyResult: "空结果",
+    truncated: "预览已截断；复制仅包含当前显示的内容。",
     moreSteps: (count: number) => `查看其他 ${count} 个步骤`,
     lessSteps: "隐藏步骤",
     executeCommand: "执行命令",

@@ -44,6 +44,7 @@ from deerflow.subagents.capacity import (
     get_subagent_execution_capacity,
 )
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.context_snapshot import SNAPSHOT_SYSTEM_NOTE, ParentContextSnapshot
 from deerflow.subagents.report_contract import (
     build_acceptance_criteria_system_note,
     build_report_contract_section,
@@ -795,6 +796,7 @@ class SubagentExecutor:
         loop_detection_recorder: Any | None = None,
         tool_promotion_recorder: Any | None = None,
         tool_progress_recorder: Any | None = None,
+        context_snapshot: ParentContextSnapshot | None = None,
     ):
         """Initialize the executor.
 
@@ -846,6 +848,9 @@ class SubagentExecutor:
                 promotion events. It follows the same isolated-loop boundary.
             tool_progress_recorder: Optional loop-safe recorder for tool-progress
                 phase transitions. It follows the same isolated-loop boundary.
+            context_snapshot: Optional immutable parent history captured by the
+                ordinary task tool at dispatch. Rendered as background data,
+                never as child execution evidence or inherited system authority.
         """
         self.config = config
         self.app_config = app_config
@@ -861,6 +866,7 @@ class SubagentExecutor:
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
+        self.context_snapshot = context_snapshot
         self.thread_id = thread_id
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
@@ -1212,6 +1218,8 @@ class SubagentExecutor:
         system_parts: list[str] = []
         if self.config.system_prompt:
             system_parts.append(self.config.system_prompt)
+        if self.context_snapshot is not None:
+            system_parts.append(SNAPSHOT_SYSTEM_NOTE)
         # RFC #4651 PR3: every subagent — built-in or custom — gets the same
         # report contract, so the citation / verifiable-handle requirements
         # never depend on the config author remembering them. The citation
@@ -1264,6 +1272,9 @@ class SubagentExecutor:
         if system_parts:
             self._assembled_system_prompt = "\n\n".join(system_parts)
             messages.append(SystemMessage(content=self._assembled_system_prompt))
+
+        if self.context_snapshot is not None:
+            messages.append(self.context_snapshot.to_message())
 
         # Then the actual task, with any lead-supplied acceptance criteria
         # appended as untrusted data (see the channel note above).

@@ -680,6 +680,51 @@ def test_before_agent_resets_warned_states_for_new_run():
     assert journal.record_middleware.call_args.kwargs["changes"]["from_phase"] == "warned"
 
 
+def test_before_agent_reset_recorder_does_not_hold_the_state_lock():
+    """A slow reset recorder must not stall concurrent state access."""
+
+    class DelayingResetRecorder:
+        def __init__(self):
+            self.reset_started = threading.Event()
+            self.release_reset = threading.Event()
+
+        def record_middleware(self, **kwargs):
+            if kwargs["action"] == "reset":
+                self.reset_started.set()
+                self.release_reset.wait(timeout=30)
+
+    mw = _make_mw(stagnation_threshold=1, warn_escalation_count=1)
+    run_one = _make_runtime(thread_id="t1", run_id="run-1")
+    request = _make_tool_request(runtime=run_one)
+    blocked = ToolMessage(
+        content="Error: invalid api key",
+        tool_call_id="tc-web_search",
+        name="web_search",
+        status="error",
+        additional_kwargs=_meta_kwargs(
+            status="error",
+            error_type="auth",
+            recoverable_by_model=False,
+            recommended_next_action="stop",
+        ),
+    )
+    mw.wrap_tool_call(request, lambda _request: blocked)
+
+    recorder = DelayingResetRecorder()
+    run_two = _make_runtime(thread_id="t1", run_id="run-2")
+    run_two.context["__run_journal"] = recorder
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reset_future = pool.submit(mw.before_agent, MagicMock(), run_two)
+        assert recorder.reset_started.wait(timeout=5)
+        state_future = pool.submit(mw._get_block_reason, run_two, "web_search")
+        try:
+            assert state_future.result(timeout=5) is None
+        finally:
+            recorder.release_reset.set()
+        reset_future.result(timeout=5)
+
+
 def test_before_agent_resets_active_state_consecutive_problems_and_word_sets():
     """ACTIVE tools with sub-threshold problems must also be cleaned at run boundaries.
 
