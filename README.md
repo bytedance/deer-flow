@@ -1261,7 +1261,9 @@ before. Snapshot tasks also receive the parent's retained conversation and
 compaction summary, captured at dispatch as historical background. This helps
 handoffs that depend on earlier requirements or failed approaches, at the cost
 of additional input tokens. Retained text, tool-call descriptions/results, and
-media input blocks are carried over; parent system prompts, hidden framework
+JSON-serializable media input blocks are carried over. Binary or otherwise
+unserializable media blocks become an explicit omission notice; surrounding
+conversation remains available. Parent system prompts, hidden framework
 messages (such as injected memory and todo reminders), reasoning blocks, tool
 execution metadata, and pending tool calls are excluded. Tool-call descriptions
 require a retained matching result, including calls alongside the current task.

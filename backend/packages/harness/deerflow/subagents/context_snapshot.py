@@ -88,7 +88,15 @@ class ParentContextSnapshot:
                 elif block.get("type") in {"text", "output_text"} and isinstance(block.get("text"), str):
                     history.append({"type": "text", "text": neutralize_untrusted_tags(block["text"])})
                 elif block.get("type") in _MEDIA_BLOCK_TYPES:
-                    history.append({key: value for key, value in block.items() if key != "cache_control"})
+                    media = {key: value for key, value in block.items() if key != "cache_control"}
+                    try:
+                        json.dumps(media, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        # Do not guess a provider encoding for opaque payloads.
+                        # Omit this block without discarding the conversation.
+                        history.append({"type": "text", "text": "[Historical media omitted: content could not be serialized. Do not assume its contents.]"})
+                    else:
+                        history.append(media)
             if isinstance(message, AIMessage):
                 # Every tool needs a retained result, including ordinary calls
                 # executing alongside the current delegation.

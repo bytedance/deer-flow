@@ -54,6 +54,58 @@ def test_snapshot_is_detached_in_both_directions_including_media():
     assert "Parent changed" not in fresh and "later.png" not in fresh and "child.png" not in fresh
 
 
+@pytest.mark.parametrize("message_type", [HumanMessage, AIMessage, ToolMessage])
+@pytest.mark.parametrize("media_type", ["image", "file", "audio", "input_audio", "video", "image_url"])
+def test_snapshot_omits_binary_media_without_losing_surrounding_history(message_type, media_type):
+    media = {"type": media_type, "data": b"PRIVATE_BINARY_PAYLOAD"}
+    if media_type in {"image_url", "input_audio"}:
+        media = {"type": media_type, media_type: {"data": b"PRIVATE_BINARY_PAYLOAD"}}
+    kwargs = {"tool_call_id": "media-result"} if message_type is ToolMessage else {}
+    message = message_type(content=[{"type": "text", "text": "BEFORE_MEDIA"}, media, {"type": "text", "text": "AFTER_MEDIA"}], **kwargs)
+
+    snapshot = ParentContextSnapshot.from_state({"summary_text": "KEEP_SUMMARY", "messages": [message, HumanMessage(content="LATER_MESSAGE")]})
+
+    assert snapshot is not None
+    text = message_content_to_text(snapshot.to_message().content)
+    for expected in ("KEEP_SUMMARY", "BEFORE_MEDIA", "AFTER_MEDIA", "LATER_MESSAGE", "Historical media omitted"):
+        assert expected in text
+    assert "PRIVATE_BINARY_PAYLOAD" not in snapshot.content_json
+    assert all(block["type"] == "text" for block in snapshot.to_message().content)
+    original_payload = message.content[1].get("data") if "data" in message.content[1] else message.content[1][media_type]["data"]
+    assert original_payload == b"PRIVATE_BINARY_PAYLOAD"
+
+
+@pytest.mark.parametrize(
+    "media",
+    [
+        {"type": "image_url", "image_url": {"url": "https://example.test/image.png"}},
+        {"type": "image", "source_type": "base64", "mime_type": "image/png", "data": "iVBORw0KGgo="},
+        {"type": "file", "source_type": "base64", "mime_type": "application/pdf", "filename": "report.pdf", "data": "JVBERi0xLjc="},
+        {"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}},
+    ],
+)
+def test_snapshot_preserves_serializable_media_and_removes_cache_control(media):
+    message = HumanMessage(content=[{**media, "cache_control": b"PRIVATE_CACHE_METADATA"}])
+    snapshot = ParentContextSnapshot.from_state({"messages": [message]})
+    content = snapshot.to_message().content
+    assert content[-1] == media
+    assert "omitted" not in snapshot.content_json and "PRIVATE_CACHE_METADATA" not in snapshot.content_json
+    content[-1]["changed"] = True
+    assert "changed" not in snapshot.to_message().content[-1]
+
+
+@pytest.mark.parametrize("payload_kind", ["bytearray", "circular"])
+def test_snapshot_with_only_unserializable_media_keeps_an_omission_notice(payload_kind):
+    payload = bytearray(b"PRIVATE_BINARY_PAYLOAD") if payload_kind == "bytearray" else {}
+    if payload_kind == "circular":
+        payload["loop"] = payload
+    snapshot = ParentContextSnapshot.from_state({"messages": [HumanMessage(content=[{"type": "file", "data": payload}])]})
+    assert snapshot is not None
+    assert "Historical media omitted" in snapshot.content_json
+    assert "PRIVATE_BINARY_PAYLOAD" not in snapshot.content_json
+    assert all(block["type"] == "text" for block in snapshot.to_message().content)
+
+
 def test_snapshot_neutralizes_historical_framework_tags_and_omits_reasoning():
     snapshot = ParentContextSnapshot.from_state(
         {

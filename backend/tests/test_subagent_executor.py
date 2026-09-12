@@ -602,6 +602,7 @@ class TestAgentConstruction:
                 ToolMessage(content="parent tests passed [r1]", name="bash", tool_call_id="parent-only"),
                 HumanMessage(content="PRIVATE_PARENT_MEMORY", additional_kwargs={"hide_from_ui": True}),
                 HumanMessage(content="PRIVATE_PARENT_PLAN", name="todo_reminder", additional_kwargs={"hide_from_ui": True}),
+                HumanMessage(content=[{"type": "image", "data": b"PRIVATE_BINARY_IMAGE"}, {"type": "file", "data": b"PRIVATE_BINARY_FILE"}, {"type": "text", "text": "Text beside unavailable media"}]),
                 HumanMessage(
                     content="Clarified user requirement",
                     additional_kwargs={
@@ -667,6 +668,9 @@ class TestAgentConstruction:
         assert "Changed parent" not in str(observed)
         assert "PRIVATE_PARENT" not in str(observed)
         assert "PENDING_PARENT" not in str(observed)
+        assert "PRIVATE_BINARY" not in str(observed)
+        assert ("Historical media omitted" in str(observed)) is inherit
+        assert ("Text beside unavailable media" in str(observed)) is inherit
         assert ("parent tests passed" in str(observed)) is inherit
         assert ("Clarified user requirement" in str(observed)) is inherit
         assert result.tool_receipts and {receipt["tool_call_id"] for receipt in result.tool_receipts} == {"child-call"}
