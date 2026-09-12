@@ -18,6 +18,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
+from deerflow.agents.middlewares.tool_args_compaction_middleware import compact_messages_for_model_context
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import DEFAULT_KEEP
 from deerflow.extensions.notify import notify_context_compacted
@@ -521,6 +522,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
     def _build_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Build the summary prompt, returning ``None`` when trimming leaves nothing."""
+        # Compact before trimming/formatting, while completed call/result pairs
+        # are intact. Keep hook inputs and persisted history unchanged.
+        messages_to_summarize = compact_messages_for_model_context(messages_to_summarize)
         trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
         new_messages_strategy: Literal["first", "last"] = "first"
         if not trimmed_messages:

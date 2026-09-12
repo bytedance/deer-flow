@@ -47,6 +47,7 @@ from deerflow.agents.middlewares.terminal_response_middleware import TerminalRes
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
+from deerflow.agents.middlewares.tool_args_compaction_middleware import ToolArgsCompactionMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
@@ -583,6 +584,10 @@ def build_middlewares(
     )
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
+
+    # Compact oversized historical write_file tool-call args in the model-bound
+    # request view without mutating persisted conversation state.
+    middlewares.append(ToolArgsCompactionMiddleware())
 
     # Add TodoList middleware if plan mode is enabled
     cfg = _get_runtime_config(config)
