@@ -24,11 +24,13 @@ _MISSING_ROOT = "missing"
 # head closing the pipe after the limit kills the search with SIGPIPE: a
 # successful truncation, not an error.
 _SIGPIPE = 141
-# Statuses that always mean the search ran. grep: 0 = matches, 1 = no match.
+# Statuses of a complete search. grep: 0 = matches, 1 = no match. Everything
+# else fails, even after printed results.
 _OK_STATUSES: dict[str, tuple[int, ...]] = {"grep": (0, 1, _SIGPIPE), "find": (0, _SIGPIPE)}
-# Error statuses that still searched the rest of the tree (an unreadable file
-# or subdirectory). They are accepted only when results were printed.
-_PARTIAL_STATUSES: dict[str, tuple[int, ...]] = {"grep": (2,), "find": (1,)}
+# grep 2 / find 1 usually mean an unreadable file or subdirectory. Printed
+# results are then incomplete and callers have no partial-result channel, so
+# the error tells the agent to narrow the search instead.
+_READ_ERROR_STATUS: dict[str, int] = {"grep": 2, "find": 1}
 
 
 def remote_search_command(search: str, root: str, *, limit: int) -> str:
@@ -51,8 +53,8 @@ def parse_remote_search_output(stdout: str | None, root: str, *, tool: SearchToo
 
     Raises:
         FileNotFoundError: The search root does not exist.
-        OSError: The search did not run (missing binary, unreadable root,
-            invalid invocation) or its status was lost.
+        OSError: The search did not complete (missing binary, unreadable
+            root or subtree, invalid invocation) or its status was lost.
     """
     # Split on "\n" only: splitlines() would also split on characters that are
     # legal in Linux filenames. Callers keep their own per-line handling.
@@ -70,6 +72,8 @@ def parse_remote_search_output(stdout: str | None, root: str, *, tool: SearchToo
         status = int(raw)
     except ValueError:
         raise OSError(f"Failed to {tool} under {root}: search status unavailable") from None
-    if status in _OK_STATUSES[tool] or (status in _PARTIAL_STATUSES[tool] and any(lines)):
+    if status in _OK_STATUSES[tool]:
         return "\n".join(lines)
+    if status == _READ_ERROR_STATUS[tool]:
+        raise OSError(f"Failed to {tool} under {root}: {tool} exited with code {status}, usually because some files or directories could not be read; results would be incomplete, so search a narrower path")
     raise OSError(f"Failed to {tool} under {root}: command exited with code {status}")

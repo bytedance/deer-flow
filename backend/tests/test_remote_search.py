@@ -81,9 +81,21 @@ def test_parse_failure_without_output_raises(tool: str, status: int) -> None:
 
 
 @pytest.mark.parametrize(("tool", "status"), [("grep", 2), ("find", 1)])
-def test_parse_partial_error_keeps_what_was_read(tool: str, status: int) -> None:
-    # One unreadable file or subdirectory: the rest of the tree was still searched.
-    assert parse_remote_search_output(f"/dir/a.py\n\n__DF_SEARCH_STATUS__:{status}\n", "/dir", tool=tool) == "/dir/a.py"
+def test_parse_error_after_partial_output_still_raises(tool: str, status: int) -> None:
+    # An unreadable file or subdirectory leaves the result incomplete, and callers
+    # have no partial-result channel: it must not pass as a complete search, and
+    # the error must tell the agent how to recover.
+    with pytest.raises(OSError, match=f"exited with code {status}") as info:
+        parse_remote_search_output(f"/dir/a.py\n\n__DF_SEARCH_STATUS__:{status}\n", "/dir", tool=tool)
+    assert "could not be read" in str(info.value)
+    assert "narrower path" in str(info.value)
+
+
+@pytest.mark.parametrize(("tool", "status"), [("grep", 126), ("grep", 127), ("find", 127)])
+def test_parse_other_failures_do_not_blame_unreadable_paths(tool: str, status: int) -> None:
+    with pytest.raises(OSError, match=f"exited with code {status}") as info:
+        parse_remote_search_output(f"\n__DF_SEARCH_STATUS__:{status}\n", "/dir", tool=tool)
+    assert "could not be read" not in str(info.value)
 
 
 def test_parse_unparseable_status_is_a_failure() -> None:
@@ -165,6 +177,28 @@ def test_unreadable_root_is_a_failure_not_a_no_match(tmp_path) -> None:
     try:
         with pytest.raises(OSError, match="exited with code 2"):
             parse_remote_search_output(_run(remote_search_command(_grep(str(locked)), str(locked), limit=450)), str(locked), tool="grep")
+    finally:
+        locked.chmod(0o700)
+
+
+@_POSIX_SH
+@_REAL_GREP
+@_REAL_FIND
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can read an unreadable directory")
+def test_unreadable_subtree_is_a_failure_not_a_partial_result(tmp_path) -> None:
+    (tmp_path / "open").mkdir()
+    (tmp_path / "open" / "a.txt").write_text("needle\n", encoding="utf-8")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "b.txt").write_text("needle\n", encoding="utf-8")
+    locked.chmod(0)
+    root = str(tmp_path)
+    try:
+        # Both searches print the readable match before failing on the locked subtree.
+        with pytest.raises(OSError, match="exited with code 2.*could not be read"):
+            parse_remote_search_output(_run(remote_search_command(_grep(root), root, limit=450)), root, tool="grep")
+        with pytest.raises(OSError, match="exited with code 1.*could not be read"):
+            parse_remote_search_output(_run(remote_search_command(_find(root), root, limit=850)), root, tool="find")
     finally:
         locked.chmod(0o700)
 
