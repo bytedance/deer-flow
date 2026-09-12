@@ -56,6 +56,10 @@ def _build_usage_metadata(oai_usage: dict) -> dict:
 
 
 MAX_RETRIES = 3
+MODEL_FALLBACKS = {
+    "gpt-5.3-codex-spark-xhigh": "gpt-5.4",
+    "gpt-5.3-codex-spark": "gpt-5.4",
+}
 
 
 class CodexChatModel(BaseChatModel):
@@ -68,8 +72,8 @@ class CodexChatModel(BaseChatModel):
           reasoning_effort: medium
     """
 
-    model: str = "gpt-5.4"
-    reasoning_effort: str = "medium"
+    model: str = "gpt-5.3-codex-spark"
+    reasoning_effort: str = "xhigh"
     retry_max_attempts: int = MAX_RETRIES
     _access_token: str = ""
     _account_id: str = ""
@@ -202,21 +206,22 @@ class CodexChatModel(BaseChatModel):
                 )
         return responses_tools
 
+    def _build_reasoning_param(self, model: str) -> dict:
+        """Build the reasoning parameter, omitting summary for models that don't support it."""
+        if self.reasoning_effort == "none":
+            return {"effort": "none"}
+        reasoning: dict[str, Any] = {"effort": self.reasoning_effort}
+        if "spark" not in model:
+            reasoning["summary"] = "detailed"
+        return reasoning
+
     def _call_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None) -> dict:
         """Call the Codex Responses API and return the completed response."""
         instructions, input_items = self._convert_messages(messages)
-
-        payload = {
-            "model": self.model,
-            "instructions": instructions,
-            "input": input_items,
-            "store": False,
-            "stream": True,
-            "reasoning": {"effort": self.reasoning_effort, "summary": "detailed"} if self.reasoning_effort != "none" else {"effort": "none"},
-        }
-
-        if tools:
-            payload["tools"] = self._convert_tools(tools)
+        model_candidates = [self.model]
+        fallback_model = MODEL_FALLBACKS.get(self.model)
+        if fallback_model and fallback_model not in model_candidates:
+            model_candidates.append(fallback_model)
 
         headers = {
             "Authorization": f"Bearer {self._access_token}",
@@ -226,24 +231,56 @@ class CodexChatModel(BaseChatModel):
             "originator": "codex_cli_rs",
         }
 
-        last_error = None
-        for attempt in range(1, self.retry_max_attempts + 1):
-            try:
-                return self._stream_response(headers, payload)
-            except httpx.HTTPStatusError as e:
-                last_error = e
-                if e.response.status_code in (429, 500, 529):
-                    if attempt >= self.retry_max_attempts:
+        for i, model in enumerate(model_candidates):
+            payload = {
+                "model": model,
+                "instructions": instructions,
+                "input": input_items,
+                "store": False,
+                "stream": True,
+                "reasoning": self._build_reasoning_param(model),
+            }
+            if tools:
+                payload["tools"] = self._convert_tools(tools)
+
+            last_error = None
+            for attempt in range(1, self.retry_max_attempts + 1):
+                try:
+                    return self._stream_response(headers, payload)
+                except httpx.HTTPStatusError as e:
+                    last_error = e
+                    if self._is_unsupported_model_error(e) and fallback_model and i < len(model_candidates) - 1:
+                        logger.warning(
+                            "Codex model '%s' is not supported with this account. Falling back to '%s'.",
+                            self.model,
+                            fallback_model,
+                        )
+                        break
+                    if e.response.status_code in (429, 500, 529):
+                        if attempt >= self.retry_max_attempts:
+                            raise
+                        wait_ms = 2000 * (1 << (attempt - 1))
+                        logger.warning(
+                            f"Codex API error {e.response.status_code}, retrying {attempt}/{self.retry_max_attempts} after {wait_ms}ms"
+                        )
+                        time.sleep(wait_ms / 1000)
+                    else:
                         raise
-                    wait_ms = 2000 * (1 << (attempt - 1))
-                    logger.warning(f"Codex API error {e.response.status_code}, retrying {attempt}/{self.retry_max_attempts} after {wait_ms}ms")
-                    time.sleep(wait_ms / 1000)
-                else:
+                except Exception:
                     raise
-            except Exception:
-                raise
 
         raise last_error
+
+    def _is_unsupported_model_error(self, error: httpx.HTTPStatusError) -> bool:
+        """Return True when the endpoint rejects the current model for this account."""
+        try:
+            body = error.response.json()
+            detail = body.get("detail", "")
+        except Exception:
+            detail = error.response.text if error.response is not None else ""
+        if isinstance(detail, list):
+            detail = " ".join(str(item) for item in detail)
+        return "not supported when using Codex with a ChatGPT account" in str(detail)
 
     def _stream_response(self, headers: dict, payload: dict) -> dict:
         """Stream SSE from Codex API and collect the final response."""
@@ -252,7 +289,9 @@ class CodexChatModel(BaseChatModel):
 
         with httpx.Client(timeout=300) as client:
             with client.stream("POST", f"{CODEX_BASE_URL}/responses", headers=headers, json=payload) as resp:
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    resp.read()
+                    resp.raise_for_status()
                 for line in resp.iter_lines():
                     data = self._parse_sse_data_line(line)
                     if not data:
