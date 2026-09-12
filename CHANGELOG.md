@@ -568,6 +568,17 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **skills:** Stop writing resolved secrets into `extensions_config.json` when a
+  skill is toggled. The Gateway skill toggle and `DeerFlowClient.update_skill`
+  loaded the file through `ExtensionsConfig.from_file()`, which replaces every
+  `$VAR` value with the environment value, and wrote that model back — so a
+  `"$GITHUB_TOKEN"` reference was persisted as the plaintext token and an unset
+  variable was permanently replaced with `""`. `DeerFlowClient.update_mcp_config`
+  did the same for every key other than `mcpServers`. These writers now edit the
+  raw on-disk JSON and validate the candidate the way the runtime loads it, so
+  placeholders and hand-written structure survive; the MCP router shares the same
+  raw loader. Files rewritten by an earlier toggle keep their plaintext values:
+  restore the `$VAR` references and rotate the exposed credentials. ([#5357])
 - **gateway:** Honor `disable_clarification` and `github_token` only for
   internally-authenticated callers, the way `non_interactive` already was.
   Both keys were forwarded from `body.context` regardless of the caller and
@@ -2749,4 +2760,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5321]: https://github.com/bytedance/deer-flow/pull/5321
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
 [#5353]: https://github.com/bytedance/deer-flow/pull/5353
+[#5357]: https://github.com/bytedance/deer-flow/pull/5357
 [#5375]: https://github.com/bytedance/deer-flow/pull/5375

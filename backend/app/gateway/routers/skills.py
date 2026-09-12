@@ -17,12 +17,14 @@ from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
-    SkillStateConfig,
     atomic_write_extensions_config,
     extensions_config_file_lock,
     extensions_config_write_lock,
     get_extensions_config,
+    read_raw_extensions_config,
     reload_extensions_config,
+    set_raw_skill_enabled,
+    validate_raw_extensions_config,
 )
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
@@ -653,13 +655,18 @@ def _write_extensions_skill_state(
     with projection_update:
         with extensions_config_write_lock, extensions_config_file_lock(config_path):
             # The projection lock is cross-process, but the singleton cache is
-            # not. Existing files are therefore re-read under the lock; a new
-            # file starts from a deep snapshot of the cached defaults.
-            extensions_config = ExtensionsConfig.from_file(config_path) if config_path.exists() else get_extensions_config().model_copy(deep=True)
-            extensions_config.skills[skill_name] = SkillStateConfig(enabled=enabled)
+            # not. Existing files are therefore re-read under the lock, raw, so
+            # $VAR placeholders are not persisted as resolved secrets. A new
+            # file starts from the cached skill states only: the cached model
+            # holds resolved values and must never be serialized.
+            if config_path.exists():
+                raw_config = read_raw_extensions_config(config_path)
+            else:
+                raw_config = {"skills": {name: {"enabled": state.enabled} for name, state in get_extensions_config().skills.items()}}
+            set_raw_skill_enabled(raw_config, skill_name, enabled)
 
-            config_data = extensions_config.to_file_dict()
-            atomic_write_extensions_config(config_path, config_data)
+            validate_raw_extensions_config(raw_config)
+            atomic_write_extensions_config(config_path, raw_config)
 
             logger.info(f"Skills configuration updated and saved to: {config_path}")
             reload_extensions_config()
