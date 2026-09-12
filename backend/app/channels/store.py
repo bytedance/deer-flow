@@ -73,7 +73,12 @@ class ChannelStore:
 
     @staticmethod
     def _key(channel_name: str, chat_id: str, topic_id: str | None = None) -> str:
-        if topic_id:
+        # Use ``is not None`` (not truthiness) so an empty ``topic_id`` stays a
+        # distinct key from the topic-less base mapping. ``remove()`` already
+        # treats any non-None topic_id as topic-specific; collapsing ``""`` here
+        # would let a topic write/delete clobber the base ``channel:chat`` entry
+        # (e.g. DingTalk group messages whose ``message_id`` is missing).
+        if topic_id is not None:
             return f"{channel_name}:{chat_id}:{topic_id}"
         return f"{channel_name}:{chat_id}"
 
