@@ -335,9 +335,9 @@ start() {
     if [ "$sandbox_mode" = "aio" ]; then
         local docker_socket="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
         if [ ! -S "$docker_socket" ]; then
-            # On Windows (Git Bash / MSYS), /var/run/docker.sock does not exist as
-            # a host socket file, but Docker Desktop mounts it into containers.
-            if [[ "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]] && docker info >/dev/null 2>&1; then
+            # On Windows (Git Bash / MSYS), Docker Desktop mounts the default
+            # /var/run/docker.sock into containers even though no host socket file exists.
+            if [ "$docker_socket" = "/var/run/docker.sock" ] && [[ "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]] && docker info >/dev/null 2>&1; then
                 :
             else
                 echo -e "${YELLOW}⚠ Docker socket not found at $docker_socket — AioSandboxProvider (DooD) will not work.${NC}"

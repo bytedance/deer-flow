@@ -373,9 +373,9 @@ fi
 
 if [ "$sandbox_mode" = "aio" ]; then
     if [ ! -S "$DEER_FLOW_DOCKER_SOCKET" ]; then
-        # On Windows (Git Bash / MSYS), /var/run/docker.sock does not exist as
-        # a host socket file, but Docker Desktop mounts it into containers.
-        if [[ "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]] && docker info >/dev/null 2>&1; then
+        # On Windows (Git Bash / MSYS), Docker Desktop mounts the default
+        # /var/run/docker.sock into containers even though no host socket file exists.
+        if [ "$DEER_FLOW_DOCKER_SOCKET" = "/var/run/docker.sock" ] && [[ "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]] && docker info >/dev/null 2>&1; then
             :
         else
             echo -e "${RED}⚠ Docker socket not found at $DEER_FLOW_DOCKER_SOCKET${NC}"

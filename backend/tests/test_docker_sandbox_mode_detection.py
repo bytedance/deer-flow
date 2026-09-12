@@ -342,7 +342,7 @@ docker() {{
   fi
   return 0
 }}
-DEER_FLOW_DOCKER_SOCKET='/nonexistent/docker.sock'
+DEER_FLOW_DOCKER_SOCKET='/var/run/docker.sock'
 COMPOSE_CMD=echo
 start
 """
@@ -388,6 +388,43 @@ start
         assert "Docker socket not found" in result.stdout
 
 
+def test_aio_dood_socket_preflight_rejects_missing_custom_socket_on_windows():
+    """Windows Git Bash must fail if a custom non-existent socket path is specified."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        _seed_env_examples(tmp_root)
+        (tmp_root / "config.yaml").write_text(
+            "sandbox:\n  use: deerflow.community.aio_sandbox:AioSandboxProvider\n",
+            encoding="utf-8",
+        )
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+require_compose_version() {{ :; }}
+uname() {{ echo 'MINGW64_NT-10.0'; }}
+docker() {{
+  if [ "$1" = info ]; then
+    return 0
+  fi
+  return 0
+}}
+DEER_FLOW_DOCKER_SOCKET='/nonexistent/docker.sock'
+COMPOSE_CMD=echo
+start
+"""
+        result = subprocess.run(
+            [BASH_EXECUTABLE, "-lc", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "Docker socket not found" in result.stdout
+
+
 def test_aio_dood_socket_preflight_rejects_windows_when_docker_unreachable():
     """Windows Git Bash must fail if Docker daemon is not reachable."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -410,7 +447,7 @@ docker() {{
   fi
   return 0
 }}
-DEER_FLOW_DOCKER_SOCKET='/nonexistent/docker.sock'
+DEER_FLOW_DOCKER_SOCKET='/var/run/docker.sock'
 COMPOSE_CMD=echo
 start
 """
@@ -458,7 +495,7 @@ def test_aio_deploy_socket_preflight_allows_windows_when_docker_reachable(tmp_pa
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env["BASH_ENV"] = str(bash_env)
-    env["DEER_FLOW_DOCKER_SOCKET"] = "/nonexistent/docker.sock"
+    env["DEER_FLOW_DOCKER_SOCKET"] = "/var/run/docker.sock"
     env["BETTER_AUTH_SECRET"] = "test-secret"
     env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
     env["UV_EXTRAS"] = "redis"
@@ -500,6 +537,41 @@ def test_aio_deploy_socket_preflight_rejects_missing_socket_on_posix(tmp_path):
     assert "Docker socket not found" in result.stdout + result.stderr
 
 
+def test_aio_deploy_socket_preflight_rejects_missing_custom_socket_on_windows(tmp_path):
+    """deploy.sh on Windows Git Bash fails if a custom non-existent socket path is specified."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(
+        '#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 0; fi\nexit 0\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text("uname() { echo 'MINGW64_NT-10.0'; }\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env["DEER_FLOW_DOCKER_SOCKET"] = "/nonexistent/docker.sock"
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Docker socket not found" in result.stdout + result.stderr
+
+
 def test_aio_deploy_socket_preflight_rejects_windows_when_docker_unreachable(tmp_path):
     """deploy.sh on Windows Git Bash fails if Docker daemon is not reachable."""
     worktree = _setup_deploy_worktree(tmp_path)
@@ -515,7 +587,7 @@ def test_aio_deploy_socket_preflight_rejects_windows_when_docker_unreachable(tmp
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env["BASH_ENV"] = str(bash_env)
-    env["DEER_FLOW_DOCKER_SOCKET"] = "/nonexistent/docker.sock"
+    env["DEER_FLOW_DOCKER_SOCKET"] = "/var/run/docker.sock"
     env["BETTER_AUTH_SECRET"] = "test-secret"
     env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
     env["UV_EXTRAS"] = "redis"
