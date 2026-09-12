@@ -1,13 +1,13 @@
 """Model-facing working notes and historical source lookup."""
 
 import json
-import re
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 
 from deerflow.agents.task_continuity.archive import lookup
+from deerflow.agents.task_continuity.state import MAX_NOTE_CHARS, MAX_NOTE_SOURCES, MAX_NOTES, NOTE_KEY_PATTERN, SOURCE_ID_PATTERN, normalize_task_notes
 from deerflow.tools.types import Runtime
 from deerflow.utils.file_io import run_file_io
 
@@ -35,7 +35,7 @@ def _history_read(runtime: Runtime, source_id: str, offset: int = 0) -> str:
     Follow next_offset when present; truncated marks an incomplete stored source.
     Never invent a source ID or treat a tool's historical report as current proof.
     """
-    if not re.fullmatch(r"r[a-f0-9]{32}", source_id) or offset < 0:
+    if not SOURCE_ID_PATTERN.fullmatch(source_id) or offset < 0:
         return json.dumps({"error": "invalid_source_or_offset"})
     try:
         result = lookup(runtime.state, runtime, source_id=source_id)
@@ -57,13 +57,13 @@ def _task_note(runtime: Runtime, key: str, content: str, source_ids: list[str] |
     history_search IDs when possible; uncited notes are explicitly self-reported.
     """
     sources = source_ids or []
-    notes = runtime.state.get("task_notes") or {}
-    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,40}", key) or len(content) > 750 or len(sources) > 4:
+    notes = normalize_task_notes(runtime.state.get("task_notes"))
+    if not NOTE_KEY_PATTERN.fullmatch(key) or len(content) > MAX_NOTE_CHARS or len(sources) > MAX_NOTE_SOURCES:
         return json.dumps({"error": "invalid_note", "limits": "key: 40 ASCII letters/digits/_/-, content: 750 chars, sources: 4"})
-    if content and key not in notes and len(notes) >= 8:
+    if content and key not in notes and len(notes) >= MAX_NOTES:
         return json.dumps({"error": "note_capacity", "hint": "replace or delete an existing key"})
     for source_id in sources:
-        if not re.fullmatch(r"r[a-f0-9]{32}", source_id):
+        if not SOURCE_ID_PATTERN.fullmatch(source_id):
             return json.dumps({"error": "invalid_source_id"})
         try:
             result = lookup(runtime.state, runtime, source_id=source_id)

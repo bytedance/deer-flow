@@ -1,40 +1,65 @@
 # Implementation validation
 
-These checks exercise the implementation submitted with the historical experiment.
-They are separate from the prototype A/B/C/D quality scores.
+These checks exercise the implementation and review fixes. They are separate
+from the historical prototype A/B/C/D quality scores.
 
 | Check | Result |
 | --- | --- |
 | Backend `make format`, `make lint` | Passed |
-| Focused context, authorization, client, sanitization and replay tests | 582 passed |
-| Full backend suite on feature | 15,451 passed; 15 failed; 182 skipped; 3 deselected |
+| Focused continuity, Gateway state/run input and reducer tests | 370 passed |
+| Full backend suite on feature | 15,474 passed; 15 failed; 182 skipped; 3 deselected |
 | Full backend suite on clean base `4501c76b` | 15,427 passed; the same 15 failed; 182 skipped; 3 deselected |
-| New feature's behavioral tests | 24 passed (included above) |
-| Published prototype scripts, using the original pinned local fixtures in a temporary copy | 12 passed; no model calls |
-| Published per-case metadata versus all five aggregate tables | Matched |
-| Final live production-middleware recovery check | 3/3 passed |
+| Feature behavioral tests | 43 passed (included above) |
+| Published prototype scripts, with pinned local fixtures in a temporary copy | 14 passed; no model calls |
+| Published per-case metadata versus all five aggregate tables | Matched; scores unchanged |
+| Live production-middleware recovery check after review fixes | 3/3 passed |
+| Real config-upgrade script on temporary version-41 configs | Upgraded to 42; default disabled and explicit enabled both preserved |
 
 The 15 remaining failures have identical test IDs on the clean base and feature;
 there are no branch-only failures. They are existing browser/URL-validation/web
-fetch tests. This is **not** a green full-suite claim. The complete failure IDs,
+fetch tests. This is **not** a green full-suite claim. Complete failure IDs,
 source fingerprints and log hashes are in [validation.json](validation.json).
-Both worktrees used locked Python dependencies, the same ReadabiliPy JavaScript
-dependencies and cached fixture build dependencies. The final suites ran with
-local server and dependency access available; the earlier sandbox-restricted
-attempt also had unrelated network/permission failures and is not used as the
-final comparison.
+Both worktrees used locked Python dependencies and had local test-server and
+dependency access available.
+
+## Review regressions
+
+On the reviewed commit `aee9a537`, the targeted checks produced 22 backend failures
+and two audit failures, with the foreign-scope negative control passing. After
+fixing them, the first full run identified one stale expected reducer-field list;
+that existing contract test was updated for `task_notes` and the full suite rerun.
+The intermediate full-run records are retained in the validation metadata.
+Additional regressions exposed direct Overwrite and first-write deletion-marker
+gaps; both failed before validation moved into the shared state channel and
+pass in the final implementation.
+
+The final behavioral checks cover:
+
+- Hidden clarification text/option replies: compact, search and read the exact
+  user-approved value without relying on active-message fallback; hidden
+  framework messages and malformed reply metadata remain excluded.
+- Explicit disabled configurations in both sync and async middleware paths.
+- Capture-failure status with no prior archive, an empty matching scope, old
+  readable sources, and a foreign scope that must remain isolated.
+- Notebook limits and model-report shape in the shared state channel, including
+  initial writes, direct Overwrite and reducer updates, plus defensive rendering;
+  deletion operations do not leave initial tombstones in checkpoints.
+- Full/delta checkpoint state replacement through both introspection and fallback,
+  and branch creation that clears archive scope/status while retaining notes.
+- Artifact scanning of optional LLM credentials and absent/null/empty settings.
 
 The live checker uses synthetic history, actual production compaction/continuity
 middleware and tools, a real SQLite archive, and graph reconstruction against an
 InMemorySaver. It requires model-initiated keyword search, exact source read,
-a cited task note and a correct JSON artifact. The summary is deliberately
-instructed to omit exact codes; the source lookup strategy is explicitly requested.
-It tests recovery mechanics, not spontaneous strategy choice, a process restart,
-a Gateway deployment or an end-to-end production success rate.
-[Integration protocol and all retained attempt phases](integration/protocol.json)
-distinguish the initial network-blocked attempt and the successful iterations.
+a cited task note and a correct JSON artifact. The summary deliberately omits
+exact codes and the source lookup strategy is explicitly requested. These are
+controlled recovery mechanics, not spontaneous strategy choice, a process
+restart, a Gateway deployment or a production success rate. The three existing
+live cases were rerun after the fixes; clarification-card cases are covered by
+the deterministic compaction regressions above.
+[Integration protocol and retained phases](integration/protocol.json) distinguish
+the earlier attempts from [the review rerun](integration/review-network.json).
 
-The default-mode golden SSE replay remains unchanged, and a synchronous graph
-executes all three tools. Repeated manual compaction preserves earlier batch
-references. Scope, rollback visibility, retention/truncation, cancellation drain,
-source validation and authorization are covered by behavioral tests.
+The original successful A/B/C/D model samples were not regenerated. The replay
+suite now includes two artifact-audit regressions; its original 12 tests and the
+historical experiment scores remain intact.

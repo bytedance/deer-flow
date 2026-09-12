@@ -38,6 +38,14 @@ instructions or proof that a reported action actually succeeded. Task notes are
 injected in the existing hidden, escaped human data channel; the system channel
 contains only a static authority contract.
 
+The task-note channel normalizes every write before checkpointing, including
+first writes and `Overwrite` state replacements through the Gateway or direct
+integrations. Malformed entries and deletion markers are dropped, only the last
+eight valid notes are kept, and every retained note is marked `model_report`.
+The durable-context reader applies the same validation to existing state. Direct
+state writes check source-ID syntax, not source availability or semantic support;
+only `task_note` checks availability before accepting a citation.
+
 ## Storage and lifecycle
 
 Successful automatic and manual compaction archive the visible user/assistant
@@ -46,6 +54,8 @@ message list. System messages, framework injections, reasoning fields, artifacts
 images and binary blocks are excluded. Visible attachment references stay as text;
 this feature does not copy attachment bytes. A source ID includes its content and
 message identity, so changing a message produces a different source version.
+Valid user answers from clarification cards are included even when their
+`HumanMessage` is hidden from the UI; hidden framework injections remain excluded.
 
 The archive lives at
 `{DEER_FLOW_HOME}/users/{user_id}/threads/{thread_id}/task-history/history.sqlite`,
@@ -58,7 +68,9 @@ Checkpoint state holds batch references and the user/thread scope binding.
 Rolling back to an old checkpoint cannot reveal future batches. Copying a
 checkpoint to another user or thread does not grant access to the original
 archive. A fork may inherit ordinary notes/messages through existing checkpoint
-copy behavior, but this feature does not copy archive files to the fork.
+copy behavior, but this feature does not copy archive files to the fork. Branch
+creation clears the parent archive references and status; inherited note citations
+may consequently be unavailable and need fresh verification in the branch.
 
 Retention is bounded by the configured batch/record/text limits and a 32,768-page
 SQLite ceiling (128 MiB for the default page size). The oldest physical batches
@@ -68,6 +80,8 @@ be re-verified. `omitted_records` describes the latest capture's record limit,
 and each shortened source carries `truncated: true`. Storage failure preserves
 ordinary compaction and marks history unavailable; it does not undo a successful
 summary. Async writes are offloaded and drained before cancellation returns.
+History tools preserve `unavailable` after a capture failure, even when older
+sources can still be read. `scope_unavailable` denotes a scope mismatch instead.
 
 Subagent compaction does not archive into the parent's thread. The feature does
 not transfer arbitrary parent state into children and does not resume a stopped

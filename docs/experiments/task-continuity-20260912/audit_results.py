@@ -82,7 +82,8 @@ def run(args):
             counts["vector_batches"] += 1
     if args.endpoints:
         settings = json.loads(__import__("pathlib").Path(args.endpoints).read_text())
-        needles = [settings[k].encode() for k in ("llm_base", "embedding_base", "embedding_key")]
+        needles = [value.encode() for key in ("llm_base", "llm_key", "embedding_base", "embedding_key")
+                   if isinstance(value := settings.get(key), str) and value]
         for path in ROOT.rglob("*"):
             if path.is_file() and path.suffix in {".json", ".py", ".md", ".txt", ".log"}:
                 body = path.read_bytes()

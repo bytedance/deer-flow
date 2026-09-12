@@ -18,6 +18,7 @@ from pathlib import Path
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.config import get_config
 
+from deerflow.agents.human_input import read_human_input_response
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.utils.file_io import run_file_io
@@ -53,7 +54,8 @@ def records(messages, cap: int = 16000) -> list[dict]:
         if not isinstance(message, (HumanMessage, AIMessage, ToolMessage)):
             continue
         # Framework injections are data for the current call, not source history.
-        if any(message.additional_kwargs.get(key) for key in ("hide_from_ui", "deerflow_content_kind", "dynamic_context_reminder")) or (message.name or "").startswith("__"):
+        hidden_injection = message.additional_kwargs.get("hide_from_ui") and not (isinstance(message, HumanMessage) and read_human_input_response(message.additional_kwargs) is not None)
+        if hidden_injection or any(message.additional_kwargs.get(key) for key in ("deerflow_content_kind", "dynamic_context_reminder")) or (message.name or "").startswith("__"):
             continue
         content = message.content
         text = content if isinstance(content, str) else "\n".join(block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
@@ -144,13 +146,14 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     if query is not None and not keywords:
         return {"results": [], "status": "empty_query"}
     found = {}
-    status = "available"
+    history = state.get("task_history") or {}
+    status = "unavailable" if history.get("status") == "unavailable" else "available"
     if batches:
         try:
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
                 placeholders = ",".join("?" for _ in batches)
                 present = db.execute(f"SELECT count(*) FROM batches WHERE id IN ({placeholders})", batches).fetchone()[0]
-                if present != len(batches):
+                if present != len(batches) and status != "unavailable":
                     status = "partially_expired"
                 if source_id:
                     rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? LIMIT 1", [*batches, source_id])
@@ -162,7 +165,7 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                     found[row["id"]] = row
         except (OSError, sqlite3.Error):
             status = "unavailable"
-    elif state.get("task_history"):
+    elif history.get("scope") is not None and history["scope"] != owner:
         status = "scope_unavailable"
     for row in active:
         if (source_id and row["id"] == source_id) or (query is not None and any(t in row["text"].casefold() for t in keywords)):

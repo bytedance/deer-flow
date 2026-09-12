@@ -119,3 +119,33 @@ def test_official_qa_prompt_branches_include_gold_only_at_grading():
     assert len(sha) == 64
     prompt = make("abstention", "QUESTION", "GOLD_ONLY", "PREDICTION", abstention=True)
     assert "unanswerable" in prompt and "GOLD_ONLY" in prompt
+
+
+@pytest.mark.parametrize("with_optional_keys", [False, True])
+def test_artifact_audit_detects_optional_llm_key(tmp_path, monkeypatch, with_optional_keys):
+    from types import SimpleNamespace
+    import audit_results
+
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    for name in ("public-manifest.json", "task-manifest.json"):
+        (root / name).write_text('{"test": []}')
+    (root / "known-goal-manifest.json").write_text('[]')
+    settings = {"llm_base": "https://synthetic-llm.invalid"}
+    if with_optional_keys:
+        settings.update(llm_key="synthetic-llm-key", embedding_base="https://synthetic-embedding.invalid", embedding_key="synthetic-embedding-key")
+    else:
+        settings.update(embedding_base="", embedding_key=None)
+    endpoints = tmp_path / "endpoints.json"
+    endpoints.write_text(json.dumps(settings))
+    (root / "clean.txt").write_text("ordinary public content")
+    expected = set()
+    for key, value in settings.items():
+        if value:
+            filename = f"leaked-{key}.txt"
+            (root / filename).write_text(value)
+            expected.add(filename)
+    monkeypatch.setattr(audit_results, "ROOT", root)
+    audit_results.run(SimpleNamespace(full=False, endpoints=str(endpoints)))
+    result = json.loads((root / "results/audit.json").read_text())
+    assert {issue["file"] for issue in result["issues"]} == expected

@@ -1,24 +1,25 @@
 {
   "base_commit": "4501c76b0f44cc55af6332d65ac2e7f5311f71fd",
+  "reviewed_commit": "aee9a537be53a411632dc5130c29ba0ef96f86ae",
   "format": "passed",
   "lint": "passed",
   "focused": {
-    "passed": 582,
-    "warnings": 1
+    "passed": 370,
+    "seconds": 9.56
   },
   "full_branch": {
-    "passed": 15451,
+    "passed": 15474,
     "failed": 15,
     "skipped": 182,
     "deselected": 3,
-    "seconds": 375.89
+    "seconds": 394.61
   },
   "full_base": {
     "passed": 15427,
     "failed": 15,
     "skipped": 182,
     "deselected": 3,
-    "seconds": 440.22
+    "seconds": 467.39
   },
   "branch_only_failures": [],
   "base_only_failures": [],
@@ -39,32 +40,74 @@
     "tests/test_fastcrw_tools.py::TestWebFetchTool::test_fetch_returns_error_when_no_content",
     "tests/test_fastcrw_tools.py::TestWebFetchTool::test_fetch_uses_web_fetch_config"
   ],
-  "published_prototype_unit_tests": {
-    "passed": 12
+  "review_regressions": {
+    "before_fix": {
+      "backend_failed": 22,
+      "backend_control_passed": 1,
+      "audit_failed": 2
+    },
+    "first_full_review_run": {
+      "passed": 15472,
+      "failed": 16,
+      "skipped": 182,
+      "deselected": 3,
+      "seconds": 470.45
+    },
+    "intermediate_branch_before_channel_validation": {
+      "passed": 15473,
+      "failed": 15,
+      "skipped": 182,
+      "deselected": 3,
+      "seconds": 396.36
+    },
+    "additional_channel_boundary_regressions_failed_before_fix": 2,
+    "first_full_review_run_note": "The additional failure was the existing reducer-field contract test, whose expected field list needed task_notes. Final rerun has only the same 15 base failures.",
+    "scenarios": [
+      "hidden clarification text/option responses survive compaction and source reads",
+      "explicit disabled middleware does not archive, sync and async",
+      "capture failure status with no scope, empty matching scope, old readable sources, and mismatched scope",
+      "notebook bounds and model-report shape on initial writes, Overwrite and reducer updates through the shared state channel, plus defensive rendering",
+      "normal run note deletions still work",
+      "state replacement via introspection and fallback in full/delta modes",
+      "branches clear archive references/status but preserve ordinary notes in full/delta modes",
+      "optional credential scanning including absent/null/empty values"
+    ]
   },
-  "published_score_consistency": "all five tables matched per-case metadata",
+  "config_upgrade": {
+    "from_version": 41,
+    "to_version": 42,
+    "default_disabled": true,
+    "explicit_enabled_preserved": true
+  },
+  "published_prototype_unit_tests": {
+    "passed": 14,
+    "seconds": 0.58
+  },
+  "published_score_consistency": "all five tables matched unchanged per-case metadata",
   "live_integration": {
     "passed": 3,
     "total": 3,
-    "results": "integration/final-network.json",
+    "results": "integration/review-network.json",
     "protocol": "integration/protocol.json"
   },
   "validation_conditions": [
     "Locked Python dependencies installed separately for branch and clean base.",
-    "Existing ReadabiliPy JavaScript dependencies and Hatchling fixture build requirements installed/cached for both.",
-    "Final full suites allowed the local test servers and package dependency access needed by existing tests.",
-    "The initial sandbox-restricted suite is not the final branch comparison."
+    "Both full suites had local server and dependency access available.",
+    "Successful historical A/B/C/D model samples were not rerun; the 3-case production-middleware integration was rerun.",
+    "Replay tests use pinned original local fixtures in a temporary copy; two new audit regressions raise the script test count from 12 to 14."
   ],
   "source_sha256": {
+    "backend/app/gateway/AGENTS.md": "2928ffea0560997963b0b086fc08f00dfc37f80bec1837e4f98e0fa44d06786f",
+    "backend/app/gateway/routers/threads.py": "5a5263ec9d8ad297f1928e1665f27bb925ead9f578505350646e144328ef65cb",
     "backend/packages/harness/deerflow/agents/lead_agent/agent.py": "7c55780374bc732e56a2ff8843a357daf8e525e3002e2342115fad7b9049b0be",
-    "backend/packages/harness/deerflow/agents/middlewares/durable_context_middleware.py": "cf9a931714a70bdc01f5fdf72ae46d32c642d4b991a691bcdd440c5566224680",
-    "backend/packages/harness/deerflow/agents/middlewares/summarization_middleware.py": "37bd2f91fd0f8b7e8dc96da9503b81a93be63a20f545de8038f7efc752396783",
+    "backend/packages/harness/deerflow/agents/middlewares/durable_context_middleware.py": "2adfe86b877fa207635d63a365711d5b5a87bfc0cf7e932fc7d4daec6f8f0833",
+    "backend/packages/harness/deerflow/agents/middlewares/summarization_middleware.py": "bf5e12d4ca44eae77e030fc7743ffeec3f1bf2538f9ee4cc606d7adcebe94325",
     "backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py": "4cdec0c2f614bdfb2b95d28065c142602beeff793aa6b43ba55695479519475c",
     "backend/packages/harness/deerflow/agents/task_continuity/__init__.py": "8fba61f70e526bc45fe426f15746eb31b2d42e9d19b2852942787266a68bcd30",
-    "backend/packages/harness/deerflow/agents/task_continuity/archive.py": "291dfe26de4c9d7053f7f126d4fbff1ebc5ecfa6a91e04f1b5d9d9d3ab8ddb9e",
-    "backend/packages/harness/deerflow/agents/task_continuity/state.py": "7d18d259bc5ae6714532727fc92fb10b0647af1ef63a2bf8fa73d8efd78deb3d",
-    "backend/packages/harness/deerflow/agents/task_continuity/tools.py": "f78bf9406760ab47c5c2afd3817188e416396195c11b2cece3b8d387d16b5c8e",
-    "backend/packages/harness/deerflow/agents/thread_state.py": "e7f1e8c2caf74309c538175fe6f0038cbd5c9d8b7fa71808d6a647f6debc556f",
+    "backend/packages/harness/deerflow/agents/task_continuity/archive.py": "ba821a6aa8d406d5fa2aeebe2108aee38f35b681412268bc7518b9c0ec61f428",
+    "backend/packages/harness/deerflow/agents/task_continuity/state.py": "feb780e202d88a14d74d62d80067bcd7a3a9c119e83a050c9e564e59aabffc6e",
+    "backend/packages/harness/deerflow/agents/task_continuity/tools.py": "d86570525feb805a15c862a1f4032f7e204282e3fd0e65966a36dbf5e20057f4",
+    "backend/packages/harness/deerflow/agents/thread_state.py": "04e10d910f721f6ff9996b0b8bdef09c9560ed4234678712c4ce3d514d7b796f",
     "backend/packages/harness/deerflow/client.py": "fd4264fddd86a21329ca79bbf9c0b4994d56fbe96ed6fbc67289770f8d1478dd",
     "backend/packages/harness/deerflow/config/app_config.py": "fcae3bf34177bb52820f1469382c857f6845f1a46d5bfa8eb3333b18a7148eaa",
     "backend/packages/harness/deerflow/config/task_continuity_config.py": "bdb062a43fe9d1ba6ac35818afe847ac049cc62cbac39a3ec7489c8fd22078da",
@@ -72,11 +115,20 @@
     "backend/scripts/manual_task_continuity_check.py": "763fdccdffd3bd9c2566638b5f199bb806a01951c48014ea9c63031b7765f548",
     "backend/tests/test_authorization_enforcement.py": "89e349781a73aa212a973257d6ff4b59edc66bebc374e784aebe10007fb895ae",
     "backend/tests/test_client.py": "2310b72f08db2f8d620bd41e213227290a6116e4998531912599d9aa6511b16a",
-    "backend/tests/test_task_continuity.py": "737370f6d34ffacdc40f8ade28a18bb635137e12196c0a61d003249c6df94b88",
+    "backend/tests/test_task_continuity.py": "46fa16fcbcf372c6a50f863e9f4d341a4c67b7ab36df64a834dc1848f77a2afc",
+    "backend/tests/test_thread_state_reducers.py": "e51de12ac62d732d8d8462e5ddf0afa818611b114ca574675b2429c4cfa25f59",
+    "backend/tests/test_threads_router.py": "501126bdacfbd6239289e6f65960c5a6228eaecdab86a0c274d179ea5726731e",
     "backend/tests/test_tool_error_handling_middleware.py": "fd4c3683028901e4d520abd615694f1bbbf44d8c244b8e520c15ad86d3fe03fb"
   },
   "log_sha256": {
-    "full_branch": "51d3b5ded85c5786c29a8177366ed5fb7ff8425f09036cc18c9fb8bf88a450c6",
-    "full_base": "87e730c5249f7e0bddacdbfa7b060e777858a7f3cd2b212a642f325ac9b853d3"
+    "full_branch": "10969fcac135691134fcfc5f710bc3ecd99c7d92e41bdc61525fd161d6305e76",
+    "full_base": "533d31aec15acbb365204e7572dded9859abf4a84c4c3a2f2f003b5c76b0520b",
+    "first_review_branch": "ffb43536e3ba4c81fef9a9d7f44cb1a475f0969a056ffef5043a6e6a18df7b91",
+    "focused": "ae9a3add0f93f86124a71dc0545213e60a4d64bb645d2be7a031d565182fa091",
+    "replay": "3d982959a6d0ad327e4c2ff7cfedf579823ee4d0c00b0aff1195763fb428a921",
+    "red_backend": "c15c90854ec15f06f6abbba3adb818a990201dbf6f6087674e3ce34d7da38b1e",
+    "red_audit": "901d91ea3bed702437826b7ba60d55a23e0464c9ce8eaf54116deecab10ed855",
+    "channel_red": "f97b5ead21ee616225c2d37daf7014107749754454f7d67514ae60eb55366358",
+    "intermediate_branch": "a68e6487284a428998f67eaf98753086df73b0bdeeb326ace827bb77d7612cd3"
   }
 }

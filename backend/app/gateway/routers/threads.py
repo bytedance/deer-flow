@@ -122,7 +122,9 @@ _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
 # parent's sandbox after its first run; the branch lazily acquires its own
 # sandbox keyed by its own thread_id instead. ``thread_data`` is recomputed
 # from the branch's thread_id by ThreadDataMiddleware on every run.
-_BRANCH_EXCLUDED_CHANNELS = frozenset({"sandbox", "thread_data"})
+# task_history binds source batches to the parent's archive scope. Notes may
+# carry over, but the branch must not advertise that archive as available.
+_BRANCH_EXCLUDED_CHANNELS = frozenset({"sandbox", "thread_data", "task_history"})
 _BRANCH_HISTORY_SCAN_LIMIT = 200
 _BRANCH_HISTORY_RAW_SCAN_LIMIT = _BRANCH_HISTORY_SCAN_LIMIT * 2
 _BRANCH_TITLE_MAX_LENGTH = 256

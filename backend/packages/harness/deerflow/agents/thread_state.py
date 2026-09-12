@@ -17,7 +17,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import-time saver fixes
 from deerflow.agents.goal_state import GoalState
-from deerflow.agents.task_continuity.state import merge_task_notes
+from deerflow.agents.task_continuity.state import TaskNotesChannel, merge_task_notes
 from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY, CheckpointChannelMode
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
 
@@ -289,7 +289,7 @@ class ThreadState(AgentState):
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
-    task_notes: Annotated[dict | None, merge_task_notes]
+    task_notes: Annotated[dict | None, TaskNotesChannel(dict | None, merge_task_notes)]
     task_history: NotRequired[dict | None]
     summary_text: NotRequired[str | None]
     background_tasks: NotRequired[list[BackgroundTaskState]]
@@ -408,6 +408,7 @@ THREAD_STATE_REDUCER_FIELDS = frozenset(
         "promoted",
         "delegations",
         "skill_context",
+        "task_notes",
     }
 )
 
