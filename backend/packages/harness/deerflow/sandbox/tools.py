@@ -794,8 +794,10 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
     # ``deerflow.sandbox.path_patterns`` so the static regex path and dynamic
     # scanner cannot drift.
     #
-    # ``separator_agnostic=True`` is the one thing this site does differently:
-    # output separators are outside this layer's control.
+    # ``separator_agnostic=True`` is required here: output separators are
+    # outside this layer's control. ``LocalSandbox`` needs it for the same
+    # reason — its forward resolution spells Windows paths with forward
+    # slashes even though its bases are resolved natively.
     compiled: list[tuple[re.Pattern[str], str, str]] = []
     for host_base, virtual_base in sources:
         seen: set[str] = set()

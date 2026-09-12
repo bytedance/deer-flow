@@ -391,12 +391,19 @@ class LocalSandbox(Sandbox):
         # Scan directly instead of compiling one regex per thread root. Python's
         # global regex caches outlive an evicted LocalSandbox and otherwise keep
         # high-cardinality thread paths resident.
+        #
+        # The base is resolved with native separators, but forward resolution
+        # emits forward-slash spellings in commands and file content (see
+        # ``_resolve_paths_in_command``), so matching must accept both
+        # separators or the model sees raw host paths that no container path
+        # maps back to.
         result = output
         for mapping in self._mappings_by_local_specificity:
             result = replace_output_path_matches(
                 result,
                 self._resolved_local_paths[mapping],
                 self._reverse_resolve_path,
+                separator_agnostic=True,
             )
 
         return result
