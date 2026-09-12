@@ -2087,3 +2087,17 @@ class TestSupersededWriteElision:
         wire = json.loads(_convert_message_to_dict(forwarded.messages[0])["tool_calls"][0]["function"]["arguments"])
         assert wire["content"].startswith("[content elided: 5000 chars")
         assert payload not in json.dumps(wire)
+
+    def test_unanswered_write_with_a_reused_id_is_never_treated_as_successful(self):
+        """Review on #5374: an interrupted write must not inherit the success of a later call that reused its id."""
+        mw = self._middleware()
+        draft = "d" * 5000
+        interrupted, _never_delivered = _write("reused", self.PATH, draft)
+        rd, rr = _read("call-2", self.PATH)
+        later, later_ok = _write("reused", self.OTHER, "n" * 5000)
+        last, last_ok = _write("call-4", "/mnt/user-data/outputs/last.md", "l" * 5000)
+
+        request, forwarded = self._forward(mw, [interrupted, rd, rr, later, later_ok, last, last_ok])
+
+        assert forwarded is request
+        assert interrupted.tool_calls[0]["args"]["content"] == draft

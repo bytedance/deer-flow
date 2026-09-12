@@ -453,3 +453,53 @@ class TestPairToolCallResults:
 
     def test_empty_history_pairs_nothing(self):
         assert pair_tool_call_results([]) == []
+
+    def test_unanswered_call_never_consumes_a_later_turns_result_for_a_reused_id(self):
+        """Review on #5374: an interrupted call must not inherit the result of a later call that reused its id."""
+        interrupted = AIMessage(content="", tool_calls=[self._call("reused", args={"path": "report.md"})])
+        read = AIMessage(content="", tool_calls=[self._call("r1", name="read_file")])
+        read_result = ToolMessage(content="text", tool_call_id="r1")
+        later = AIMessage(content="", tool_calls=[self._call("reused", args={"path": "notes.md"})])
+        later_result = ToolMessage(content="OK", tool_call_id="reused")
+
+        occurrences = pair_tool_call_results([interrupted, read, read_result, later, later_result])
+
+        assert [(o.index, o.call_id, o.result) for o in occurrences] == [(0, "reused", None), (1, "r1", read_result), (3, "reused", later_result)]
+
+    def test_result_answers_only_the_most_recent_preceding_turn(self):
+        """A result never answers a call from an earlier turn (same rule as DanglingToolCallMiddleware)."""
+        first = AIMessage(content="", tool_calls=[self._call("call-x")])
+        second = AIMessage(content="", tool_calls=[self._call("call-y")])
+        stale = ToolMessage(content="late", tool_call_id="call-x")
+        fresh = ToolMessage(content="ok", tool_call_id="call-y")
+
+        occurrences = pair_tool_call_results([first, second, stale, fresh])
+
+        assert [(o.call_id, o.result) for o in occurrences] == [("call-x", None), ("call-y", fresh)]
+
+    def test_stray_results_before_any_call_are_ignored(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        stray = ToolMessage(content="stray", tool_call_id="call-1")
+        real = ToolMessage(content="real", tool_call_id="call-1")
+
+        occurrences = pair_tool_call_results([stray, ai, real])
+
+        assert [(o.call_id, o.result) for o in occurrences] == [("call-1", real)]
+
+    def test_second_result_for_an_answered_call_is_ignored(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        first = ToolMessage(content="first", tool_call_id="call-1")
+        duplicate = ToolMessage(content="duplicate", tool_call_id="call-1")
+
+        occurrences = pair_tool_call_results([ai, first, duplicate])
+
+        assert [(o.call_id, o.result) for o in occurrences] == [("call-1", first)]
+
+    def test_non_ai_messages_between_call_and_result_do_not_break_pairing(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1"), self._call("call-2")])
+        first = ToolMessage(content="1", tool_call_id="call-1")
+        second = ToolMessage(content="2", tool_call_id="call-2")
+
+        occurrences = pair_tool_call_results([ai, first, HumanMessage(content="reminder"), second])
+
+        assert [(o.call_id, o.result) for o in occurrences] == [("call-1", first), ("call-2", second)]

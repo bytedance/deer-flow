@@ -792,3 +792,18 @@ class TestBlockedPayloadElision:
         assert len(calls) == 1
         assert json.loads(calls[0]["arguments"])["content"].startswith("[payload elided: 5000 chars")
         assert payload not in json.dumps(sent, ensure_ascii=False)
+
+    def test_unanswered_write_with_a_reused_id_is_not_labeled_blocked(self):
+        """Review on #5374: an interrupted write must not inherit the blocked result of a later call that reused its id."""
+        mw = self._middleware()
+        draft = "d" * 5000
+        interrupted = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "reused", "args": {"description": "d", "path": "/mnt/user-data/outputs/other.md", "content": draft}}])
+        blocked_ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "b" * 5000}, tool_call_id="reused")
+        request = self._model_request([HumanMessage(content="go"), interrupted, blocked_ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        captured = self._captured(handler).messages
+        assert captured[1] is interrupted
+        assert captured[2].tool_calls[0]["args"]["content"].startswith("[payload elided: 5000 chars")

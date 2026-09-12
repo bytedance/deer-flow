@@ -50,7 +50,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
@@ -124,31 +124,36 @@ class ToolCallOccurrence:
 def pair_tool_call_results(messages: Sequence[Any]) -> list[ToolCallOccurrence]:
     """Pair every AIMessage tool call carrying a non-empty string id with the ToolMessage that answered it.
 
-    Tool-call ids may repeat across assistant turns, so a history-wide id lookup
-    would pair a call with an earlier (or later) result for the same id. Results
-    are paired per *occurrence* the way ``DanglingToolCallMiddleware`` does:
-    ToolMessages queue per id in history order and each AIMessage call consumes
-    the next one for its id. ``index`` is the AIMessage's position in
-    ``messages``, so callers can order events across turns; the calls of one
-    AIMessage share an index because they ran concurrently, in no fixed order.
+    Walks ``messages`` in document order. Each AIMessage opens its own calls,
+    and a ToolMessage answers the still-open call with its id from the *most
+    recent preceding* AIMessage only — the rule ``DanglingToolCallMiddleware``
+    applies: a result never answers a call from an earlier turn. So ids that
+    repeat across turns pair per occurrence, an interrupted call whose id a
+    later turn reused stays unanswered instead of inheriting that turn's result
+    (review on #5374), and stray or duplicate results are ignored. ``index`` is
+    the AIMessage's position in ``messages``, so callers can order events
+    across turns; the calls of one AIMessage share an index because they ran
+    concurrently, in no fixed order.
     """
-    results_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
-    for message in messages:
-        if isinstance(message, ToolMessage) and isinstance(message.tool_call_id, str) and message.tool_call_id:
-            results_by_id[message.tool_call_id].append(message)
-
     occurrences: list[ToolCallOccurrence] = []
+    # Unanswered calls of the most recent AIMessage: id -> positions in ``occurrences``.
+    open_calls: dict[str, deque[int]] = defaultdict(deque)
     for index, message in enumerate(messages):
-        if not isinstance(message, AIMessage):
-            continue
-        for tool_call in message.tool_calls or ():
-            if not isinstance(tool_call, dict):
-                continue
-            call_id = tool_call.get("id")
-            if not isinstance(call_id, str) or not call_id:
-                continue
-            queue = results_by_id.get(call_id)
-            occurrences.append(ToolCallOccurrence(index, message, tool_call, queue.popleft() if queue else None))
+        if isinstance(message, AIMessage):
+            open_calls = defaultdict(deque)
+            for tool_call in message.tool_calls or ():
+                if not isinstance(tool_call, dict):
+                    continue
+                call_id = tool_call.get("id")
+                if not isinstance(call_id, str) or not call_id:
+                    continue
+                open_calls[call_id].append(len(occurrences))
+                occurrences.append(ToolCallOccurrence(index, message, tool_call, None))
+        elif isinstance(message, ToolMessage):
+            queue = open_calls.get(message.tool_call_id) if isinstance(message.tool_call_id, str) else None
+            if queue:
+                position = queue.popleft()
+                occurrences[position] = replace(occurrences[position], result=message)
     return occurrences
 
 
