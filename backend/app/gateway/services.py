@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -70,6 +71,7 @@ from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
+from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
@@ -81,6 +83,7 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -937,6 +940,8 @@ def build_checkpoint_state_mutation_accessor(
 # a restart.
 _STATE_ACCESSOR_GRAPH_CACHE_MAX = 64
 _state_accessor_graph_cache: dict[tuple[str | None, str, int | None], tuple[Any, Any, Any]] = {}
+_state_accessor_graph_cache_lock = threading.Lock()
+_state_accessor_graph_build_locks = KeyedLockTable[tuple[str | None, str, int | None]]()
 
 
 def _accessor_graph_cache_max(app_config: Any) -> int:
@@ -947,25 +952,52 @@ def _accessor_graph_cache_max(app_config: Any) -> int:
     )
 
 
-def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
-    app_config = (config.get("context") or {}).get("app_config")
-    key = (assistant_id, mode, snapshot_frequency)
-    cached = _state_accessor_graph_cache.get(key)
-    if cached is not None and cached[0] is agent_factory and cached[1] is app_config:
-        return cached[2]
-    if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
-        _state_accessor_graph_cache.clear()
+def _cached_state_accessor_graph(key: tuple[str | None, str, int | None], agent_factory: Any, app_config: Any) -> Any | None:
+    with _state_accessor_graph_cache_lock:
+        cached = _state_accessor_graph_cache.get(key)
+        if cached is not None and cached[0] is agent_factory and cached[1] is app_config:
+            return cached[2]
+    return None
+
+
+def _cache_state_accessor_graph(key: tuple[str | None, str, int | None], agent_factory: Any, app_config: Any, graph: Any) -> None:
+    with _state_accessor_graph_cache_lock:
+        if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
+            _state_accessor_graph_cache.clear()
+        _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
+
+
+def _build_state_accessor_graph(agent_factory: Any, config: dict[str, Any]) -> Any:
     agent_result = agent_factory(config=config)
     try:
         from deerflow.agents.lead_agent.agent import unwrap_agent_graph
 
-        graph = unwrap_agent_graph(agent_result)
+        return unwrap_agent_graph(agent_result)
     except Exception:
         # A custom factory must keep working even if importing the lead
         # assembly type fails.
-        graph = agent_result
-    _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
-    return graph
+        return agent_result
+
+
+def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
+    app_config = (config.get("context") or {}).get("app_config")
+    key = (assistant_id, mode, snapshot_frequency)
+    cached = _cached_state_accessor_graph(key, agent_factory, app_config)
+    if cached is not None:
+        return cached
+
+    # Construction runs on assembly-pool threads, so same-key cold misses are
+    # serialized with a thread lock. The re-check under the lock makes
+    # overlapping first readers run the factory exactly once; a waiter whose
+    # factory or app-config identity changed while it waited still rebuilds,
+    # preserving identity-based cache invalidation.
+    with _state_accessor_graph_build_locks.hold(key):
+        cached = _cached_state_accessor_graph(key, agent_factory, app_config)
+        if cached is not None:
+            return cached
+        graph = _build_state_accessor_graph(agent_factory, config)
+        _cache_state_accessor_graph(key, agent_factory, app_config, graph)
+        return graph
 
 
 class _RawCheckpointSnapshot:
@@ -1066,7 +1098,13 @@ def build_checkpoint_state_accessor(
 
     agent_factory = resolve_agent_factory(assistant_id)
     try:
-        graph = _state_accessor_graph(agent_factory, assistant_id, ctx.checkpoint_channel_mode, getattr(ctx, "checkpoint_snapshot_frequency", None), config)
+        graph = _state_accessor_graph(
+            agent_factory,
+            assistant_id,
+            ctx.checkpoint_channel_mode,
+            getattr(ctx, "checkpoint_snapshot_frequency", None),
+            config,
+        )
     except Exception:
         if ctx.checkpoint_channel_mode != "full":
             # Delta materialization needs the graph's channel table; there is
@@ -1088,6 +1126,34 @@ def build_checkpoint_state_accessor(
         mode=ctx.checkpoint_channel_mode,
     )
     return accessor, config
+
+
+async def abuild_checkpoint_state_accessor(
+    request: Request,
+    *,
+    thread_id: str,
+    assistant_id: str | None = None,
+    checkpoint_id: str | None = None,
+) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
+    """Async variant of :func:`build_checkpoint_state_accessor`.
+
+    Identical accessor construction, but the agent-factory assembly — which
+    re-enters ``get_available_tools()`` and may block on MCP cache
+    initialization — runs off-loop on the dedicated assembly pool so the
+    Gateway event loop keeps making progress (issue #5172). Repeat calls hit
+    ``_state_accessor_graph_cache`` and only pay the thread hop; overlapping
+    cold readers with the same cache key are serialized per key so the
+    factory runs exactly once, and a reader whose factory or app-config
+    identity changed while it waited rebuilds instead of reusing the
+    winner's graph.
+    """
+    return await run_assembly(
+        build_checkpoint_state_accessor,
+        request,
+        thread_id=thread_id,
+        assistant_id=assistant_id,
+        checkpoint_id=checkpoint_id,
+    )
 
 
 async def resolve_thread_assistant_id(
@@ -1129,7 +1195,7 @@ async def build_thread_checkpoint_state_accessor(
     ``AgentMiddleware.state_schema`` from the response.
     """
     assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=fail_closed)
-    return build_checkpoint_state_accessor(
+    return await abuild_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=assistant_id,
@@ -1260,7 +1326,7 @@ async def ensure_checkpoint_history_seeded(
     if await get_checkpointer(request).aget_tuple(checkpoint_config) is None:
         return
 
-    accessor, config = build_checkpoint_state_accessor(
+    accessor, config = await abuild_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=assistant_id,

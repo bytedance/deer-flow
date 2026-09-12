@@ -12,14 +12,12 @@ from sqlalchemy.orm import aliased
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
+from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES, ScheduledTaskRow
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
 
-TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"success", "failed", "skipped", "interrupted"})
-QUEUED_RUN_STATUSES: tuple[str, ...] = ("queued",)
 EXECUTING_RUN_STATUSES: tuple[str, ...] = ("launching", "running")
-ACTIVE_RUN_STATUSES: tuple[str, ...] = (*QUEUED_RUN_STATUSES, *EXECUTING_RUN_STATUSES)
 _SCHEDULER_BUDGET_LOCK_KEY = 4694001
 _RECOVERED_RUN_STOP_REASONS = frozenset(
     {
@@ -72,7 +70,7 @@ class ScheduledTaskRunRepository:
 
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRunRow) -> dict[str, Any]:
-        data = row.to_dict()
+        data = row.to_dict(exclude={"occurrence_seq", "launch_accounted"})
         for key in (
             "scheduled_for",
             "lease_expires_at",
@@ -110,7 +108,10 @@ class ScheduledTaskRunRepository:
         candidate: RunRow,
     ) -> None:
         """Repair the parent update if launch committed before bookkeeping."""
-        if task is None or task.last_run_id == candidate.run_id:
+        if task is None:
+            return
+        account_launch(task, row, candidate.run_id)
+        if task.last_run_id == candidate.run_id or not can_project(task, row):
             return
         launched_at = candidate.created_at
         if launched_at.tzinfo is None:
@@ -124,9 +125,9 @@ class ScheduledTaskRunRepository:
             task.timezone,
             now=launched_at,
         )
-        task.run_count += 1
         task.lease_owner = None
         task.lease_expires_at = None
+        task.updated_at = datetime.now(UTC)
         if task.schedule_type == "once":
             if candidate.status == "success":
                 task.status = "completed"
@@ -167,12 +168,14 @@ class ScheduledTaskRunRepository:
             scheduled_for=scheduled_for,
             trigger=trigger,
             status=status,
+            launch_accounted=False,
             created_at=datetime.now(UTC),
         )
         async with self._sf() as session:
-            task: ScheduledTaskRow | None = None
+            # Every occurrence with a parent participates in the same DB
+            # ordering, including terminal records and uncoordinated callers.
+            task = await self._lock_task(session, task_id)
             if coordinate_with_task:
-                task = await self._lock_task(session, task_id)
                 if task is None or (expected_task_user_id is not None and task.user_id != expected_task_user_id):
                     await session.rollback()
                     raise ScheduledTaskAdmissionRejected(task_id, reason="not_found")
@@ -198,8 +201,19 @@ class ScheduledTaskRunRepository:
                 if active_status is not None:
                     await session.rollback()
                     raise ActiveScheduledRunConflict(task_id)
+            if task is not None:
+                row.occurrence_seq = await session.scalar(
+                    update(ScheduledTaskRow)
+                    .where(ScheduledTaskRow.id == task_id)
+                    .values(
+                        last_occurrence_seq=ScheduledTaskRow.last_occurrence_seq + 1,
+                        # Sequence allocation is not a user-visible task edit.
+                        updated_at=ScheduledTaskRow.updated_at,
+                    )
+                    .returning(ScheduledTaskRow.last_occurrence_seq)
+                )
             session.add(row)
-            if task is not None and release_task_lease_status is not None:
+            if coordinate_with_task and task is not None and release_task_lease_status is not None:
                 task.status = release_task_lease_status
                 task.lease_owner = None
                 task.lease_expires_at = None
@@ -208,12 +222,10 @@ class ScheduledTaskRunRepository:
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                # Only active-status inserts can trip the partial unique index
-                # ``uq_scheduled_task_run_active``; a terminal-status row (e.g.
-                # a "skipped" tombstone) is outside its predicate and cannot
-                # conflict, so any IntegrityError there is a genuine fault and
-                # is re-raised untranslated.
-                if status in ACTIVE_RUN_STATUSES:
+                # A primary-key/sequence conflict is not necessarily an active
+                # slot conflict. Preserve the database error unless an active
+                # occurrence actually exists after rollback.
+                if status in ACTIVE_RUN_STATUSES and await session.scalar(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES)).limit(1)):
                     raise ActiveScheduledRunConflict(task_id) from None
                 raise
             await session.refresh(row)
@@ -419,7 +431,7 @@ class ScheduledTaskRunRepository:
                 row.lease_owner = None
                 row.lease_expires_at = None
 
-                if task is not None:
+                if task is not None and can_project(task, row):
                     if task.status == "paused":
                         # A concurrent/later pause owns the parent presentation.
                         task.lease_owner = None
@@ -472,7 +484,7 @@ class ScheduledTaskRunRepository:
             row.lease_owner = None
             row.lease_expires_at = None
 
-            if task is not None:
+            if task is not None and can_project(task, row):
                 if row.trigger == "manual":
                     task_status = task.status or "enabled"
                     next_at = task.next_run_at
