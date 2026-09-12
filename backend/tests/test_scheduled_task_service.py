@@ -682,6 +682,10 @@ async def test_single_instance_start_fails_closed_before_polling(failure_stage):
 async def test_multi_instance_start_uses_lease_aware_reconciliation():
     task_repo = DummyTaskRepo([])
     run_repo = DummyRunRepo()
+
+    async def on_runs_recovered(_run_ids):
+        return None
+
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
@@ -691,6 +695,7 @@ async def test_multi_instance_start_uses_lease_aware_reconciliation():
         max_concurrent_runs=3,
         multi_instance=True,
         run_lease_grace_seconds=17,
+        on_runs_recovered=on_runs_recovered,
     )
 
     await service.start()
@@ -700,8 +705,12 @@ async def test_multi_instance_start_uses_lease_aware_reconciliation():
     assert run_repo.reconcile_count == 1
     assert run_repo.reconciled is not None
     assert run_repo.reconciled["lease_grace_seconds"] == 17
+    assert run_repo.reconciled["owner_worker_id"] == service._lease_owner
+    assert run_repo.reconciled["on_runs_recovered"] is on_runs_recovered
     assert task_repo.reconciled_stuck_once is not None
     assert task_repo.reconciled_stuck_once["lease_grace_seconds"] == 17
+    assert task_repo.reconciled_stuck_once["owner_worker_id"] == service._lease_owner
+    assert task_repo.reconciled_stuck_once["on_runs_recovered"] is on_runs_recovered
     assert task_repo.cancelled_stuck_once is None
 
 

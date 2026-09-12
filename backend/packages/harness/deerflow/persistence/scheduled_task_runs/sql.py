@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -18,6 +19,12 @@ from deerflow.utils.time import coerce_iso
 
 EXECUTING_RUN_STATUSES: tuple[str, ...] = ("launching", "running")
 _SCHEDULER_BUDGET_LOCK_KEY = 4694001
+_RECOVERED_RUN_STOP_REASONS = frozenset(
+    {
+        "orphan_recovered",
+        "scheduled_task_orphan_recovered",
+    }
+)
 
 
 def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_seconds: int) -> bool:
@@ -722,7 +729,9 @@ class ScheduledTaskRunRepository:
         *,
         error: str,
         now: datetime,
+        owner_worker_id: str,
         lease_grace_seconds: int = 10,
+        on_runs_recovered: Callable[[list[str]], Awaitable[bool | None]] | None = None,
     ) -> int:
         """Reconcile only rows whose underlying owner is no longer live.
 
@@ -730,6 +739,8 @@ class ScheduledTaskRunRepository:
         underlying run, or a queued row whose parent task still has a dispatch
         lease, belongs to another process and must survive this startup.
         """
+        recovered_run_ids: list[str] = []
+        deferred_terminal_rows: list[tuple[str, str, str, str, str | None]] = []
         async with self._sf() as session:
             result = await session.execute(
                 select(
@@ -765,6 +776,28 @@ class ScheduledTaskRunRepository:
                     # would hold SQLite's writer lock across the nested short
                     # transaction used by that durable-run CAS.
                     associations.append((task, row, candidate))
+                    if on_runs_recovered is not None and candidate.status not in {"pending", "running"} and candidate.stop_reason in _RECOVERED_RUN_STOP_REASONS:
+                        # Heal a scheduler takeover that committed before this
+                        # process completed terminal observability. Keep this
+                        # parent row active until the post-commit callback
+                        # succeeds so another scheduler can retry after a crash.
+                        recovered_run_ids.append(candidate.run_id)
+                        if candidate.status == "success":
+                            terminal_status, terminal_error = "success", None
+                        elif candidate.status in {"error", "timeout"}:
+                            terminal_status, terminal_error = "failed", candidate.error
+                        else:
+                            terminal_status, terminal_error = "interrupted", candidate.error or error
+                        deferred_terminal_rows.append(
+                            (
+                                row.id,
+                                row.task_id,
+                                candidate.run_id,
+                                terminal_status,
+                                terminal_error,
+                            )
+                        )
+                        continue
                 if candidate is not None and candidate.status not in {"pending", "running"}:
                     row.lease_owner = None
                     row.lease_expires_at = None
@@ -796,13 +829,31 @@ class ScheduledTaskRunRepository:
                     # Run takeover commits in its own short transaction. If this
                     # outer commit fails, the next poll finishes scheduled-row
                     # bookkeeping while the run remains safely terminal.
-                    claimed = await self._run_repository.claim_for_takeover(
+                    claimed = await self._run_repository.claim_for_takeover_as(
                         candidate.run_id,
+                        owner_worker_id=owner_worker_id,
                         grace_seconds=lease_grace_seconds,
                         error=error,
                         stop_reason="scheduled_task_orphan_recovered",
                     )
-                    if not claimed:
+                    if claimed:
+                        recovered_run_ids.append(candidate.run_id)
+                        if on_runs_recovered is not None:
+                            # The durable run takeover committed in its own
+                            # transaction. Leave the scheduled row executing as
+                            # a retryable outbox until events and stream END are
+                            # confirmed outside this SQL session.
+                            deferred_terminal_rows.append(
+                                (
+                                    row.id,
+                                    row.task_id,
+                                    candidate.run_id,
+                                    "interrupted",
+                                    error,
+                                )
+                            )
+                            continue
+                    else:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
                         if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
                             continue
@@ -823,7 +874,42 @@ class ScheduledTaskRunRepository:
             for task, row, candidate in associations:
                 self._associate_task_with_run(task, row, candidate)
             await session.commit()
-            return stale
+        if recovered_run_ids and on_runs_recovered is not None:
+            callback_result = await on_runs_recovered(list(dict.fromkeys(recovered_run_ids)))
+            if callback_result is False:
+                return stale
+
+            # Phase 2: terminalize only the exact parent rows whose durable run
+            # observability completed. If the process dies before this commit,
+            # their executing status makes the next reconciliation retry the
+            # idempotent callback.
+            async with self._sf() as session:
+                for row_id, task_id, run_id, terminal_status, terminal_error in deferred_terminal_rows:
+                    task = await session.get(
+                        ScheduledTaskRow,
+                        task_id,
+                        with_for_update=True,
+                    )
+                    row = await session.get(
+                        ScheduledTaskRunRow,
+                        row_id,
+                        with_for_update=True,
+                    )
+                    if row is None or row.status not in EXECUTING_RUN_STATUSES:
+                        continue
+                    candidate = await session.get(RunRow, run_id)
+                    if candidate is None or candidate.status in {"pending", "running"} or candidate.stop_reason not in _RECOVERED_RUN_STOP_REASONS:
+                        continue
+                    self._associate_scheduled_run(row, candidate)
+                    self._associate_task_with_run(task, row, candidate)
+                    row.status = terminal_status
+                    row.error = terminal_error
+                    row.finished_at = now
+                    row.lease_owner = None
+                    row.lease_expires_at = None
+                    stale += 1
+                await session.commit()
+        return stale
 
     @staticmethod
     async def _find_underlying_run(session: AsyncSession, row: ScheduledTaskRunRow, task: ScheduledTaskRow | None) -> RunRow | None:

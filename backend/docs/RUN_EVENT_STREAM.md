@@ -53,7 +53,7 @@ through run-event or specialized APIs:
 | Category | Purpose |
 | --- | --- |
 | `trace` | Execution evidence. |
-| `outputs` | Root graph completion output. |
+| `outputs` | Authoritative run terminal evidence with opaque graph output. |
 | `error` | Callback-observed failure evidence. |
 | `middleware` | Middleware state-change audit evidence. |
 | `context` | Effective hidden-context identity. |
@@ -67,7 +67,6 @@ through run-event or specialized APIs:
 | Event type | Category | Producer |
 | --- | --- | --- |
 | `run.start` | `trace` | Root `on_chain_start()` |
-| `run.end` | `outputs` | Root `on_chain_end()` |
 | `run.error` | `error` | `on_chain_error()` |
 | `llm.human.input` | `message` | First persisted lead-agent human input |
 | `llm.ai.response` | `message` | `on_llm_end()` |
@@ -111,6 +110,18 @@ Ordinary task-tool subagents forward both loop-detection and tool-promotion
 appends to the parent run loop through dedicated recorder context keys. The
 loop-bound `RunJournal` itself never enters the isolated subagent loop.
 
+The run worker owns the authoritative terminal event:
+
+| Event type | Category | Producer |
+| --- | --- | --- |
+| `run.end` | `outputs` | Worker finalization after durable `RunRow.status`; RunManager after atomic orphan/cancel/admission takeover |
+
+`RunJournal.on_chain_end()` only captures and reconciles the latest root graph
+output. It does not publish a lifecycle event. This matters when an active goal
+causes multiple hidden root invocations inside one Gateway run: only the final
+worker outcome publishes `run.end`, exactly once through the event store's
+run-scoped idempotent write.
+
 ### Opaque Run Outputs
 
 `run.end.content` is the root graph output and is intentionally opaque. Its
@@ -122,10 +133,22 @@ nested representation is not currently identical across storage backends:
   `json.dumps(default=str)`, so nested values that are not directly JSON
   serializable are read back as strings.
 
-Consumers may use `run.end` as completion evidence, but must not depend on
-backend-identical nested output values. Normalizing those values would be a
-separate runtime compatibility change rather than part of this current-state
-contract.
+New `run.end` events set `metadata.authoritative: true` and
+`metadata.status` to one of `success`, `error`, `timeout`, or `interrupted`.
+The status mirrors the already-durable `RunRow.status`; the producer writes the
+marked singleton only after every client-visible tail frame. Recovery events
+also set `metadata.recovered: true`. This includes orphan reconciliation, an
+expired-lease cancel takeover, and runs claimed by cross-worker
+interrupt/rollback admission. Error text, prompts, tool arguments, and tool
+results are never copied into terminal metadata. Runs without a completed root
+invocation use `{}` as content.
+
+When a retained stream lacks its END marker, a consumer may synthesize END from
+a fresh owner-scoped read only when the terminal `RunRow.status` matches a
+marked `run.end`, or when the stronger `run.delivery` receipt is present. An
+older unmarked `run.end` is preserved for history but is not safe liveness
+evidence because its ordering relative to late visible frames is unknown.
+Consumers must not depend on backend-identical nested output values.
 
 `subagents/step_events.py::subagent_run_event()` maps streamed `task_*` chunks
 to persisted events. The worker batches them through `put_batch()`:
@@ -200,9 +223,14 @@ be used by new producers.
 - Tool-call intent is embedded in `llm.ai.response.content.tool_calls`; it is
   not a first-class event. A missing or timed-out result may have no dedicated
   outcome event.
-- `run.end.metadata.status` is only a root graph completion marker and is
-  always `success`. `RunRow.status` remains authoritative for lifecycle state,
-  and worker loss may leave no terminal event.
+- `RunRow.status` remains the lifecycle source of truth. A crash, caller
+  cancellation, or event-store outage after the row becomes terminal but before
+  the idempotent `run.end` write can leave the event missing. Current orphan,
+  cancel-takeover, and cross-worker admission claim paths backfill the runs they
+  terminalize, but there is no historical terminal-row scan. A terminal row
+  plus a matching `metadata.authoritative: true` event can recover a missing
+  bridge END; older unmarked `run.end` rows remain legacy graph-completion
+  markers, are not rewritten, and cannot enable that shortcut.
 - Nested non-JSON values in `run.end.content` have backend-dependent
   representations: memory retains Python values, while JSONL and database
   stores read them back as strings.

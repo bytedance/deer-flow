@@ -15,14 +15,21 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
+from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.types import Command
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
-from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, ThreadOperationKind
+from deerflow.runtime import LOCAL_FINALIZER_PENDING_STOP_REASON, ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, ThreadOperationKind
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, _generate_worker_id
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.runtime.user_context import get_current_user, reset_current_user, set_current_user
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,6 +50,72 @@ def _make_manager(store=None, **kwargs) -> RunManager:
         run_ownership_config=kwargs.pop("run_ownership_config", _lease_config()),
         **kwargs,
     )
+
+
+class _OwnerCapturingEventStore(MemoryRunEventStore):
+    def __init__(self, run_store: MemoryRunStore, *, require_terminal_row: bool = True):
+        super().__init__()
+        self._run_store = run_store
+        self._require_terminal_row = require_terminal_row
+        self.writes: list[tuple[str, str, str | None]] = []
+
+    async def put_if_absent(self, **kwargs):
+        row = await self._run_store.get(kwargs["run_id"])
+        assert row is not None
+        if self._require_terminal_row:
+            assert row["status"] not in {"pending", "running"}
+        user = get_current_user()
+        self.writes.append((kwargs["run_id"], kwargs["event_type"], user.id if user is not None else None))
+        return await super().put_if_absent(**kwargs)
+
+
+class _TerminalOutputAgent:
+    async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+        journal = config["context"]["__run_journal"]
+        journal._remember_current_run_tool_calls(
+            AIMessage(content="", tool_calls=[{"id": "call_1", "name": "present_files", "args": {}}]),
+            caller="lead_agent",
+        )
+        journal.on_tool_end(
+            Command(
+                update={
+                    "artifacts": ["/mnt/user-data/outputs/report.md"],
+                    "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                }
+            ),
+            run_id=uuid4(),
+        )
+        journal.on_chain_end(
+            {"messages": [AIMessage(content="real worker output")]},
+            run_id=uuid4(),
+            parent_run_id=None,
+        )
+        yield {"messages": []}
+
+
+def _start_output_worker(
+    manager: RunManager,
+    record,
+    events: MemoryRunEventStore,
+) -> asyncio.Task:
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    worker_user_token = set_current_user(SimpleNamespace(id=record.user_id))
+    try:
+        task = asyncio.create_task(
+            run_agent(
+                bridge,
+                manager,
+                record,
+                ctx=RunContext(checkpointer=None, event_store=events),
+                agent_factory=lambda *, config: _TerminalOutputAgent(),
+                graph_input={},
+                config={},
+            )
+        )
+    finally:
+        reset_current_user(worker_user_token)
+    record.task = task
+    return task
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +218,1022 @@ async def test_interrupt_reclaims_expired_checkpoint_write_reservation():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+async def test_cross_worker_admission_backfills_terminal_events_for_every_claimed_run(strategy):
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store)
+    on_recovered = AsyncMock(return_value=False)
+    expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    for run_id, owner_id in (("old-run-a", "owner-a"), ("old-run-b", "owner-b")):
+        await store.put(
+            run_id,
+            thread_id="thread-1",
+            status="running",
+            operation_kind=ThreadOperationKind.run,
+            user_id=owner_id,
+            owner_worker_id=f"dead-{owner_id}",
+            lease_expires_at=expired,
+            created_at=expired,
+        )
+    await store.put(
+        "expired-checkpoint-write",
+        thread_id="thread-1",
+        status="pending",
+        operation_kind=ThreadOperationKind.checkpoint_write,
+        user_id="reservation-owner",
+        owner_worker_id="dead-reservation-owner",
+        lease_expires_at=expired,
+        created_at=expired,
+    )
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        on_orphans_recovered=on_recovered,
+        worker_id="worker-b",
+        run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=10),
+    )
+
+    admitted = await manager.create_or_reject(
+        "thread-1",
+        multitask_strategy=strategy,
+        user_id="new-owner",
+    )
+
+    assert admitted.status == RunStatus.pending
+    for run_id in ("old-run-a", "old-run-b"):
+        claimed = await store.get(run_id)
+        assert claimed is not None
+        assert claimed["status"] == "interrupted"
+        assert claimed["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+        delivery = await events.list_events("thread-1", run_id, event_types=["run.delivery"])
+        terminal = await events.list_events("thread-1", run_id, event_types=["run.end"])
+        assert len(delivery) == 1
+        assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+        assert len(terminal) == 1
+        assert terminal[0]["metadata"] == {
+            "status": "interrupted",
+            "recovered": True,
+            "authoritative": True,
+        }
+
+    assert await events.list_events("thread-1", "expired-checkpoint-write") == []
+    assert set(events.writes) == {
+        ("old-run-a", "run.delivery", "owner-a"),
+        ("old-run-a", "run.end", "owner-a"),
+        ("old-run-b", "run.delivery", "owner-b"),
+        ("old-run-b", "run.end", "owner-b"),
+    }
+    on_recovered.assert_awaited_once()
+    recovered_records = on_recovered.await_args.args[0]
+    assert {record.run_id for record in recovered_records} == {"old-run-a", "old-run-b"}
+    assert all(record.stop_reason == ORPHAN_RECOVERY_STOP_REASON for record in recovered_records)
+
+
+@pytest.mark.anyio
+async def test_atomic_admission_marks_local_task_until_its_lease_expires():
+    """A cancelled wrapper cannot be recovered while its finalizer lease is live."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-live-local")
+    await manager.set_status(old.run_id, RunStatus.running)
+    old.task = asyncio.create_task(asyncio.Event().wait())
+
+    replacement = await manager.create_or_reject(
+        "thread-live-local",
+        multitask_strategy="interrupt",
+    )
+    await asyncio.gather(old.task, return_exceptions=True)
+
+    stored = await store.get(old.run_id)
+    assert replacement.status == RunStatus.pending
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert stored["stop_reason"] == LOCAL_FINALIZER_PENDING_STOP_REASON
+    assert stored["lease_expires_at"] is not None
+    assert await manager.recover_expired_local_finalizer(manager._record_from_store(stored)) is False
+
+    store._runs[old.run_id]["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    assert await manager.recover_expired_local_finalizer(manager._record_from_store(stored)) is True
+    assert (await store.get(old.run_id))["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+
+
+@pytest.mark.anyio
+async def test_atomic_admission_marks_a_same_owner_run_after_local_ownership_loss():
+    """A fenced local record has no authoritative publisher despite owner equality."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-fenced-local")
+    await manager.set_status(old.run_id, RunStatus.running)
+    old.status = RunStatus.error
+    old.ownership_lost = True
+
+    replacement = await manager.create_or_reject(
+        "thread-fenced-local",
+        multitask_strategy="interrupt",
+    )
+
+    stored = await store.get(old.run_id)
+    assert replacement.status == RunStatus.pending
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+
+
+@pytest.mark.anyio
+async def test_admission_cancels_only_rows_returned_by_atomic_claim():
+    """A worker that finishes during the DB await must not be cancelled later."""
+
+    class PausedAtomicStore(MemoryRunStore):
+        supports_atomic_recovery_markers = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.pause = False
+
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            if self.pause:
+                self.entered.set()
+                await self.release.wait()
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    store = PausedAtomicStore()
+    manager = _make_manager(store=store)
+    old = await manager.create_or_reject("thread-finish-during-admission")
+    await manager.set_status(old.run_id, RunStatus.running)
+    old.task = asyncio.create_task(asyncio.Event().wait())
+    store.pause = True
+
+    admission = asyncio.create_task(
+        manager.create_or_reject(
+            old.thread_id,
+            multitask_strategy="interrupt",
+        )
+    )
+    await asyncio.wait_for(store.entered.wait(), timeout=1)
+    store._runs[old.run_id]["status"] = RunStatus.success.value
+    old.status = RunStatus.success
+    store.release.set()
+
+    replacement = await asyncio.wait_for(admission, timeout=1)
+    assert replacement.status == RunStatus.pending
+    assert old.abort_event.is_set() is False
+    assert old.task.done() is False
+    assert (await store.get(old.run_id))["cancel_action"] is None
+
+    old.task.cancel()
+    await asyncio.gather(old.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_strict_legacy_store_rejects_live_local_interrupt_before_mutation():
+    class StrictLegacyStore(MemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.atomic_calls = 0
+
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            self.atomic_calls += 1
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    store = StrictLegacyStore()
+    manager = _make_manager(store=store)
+    old = await manager.create_or_reject("thread-strict-store")
+    await manager.set_status(old.run_id, RunStatus.running)
+    old.task = asyncio.create_task(asyncio.Event().wait())
+    store.atomic_calls = 0
+
+    with pytest.raises(ConflictError, match="cannot atomically fence"):
+        await manager.create_or_reject(
+            old.thread_id,
+            multitask_strategy="interrupt",
+        )
+
+    assert store.atomic_calls == 0
+    assert old.abort_event.is_set() is False
+    assert old.task.done() is False
+    assert (await store.get(old.run_id))["status"] == RunStatus.running.value
+    old.task.cancel()
+    await asyncio.gather(old.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_atomic_admission_preserves_first_cancel_action_winner():
+    """A prior durable interrupt wins over a racing rollback admission."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-first-action")
+    await manager.set_status(old.run_id, RunStatus.running)
+    old.task = asyncio.create_task(asyncio.Event().wait())
+    assert await store.request_cancel(old.run_id, action="interrupt") == "interrupt"
+
+    await manager.create_or_reject(
+        old.thread_id,
+        multitask_strategy="rollback",
+    )
+    await asyncio.gather(old.task, return_exceptions=True)
+
+    claimed = await store.get(old.run_id)
+    assert claimed is not None
+    assert claimed["cancel_action"] == "interrupt"
+    assert old.abort_action == "interrupt"
+
+
+@pytest.mark.anyio
+async def test_delayed_atomic_commit_refreshes_predecessor_and_replacement_leases():
+    class DelayedStore(MemoryRunStore):
+        supports_atomic_recovery_markers = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.pause = False
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            if self.pause:
+                self.entered.set()
+                await self.release.wait()
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    store = DelayedStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(
+            heartbeat_enabled=True,
+            lease_seconds=30,
+        ),
+    )
+    old = await manager.create_or_reject("thread-delayed-commit")
+    await manager.set_status(old.run_id, RunStatus.running)
+    old.task = asyncio.create_task(asyncio.Event().wait())
+    stale = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    manager._compute_lease_expires_at = lambda: stale
+    store.pause = True
+
+    admission = asyncio.create_task(
+        manager.create_or_reject(
+            old.thread_id,
+            multitask_strategy="interrupt",
+        )
+    )
+    await asyncio.wait_for(store.entered.wait(), timeout=1)
+    store.release.set()
+    replacement = await asyncio.wait_for(admission, timeout=1)
+    await asyncio.gather(old.task, return_exceptions=True)
+
+    old_row = await store.get(old.run_id)
+    replacement_row = await store.get(replacement.run_id)
+    fresh_boundary = datetime.now(UTC) + timedelta(seconds=20)
+    assert datetime.fromisoformat(old_row["lease_expires_at"]) > fresh_boundary
+    assert datetime.fromisoformat(replacement_row["lease_expires_at"]) > fresh_boundary
+    assert replacement.lease_expires_at == replacement_row["lease_expires_at"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+async def test_admission_preserves_active_terminal_staged_workers_authoritative_events(
+    monkeypatch,
+    strategy,
+):
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store, require_terminal_row=False)
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-1", user_id="run-owner")
+
+    staged_success = asyncio.Event()
+    release_staged_success = asyncio.Event()
+    original_set_status = manager.set_status_if_not_cancelled
+
+    async def pause_after_staging_success(run_id, status, **kwargs):
+        outcome = await original_set_status(run_id, status, **kwargs)
+        if status == RunStatus.success and kwargs.get("persist") is False and not staged_success.is_set():
+            staged_success.set()
+            await release_staged_success.wait()
+        return outcome
+
+    monkeypatch.setattr(manager, "set_status_if_not_cancelled", pause_after_staging_success)
+    worker_task = _start_output_worker(manager, old, events)
+    await asyncio.wait_for(staged_success.wait(), timeout=1)
+
+    admission_task = asyncio.create_task(
+        manager.create_or_reject(
+            "thread-1",
+            multitask_strategy=strategy,
+            user_id="new-owner",
+        )
+    )
+    await asyncio.sleep(0)
+    admission_waited = not admission_task.done()
+    status_while_waiting = (await store.get(old.run_id))["status"]
+    events_while_waiting = await events.list_events(
+        "thread-1",
+        old.run_id,
+        event_types=["run.delivery", "run.end"],
+    )
+    finalizing_while_waiting = old.finalizing
+    release_staged_success.set()
+    await asyncio.wait_for(worker_task, timeout=1)
+    admitted = await asyncio.wait_for(admission_task, timeout=1)
+
+    assert admission_waited is True
+    assert status_while_waiting == RunStatus.running.value
+    assert events_while_waiting == []
+    assert finalizing_while_waiting is True
+    assert admitted.status == RunStatus.pending
+    claimed = await store.get(old.run_id)
+    assert claimed is not None
+    assert claimed["status"] == RunStatus.success.value
+    delivery = await events.list_events("thread-1", old.run_id, event_types=["run.delivery"])
+    terminal = await events.list_events("thread-1", old.run_id, event_types=["run.end"])
+    assert len(delivery) == 1
+    assert delivery[0]["content"] == {
+        "presented": 1,
+        "paths": ["/mnt/user-data/outputs/report.md"],
+        "by_tool": {"present_files": ["/mnt/user-data/outputs/report.md"]},
+    }
+    assert len(terminal) == 1
+    assert terminal[0]["content"]["messages"][0].content == "real worker output"
+    assert terminal[0]["metadata"] == {
+        "status": RunStatus.success.value,
+        "authoritative": True,
+    }
+    assert events.writes == [
+        (old.run_id, "run.delivery", "run-owner"),
+        (old.run_id, "run.end", "run-owner"),
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+async def test_admission_commits_local_finalizer_marker_before_worker_receipt(
+    monkeypatch,
+    strategy,
+):
+    """Admission stays atomic while a live worker retains its authoritative tail."""
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store, require_terminal_row=False)
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-admission-cancel", user_id="run-owner")
+    worker_streaming = asyncio.Event()
+
+    class BlockingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal.on_chain_end(
+                {"messages": [AIMessage(content="output before cancellation")]},
+                run_id=uuid4(),
+                parent_run_id=None,
+            )
+            worker_streaming.set()
+            await asyncio.Event().wait()
+            yield {"messages": []}
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    worker_user_token = set_current_user(SimpleNamespace(id=old.user_id))
+    try:
+        worker_task = asyncio.create_task(
+            run_agent(
+                bridge,
+                manager,
+                old,
+                ctx=RunContext(checkpointer=None, event_store=events),
+                agent_factory=lambda *, config: BlockingAgent(),
+                graph_input={},
+                config={},
+            )
+        )
+    finally:
+        reset_current_user(worker_user_token)
+    old.task = worker_task
+    await asyncio.wait_for(worker_streaming.wait(), timeout=1)
+
+    receipt_started = asyncio.Event()
+    release_receipt = asyncio.Event()
+    from deerflow.runtime.runs import worker as worker_module
+
+    original_persist_delivery = worker_module._persist_delivery_receipt
+
+    async def pause_delivery_receipt(*args, **kwargs):
+        receipt_started.set()
+        await release_receipt.wait()
+        return await original_persist_delivery(*args, **kwargs)
+
+    monkeypatch.setattr(worker_module, "_persist_delivery_receipt", pause_delivery_receipt)
+    store.create_thread_operation_atomic = AsyncMock(
+        wraps=store.create_thread_operation_atomic,
+    )
+
+    admission_task = asyncio.create_task(
+        manager.create_or_reject(
+            old.thread_id,
+            multitask_strategy=strategy,
+            user_id="new-owner",
+        )
+    )
+    await asyncio.wait_for(receipt_started.wait(), timeout=1)
+
+    durable_before_receipt = await store.get(old.run_id)
+    admitted = await asyncio.wait_for(admission_task, timeout=1)
+    assert admitted.status == RunStatus.pending
+    store.create_thread_operation_atomic.assert_awaited_once()
+    assert durable_before_receipt is not None
+    assert durable_before_receipt["status"] == RunStatus.interrupted.value
+    assert durable_before_receipt["cancel_action"] == strategy
+    assert durable_before_receipt["stop_reason"] == LOCAL_FINALIZER_PENDING_STOP_REASON
+    assert old.abort_action == strategy
+    assert old.abort_event.is_set()
+    assert old.finalizing is True
+    assert old.terminal_status_staged is True
+    assert (
+        await events.list_events(
+            old.thread_id,
+            old.run_id,
+            event_types=["run.delivery", "run.end"],
+        )
+        == []
+    )
+
+    release_receipt.set()
+    await asyncio.wait_for(worker_task, timeout=1)
+
+    durable = await store.get(old.run_id)
+    assert durable is not None
+    assert durable["status"] == (RunStatus.interrupted.value if strategy == "interrupt" else RunStatus.error.value)
+    assert durable.get("stop_reason") == LOCAL_FINALIZER_PENDING_STOP_REASON
+    delivery = await events.list_events(
+        old.thread_id,
+        old.run_id,
+        event_types=["run.delivery"],
+    )
+    terminal = await events.list_events(
+        old.thread_id,
+        old.run_id,
+        event_types=["run.end"],
+    )
+    assert len(delivery) == 1
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {
+        "status": durable["status"],
+        "authoritative": True,
+    }
+    bridge.publish_end.assert_awaited_once_with(old.run_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+async def test_direct_cancel_fences_admission_before_durable_terminal_write(
+    monkeypatch,
+    strategy,
+):
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store, require_terminal_row=False)
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-1", user_id="run-owner")
+
+    worker_streaming = asyncio.Event()
+
+    class BlockingOutputAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal.on_chain_end(
+                {"messages": [AIMessage(content="real rollback output")]},
+                run_id=uuid4(),
+                parent_run_id=None,
+            )
+            worker_streaming.set()
+            await asyncio.Event().wait()
+            yield {"messages": []}
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    worker_user_token = set_current_user(SimpleNamespace(id=old.user_id))
+    try:
+        worker_task = asyncio.create_task(
+            run_agent(
+                bridge,
+                manager,
+                old,
+                ctx=RunContext(checkpointer=None, event_store=events),
+                agent_factory=lambda *, config: BlockingOutputAgent(),
+                graph_input={},
+                config={},
+            )
+        )
+    finally:
+        reset_current_user(worker_user_token)
+    old.task = worker_task
+    await asyncio.wait_for(worker_streaming.wait(), timeout=1)
+
+    worker_terminal_staged = asyncio.Event()
+    release_worker_terminal = asyncio.Event()
+    original_set_status = manager.set_status
+
+    async def pause_worker_terminal_status(run_id, status, **kwargs):
+        if run_id == old.run_id and status == RunStatus.error and kwargs.get("stage_terminal") is True:
+            worker_terminal_staged.set()
+            await release_worker_terminal.wait()
+        return await original_set_status(run_id, status, **kwargs)
+
+    monkeypatch.setattr(manager, "set_status", pause_worker_terminal_status)
+
+    cancel_task = asyncio.create_task(manager.cancel(old.run_id, action="rollback"))
+    assert await asyncio.wait_for(cancel_task, timeout=1) == CancelOutcome.cancelled
+    await asyncio.wait_for(worker_terminal_staged.wait(), timeout=1)
+
+    store.create_thread_operation_atomic = AsyncMock(
+        wraps=store.create_thread_operation_atomic,
+    )
+    admission_attempt_finished = asyncio.Event()
+    original_admit = manager._admit_thread_operation
+
+    async def observe_admission_attempt(*args, **kwargs):
+        try:
+            return await original_admit(*args, **kwargs)
+        finally:
+            admission_attempt_finished.set()
+
+    monkeypatch.setattr(manager, "_admit_thread_operation", observe_admission_attempt)
+    admission_task = asyncio.create_task(
+        manager.create_or_reject(
+            "thread-1",
+            multitask_strategy=strategy,
+            user_id="new-owner",
+        )
+    )
+    await asyncio.wait_for(admission_attempt_finished.wait(), timeout=1)
+
+    admission_waited = not admission_task.done()
+    terminal_before_durable_cancel = await events.list_events(
+        "thread-1",
+        old.run_id,
+        event_types=["run.end"],
+    )
+    durable_before_tail = await store.get(old.run_id)
+    assert durable_before_tail is not None
+    durable_status_before_cancel = durable_before_tail["status"]
+    durable_cancel_action = durable_before_tail["cancel_action"]
+    cancel_staged_terminal = old.terminal_status_staged
+    atomic_calls_before_cancel = store.create_thread_operation_atomic.await_count
+
+    release_worker_terminal.set()
+    await asyncio.wait_for(worker_task, timeout=1)
+    admitted = await asyncio.wait_for(admission_task, timeout=1)
+
+    assert admission_waited is True
+    assert cancel_staged_terminal is True
+    assert atomic_calls_before_cancel == 0
+    assert durable_status_before_cancel == RunStatus.running.value
+    assert durable_cancel_action == "rollback"
+    assert terminal_before_durable_cancel == []
+    assert admitted.status == RunStatus.pending
+    stored = await store.get(old.run_id)
+    assert stored is not None
+    assert stored["status"] == RunStatus.error.value
+    assert stored["error"] == "Rolled back by user"
+    terminal = await events.list_events("thread-1", old.run_id, event_types=["run.end"])
+    assert len(terminal) == 1
+    assert terminal[0]["content"]["messages"][0].content == "real rollback output"
+    assert terminal[0]["metadata"] == {
+        "status": RunStatus.error.value,
+        "authoritative": True,
+    }
+
+
+@pytest.mark.anyio
+async def test_pending_direct_cancel_signals_wrapper_before_atomic_recovery(
+    monkeypatch,
+):
+    """A pending metadata wrapper must observe abort without skipping cleanup."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-pending-wrapper")
+    wrapper_started = asyncio.Event()
+    wrapper_aborted = asyncio.Event()
+
+    async def metadata_wrapper():
+        wrapper_started.set()
+        await old.abort_event.wait()
+        wrapper_aborted.set()
+
+    wrapper_task = asyncio.create_task(metadata_wrapper())
+    old.task = wrapper_task
+    await asyncio.wait_for(wrapper_started.wait(), timeout=1)
+
+    async def accept_durable_cancel(_run_id, *, action):
+        return CancelOutcome.requested, action
+
+    monkeypatch.setattr(manager, "_request_durable_cancel", accept_durable_cancel)
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    old.lease_expires_at = expired
+    store._runs[old.run_id]["lease_expires_at"] = expired
+
+    outcome = await manager.cancel(old.run_id, action="interrupt")
+    await asyncio.wait_for(wrapper_aborted.wait(), timeout=1)
+    await wrapper_task
+    for _ in range(10):
+        if not old.finalizing:
+            break
+        await asyncio.sleep(0)
+
+    assert outcome == CancelOutcome.cancelled
+    assert old.ownership_lost is False
+    assert old.finalizing is False
+    assert old.terminal_status_persistence_inflight == 0
+
+    replacement = await manager.create_or_reject(
+        "thread-pending-wrapper",
+        multitask_strategy="interrupt",
+    )
+    await asyncio.wait_for(
+        manager.wait_for_prior_finalizing(
+            replacement.thread_id,
+            replacement.run_id,
+        ),
+        timeout=1,
+    )
+    stored = await store.get(old.run_id)
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+
+
+@pytest.mark.anyio
+async def test_admission_waits_for_terminal_worker_paused_inside_finalization(monkeypatch):
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store, require_terminal_row=False)
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-1", user_id="run-owner")
+
+    receipt_started = asyncio.Event()
+    release_receipt = asyncio.Event()
+    from deerflow.runtime.runs import worker as worker_module
+
+    original_persist_delivery = worker_module._persist_delivery_receipt
+
+    async def pause_delivery_receipt(*args, **kwargs):
+        receipt_started.set()
+        await release_receipt.wait()
+        return await original_persist_delivery(*args, **kwargs)
+
+    monkeypatch.setattr(worker_module, "_persist_delivery_receipt", pause_delivery_receipt)
+    worker_task = _start_output_worker(manager, old, events)
+    await asyncio.wait_for(receipt_started.wait(), timeout=1)
+
+    admission_task = asyncio.create_task(
+        manager.create_or_reject(
+            "thread-1",
+            multitask_strategy="interrupt",
+            user_id="new-owner",
+        )
+    )
+    await asyncio.sleep(0)
+    admission_waited = not admission_task.done()
+    status_while_waiting = (await store.get(old.run_id))["status"]
+    events_while_waiting = await events.list_events(
+        "thread-1",
+        old.run_id,
+        event_types=["run.delivery", "run.end"],
+    )
+    finalizing_while_waiting = old.finalizing
+    release_receipt.set()
+    await asyncio.wait_for(worker_task, timeout=1)
+    admitted = await asyncio.wait_for(admission_task, timeout=1)
+
+    assert admission_waited is True
+    assert status_while_waiting == RunStatus.running.value
+    assert events_while_waiting == []
+    assert finalizing_while_waiting is True
+    assert (await store.get(old.run_id))["status"] == RunStatus.success.value
+    assert admitted.status == RunStatus.pending
+    delivery = await events.list_events("thread-1", old.run_id, event_types=["run.delivery"])
+    terminal = await events.list_events("thread-1", old.run_id, event_types=["run.end"])
+    assert len(delivery) == 1
+    assert delivery[0]["content"]["presented"] == 1
+    assert len(terminal) == 1
+    assert terminal[0]["content"]["messages"][0].content == "real worker output"
+    assert terminal[0]["metadata"] == {
+        "status": RunStatus.success.value,
+        "authoritative": True,
+    }
+
+
+@pytest.mark.anyio
+async def test_cancelling_waiting_admission_does_not_cancel_terminal_finalizer():
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+
+    release_finalizer = asyncio.Event()
+    finalizer = asyncio.create_task(release_finalizer.wait())
+    old.task = finalizer
+    await manager.set_status(
+        old.run_id,
+        RunStatus.success,
+        persist=False,
+        stage_terminal=True,
+    )
+    store.create_thread_operation_atomic = AsyncMock(
+        wraps=store.create_thread_operation_atomic,
+    )
+
+    admission = asyncio.create_task(
+        manager.create_or_reject(
+            "thread-1",
+            multitask_strategy="interrupt",
+        )
+    )
+    await asyncio.sleep(0)
+    assert admission.done() is False
+    store.create_thread_operation_atomic.assert_not_awaited()
+
+    admission.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await admission
+
+    assert finalizer.done() is False
+    assert (await store.get(old.run_id))["status"] == RunStatus.running.value
+    store.create_thread_operation_atomic.assert_not_awaited()
+
+    release_finalizer.set()
+    await finalizer
+    await manager.set_finalizing(old.run_id, False)
+
+
+@pytest.mark.anyio
+async def test_waiting_admission_times_out_without_cancelling_terminal_finalizer():
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(
+            heartbeat_enabled=True,
+            grace_seconds=0,
+        ),
+    )
+    old = await manager.create_or_reject("thread-finalizer-timeout")
+    await manager.set_status(old.run_id, RunStatus.running)
+
+    release_finalizer = asyncio.Event()
+    finalizer = asyncio.create_task(release_finalizer.wait())
+    old.task = finalizer
+    await manager.set_status(
+        old.run_id,
+        RunStatus.success,
+        persist=False,
+        stage_terminal=True,
+    )
+    store.create_thread_operation_atomic = AsyncMock(
+        wraps=store.create_thread_operation_atomic,
+    )
+
+    with pytest.raises(ConflictError, match="still finalizing"):
+        await manager.create_or_reject(
+            old.thread_id,
+            multitask_strategy="interrupt",
+        )
+
+    assert finalizer.done() is False
+    assert (await store.get(old.run_id))["status"] == RunStatus.running.value
+    store.create_thread_operation_atomic.assert_not_awaited()
+
+    release_finalizer.set()
+    await finalizer
+    await manager.set_finalizing(old.run_id, False)
+
+
+@pytest.mark.anyio
+async def test_interrupt_admission_backfills_a_cancelled_pending_worker():
+    store = MemoryRunStore()
+    events = MemoryRunEventStore()
+    manager = _make_manager(store=store, event_store=events)
+    old = await manager.create_or_reject("thread-1")
+    old.task = asyncio.create_task(asyncio.sleep(3600))
+
+    replacement = await manager.create_or_reject(
+        "thread-1",
+        multitask_strategy="interrupt",
+    )
+    await asyncio.gather(old.task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert replacement.status == RunStatus.pending
+    assert old.task.cancelled()
+    assert old.finalizing is False
+    stored = await store.get(old.run_id)
+    assert stored is not None
+    assert stored["stop_reason"] == LOCAL_FINALIZER_PENDING_STOP_REASON
+    delivery = await events.list_events("thread-1", old.run_id, event_types=["run.delivery"])
+    terminal = await events.list_events("thread-1", old.run_id, event_types=["run.end"])
+    assert delivery == []
+    assert terminal == []
+
+    assert await manager.recover_expired_local_finalizer(old) is True
+    recovered_delivery = await events.list_events("thread-1", old.run_id, event_types=["run.delivery"])
+    recovered_terminal = await events.list_events("thread-1", old.run_id, event_types=["run.end"])
+    assert len(recovered_delivery) == 1
+    assert len(recovered_terminal) == 1
+    assert recovered_terminal[0]["metadata"] == {
+        "status": "interrupted",
+        "recovered": True,
+        "authoritative": True,
+    }
+
+
+@pytest.mark.anyio
+async def test_cancelled_admission_compensation_persists_a_no_worker_marker(
+    monkeypatch,
+):
+    """The strict second CAS must retain liveness when the first write failed."""
+    store = MemoryRunStore()
+    manager = _make_manager(store=store)
+    record = await manager.create_or_reject("thread-cancelled-admission")
+    monkeypatch.setattr(manager, "_persist_status", AsyncMock(return_value=False))
+
+    await manager._close_cancelled_admission(record)
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+
+
+@pytest.mark.anyio
+async def test_rollback_admission_keeps_pending_worker_terminal_event_authoritative(
+    monkeypatch,
+):
+    """A pre-start rollback is an interruption, not a checkpoint rollback."""
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store)
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-1", user_id="run-owner")
+    worker_waiting = asyncio.Event()
+    worker_finalizing = asyncio.Event()
+    release_worker_finalization = asyncio.Event()
+
+    async def wait_before_start(*_args, **_kwargs):
+        worker_waiting.set()
+        await asyncio.Event().wait()
+
+    original_set_status = manager.set_status
+
+    async def pause_cancelled_worker_status(run_id, status, **kwargs):
+        if run_id == old.run_id and status == RunStatus.interrupted and kwargs.get("stage_terminal") is True:
+            worker_finalizing.set()
+            await release_worker_finalization.wait()
+        return await original_set_status(run_id, status, **kwargs)
+
+    monkeypatch.setattr(manager, "wait_for_prior_finalizing", wait_before_start)
+    monkeypatch.setattr(manager, "set_status", pause_cancelled_worker_status)
+    rollback = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint",
+        rollback,
+    )
+    worker_task = _start_output_worker(manager, old, events)
+    await asyncio.wait_for(worker_waiting.wait(), timeout=1)
+
+    replacement = await manager.create_or_reject(
+        "thread-1",
+        multitask_strategy="rollback",
+        user_id="new-owner",
+    )
+    await asyncio.wait_for(worker_finalizing.wait(), timeout=1)
+    terminal_before_worker_cleanup = await events.list_events(
+        "thread-1",
+        old.run_id,
+        event_types=["run.end"],
+    )
+    release_worker_finalization.set()
+    await asyncio.wait_for(worker_task, timeout=1)
+
+    stored = await store.get(old.run_id)
+    delivery = await events.list_events(
+        "thread-1",
+        old.run_id,
+        event_types=["run.delivery"],
+    )
+    terminal = await events.list_events(
+        "thread-1",
+        old.run_id,
+        event_types=["run.end"],
+    )
+    assert replacement.status == RunStatus.pending
+    assert old.status == RunStatus.interrupted
+    assert old.error is None
+    assert old.finalizing is False
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert stored["error"] == "Cancelled by newer run"
+    assert terminal_before_worker_cleanup == []
+    assert len(delivery) == 1
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {
+        "status": stored["status"],
+        "authoritative": True,
+    }
+    rollback.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_cross_worker_admission_survives_terminal_event_store_failure():
+    class FailingEventStore(MemoryRunEventStore):
+        def __init__(self):
+            super().__init__()
+            self.attempted_types: list[str] = []
+
+        async def put_if_absent(self, **kwargs):
+            self.attempted_types.append(kwargs["event_type"])
+            raise RuntimeError("event store unavailable")
+
+    store = MemoryRunStore()
+    events = FailingEventStore()
+    expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    await store.put(
+        "old-run",
+        thread_id="thread-1",
+        status="running",
+        user_id="old-owner",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired,
+        created_at=expired,
+    )
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-b",
+        run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=10),
+    )
+
+    admitted = await manager.create_or_reject(
+        "thread-1",
+        multitask_strategy="interrupt",
+        user_id="new-owner",
+    )
+
+    assert admitted.status == RunStatus.pending
+    assert (await store.get(admitted.run_id))["status"] == "pending"
+    assert (await store.get("old-run"))["status"] == "interrupted"
+    assert (await store.get("old-run"))["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    assert events.attempted_types == ["run.delivery", "run.end"]
+
+
+@pytest.mark.anyio
 async def test_reject_blocks_reentrant_same_thread_locally():
     """reject must also block when a local in-memory active run exists."""
     store = MemoryRunStore()
@@ -231,6 +1320,76 @@ async def test_interrupt_exhausted_retries_surface_as_conflict_error():
 
     # Sanity: the loop actually retried 3 times before giving up.
     assert store.atomic_call_count == 3
+
+
+@pytest.mark.anyio
+async def test_atomic_recovery_keywords_do_not_break_a_strict_legacy_store():
+    """Subclasses that retain the old strict signature remain callable."""
+
+    class StrictLegacyAtomicStore(MemoryRunStore):
+        async def create_thread_operation_atomic(
+            self,
+            run_id: str,
+            *,
+            thread_id: str,
+            owner_worker_id: str,
+            lease_expires_at: str | None,
+            operation_kind: str = "run",
+            multitask_strategy: str = "reject",
+            assistant_id: str | None = None,
+            user_id: str | None = None,
+            model_name: str | None = None,
+            metadata: dict | None = None,
+            kwargs: dict | None = None,
+            created_at: str | None = None,
+            grace_seconds: int = 10,
+            idempotency_key: str | None = None,
+        ):
+            return await super().create_thread_operation_atomic(
+                run_id,
+                thread_id=thread_id,
+                owner_worker_id=owner_worker_id,
+                lease_expires_at=lease_expires_at,
+                operation_kind=operation_kind,
+                multitask_strategy=multitask_strategy,
+                assistant_id=assistant_id,
+                user_id=user_id,
+                model_name=model_name,
+                metadata=metadata,
+                kwargs=kwargs,
+                created_at=created_at,
+                grace_seconds=grace_seconds,
+                idempotency_key=idempotency_key,
+            )
+
+    store = StrictLegacyAtomicStore()
+    expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    await store.put(
+        "legacy-run",
+        thread_id="thread-legacy",
+        status="running",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired,
+        created_at=expired,
+    )
+    manager = _make_manager(
+        store=store,
+        on_orphans_recovered=AsyncMock(return_value=False),
+        worker_id="worker-b",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+
+    admitted = await manager.create_or_reject(
+        "thread-legacy",
+        multitask_strategy="interrupt",
+    )
+
+    assert admitted.status == RunStatus.pending
+    stored = await store.get("legacy-run")
+    assert stored["status"] == RunStatus.interrupted.value
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    callback_records = manager._on_orphans_recovered.await_args.args[0]
+    assert callback_records[0].stop_reason == ORPHAN_RECOVERY_STOP_REASON
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +1980,115 @@ async def test_heartbeat_renews_active_run_leases():
 
 
 @pytest.mark.anyio
+async def test_terminal_lease_renewal_requires_exact_live_local_finalizer_marker():
+    store = MemoryRunStore()
+    live = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    next_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    await store.put(
+        "local-finalizer",
+        thread_id="thread-1",
+        status=RunStatus.interrupted.value,
+        owner_worker_id="worker-a",
+        lease_expires_at=live,
+        stop_reason=LOCAL_FINALIZER_PENDING_STOP_REASON,
+    )
+    await store.put(
+        "ordinary-terminal",
+        thread_id="thread-2",
+        status=RunStatus.interrupted.value,
+        owner_worker_id="worker-a",
+        lease_expires_at=live,
+        stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+    )
+
+    assert (
+        await store.renew_lease(
+            "local-finalizer",
+            owner_worker_id="worker-a",
+            lease_expires_at=next_lease,
+        )
+    ).renewed is True
+    assert (
+        await store.renew_lease(
+            "ordinary-terminal",
+            owner_worker_id="worker-a",
+            lease_expires_at=next_lease,
+        )
+    ).renewed is False
+
+    store._runs["local-finalizer"]["lease_expires_at"] = expired
+    assert (
+        await store.renew_lease(
+            "local-finalizer",
+            owner_worker_id="worker-a",
+            lease_expires_at=next_lease,
+        )
+    ).renewed is False
+    claimed = await store.claim_expired_local_finalizer(
+        "local-finalizer",
+        owner_worker_id="worker-b",
+        recovery_stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+        grace_seconds=0,
+    )
+    assert claimed is not None
+    assert claimed["owner_worker_id"] == "worker-b"
+    assert claimed["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    assert (
+        await store.renew_lease(
+            "local-finalizer",
+            owner_worker_id="worker-a",
+            lease_expires_at=next_lease,
+        )
+    ).renewed is False
+
+
+@pytest.mark.anyio
+async def test_expired_local_finalizer_marker_fences_its_live_task():
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    old = await manager.create_or_reject("thread-expired-local-finalizer")
+    await manager.set_status(old.run_id, RunStatus.running)
+    cancellation_observed = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_finalizer() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_observed.set()
+            await release.wait()
+
+    old.task = asyncio.create_task(slow_finalizer())
+    await asyncio.sleep(0)
+    await manager.create_or_reject(
+        old.thread_id,
+        multitask_strategy="interrupt",
+    )
+    await asyncio.wait_for(cancellation_observed.wait(), timeout=1)
+    assert old.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON
+    assert old.finalizing is True
+
+    # The worker may already have confirmed the terminal RunRow while it is
+    # still completing run.end/hooks/bridge END.  A failed marker renewal must
+    # still re-read ownership and fence that remaining finalizer work.
+    old.terminal_status_staged = False
+    old.terminal_status_persisted = True
+
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    old.lease_expires_at = expired
+    store._runs[old.run_id]["lease_expires_at"] = expired
+    await manager._renew_leases()
+
+    assert old.ownership_lost is True
+    await asyncio.gather(old.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
 async def test_heartbeat_renews_pending_run_before_task_is_spawned():
     """A run sitting in ``pending`` between ``create_thread_operation_atomic`` and task
     spawn must still have its lease renewed.
@@ -860,6 +2128,319 @@ async def test_heartbeat_renews_pending_run_before_task_is_spawned():
 
 
 @pytest.mark.anyio
+async def test_try_start_fences_expired_owner_before_agent_execution():
+    """The startup CAS must reject a stale worker before Agent side effects."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await manager.create_or_reject("thread-expired-start")
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    record.lease_expires_at = expired
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    stored["lease_expires_at"] = expired
+
+    outcome = await manager.try_start(record.run_id)
+
+    assert outcome.value == "cancelled"
+    assert record.ownership_lost is True
+    assert record.abort_event.is_set()
+    assert record.status == RunStatus.error
+    assert stored["status"] == RunStatus.pending.value
+
+
+@pytest.mark.anyio
+async def test_durable_cancel_before_start_blocks_agent_without_fencing_owner():
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store)
+    ownership = _lease_config(heartbeat_enabled=True)
+    owner = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-a",
+        run_ownership_config=ownership,
+    )
+    peer = _make_manager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=ownership,
+    )
+    record = await owner.create_or_reject(
+        "thread-cancel-before-start",
+        user_id="run-owner",
+    )
+    assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
+    agent_factory_called = False
+
+    def agent_factory(**_kwargs):
+        nonlocal agent_factory_called
+        agent_factory_called = True
+        raise AssertionError("durably cancelled run built the Agent")
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            owner,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=events),
+            agent_factory=agent_factory,
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+    await asyncio.wait_for(task, timeout=1)
+
+    stored = await store.get(record.run_id)
+    terminal = await events.list_events(
+        record.thread_id,
+        record.run_id,
+        event_types=["run.end"],
+    )
+    assert agent_factory_called is False
+    assert record.ownership_lost is False
+    assert record.status == RunStatus.interrupted
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {
+        "status": RunStatus.interrupted.value,
+        "authoritative": True,
+    }
+
+
+@pytest.mark.anyio
+async def test_local_cancel_terminalizing_during_start_does_not_fence_owner():
+    """A same-owner cancel may persist before the failed startup CAS is read."""
+    store = MemoryRunStore()
+    owner = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await owner.create_or_reject("thread-local-cancel-before-start")
+    original_start = store.start_run_if_owned
+
+    async def cancel_before_start_returns(run_id, *, owner_worker_id):
+        assert await owner.cancel(run_id, action="interrupt") == CancelOutcome.cancelled
+        return await original_start(run_id, owner_worker_id=owner_worker_id)
+
+    store.start_run_if_owned = cancel_before_start_returns
+
+    outcome = await owner.try_start(record.run_id)
+    stored = await store.get(record.run_id)
+
+    assert outcome.value == "cancelled"
+    assert record.ownership_lost is False
+    assert record.abort_event.is_set()
+    assert record.status == RunStatus.interrupted
+    assert record.durable_terminal_status == RunStatus.interrupted
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+
+
+@pytest.mark.anyio
+async def test_heartbeat_renews_terminal_staged_run_until_status_is_durable():
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=config,
+    )
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    release_finalizer = asyncio.Event()
+    finalizer = asyncio.create_task(release_finalizer.wait())
+    record.task = finalizer
+    await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        persist=False,
+        stage_terminal=True,
+    )
+    original_lease = record.lease_expires_at
+    assert original_lease is not None
+    # Windows wall-clock timestamps can have coarser granularity than the
+    # event-loop clock, so leave enough room for a strict ISO comparison.
+    await asyncio.sleep(0.02)
+    store.update_lease = AsyncMock(wraps=store.update_lease)
+
+    await manager._renew_leases()
+
+    store.update_lease.assert_awaited_once()
+    assert record.lease_expires_at is not None
+    assert record.lease_expires_at > original_lease
+    assert record.terminal_status_staged is True
+    assert record.terminal_status_persisted is False
+    assert record.ownership_lost is False
+
+    assert await manager.persist_current_status(record.run_id) is True
+    assert record.terminal_status_staged is False
+    assert record.terminal_status_persisted is True
+
+    release_finalizer.set()
+    await finalizer
+    await manager.set_finalizing(record.run_id, False)
+
+
+@pytest.mark.anyio
+async def test_heartbeat_defers_to_inflight_terminal_owner_cas():
+    """The database CAS, not a stale cached deadline, arbitrates finalization."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await manager.create_or_reject("thread-terminal-cas-race")
+    await manager.set_status(record.run_id, RunStatus.running)
+    finalizer = asyncio.create_task(asyncio.Event().wait())
+    record.task = finalizer
+    await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        persist=False,
+        stage_terminal=True,
+    )
+
+    cas_started = asyncio.Event()
+    release_cas = asyncio.Event()
+    original_finalize = store.finalize_if_owned_and_not_cancelled
+
+    async def paused_finalize(*args, **kwargs):
+        cas_started.set()
+        await release_cas.wait()
+        return await original_finalize(*args, **kwargs)
+
+    store.finalize_if_owned_and_not_cancelled = paused_finalize
+    persist_task = asyncio.create_task(manager.set_status_if_not_cancelled(record.run_id, RunStatus.success))
+    await asyncio.wait_for(cas_started.wait(), timeout=1)
+    record.lease_expires_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+
+    try:
+        await manager._renew_leases()
+
+        assert record.terminal_status_persistence_inflight == 1
+        assert record.ownership_lost is False
+        assert finalizer.done() is False
+
+        release_cas.set()
+        assert await asyncio.wait_for(persist_task, timeout=1) is None
+        stored = await store.get(record.run_id)
+        assert stored is not None and stored["status"] == RunStatus.success.value
+        assert record.terminal_status_persistence_inflight == 0
+        assert record.terminal_status_persisted is True
+        assert record.ownership_lost is False
+    finally:
+        release_cas.set()
+        if not persist_task.done():
+            await persist_task
+        finalizer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await finalizer
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("expiry_path", ["already_expired", "renewal_timeout"])
+async def test_heartbeat_adopts_same_owner_terminal_commit_before_expiry_fence(expiry_path):
+    """A committed terminal CAS must keep its final event publisher alive."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await manager.create_or_reject("thread-terminal-expiry-race")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    finalizer = asyncio.create_task(asyncio.Event().wait())
+    record.task = finalizer
+    await manager.set_status(
+        record.run_id,
+        RunStatus.success,
+        persist=False,
+        stage_terminal=True,
+    )
+    assert await store.update_status_if_owned(
+        record.run_id,
+        RunStatus.success.value,
+        owner_worker_id="worker-a",
+    )
+
+    if expiry_path == "already_expired":
+        record.lease_expires_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    else:
+        record.lease_expires_at = (datetime.now(UTC) + timedelta(milliseconds=20)).isoformat()
+
+        async def block_renewal_until_deadline(*_args, **_kwargs):
+            await asyncio.Event().wait()
+
+        store.renew_lease = block_renewal_until_deadline
+
+    try:
+        await asyncio.wait_for(manager._renew_leases(), timeout=1)
+
+        assert record.ownership_lost is False
+        assert record.abort_event.is_set() is False
+        assert finalizer.done() is False
+        assert record.durable_terminal_status == RunStatus.success
+        assert record.terminal_status_staged is False
+        assert record.terminal_status_persisted is True
+    finally:
+        finalizer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await finalizer
+
+
+@pytest.mark.anyio
+async def test_heartbeat_skips_same_owner_terminal_fence_during_rollback():
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+
+    release_finalizer = asyncio.Event()
+    record.task = asyncio.create_task(release_finalizer.wait())
+    await manager.set_status(
+        record.run_id,
+        RunStatus.error,
+        error="Rolled back by user",
+        persist=False,
+        stage_terminal=True,
+    )
+    store.update_lease = AsyncMock(wraps=store.update_lease)
+
+    await manager._renew_leases()
+
+    store.update_lease.assert_not_awaited()
+    assert record.ownership_lost is False
+    assert await manager.persist_current_status(record.run_id) is True
+    row = await store.get(record.run_id)
+    assert row is not None
+    assert row["status"] == RunStatus.error.value
+    assert row["error"] == "Rolled back by user"
+
+    release_finalizer.set()
+    await record.task
+    await manager.set_finalizing(record.run_id, False)
+
+
+@pytest.mark.anyio
 async def test_transient_renewal_exception_before_deadline_keeps_run_alive():
     """A renewal error is retryable while the last confirmed lease is valid."""
     config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
@@ -888,6 +2469,7 @@ async def test_transient_renewal_exception_before_deadline_keeps_run_alive():
         assert record.task.done() is False
         assert record.lease_expires_at == original_expiry
 
+        await asyncio.sleep(0.02)
         await manager._renew_leases()
 
         assert attempts == 2
@@ -1647,6 +3229,96 @@ async def test_cancel_takeover_from_crashed_worker():
     row = await store.get("run-expired")
     assert row is not None
     assert row["status"] == "error"
+    assert row["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+
+
+@pytest.mark.anyio
+async def test_cancel_takeover_backfills_owner_scoped_terminal_events_once():
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store)
+    on_recovered = AsyncMock(return_value=False)
+    grace = 10
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+    await store.put(
+        "run-expired",
+        thread_id="t1",
+        status="running",
+        user_id="run-owner",
+        created_at=datetime.now(UTC).isoformat(),
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+    )
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        on_orphans_recovered=on_recovered,
+        run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace),
+    )
+
+    first = await manager.cancel("run-expired")
+    second = await manager.cancel("run-expired")
+    recovered_record = await manager.get("run-expired", user_id=None)
+    assert recovered_record is not None
+    await manager._ensure_recovered_run_events(recovered_record)
+
+    assert first == CancelOutcome.taken_over
+    assert second == CancelOutcome.not_cancellable
+    delivery = await events.list_events("t1", "run-expired", event_types=["run.delivery"])
+    terminal = await events.list_events("t1", "run-expired", event_types=["run.end"])
+    assert len(delivery) == 1
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {
+        "status": "error",
+        "recovered": True,
+        "authoritative": True,
+    }
+    assert events.writes == [
+        ("run-expired", "run.delivery", "run-owner"),
+        ("run-expired", "run.end", "run-owner"),
+        ("run-expired", "run.delivery", "run-owner"),
+        ("run-expired", "run.end", "run-owner"),
+    ]
+    on_recovered.assert_awaited_once()
+    callback_records = on_recovered.await_args.args[0]
+    assert [record.run_id for record in callback_records] == ["run-expired"]
+    assert callback_records[0].stop_reason == ORPHAN_RECOVERY_STOP_REASON
+
+
+@pytest.mark.anyio
+async def test_cancel_takeover_clears_ambient_user_for_a_legacy_ownerless_run():
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store)
+    grace = 10
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+    await store.put(
+        "legacy-run",
+        thread_id="t1",
+        status="running",
+        user_id=None,
+        created_at=datetime.now(UTC).isoformat(),
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+    )
+    manager = _make_manager(
+        store=store,
+        event_store=events,
+        run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace),
+    )
+
+    ambient_user = SimpleNamespace(id="new-request-user")
+    token = set_current_user(ambient_user)
+    try:
+        outcome = await manager.cancel("legacy-run")
+        assert get_current_user() is ambient_user
+    finally:
+        reset_current_user(token)
+
+    assert outcome == CancelOutcome.taken_over
+    assert events.writes == [
+        ("legacy-run", "run.delivery", None),
+        ("legacy-run", "run.end", None),
+    ]
 
 
 @pytest.mark.anyio
@@ -1666,6 +3338,121 @@ async def test_cancel_requests_active_lease_from_other_worker():
     assert row["status"] == "running"
     assert row["cancel_action"] == "interrupt"
     assert row["cancel_requested_at"] is not None
+
+
+@pytest.mark.anyio
+async def test_cancel_routes_an_idempotent_observation_to_its_live_remote_owner():
+    """A store-only cache entry is an observation handle, not local ownership."""
+    store = MemoryRunStore()
+    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    await store.put(
+        "remote-idempotent-run",
+        thread_id="thread-idempotent",
+        status="running",
+        user_id="user-1",
+        owner_worker_id="worker-a",
+        lease_expires_at=valid_lease,
+        idempotency_key="scheduled-task:retry-1",
+    )
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    cached = await manager.create_or_reject(
+        "thread-idempotent",
+        user_id="user-1",
+        idempotency_key="scheduled-task:retry-1",
+    )
+    assert cached.store_only is True
+    assert cached.run_id not in manager._runs
+
+    outcome = await manager.cancel(cached.run_id)
+
+    stored = await store.get(cached.run_id, user_id="user-1")
+    assert outcome == CancelOutcome.requested
+    assert stored is not None
+    assert stored["status"] == RunStatus.running.value
+    assert stored["owner_worker_id"] == "worker-a"
+    assert stored["cancel_action"] == "interrupt"
+    assert cached.status == RunStatus.running
+
+
+@pytest.mark.anyio
+async def test_remote_idempotent_snapshot_does_not_poison_later_admission():
+    """Remote completion must release both fresh retries and local reject guards."""
+    store = MemoryRunStore()
+    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    await store.put(
+        "remote-completing-run",
+        thread_id="thread-idempotent-complete",
+        status="running",
+        owner_worker_id="worker-a",
+        lease_expires_at=valid_lease,
+        idempotency_key="scheduled-task:retry-complete",
+    )
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    observed = await manager.create_or_reject(
+        "thread-idempotent-complete",
+        idempotency_key="scheduled-task:retry-complete",
+    )
+    assert observed.status == RunStatus.running
+    assert observed.run_id not in manager._runs
+
+    await store.update_status(observed.run_id, RunStatus.success.value)
+    retried = await manager.create_or_reject(
+        "thread-idempotent-complete",
+        idempotency_key="scheduled-task:retry-complete",
+    )
+    replacement = await manager.create_or_reject(
+        "thread-idempotent-complete",
+        multitask_strategy="reject",
+    )
+
+    assert retried.run_id == observed.run_id
+    assert retried.status == RunStatus.success
+    assert replacement.status == RunStatus.pending
+
+
+@pytest.mark.anyio
+async def test_cached_store_only_cancel_fails_safe_for_a_legacy_remote_store():
+    """Missing remote-cancel support must not trigger an unfenced local write."""
+
+    class LegacyRemoteCancelStore(MemoryRunStore):
+        async def request_cancel(self, run_id, *, action):
+            raise NotImplementedError
+
+    store = LegacyRemoteCancelStore()
+    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    await store.put(
+        "legacy-remote-run",
+        thread_id="thread-legacy-remote",
+        status="running",
+        owner_worker_id="worker-a",
+        lease_expires_at=valid_lease,
+        idempotency_key="legacy-retry-1",
+    )
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    cached = await manager.create_or_reject(
+        "thread-legacy-remote",
+        idempotency_key="legacy-retry-1",
+    )
+
+    outcome = await manager.cancel(cached.run_id)
+
+    stored = await store.get(cached.run_id)
+    assert outcome == CancelOutcome.lease_valid_elsewhere
+    assert stored is not None
+    assert stored["status"] == RunStatus.running.value
+    assert stored["owner_worker_id"] == "worker-a"
 
 
 @pytest.mark.anyio
@@ -1745,6 +3532,95 @@ async def test_first_cancel_action_wins_when_retry_lands_on_owner():
 
 
 @pytest.mark.anyio
+async def test_active_local_cancel_leaves_inflight_row_for_crash_recovery():
+    """A crash before the worker tail must leave an active row peers can reclaim."""
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store)
+    config = _lease_config(
+        heartbeat_enabled=True,
+        lease_seconds=30,
+        grace_seconds=0,
+    )
+    owner = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=config,
+    )
+    peer = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-b",
+        run_ownership_config=config,
+    )
+    record = await owner.create_or_reject(
+        "thread-cancel-crash",
+        user_id="run-owner",
+    )
+    await owner.set_status(record.run_id, RunStatus.running)
+    worker_started = asyncio.Event()
+
+    async def crash_before_terminal_tail() -> None:
+        worker_started.set()
+        await asyncio.Event().wait()
+
+    record.task = asyncio.create_task(crash_before_terminal_tail())
+    await asyncio.wait_for(worker_started.wait(), timeout=1)
+
+    assert await owner.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+    with pytest.raises(asyncio.CancelledError):
+        await record.task
+
+    crash_row = await store.get(record.run_id)
+    assert crash_row is not None
+    assert crash_row["status"] == RunStatus.running.value
+    assert crash_row["cancel_action"] == "rollback"
+    assert record.status == RunStatus.interrupted
+    assert record.terminal_status_staged is True
+    assert record.terminal_status_persisted is False
+    assert (
+        await events.list_events(
+            record.thread_id,
+            record.run_id,
+            event_types=["run.delivery", "run.end"],
+        )
+        == []
+    )
+
+    # Model process death after cancel acknowledgement but before the worker's
+    # receipt/status/event tail. The still-active row remains discoverable by
+    # ordinary lease recovery instead of becoming a terminal observability gap.
+    store._runs[record.run_id]["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    recovered = await peer.reconcile_orphaned_inflight_runs(
+        error="owner crashed during cancellation",
+        stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+    )
+
+    assert [item.run_id for item in recovered] == [record.run_id]
+    recovered_row = await store.get(record.run_id)
+    assert recovered_row is not None
+    assert recovered_row["status"] == RunStatus.error.value
+    assert recovered_row["owner_worker_id"] == "worker-b"
+    assert recovered_row["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    delivery = await events.list_events(
+        record.thread_id,
+        record.run_id,
+        event_types=["run.delivery"],
+    )
+    terminal = await events.list_events(
+        record.thread_id,
+        record.run_id,
+        event_types=["run.end"],
+    )
+    assert len(delivery) == 1
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {
+        "status": RunStatus.error.value,
+        "recovered": True,
+        "authoritative": True,
+    }
+
+
+@pytest.mark.anyio
 async def test_local_owner_cancel_falls_back_when_durable_request_fails():
     """A local owner can still abort its own task when durable cancel persistence fails."""
 
@@ -1773,8 +3649,10 @@ async def test_local_owner_cancel_falls_back_when_durable_request_fails():
 
         stored = await store.get(record.run_id)
         assert stored is not None
-        assert stored["status"] == "interrupted"
+        assert stored["status"] == "running"
         assert stored["cancel_action"] is None
+        assert record.terminal_status_staged is True
+        assert record.terminal_status_persisted is False
     finally:
         if not record.task.done():
             record.task.cancel()
@@ -1855,12 +3733,17 @@ async def test_cancel_takeover_race_owner_renewed_lease():
     # simulate the lease having been renewed.
     original = store.claim_for_takeover
 
-    async def race_lost(run_id, *, grace_seconds, error):
+    async def race_lost(run_id, *, grace_seconds, error, stop_reason=None):
         # Simulate a heartbeat renewal between the read and the write
         run = store._runs.get(run_id)
         if run and run["status"] in ("pending", "running"):
             run["lease_expires_at"] = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+        return await original(
+            run_id,
+            grace_seconds=grace_seconds,
+            error=error,
+            stop_reason=stop_reason,
+        )
 
     store.claim_for_takeover = race_lost
     manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
@@ -2180,8 +4063,9 @@ async def test_heartbeat_cancels_task_on_lease_loss():
     loop = asyncio.get_running_loop()
     record.task = loop.create_task(asyncio.sleep(3600))
 
-    # Simulate takeover: directly flip the store row to error
+    # Simulate an atomic peer takeover: terminalize and transfer the owner.
     await store.update_status(record.run_id, "error")
+    store._runs[record.run_id]["owner_worker_id"] = "worker-b"
 
     # Run a single heartbeat tick — it should see update_lease return False
     # and cancel the task
@@ -2292,6 +4176,90 @@ async def test_peer_reconciliation_fences_late_success_and_completion():
 
 
 @pytest.mark.anyio
+async def test_peer_owned_active_row_rejects_stale_worker_completion():
+    """Completion and owner fencing must be one atomic store predicate."""
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True)
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    record = await owner.create("thread-1")
+    await owner.set_status(record.run_id, RunStatus.running)
+
+    # Model a lease hand-off primitive that transferred an otherwise-active row.
+    # The stale worker must not be able to complete it solely by run_id.
+    store._runs[record.run_id]["owner_worker_id"] = "worker-b"
+
+    await owner.set_status_if_not_cancelled(record.run_id, RunStatus.success)
+
+    row = await store.get(record.run_id)
+    assert row is not None
+    assert row["status"] == RunStatus.running.value
+    assert row["owner_worker_id"] == "worker-b"
+    assert record.ownership_lost is True
+    assert record.status == RunStatus.error
+
+
+@pytest.mark.anyio
+async def test_expired_owner_cannot_finalize_before_heartbeat_tick():
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    record.lease_expires_at = expired
+    store._runs[record.run_id]["lease_expires_at"] = expired
+
+    await manager.set_status_if_not_cancelled(record.run_id, RunStatus.success)
+
+    row = await store.get(record.run_id)
+    assert row is not None
+    assert row["status"] == RunStatus.running.value
+    assert record.ownership_lost is True
+    assert record.status == RunStatus.error
+
+
+@pytest.mark.anyio
+async def test_takeover_owner_transfer_fences_same_status_from_stale_worker():
+    """A stale worker's error must not impersonate the recovering worker's error."""
+    store = MemoryRunStore()
+    events = _OwnerCapturingEventStore(store)
+    config = _lease_config(heartbeat_enabled=True, grace_seconds=0)
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(
+        store=store,
+        event_store=events,
+        worker_id="worker-b",
+        run_ownership_config=config,
+    )
+    record = await owner.create("thread-1", user_id="run-owner")
+    await owner.set_status(record.run_id, RunStatus.running)
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    record.lease_expires_at = expired
+    store._runs[record.run_id]["lease_expires_at"] = expired
+
+    recovered = await peer.reconcile_orphaned_inflight_runs(error="peer takeover")
+    await owner.set_status(record.run_id, RunStatus.error, error="stale worker failure")
+
+    assert [item.run_id for item in recovered] == [record.run_id]
+    row = await store.get(record.run_id)
+    assert row is not None
+    assert row["status"] == RunStatus.error.value
+    assert row["error"] == "peer takeover"
+    assert row["owner_worker_id"] == "worker-b"
+    assert record.ownership_lost is True
+    terminal = await events.list_events("thread-1", record.run_id, event_types=["run.end"])
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {
+        "status": "error",
+        "recovered": True,
+        "authoritative": True,
+    }
+
+
+@pytest.mark.anyio
 async def test_unconfirmed_success_is_fenced_when_heartbeat_is_enabled():
     """A store outage cannot turn an unconfirmed terminal write into local success."""
     store = MemoryRunStore()
@@ -2373,9 +4341,14 @@ async def test_cancel_claim_lost_to_terminal_returns_not_cancellable():
     # conditional UPDATE so it matches 0 rows.
     original = store.claim_for_takeover
 
-    async def race_claim(run_id, *, grace_seconds, error):
+    async def race_claim(run_id, *, grace_seconds, error, stop_reason=None):
         store._runs[run_id]["status"] = "success"
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+        return await original(
+            run_id,
+            grace_seconds=grace_seconds,
+            error=error,
+            stop_reason=stop_reason,
+        )
 
     store.claim_for_takeover = race_claim
 
@@ -2405,10 +4378,15 @@ async def test_cancel_claim_lost_to_takeover_returns_taken_over():
     # UPDATE so it matches 0 rows (peer already took it over).
     original = store.claim_for_takeover
 
-    async def race_takeover(run_id, *, grace_seconds, error):
+    async def race_takeover(run_id, *, grace_seconds, error, stop_reason=None):
         store._runs[run_id]["status"] = "error"
         store._runs[run_id]["error"] = "peer claim"
-        return await original(run_id, grace_seconds=grace_seconds, error=error)
+        return await original(
+            run_id,
+            grace_seconds=grace_seconds,
+            error=error,
+            stop_reason=stop_reason,
+        )
 
     store.claim_for_takeover = race_takeover
 

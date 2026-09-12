@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.runs.store.base import (
+    LOCAL_FINALIZER_PENDING_STOP_REASON,
     LeaseRenewal,
     RunIdempotencyConflict,
     RunStore,
@@ -33,6 +34,8 @@ def _lease_expired_or_null(lease_col, cutoff: datetime):
 
 
 class RunRepository(RunStore):
+    supports_atomic_recovery_markers = True
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
 
@@ -273,6 +276,59 @@ class RunRepository(RunStore):
             await session.commit()
             return result.rowcount != 0
 
+    async def update_status_if_owned(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        owner_worker_id: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> bool:
+        """Atomically reject a terminal write after ownership or lease expiry."""
+        now = datetime.now(UTC)
+        values: dict[str, Any] = {
+            "status": status,
+            "updated_at": now,
+        }
+        if error is not None:
+            values["error"] = error
+        if stop_reason is not None:
+            values["stop_reason"] = stop_reason
+        active_with_live_lease = and_(
+            RunRow.status.in_(("pending", "running")),
+            RunRow.lease_expires_at.is_not(None),
+            RunRow.lease_expires_at >= now,
+        )
+        local_finalizer_with_live_lease = and_(
+            ~RunRow.status.in_(("pending", "running")),
+            RunRow.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON,
+            RunRow.lease_expires_at.is_not(None),
+            RunRow.lease_expires_at >= now,
+        )
+        allowed_source = or_(active_with_live_lease, local_finalizer_with_live_lease)
+        if status == "error":
+            rollback_refinement = and_(
+                RunRow.status == "interrupted",
+                or_(
+                    RunRow.stop_reason.is_(None),
+                    RunRow.stop_reason != LOCAL_FINALIZER_PENDING_STOP_REASON,
+                ),
+            )
+            allowed_source = or_(allowed_source, rollback_refinement)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    allowed_source,
+                )
+                .values(**values)
+            )
+            await session.commit()
+            return result.rowcount != 0
+
     async def start_run(self, run_id: str) -> bool:
         """Start only a still-pending run; cancelled rows must not be resurrected."""
         async with self._sf() as session:
@@ -283,6 +339,30 @@ class RunRepository(RunStore):
                     RunRow.status == "pending",
                 )
                 .values(status="running", updated_at=datetime.now(UTC))
+            )
+            await session.commit()
+            return result.rowcount != 0
+
+    async def start_run_if_owned(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+    ) -> bool:
+        """Start only when the pending row is still owned under a live lease."""
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status == "pending",
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.lease_expires_at.is_not(None),
+                    RunRow.lease_expires_at >= now,
+                    RunRow.cancel_action.is_(None),
+                )
+                .values(status="running", updated_at=now)
             )
             await session.commit()
             return result.rowcount != 0
@@ -534,8 +614,26 @@ class RunRepository(RunStore):
             "lease_expires_at": lease_dt,
             "updated_at": datetime.now(UTC),
         }
+        now = datetime.now(UTC)
+        renewable_source = or_(
+            RunRow.status.in_(("pending", "running")),
+            and_(
+                ~RunRow.status.in_(("pending", "running")),
+                RunRow.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON,
+                RunRow.lease_expires_at.is_not(None),
+                RunRow.lease_expires_at >= now,
+            ),
+        )
         async with self._sf() as session:
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.owner_worker_id == owner_worker_id, RunRow.status.in_(("pending", "running"))).values(**values))
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    renewable_source,
+                )
+                .values(**values)
+            )
             await session.commit()
             return result.rowcount != 0
 
@@ -548,17 +646,26 @@ class RunRepository(RunStore):
     ) -> LeaseRenewal:
         """Renew the owner lease and read cancellation intent atomically."""
         lease_dt = datetime.fromisoformat(lease_expires_at)
+        now = datetime.now(UTC)
         async with self._sf() as session:
             result = await session.execute(
                 update(RunRow)
                 .where(
                     RunRow.run_id == run_id,
                     RunRow.owner_worker_id == owner_worker_id,
-                    RunRow.status.in_(("pending", "running")),
+                    or_(
+                        RunRow.status.in_(("pending", "running")),
+                        and_(
+                            ~RunRow.status.in_(("pending", "running")),
+                            RunRow.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON,
+                            RunRow.lease_expires_at.is_not(None),
+                            RunRow.lease_expires_at >= now,
+                        ),
+                    ),
                 )
                 .values(
                     lease_expires_at=lease_dt,
-                    updated_at=datetime.now(UTC),
+                    updated_at=now,
                 )
                 .returning(RunRow.run_id, RunRow.cancel_action)
             )
@@ -567,6 +674,39 @@ class RunRepository(RunStore):
         if row is None:
             return LeaseRenewal(renewed=False)
         return LeaseRenewal(renewed=True, cancel_action=row.cancel_action)
+
+    async def claim_expired_local_finalizer(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        recovery_stop_reason: str,
+        grace_seconds: int,
+    ) -> dict[str, Any] | None:
+        """Atomically fence an expired terminal local finalizer."""
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=grace_seconds)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    ~RunRow.status.in_(("pending", "running")),
+                    RunRow.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON,
+                    _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
+                )
+                .values(
+                    owner_worker_id=owner_worker_id,
+                    stop_reason=recovery_stop_reason,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount == 0:
+                await session.commit()
+                return None
+            row = await session.get(RunRow, run_id)
+            await session.commit()
+            return self._row_to_dict(row)
 
     async def request_cancel(self, run_id: str, *, action: str) -> str | None:
         """Atomically persist the first cancellation action on an active run."""
@@ -638,6 +778,60 @@ class RunRepository(RunStore):
                 cancel_action=cancel_action,
             )
 
+    async def finalize_if_owned_and_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        status: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> StatusFinalization:
+        """Atomically let the current owner complete before cancellation."""
+        now = datetime.now(UTC)
+        values: dict[str, Any] = {
+            "status": status,
+            "updated_at": now,
+        }
+        if error is not None:
+            values["error"] = error
+        if stop_reason is not None:
+            values["stop_reason"] = stop_reason
+
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.status.in_(("pending", "running")),
+                    RunRow.lease_expires_at.is_not(None),
+                    RunRow.lease_expires_at >= now,
+                    RunRow.cancel_action.is_(None),
+                )
+                .values(**values)
+                .returning(RunRow.run_id)
+            )
+            if result.first() is not None:
+                await session.commit()
+                return StatusFinalization(finalized=True)
+
+            current = await session.execute(
+                select(RunRow.cancel_action).where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.status.in_(("pending", "running")),
+                    RunRow.lease_expires_at.is_not(None),
+                    RunRow.lease_expires_at >= now,
+                )
+            )
+            cancel_action = current.scalar_one_or_none()
+            await session.commit()
+            return StatusFinalization(
+                finalized=False,
+                cancel_action=cancel_action,
+            )
+
     async def claim_for_takeover(
         self,
         run_id: str,
@@ -650,6 +844,38 @@ class RunRepository(RunStore):
         values: dict[str, Any] = {
             "status": "error",
             "error": error,
+            "updated_at": datetime.now(UTC),
+        }
+        if stop_reason is not None:
+            values["stop_reason"] = stop_reason
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status.in_(("pending", "running")),
+                    _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
+                )
+                .values(**values)
+            )
+            await session.commit()
+            return result.rowcount != 0
+
+    async def claim_for_takeover_as(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        grace_seconds: int,
+        error: str,
+        stop_reason: str | None = None,
+    ) -> bool:
+        """Claim an expired run and transfer its fencing owner atomically."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+        values: dict[str, Any] = {
+            "status": "error",
+            "error": error,
+            "owner_worker_id": owner_worker_id,
             "updated_at": datetime.now(UTC),
         }
         if stop_reason is not None:
@@ -710,6 +936,10 @@ class RunRepository(RunStore):
         created_at: str | None = None,
         grace_seconds: int = 10,
         idempotency_key: str | None = None,
+        recovery_stop_reason: str | None = None,
+        local_finalizer_run_ids: set[str] | None = None,
+        local_finalizer_stop_reason: str | None = None,
+        lease_seconds: int | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -750,8 +980,7 @@ class RunRepository(RunStore):
         }
 
         async with self._sf() as session:
-            claimed: list[dict[str, Any]] = []
-
+            claimed_rows: list[RunRow] = []
             if multitask_strategy in ("interrupt", "rollback"):
                 stmt = (
                     select(RunRow)
@@ -789,11 +1018,38 @@ class RunRepository(RunStore):
                     row.status = "interrupted"
                     row.error = "Cancelled by newer run"
                     row.owner_worker_id = owner_worker_id
+                    if row.cancel_action is None:
+                        row.cancel_action = multitask_strategy
+                        row.cancel_requested_at = now
+                    if row.operation_kind == "run":
+                        if local_finalizer_stop_reason is not None and row.run_id in (local_finalizer_run_ids or set()):
+                            row.stop_reason = local_finalizer_stop_reason
+                            row.lease_expires_at = None
+                        elif recovery_stop_reason is not None:
+                            row.stop_reason = recovery_stop_reason
                     row.updated_at = now
-                    claimed.append(self._row_to_dict(row))
+                    claimed_rows.append(row)
 
-            session.add(RunRow(run_id=run_id, **values))
+            new_run = RunRow(run_id=run_id, **values)
+            session.add(new_run)
             try:
+                # Materialize Python/SQLAlchemy defaults and snapshot the row
+                # before commit. After commit succeeds admission must not issue
+                # another fallible read that could disguise a committed
+                # replacement as a failed request.
+                await session.flush()
+                if lease_seconds is not None:
+                    fresh_now = datetime.now(UTC)
+                    fresh_lease = fresh_now + timedelta(seconds=lease_seconds)
+                    new_run.lease_expires_at = fresh_lease
+                    new_run.updated_at = fresh_now
+                    for claimed_row in claimed_rows:
+                        if claimed_row.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON:
+                            claimed_row.lease_expires_at = fresh_lease
+                            claimed_row.updated_at = fresh_now
+                    await session.flush()
+                new_row = self._row_to_dict(new_run)
+                claimed = [self._row_to_dict(row) for row in claimed_rows]
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
@@ -803,5 +1059,4 @@ class RunRepository(RunStore):
                         raise RunIdempotencyConflict(self._row_to_dict(existing)) from exc
                 raise
 
-            new_row = await session.get(RunRow, run_id)
-            return self._row_to_dict(new_row), claimed
+            return new_row, claimed

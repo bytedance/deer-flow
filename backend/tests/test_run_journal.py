@@ -422,16 +422,31 @@ class TestLlmCallbacks:
 
 class TestLifecycleCallbacks:
     @pytest.mark.anyio
-    async def test_chain_start_end_produce_trace_events(self, journal_setup):
+    async def test_chain_end_captures_outputs_without_publishing_a_terminal_event(self, journal_setup):
         j, store = journal_setup
+        outputs = {"messages": [AIMessage(content="first root output")]}
         j.on_chain_start({}, {}, run_id=uuid4(), parent_run_id=None)
-        j.on_chain_end({}, run_id=uuid4())
+        j.on_chain_end(outputs, run_id=uuid4())
         await asyncio.sleep(0.05)
         await j.flush()
         events = await store.list_events("t1", "r1")
         types = {e["event_type"] for e in events}
         assert "run.start" in types
-        assert "run.end" in types
+        assert "run.end" not in types
+        assert j.get_root_chain_outputs() is outputs
+
+    @pytest.mark.anyio
+    async def test_latest_goal_continuation_outputs_replace_the_prior_root_outputs(self, journal_setup):
+        j, store = journal_setup
+        first = {"messages": [AIMessage(content="first turn")]}
+        continuation = {"messages": [AIMessage(content="continuation turn")]}
+
+        j.on_chain_end(first, run_id=uuid4(), parent_run_id=None)
+        j.on_chain_end(continuation, run_id=uuid4(), parent_run_id=None)
+        await j.flush()
+
+        assert j.get_root_chain_outputs() is continuation
+        assert not any(e["event_type"] == "run.end" for e in await store.list_events("t1", "r1"))
 
     @pytest.mark.anyio
     async def test_nested_chain_no_run_lifecycle_events(self, journal_setup):

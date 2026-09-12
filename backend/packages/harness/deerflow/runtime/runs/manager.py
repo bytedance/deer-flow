@@ -22,11 +22,18 @@ from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .store.base import (
+    LOCAL_FINALIZER_PENDING_STOP_REASON,
     EditReplayVisibility,
     RunIdempotencyConflict,
     normalize_run_created_at_iso,
     run_is_before_cursor,
     run_sort_key,
+)
+from .terminal_events import (
+    has_authoritative_run_terminal_event,
+    has_run_delivery_receipt,
+    persist_run_delivery_receipt,
+    persist_run_terminal_event,
 )
 
 if TYPE_CHECKING:
@@ -61,6 +68,20 @@ _SQLITE_UNIQUE_ERRORCODE = sqlite3.SQLITE_CONSTRAINT_UNIQUE
 def _generate_worker_id() -> str:
     """Generate a unique worker identifier: ``hostname:hex_uuid``."""
     return f"{socket.gethostname()}:{uuid.uuid4().hex}"
+
+
+def _supports_atomic_recovery_markers(store: RunStore) -> bool:
+    """Read the capability from the class that defines the atomic method.
+
+    Passive subclasses inherit their parent's proven implementation. A class
+    that overrides the method must opt in again, so an older strict signature
+    never receives newly-added keyword arguments.
+    """
+    for store_type in type(store).__mro__:
+        namespace = vars(store_type)
+        if "create_thread_operation_atomic" in namespace:
+            return bool(namespace.get("supports_atomic_recovery_markers", False))
+    return False
 
 
 def _cursor_part(value: str | None) -> str | None:
@@ -203,6 +224,18 @@ class RunRecord:
     last_ai_message: str | None = None
     first_human_message: str | None = None
     finalizing: bool = False
+    # The worker stages a terminal outcome while the durable row deliberately
+    # remains active through final output/checkpoint persistence.
+    terminal_status_staged: bool = False
+    terminal_status_persisted: bool = False
+    # Number of owner-fenced terminal CAS operations currently in flight. The
+    # heartbeat must let those database operations arbitrate ownership instead
+    # of cancelling their finalizer from a stale cached lease deadline.
+    terminal_status_persistence_inflight: int = 0
+    # A durable terminal row is itself a peer-takeover fence. Rollback may
+    # refine a locally-owned ``interrupted`` row to ``error`` without renewing
+    # a lease that only applies while the durable row is active.
+    durable_terminal_status: RunStatus | None = None
     owner_worker_id: str | None = None
     lease_expires_at: str | None = None
     # Process-local fencing signal. Once set, this worker must not perform
@@ -227,7 +260,15 @@ class RunStartupError(RuntimeError):
     """Raised when durable startup cannot be resolved safely."""
 
 
-OrphanRecoveryCallback = Callable[[list[RunRecord]], Awaitable[None]]
+class _LocalTerminalFinalizersPending(Exception):
+    """Signal that admission must release the manager lock and await workers."""
+
+    def __init__(self, tasks: tuple[asyncio.Task, ...]) -> None:
+        super().__init__("local terminal finalization is still active")
+        self.tasks = tasks
+
+
+OrphanRecoveryCallback = Callable[[list[RunRecord]], Awaitable[bool | None]]
 
 
 class RunManager:
@@ -276,6 +317,10 @@ class RunManager:
             bucket.pop(run_id, None)
             if not bucket:
                 self._runs_by_thread.pop(thread_id, None)
+
+    def _owns_local_execution(self, record: RunRecord) -> bool:
+        """Return whether this process may drive the record's worker lifecycle."""
+        return not record.store_only and not record.ownership_lost and (not self.heartbeat_enabled or record.owner_worker_id == self._worker_id)
 
     def _thread_records_locked(self, thread_id: str) -> list[RunRecord]:
         """Return live in-memory records for *thread_id*. Caller must hold ``self._lock``.
@@ -388,6 +433,32 @@ class RunManager:
         )
 
     async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None, stop_reason: str | None = None) -> bool:
+        """Persist status while protecting an in-flight terminal owner CAS."""
+        persistence_barrier = False
+        if self.heartbeat_enabled and not record.store_only and status not in (RunStatus.pending, RunStatus.running):
+            async with self._lock:
+                if self._runs.get(record.run_id) is record and record.terminal_status_staged:
+                    record.terminal_status_persistence_inflight += 1
+                    persistence_barrier = True
+        try:
+            return await self._persist_status_unbarriered(
+                record,
+                status,
+                error=error,
+                stop_reason=stop_reason,
+            )
+        finally:
+            if persistence_barrier:
+                await self._release_terminal_status_persistence(record)
+
+    async def _persist_status_unbarriered(
+        self,
+        record: RunRecord,
+        status: RunStatus,
+        *,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> bool:
         """Best-effort persist a status transition to the backing store."""
         if record.ownership_lost:
             logger.warning(
@@ -399,11 +470,41 @@ class RunManager:
         if self._store is None:
             return True
         row_recovery_payload = self._store_put_payload(record, error=error, stop_reason=stop_reason)
+        owned_write = self.heartbeat_enabled and not record.store_only
+        owner_worker_id = record.owner_worker_id
+        if owned_write and owner_worker_id is None:
+            await self._mark_ownership_lost(
+                record,
+                reason="The local worker has no durable owner identity for its status transition.",
+                require_active=False,
+            )
+            return False
         try:
+            if owned_write:
+                assert owner_worker_id is not None
+
+                async def persist_status_operation():
+                    return await self._store.update_status_if_owned(
+                        record.run_id,
+                        status.value,
+                        owner_worker_id=owner_worker_id,
+                        error=error,
+                        stop_reason=stop_reason,
+                    )
+            else:
+
+                async def persist_status_operation():
+                    return await self._store.update_status(
+                        record.run_id,
+                        status.value,
+                        error=error,
+                        stop_reason=stop_reason,
+                    )
+
             updated = await self._call_store_with_retry(
                 "update_status",
                 record.run_id,
-                lambda: self._store.update_status(record.run_id, status.value, error=error, stop_reason=stop_reason),
+                persist_status_operation,
             )
             if updated is False:
                 # ``update_status`` is now guarded by ``status IN ('pending','running')``.
@@ -415,13 +516,44 @@ class RunManager:
                 existing = await self._store.get(record.run_id)
                 if existing is not None:
                     existing_status = existing.get("status")
+                    existing_owner = existing.get("owner_worker_id")
+                    if self.heartbeat_enabled and not record.store_only and existing_owner != record.owner_worker_id:
+                        logger.warning(
+                            "Run %s status update to %s rejected by peer owner %s; fencing local worker %s",
+                            record.run_id,
+                            status.value,
+                            existing_owner,
+                            self._worker_id,
+                        )
+                        await self._mark_ownership_lost(
+                            record,
+                            reason="A peer took ownership before this worker could persist its outcome.",
+                            require_active=False,
+                        )
+                        return False
                     if existing_status == status.value:
                         logger.info(
                             "Run %s status update to %s was already persisted",
                             record.run_id,
                             status.value,
                         )
+                        await self._confirm_terminal_status_persisted(record, status)
                         return True
+                    if (
+                        self.heartbeat_enabled
+                        and not record.store_only
+                        and existing_status
+                        in {
+                            RunStatus.pending.value,
+                            RunStatus.running.value,
+                        }
+                    ):
+                        await self._mark_ownership_lost(
+                            record,
+                            reason="The worker lease expired before its status transition could be committed.",
+                            require_active=False,
+                        )
+                        return False
                     if existing_status == "error":
                         logger.warning(
                             "Run %s status update to %s skipped: store row already at error (peer takeover)",
@@ -446,6 +578,12 @@ class RunManager:
             return True
         except Exception:
             logger.warning("Failed to persist status update for run %s", record.run_id, exc_info=True)
+            if self.heartbeat_enabled and not record.store_only:
+                await self._mark_ownership_lost(
+                    record,
+                    reason="The durable store could not confirm this worker's status transition.",
+                    require_active=False,
+                )
             return False
 
     @staticmethod
@@ -486,6 +624,16 @@ class RunManager:
             lease_expires_at=row.get("lease_expires_at"),
             stop_reason=row.get("stop_reason"),
             idempotency_key=row.get("idempotency_key"),
+            durable_terminal_status=(
+                RunStatus(row["status"])
+                if row.get("status")
+                not in {
+                    None,
+                    RunStatus.pending.value,
+                    RunStatus.running.value,
+                }
+                else None
+            ),
         )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
@@ -700,6 +848,39 @@ class RunManager:
             raise_on_store_error=raise_on_store_error,
         )
 
+    async def get_durable(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        raise_on_store_error: bool = False,
+    ) -> RunRecord | None:
+        """Read the authoritative store row without consulting local cache.
+
+        Stream heartbeat consumers use this narrow path after hydrating a
+        store-only record: a peer may recover that run after it was cached,
+        and liveness decisions must observe the peer's terminal status and
+        recovery marker without mutating process-local runtime state.
+        """
+        if self._store is None:
+            return None
+        try:
+            row = await self._store.get(run_id, user_id=user_id)
+        except Exception:
+            if raise_on_store_error:
+                raise
+            logger.warning("Failed to refresh run %s from durable store", run_id, exc_info=True)
+            return None
+        if row is None:
+            return None
+        try:
+            return self._record_from_store(row)
+        except Exception:
+            if raise_on_store_error:
+                raise
+            logger.warning("Failed to map durable store row for run %s", run_id, exc_info=True)
+            return None
+
     async def list_by_thread(
         self,
         thread_id: str,
@@ -883,15 +1064,96 @@ class RunManager:
                     return RunStartOutcome.cancelled
 
             if self._store is not None:
+                owned_start = self.heartbeat_enabled and not record.store_only
+                if owned_start and record.owner_worker_id != self._worker_id:
+                    await self._mark_ownership_lost(
+                        record,
+                        reason="This worker no longer owns the run at the Agent startup boundary.",
+                        require_active=False,
+                    )
+                    return RunStartOutcome.cancelled
                 try:
+                    if owned_start:
+
+                        async def start_operation():
+                            return await self._store.start_run_if_owned(
+                                run_id,
+                                owner_worker_id=self._worker_id,
+                            )
+
+                        operation_name = "start_run_if_owned"
+                    else:
+
+                        async def start_operation():
+                            return await self._store.start_run(run_id)
+
+                        operation_name = "start_run"
+
                     updated = await self._call_store_with_retry(
-                        "start_run",
+                        operation_name,
                         run_id,
-                        lambda: self._store.start_run(run_id),
+                        start_operation,
                     )
                 except Exception as exc:
+                    if owned_start:
+                        await self._mark_ownership_lost(
+                            record,
+                            reason="The durable store could not confirm a live owner lease before Agent startup.",
+                            require_active=False,
+                        )
                     raise RunStartupError(f"Failed to start run {run_id}: {exc}") from exc
-                if updated is False:
+                if owned_start and updated is not True:
+                    try:
+                        existing = await self._store.get(
+                            run_id,
+                            user_id=record.user_id,
+                        )
+                    except Exception:
+                        existing = None
+                    cancel_action = existing.get("cancel_action") if existing else None
+                    pending_cancel_before_start = (
+                        existing is not None
+                        and existing.get("status") == RunStatus.pending.value
+                        and existing.get("owner_worker_id") == self._worker_id
+                        and cancel_action in {"interrupt", "rollback"}
+                        and not is_lease_expired(
+                            existing.get("lease_expires_at"),
+                            grace_seconds=0,
+                        )
+                    )
+                    terminal_cancel_before_start = existing is not None and existing.get("status") == RunStatus.interrupted.value and existing.get("owner_worker_id") == self._worker_id and cancel_action in {"interrupt", "rollback"}
+                    if pending_cancel_before_start or terminal_cancel_before_start:
+                        async with self._lock:
+                            if record.status in {RunStatus.pending, RunStatus.interrupted}:
+                                record.abort_action = cancel_action
+                                record.abort_event.set()
+                                record.status = RunStatus.interrupted
+                                record.error = existing.get("error") if existing else None
+                                record.stop_reason = existing.get("stop_reason") if existing else None
+                                record.updated_at = _now_iso()
+                        if terminal_cancel_before_start:
+                            await self._confirm_terminal_status_persisted(
+                                record,
+                                RunStatus.interrupted,
+                            )
+                        else:
+                            persisted = await self._persist_status(
+                                record,
+                                RunStatus.interrupted,
+                            )
+                            if persisted:
+                                await self._confirm_terminal_status_persisted(
+                                    record,
+                                    RunStatus.interrupted,
+                                )
+                        return RunStartOutcome.cancelled
+                    await self._mark_ownership_lost(
+                        record,
+                        reason="The durable store rejected Agent startup because this worker no longer held a live lease.",
+                        require_active=False,
+                    )
+                    return RunStartOutcome.cancelled
+                if not owned_start and updated is False:
                     async with self._lock:
                         if record.status == RunStatus.pending:
                             record.status = RunStatus.interrupted
@@ -919,18 +1181,137 @@ class RunManager:
                 )
             return RunStartOutcome.cancelled
 
-    async def fail_start_if_pending(self, run_id: str, *, error: str) -> bool:
-        """Mark an admitted run as failed if its worker task could not be attached."""
+    async def fail_start_if_pending(
+        self,
+        run_id: str,
+        *,
+        error: str,
+        emit_terminal_events: bool = False,
+    ) -> bool:
+        """Mark an admitted run as failed if its worker task could not be attached.
+
+        In heartbeat mode a remote cancellation and the startup failure race at
+        the durable row.  The owner-fenced finalization CAS decides the winner;
+        a cancellation that landed first is acknowledged as ``interrupted``
+        with its original action instead of being overwritten by ``error``.
+        """
         async with self._lock:
             record = self._runs.get(run_id)
-            if record is None or record.status != RunStatus.pending:
+            if record is None or record.status != RunStatus.pending or not self._owns_local_execution(record):
                 return False
-            record.status = RunStatus.error
-            record.error = error
-            record.abort_event.set()
-            record.updated_at = _now_iso()
+            worker_absent = record.task is None or record.task.done()
+            # No Agent worker has crossed ``try_start`` yet. Even when the
+            # Gateway metadata wrapper is still alive, it can crash before it
+            # reaches ``run_agent``'s terminal tail, so every outcome from this
+            # compensation path needs the durable recovery liveness marker.
+            terminal_stop_reason = ORPHAN_RECOVERY_STOP_REASON
+            owner_fenced_failure = self.heartbeat_enabled and self._store is not None
+            if owner_fenced_failure:
+                # Keep lease renewal/fencing from observing the short window
+                # after the durable terminal CAS but before its local outcome
+                # has been adopted below.
+                record.terminal_status_persistence_inflight += 1
 
-        await self._persist_status(record, RunStatus.error, error=error)
+        terminal_status = RunStatus.error
+        terminal_error: str | None = error
+        persisted = False
+        if owner_fenced_failure:
+            try:
+                owner_worker_id = record.owner_worker_id
+                if owner_worker_id is None:
+                    await self._mark_ownership_lost(
+                        record,
+                        reason="The local worker has no durable owner identity for startup-failure finalization.",
+                        require_active=False,
+                    )
+                    return True
+                try:
+                    result = await self._call_store_with_retry(
+                        "finalize startup failure",
+                        run_id,
+                        lambda: self._store.finalize_if_owned_and_not_cancelled(
+                            run_id,
+                            owner_worker_id=owner_worker_id,
+                            status=RunStatus.error.value,
+                            error=error,
+                            stop_reason=terminal_stop_reason,
+                        ),
+                    )
+                except Exception:
+                    await self._mark_ownership_lost(
+                        record,
+                        reason="The durable store could not arbitrate startup failure against cancellation.",
+                        require_active=False,
+                    )
+                    return True
+
+                if result.cancel_action is not None:
+                    terminal_status = RunStatus.interrupted
+                    terminal_error = None
+                    async with self._lock:
+                        if self._runs.get(run_id) is not record:
+                            return False
+                        record.abort_action = result.cancel_action
+                        record.abort_event.set()
+                        record.status = terminal_status
+                        record.error = None
+                        record.stop_reason = terminal_stop_reason
+                        record.updated_at = _now_iso()
+                    # ``finalize_if_owned_and_not_cancelled`` established that the
+                    # durable cancellation won while this worker still held a live
+                    # lease. A normal owner-scoped status write now acknowledges
+                    # that winning request; it must not apply the not-cancelled
+                    # predicate a second time.
+                    persisted = await self._persist_status(
+                        record,
+                        terminal_status,
+                        stop_reason=terminal_stop_reason,
+                    )
+                elif result.finalized:
+                    persisted = True
+                    async with self._lock:
+                        if self._runs.get(run_id) is not record:
+                            return False
+                        record.status = terminal_status
+                        record.error = terminal_error
+                        record.stop_reason = terminal_stop_reason
+                        record.abort_event.set()
+                        record.updated_at = _now_iso()
+                else:
+                    await self._mark_ownership_lost(
+                        record,
+                        reason="The durable store rejected startup-failure finalization because this worker no longer held a live lease.",
+                        require_active=False,
+                    )
+                    return True
+            finally:
+                await self._release_terminal_status_persistence(record)
+        else:
+            async with self._lock:
+                if self._runs.get(run_id) is not record or record.status != RunStatus.pending:
+                    return False
+                record.status = terminal_status
+                record.error = terminal_error
+                record.stop_reason = terminal_stop_reason
+                record.abort_event.set()
+                record.updated_at = _now_iso()
+            persisted = await self._persist_status(
+                record,
+                terminal_status,
+                error=terminal_error,
+                stop_reason=terminal_stop_reason,
+            )
+
+        if persisted:
+            await self._confirm_terminal_status_persisted(record, terminal_status)
+        if emit_terminal_events and worker_absent and persisted and self._store is not None:
+            stored = await self._call_store_with_retry(
+                "verify failed run startup",
+                run_id,
+                lambda: self._store.get(run_id, user_id=record.user_id),
+            )
+            if stored is not None and stored.get("status") == terminal_status.value:
+                await self.terminalize_recovered_runs([self._record_from_store(stored)])
         return True
 
     async def get_many_by_thread(
@@ -976,8 +1357,12 @@ class RunManager:
         error: str | None = None,
         stop_reason: str | None = None,
         persist: bool = True,
+        stage_terminal: bool = False,
     ) -> None:
         """Transition a run to a new status."""
+        if stage_terminal and (persist or status in (RunStatus.pending, RunStatus.running)):
+            raise ValueError("stage_terminal requires a non-persisted terminal status")
+        persistence_barrier = False
         async with self._lock:
             record = self._runs.get(run_id)
             if record is None:
@@ -992,24 +1377,60 @@ class RunManager:
                 return
             record.status = status
             record.updated_at = _now_iso()
+            if stage_terminal:
+                # This is the admission/worker linearization point: a new run
+                # must observe both the terminal outcome and its finalization
+                # barrier, never one without the other.
+                record.finalizing = True
+                record.terminal_status_staged = True
+                record.terminal_status_persisted = False
             if error is not None:
                 record.error = error
             if stop_reason is not None:
                 record.stop_reason = stop_reason
+            if persist and record.terminal_status_staged:
+                record.terminal_status_persistence_inflight += 1
+                persistence_barrier = True
         if persist:
-            persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
-            if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
-                await self._mark_ownership_lost(
-                    record,
-                    reason="Successful completion could not be confirmed in the durable run store.",
-                    require_active=False,
-                )
+            try:
+                persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+                if persisted:
+                    await self._confirm_terminal_status_persisted(record, status)
+                if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
+                    await self._mark_ownership_lost(
+                        record,
+                        reason="Successful completion could not be confirmed in the durable run store.",
+                        require_active=False,
+                    )
+            finally:
+                if persistence_barrier:
+                    await self._release_terminal_status_persistence(record)
         if record.ownership_lost:
             return
         logger.info("Run %s -> %s", run_id, status.value)
 
+    async def _confirm_terminal_status_persisted(self, record: RunRecord, status: RunStatus) -> None:
+        """Record that this worker's staged terminal status is now durable."""
+        if status in (RunStatus.pending, RunStatus.running):
+            return
+        async with self._lock:
+            if self._runs.get(record.run_id) is not record:
+                return
+            record.durable_terminal_status = status
+            if record.status != status:
+                return
+            record.terminal_status_staged = False
+            record.terminal_status_persisted = True
+
+    async def _release_terminal_status_persistence(self, record: RunRecord) -> None:
+        """Release one process-local terminal-CAS/heartbeat arbitration barrier."""
+        async with self._lock:
+            if record.terminal_status_persistence_inflight > 0:
+                record.terminal_status_persistence_inflight -= 1
+
     async def persist_current_status(self, run_id: str) -> bool:
         """Persist the status already staged on the in-memory run record."""
+        persistence_barrier = False
         async with self._lock:
             record = self._runs.get(run_id)
             if record is None:
@@ -1018,14 +1439,23 @@ class RunManager:
             status = record.status
             error = record.error
             stop_reason = record.stop_reason
-        persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
-        if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
-            await self._mark_ownership_lost(
-                record,
-                reason="Successful completion could not be confirmed in the durable run store.",
-                require_active=False,
-            )
-        return persisted
+            if record.terminal_status_staged:
+                record.terminal_status_persistence_inflight += 1
+                persistence_barrier = True
+        try:
+            persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+            if persisted:
+                await self._confirm_terminal_status_persisted(record, status)
+            if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
+                await self._mark_ownership_lost(
+                    record,
+                    reason="Successful completion could not be confirmed in the durable run store.",
+                    require_active=False,
+                )
+            return persisted
+        finally:
+            if persistence_barrier:
+                await self._release_terminal_status_persistence(record)
 
     async def set_status_if_not_cancelled(
         self,
@@ -1035,6 +1465,7 @@ class RunManager:
         error: str | None = None,
         stop_reason: str | None = None,
         persist: bool = True,
+        stage_terminal: bool = False,
     ) -> str | None:
         """Set a terminal status unless a durable cancellation won first."""
         if not persist or not self.heartbeat_enabled or self._store is None:
@@ -1044,64 +1475,305 @@ class RunManager:
                 error=error,
                 stop_reason=stop_reason,
                 persist=persist,
+                stage_terminal=stage_terminal,
+            )
+            return None
+
+        persistence_barrier = False
+        async with self._lock:
+            record = self._runs.get(run_id)
+            owner_worker_id = record.owner_worker_id if record is not None else None
+            missing_owner = record is not None and not record.store_only and owner_worker_id is None
+            if record is not None and not missing_owner and record.terminal_status_staged:
+                record.terminal_status_persistence_inflight += 1
+                persistence_barrier = True
+        if record is None:
+            logger.warning("set_status_if_not_cancelled called for unknown run %s", run_id)
+            return None
+        if missing_owner:
+            await self._mark_ownership_lost(
+                record,
+                reason="The local worker has no durable owner identity for terminalization.",
+                require_active=False,
             )
             return None
 
         try:
-            result = await self._call_store_with_retry(
-                "finalize_if_not_cancelled",
-                run_id,
-                lambda: self._store.finalize_if_not_cancelled(
+            try:
+                if not record.store_only:
+                    assert owner_worker_id is not None
+
+                    async def finalize_operation():
+                        return await self._store.finalize_if_owned_and_not_cancelled(
+                            run_id,
+                            owner_worker_id=owner_worker_id,
+                            status=status.value,
+                            error=error,
+                            stop_reason=stop_reason,
+                        )
+
+                else:
+
+                    async def finalize_operation():
+                        return await self._store.finalize_if_not_cancelled(
+                            run_id,
+                            status=status.value,
+                            error=error,
+                            stop_reason=stop_reason,
+                        )
+
+                result = await self._call_store_with_retry(
+                    "finalize_if_not_cancelled",
                     run_id,
-                    status=status.value,
-                    error=error,
-                    stop_reason=stop_reason,
-                ),
-            )
-        except Exception:
-            async with self._lock:
-                record = self._runs.get(run_id)
-            if record is not None:
-                await self._mark_ownership_lost(
-                    record,
-                    reason=("The durable store could not confirm whether cancellation or completion won."),
-                    require_active=False,
+                    finalize_operation,
                 )
+            except Exception:
+                async with self._lock:
+                    current = self._runs.get(run_id)
+                if current is not None:
+                    await self._mark_ownership_lost(
+                        current,
+                        reason=("The durable store could not confirm whether cancellation or completion won."),
+                        require_active=False,
+                    )
+                return None
+
+            if result.cancel_action is not None:
+                async with self._lock:
+                    current = self._runs.get(run_id)
+                    if current is not None:
+                        current.abort_action = result.cancel_action
+                        current.abort_event.set()
+                return result.cancel_action
+
+            await self.set_status(
+                run_id,
+                status,
+                error=error,
+                stop_reason=stop_reason,
+                persist=not result.finalized,
+            )
+            if result.finalized:
+                async with self._lock:
+                    current = self._runs.get(run_id)
+                if current is not None:
+                    await self._confirm_terminal_status_persisted(current, status)
             return None
-
-        if result.cancel_action is not None:
-            async with self._lock:
-                record = self._runs.get(run_id)
-                if record is not None:
-                    record.abort_action = result.cancel_action
-                    record.abort_event.set()
-            return result.cancel_action
-
-        await self.set_status(
-            run_id,
-            status,
-            error=error,
-            stop_reason=stop_reason,
-            persist=not result.finalized,
-        )
-        return None
+        finally:
+            if persistence_barrier:
+                await self._release_terminal_status_persistence(record)
 
     async def _ensure_delivery_receipt(self, record: RunRecord) -> bool:
         """Idempotently persist a zero-delivery receipt during recovery."""
         if self._event_store is None:
             return True
         try:
-            await self._event_store.put_if_absent(
+            await persist_run_delivery_receipt(
+                self._event_store,
                 thread_id=record.thread_id,
                 run_id=record.run_id,
-                event_type="run.delivery",
-                category="outputs",
                 content={"presented": 0, "paths": [], "by_tool": {}},
+                user_id=record.user_id,
             )
             return True
         except Exception:
             logger.warning(
                 "Failed to backfill delivery receipt for recovered run %s; preserving its terminal status",
+                record.run_id,
+                exc_info=True,
+            )
+            return False
+
+    async def _ensure_recovered_run_events(self, record: RunRecord) -> bool:
+        """Best-effort terminal singleton backfill for an atomically claimed run."""
+        if record.operation_kind != ThreadOperationKind.run:
+            return True
+        delivery_persisted = await self._ensure_delivery_receipt(record)
+        terminal_persisted = await self._ensure_terminal_event(record)
+        return delivery_persisted and terminal_persisted
+
+    async def terminalize_recovered_runs(self, records: list[RunRecord]) -> bool:
+        """Backfill terminal observability for already-claimed run rows.
+
+        Recovery callers outside ``RunManager`` may own the durable takeover
+        transaction, but they must not grow a second implementation of the
+        terminal-event and retained-stream contract.  Only already-terminal
+        run operations are accepted.  Event writes are idempotent and
+        best-effort; the durable ``RunRow.status`` remains authoritative. The
+        return value lets two-phase recovery callers keep their parent record
+        retryable until both event persistence and Gateway END publication
+        have completed.
+        """
+        terminal_runs: list[RunRecord] = []
+        successful = True
+        for record in records:
+            if record.operation_kind != ThreadOperationKind.run:
+                continue
+            if record.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON:
+                successful = False
+                logger.debug(
+                    "Skipped terminal event recovery for live local finalizer %s",
+                    record.run_id,
+                )
+                continue
+            if record.status in (RunStatus.pending, RunStatus.running):
+                successful = False
+                logger.warning(
+                    "Skipped recovered-run terminalization for active run %s",
+                    record.run_id,
+                )
+                continue
+            successful = await self._ensure_recovered_run_events(record) and successful
+            terminal_runs.append(record)
+
+        if not terminal_runs or self._on_orphans_recovered is None:
+            return successful
+        try:
+            callback_result = await self._on_orphans_recovered(terminal_runs)
+        except Exception:
+            logger.warning(
+                "Recovered-run callback failed for %d run(s): run_ids=%s",
+                len(terminal_runs),
+                [record.run_id for record in terminal_runs],
+                exc_info=True,
+            )
+            return False
+        return callback_result is not False and successful
+
+    async def terminalize_recovered_run_ids(self, run_ids: list[str]) -> bool:
+        """Load terminal rows by id, then publish their recovery contract.
+
+        This is the bridge used by scheduler repositories after their takeover
+        transaction has committed.  Re-reading through ``RunStore`` keeps the
+        terminal status and user ownership authoritative and ensures event
+        writes never run while the scheduler's SQL session is held open.
+        """
+        if self._store is None:
+            return False
+
+        records: list[RunRecord] = []
+        successful = True
+        for run_id in dict.fromkeys(run_ids):
+            try:
+                stored = await self._call_store_with_retry(
+                    "load recovered run",
+                    run_id,
+                    lambda run_id=run_id: self._store.get(run_id, user_id=None),
+                )
+            except Exception:
+                successful = False
+                logger.warning(
+                    "Failed to load recovered run %s for terminal observability",
+                    run_id,
+                    exc_info=True,
+                )
+                continue
+            if stored is None:
+                successful = False
+                logger.warning(
+                    "Recovered run %s disappeared before terminal observability",
+                    run_id,
+                )
+                continue
+            try:
+                records.append(self._record_from_store(stored))
+            except Exception:
+                successful = False
+                logger.warning(
+                    "Failed to map recovered run %s for terminal observability",
+                    run_id,
+                    exc_info=True,
+                )
+
+        return await self.terminalize_recovered_runs(records) and successful
+
+    async def recover_expired_local_finalizer(self, record: RunRecord) -> bool:
+        """Atomically fence an expired local finalizer, then recover its tail."""
+        if self._store is None or record.stop_reason != LOCAL_FINALIZER_PENDING_STOP_REASON:
+            return False
+        try:
+            claimed = await self._call_store_with_retry(
+                "claim expired local finalizer",
+                record.run_id,
+                lambda: self._store.claim_expired_local_finalizer(
+                    record.run_id,
+                    owner_worker_id=self._worker_id,
+                    recovery_stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+                    grace_seconds=self.grace_seconds,
+                ),
+            )
+        except (NotImplementedError, AttributeError):
+            return False
+        except Exception:
+            logger.warning(
+                "Failed to claim expired local finalizer %s",
+                record.run_id,
+                exc_info=True,
+            )
+            return False
+        if claimed is None:
+            return False
+        recovered = self._record_from_store(claimed)
+        await self.terminalize_recovered_runs([recovered])
+        return True
+
+    async def has_durable_run_delivery(self, record: RunRecord) -> bool:
+        """Check the owner-scoped durable END-outbox marker for one run."""
+        if self._event_store is None:
+            return False
+        try:
+            return await has_run_delivery_receipt(
+                self._event_store,
+                thread_id=record.thread_id,
+                run_id=record.run_id,
+                user_id=record.user_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to inspect terminal delivery receipt for run %s",
+                record.run_id,
+                exc_info=True,
+            )
+            return False
+
+    async def has_durable_authoritative_run_end(self, record: RunRecord) -> bool:
+        """Check for a matching owner-scoped new-runtime ``run.end`` marker."""
+        if self._event_store is None:
+            return False
+        try:
+            return await has_authoritative_run_terminal_event(
+                self._event_store,
+                thread_id=record.thread_id,
+                run_id=record.run_id,
+                status=record.status,
+                user_id=record.user_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to inspect authoritative terminal event for run %s",
+                record.run_id,
+                exc_info=True,
+            )
+            return False
+
+    async def _ensure_terminal_event(self, record: RunRecord) -> bool:
+        """Idempotently backfill authoritative ``run.end`` after takeover."""
+        if self._event_store is None:
+            return True
+        try:
+            await persist_run_terminal_event(
+                self._event_store,
+                thread_id=record.thread_id,
+                run_id=record.run_id,
+                status=record.status,
+                content={},
+                recovered=True,
+                user_id=record.user_id,
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "Failed to backfill terminal event for recovered run %s; its RunRow remains authoritative",
                 record.run_id,
                 exc_info=True,
             )
@@ -1116,6 +1788,30 @@ class RunManager:
                 return
             record.finalizing = finalizing
             record.updated_at = _now_iso()
+
+    async def _clear_finalizing_for_completed_task(
+        self,
+        record: RunRecord,
+        completed_task: asyncio.Task,
+    ) -> None:
+        """Drop a barrier only when the exact task that installed it is done."""
+        async with self._lock:
+            if self._runs.get(record.run_id) is not record or record.task is not completed_task:
+                return
+            record.finalizing = False
+            record.updated_at = _now_iso()
+
+    def _clear_finalizing_when_task_done(self, record: RunRecord) -> None:
+        """Install idempotent exact-task cleanup for metadata or run workers."""
+        task = record.task
+        if task is None:
+            return
+
+        def clear_finalizing_after_task(completed_task: asyncio.Task) -> None:
+            clear_task = asyncio.create_task(self._clear_finalizing_for_completed_task(record, completed_task))
+            clear_task.set_name(f"deerflow-clear-cancelled-finalizing-{record.run_id}")
+
+        task.add_done_callback(clear_finalizing_after_task)
 
     async def wait_for_prior_finalizing(
         self,
@@ -1290,7 +1986,9 @@ class RunManager:
         """Request cancellation of a run.
 
         When the call lands on the owning worker the run is cancelled
-        locally as before (in-memory abort + status persisted to store).
+        locally. An attached worker keeps the durable row active until its
+        terminal tail has persisted the delivery receipt; taskless runs use
+        the immediate recovery-compensation path.
 
         When the call lands on a non-owning worker in a multi-worker
         deployment with heartbeat enabled:
@@ -1321,6 +2019,11 @@ class RunManager:
         # ------------------------------------------------------------------
         async with self._lock:
             record = self._runs.get(run_id)
+            if record is not None and not self._owns_local_execution(record):
+                # Idempotent admission may cache a read-only record hydrated
+                # from another worker. Its presence in `_runs` does not grant
+                # local execution ownership; route it through lease fencing.
+                record = None
             if record is not None:
                 if record.status == RunStatus.interrupted:
                     return CancelOutcome.cancelled  # idempotent
@@ -1346,6 +2049,8 @@ class RunManager:
 
         async with self._lock:
             record = self._runs.get(run_id)
+            if record is not None and not self._owns_local_execution(record):
+                record = None
             if record is not None:
                 if record.status == RunStatus.interrupted or record.abort_event.is_set():
                     return CancelOutcome.cancelled
@@ -1355,14 +2060,59 @@ class RunManager:
                 record.abort_event.set()
                 task_active = record.task is not None and not record.task.done()
                 record.finalizing = task_active
+                if task_active:
+                    # Publish the admission fence under the same lock as the
+                    # local staged outcome. Keep the durable row active until
+                    # the worker writes its delivery receipt and commits the
+                    # terminal status in its finally tail. If the process dies
+                    # first, lease recovery can still discover and claim it.
+                    record.terminal_status_staged = True
+                    record.terminal_status_persisted = False
+                    self._clear_finalizing_when_task_done(record)
+                else:
+                    # No worker will enter run_agent's finally block to publish
+                    # terminal events or END. Persist an explicit liveness edge
+                    # in the same owner-fenced status transition below.
+                    record.stop_reason = ORPHAN_RECOVERY_STOP_REASON
                 if task_active and record.status == RunStatus.running:
+                    # A pending task may still be the Gateway metadata wrapper.
+                    # Let ``abort_event`` wake that wrapper so it can enter
+                    # ``run_agent`` and execute the single authoritative
+                    # startup/terminal-event/stream-END path.  Once the run is
+                    # actually running, cancellation is delivered directly to
+                    # the worker task as before.
                     record.task.cancel()
                 record.status = RunStatus.interrupted
                 record.updated_at = _now_iso()
 
         # Persist outside the lock so store calls don't block other mutations.
         if record is not None:
-            persisted = await self._persist_status(record, RunStatus.interrupted)
+            if task_active:
+                logger.info(
+                    "Run %s cancellation staged for attached worker (action=%s)",
+                    run_id,
+                    action,
+                )
+                return CancelOutcome.cancelled
+
+            persisted = await self._persist_status(
+                record,
+                RunStatus.interrupted,
+                stop_reason=record.stop_reason,
+            )
+            if persisted:
+                await self._confirm_terminal_status_persisted(record, RunStatus.interrupted)
+            if persisted and self._store is not None:
+                stored = await self._call_store_with_retry(
+                    "verify taskless cancellation",
+                    run_id,
+                    lambda: self._store.get(run_id, user_id=record.user_id),
+                )
+                if stored is not None and stored.get("status") not in {
+                    RunStatus.pending.value,
+                    RunStatus.running.value,
+                }:
+                    await self.terminalize_recovered_runs([self._record_from_store(stored)])
             if not persisted and self._store is not None:
                 # ``_persist_status`` already fetched ``existing`` internally;
                 # re-check the store to see if a peer takeover flipped the
@@ -1424,10 +2174,12 @@ class RunManager:
             taken = await self._call_store_with_retry(
                 "claim_for_takeover",
                 run_id,
-                lambda: self._store.claim_for_takeover(
+                lambda: self._store.claim_for_takeover_as(
                     run_id,
+                    owner_worker_id=self._worker_id,
                     grace_seconds=grace_seconds,
                     error=take_over_msg,
+                    stop_reason=ORPHAN_RECOVERY_STOP_REASON,
                 ),
             )
         except Exception:
@@ -1435,6 +2187,24 @@ class RunManager:
             return CancelOutcome.unknown
 
         if taken:
+            try:
+                taken_record = self._record_from_store(
+                    {
+                        **row,
+                        "status": RunStatus.error.value,
+                        "error": take_over_msg,
+                        "owner_worker_id": self._worker_id,
+                        "stop_reason": ORPHAN_RECOVERY_STOP_REASON,
+                    }
+                )
+            except Exception:
+                logger.warning("Failed to map cancelled run %s for terminal event backfill", run_id, exc_info=True)
+            else:
+                if not await self.terminalize_recovered_runs([taken_record]):
+                    logger.warning(
+                        "Run %s takeover committed without complete terminal observability; the durable recovery marker will release stream waiters",
+                        run_id,
+                    )
             logger.warning("Run %s taken over by worker %s (action=%s)", run_id, self._worker_id, action)
             return CancelOutcome.taken_over
 
@@ -1489,18 +2259,92 @@ class RunManager:
         idempotency_key: str | None = None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
-        return await self._admit_thread_operation(
-            thread_id,
-            assistant_id,
-            operation_kind=ThreadOperationKind.run,
-            on_disconnect=on_disconnect,
-            metadata=metadata,
-            kwargs=kwargs,
-            multitask_strategy=multitask_strategy,
-            model_name=model_name,
-            user_id=user_id,
-            idempotency_key=idempotency_key,
-        )
+        while True:
+            try:
+                return await self._admit_thread_operation(
+                    thread_id,
+                    assistant_id,
+                    operation_kind=ThreadOperationKind.run,
+                    on_disconnect=on_disconnect,
+                    metadata=metadata,
+                    kwargs=kwargs,
+                    multitask_strategy=multitask_strategy,
+                    model_name=model_name,
+                    user_id=user_id,
+                    idempotency_key=idempotency_key,
+                )
+            except _LocalTerminalFinalizersPending as pending:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task in pending.tasks:
+                    raise ConflictError(f"Thread {thread_id} is finalizing the current run") from None
+                logger.info(
+                    "Waiting for %d local terminal finalizer(s) before admitting a new run on thread %s",
+                    len(pending.tasks),
+                    thread_id,
+                )
+                finalizers = asyncio.gather(
+                    *pending.tasks,
+                    return_exceptions=True,
+                )
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(finalizers),
+                        timeout=float(self.grace_seconds),
+                    )
+                except TimeoutError:
+                    # Existing finalizer tasks keep running; only this
+                    # admission attempt degrades to a retryable conflict.
+                    raise ConflictError(f"Thread {thread_id} is still finalizing the previous run") from None
+
+    @staticmethod
+    async def _await_atomic_admission(
+        operation: Awaitable[tuple[dict[str, Any], list[dict[str, Any]]]],
+    ) -> tuple[
+        tuple[dict[str, Any], list[dict[str, Any]]],
+        asyncio.CancelledError | None,
+    ]:
+        """Drain an atomic store write before honoring caller cancellation.
+
+        A database transaction may commit immediately before its awaitable
+        receives cancellation.  Letting that ``CancelledError`` escape would
+        leave the caller unable to tell whether the replacement row (and any
+        predecessor claims) became durable.  Run the operation independently,
+        shield it from caller cancellation, and keep draining it through
+        repeated cancellation requests.  The caller can then apply the normal
+        post-commit bookkeeping and compensation with a definitive result.
+
+        A store operation that cancels itself is still propagated immediately;
+        only cancellation requested on the admission task is deferred.
+        """
+        operation_task = asyncio.create_task(operation)
+        try:
+            return await asyncio.shield(operation_task), None
+        except asyncio.CancelledError as cancelled:
+            current_task = asyncio.current_task()
+            if current_task is None or current_task.cancelling() == 0:
+                raise
+
+            while not operation_task.done():
+                try:
+                    await asyncio.shield(operation_task)
+                except asyncio.CancelledError:
+                    # Repeated caller cancellation must not abandon a store
+                    # operation whose commit outcome is still unknown.
+                    if operation_task.done():
+                        break
+                except Exception:
+                    break
+
+            if operation_task.cancelled():
+                raise cancelled
+            try:
+                result = operation_task.result()
+            except Exception:
+                # Cancellation is the request's externally visible outcome.
+                # The store operation has finished (and therefore cannot
+                # commit later), so preserving it is safe here.
+                raise cancelled from None
+            return result, cancelled
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
         """Terminalize an unseen replacement and confirm its durable state."""
@@ -1522,7 +2366,11 @@ class RunManager:
             await self._call_store_with_retry(
                 "terminalize cancelled admission",
                 record.run_id,
-                lambda: self._store.update_status(record.run_id, RunStatus.interrupted.value),
+                lambda: self._store.update_status(
+                    record.run_id,
+                    RunStatus.interrupted.value,
+                    stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+                ),
             )
             stored = await self._call_store_with_retry(
                 "verify terminal cancelled admission",
@@ -1540,12 +2388,16 @@ class RunManager:
             return
 
         stored_status = RunStatus(stored.get("status") or RunStatus.pending.value)
+        stored_record = self._record_from_store(stored)
         async with self._lock:
             if self._runs.get(record.run_id) is record:
                 record.status = stored_status
                 record.error = stored.get("error")
                 record.stop_reason = stored.get("stop_reason")
+                record.durable_terminal_status = stored_record.durable_terminal_status
                 record.updated_at = _now_iso()
+        if stored_status not in (RunStatus.pending, RunStatus.running):
+            await self.terminalize_recovered_runs([stored_record])
 
     async def _admit_thread_operation(
         self,
@@ -1586,6 +2438,11 @@ class RunManager:
         grace_seconds = self._run_ownership_config.grace_seconds if self._run_ownership_config else 10
 
         interrupted_records: list[RunRecord] = []
+        claimed_store_rows: list[dict[str, Any]] = []
+        stored_new_row: dict[str, Any] | None = None
+        local_finalizer_run_ids: set[str] = set()
+        supports_recovery_markers = False
+        deferred_cancellation: asyncio.CancelledError | None = None
         record = RunRecord(
             run_id=run_id,
             thread_id=thread_id,
@@ -1610,6 +2467,8 @@ class RunManager:
                 for existing in self._runs.values():
                     if existing.idempotency_key != idempotency_key:
                         continue
+                    if not self._owns_local_execution(existing):
+                        continue
                     if existing.thread_id != thread_id or existing.user_id != user_id:
                         raise RuntimeError("Run idempotency key resolved to a different thread or user")
                     existing.idempotency_reused = True
@@ -1620,16 +2479,33 @@ class RunManager:
                 if existing.thread_id != thread_id or existing.user_id != user_id:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
                 current = self._runs.get(existing.run_id)
-                if current is None:
-                    self._runs[existing.run_id] = existing
-                    self._index_run_locked(existing)
-                    current = existing
-                current.idempotency_reused = True
-                return current
+                if current is not None and self._owns_local_execution(current):
+                    current.idempotency_reused = True
+                    return current
+                # Store-only snapshots are observation handles, not local
+                # workers. Return the fresh row to this request without
+                # indexing a permanently stale cross-worker record.
+                existing.idempotency_reused = True
+                return existing
 
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
-            local_inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing]
+            local_records = [local for local in self._thread_records_locked(thread_id) if self._owns_local_execution(local)]
+            active_local_tasks = {local.run_id: local.task for local in local_records if local.task is not None and not local.task.done()}
+            supports_recovery_markers = self._store is not None and _supports_atomic_recovery_markers(self._store)
+            if multitask_strategy in ("interrupt", "rollback"):
+                terminal_finalizers = tuple(
+                    task for local in local_records if (local.terminal_status_staged or local.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON) and local.finalizing and (task := active_local_tasks.get(local.run_id)) is not None
+                )
+                if terminal_finalizers:
+                    # The worker staged its terminal status and barrier under
+                    # this same lock. Release the lock before awaiting it, then
+                    # retry the entire admission before any RunStore mutation.
+                    raise _LocalTerminalFinalizersPending(terminal_finalizers)
+                local_finalizer_run_ids = {local.run_id for local in local_records if local.status in (RunStatus.pending, RunStatus.running) and active_local_tasks.get(local.run_id) is not None}
+                if local_finalizer_run_ids and self._store is not None and not supports_recovery_markers:
+                    raise ConflictError(f"Thread {thread_id} has a live local run whose store cannot atomically fence finalization")
+            local_inflight = [local for local in local_records if local.status in (RunStatus.pending, RunStatus.running) or local.finalizing]
 
             if multitask_strategy in ("interrupt", "rollback") and any(record.operation_kind != ThreadOperationKind.run for record in local_inflight):
                 raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
@@ -1666,12 +2542,17 @@ class RunManager:
                     }
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
+                    if supports_recovery_markers:
+                        create_kwargs["lease_seconds"] = self._run_ownership_config.lease_seconds if self.heartbeat_enabled else None
                     try:
-                        await self._call_store_with_retry(
-                            "create_thread_operation_atomic",
-                            run_id,
-                            lambda: self._store.create_thread_operation_atomic(**create_kwargs),
+                        (stored_new_row, _), cancelled = await self._await_atomic_admission(
+                            self._call_store_with_retry(
+                                "create_thread_operation_atomic",
+                                run_id,
+                                lambda: self._store.create_thread_operation_atomic(**create_kwargs),
+                            )
                         )
+                        deferred_cancellation = deferred_cancellation or cancelled
                     except RunIdempotencyConflict as exc:
                         return reuse_idempotent_run(exc)
                     except ConflictError:
@@ -1696,6 +2577,11 @@ class RunManager:
                         "created_at": now,
                         "grace_seconds": grace_seconds,
                     }
+                    if supports_recovery_markers:
+                        create_kwargs["recovery_stop_reason"] = ORPHAN_RECOVERY_STOP_REASON
+                        create_kwargs["local_finalizer_run_ids"] = local_finalizer_run_ids
+                        create_kwargs["local_finalizer_stop_reason"] = LOCAL_FINALIZER_PENDING_STOP_REASON
+                        create_kwargs["lease_seconds"] = self._run_ownership_config.lease_seconds if self.heartbeat_enabled else None
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
                     # Interrupt / rollback: store-side claim + insert in one
@@ -1704,11 +2590,14 @@ class RunManager:
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
-                            await self._call_store_with_retry(
-                                "create_thread_operation_atomic",
-                                run_id,
-                                lambda: self._store.create_thread_operation_atomic(**create_kwargs),
+                            (stored_new_row, claimed_store_rows), cancelled = await self._await_atomic_admission(
+                                self._call_store_with_retry(
+                                    "create_thread_operation_atomic",
+                                    run_id,
+                                    lambda: self._store.create_thread_operation_atomic(**create_kwargs),
+                                )
                             )
+                            deferred_cancellation = deferred_cancellation or cancelled
                             break
                         except RunIdempotencyConflict as exc:
                             return reuse_idempotent_run(exc)
@@ -1723,37 +2612,118 @@ class RunManager:
                                 # worker won the race for this thread.
                                 raise ConflictError(f"Thread {thread_id} already has an active run") from exc
                             raise
-                    # ``create_thread_operation_atomic`` already marked any claimed store
-                    # rows as interrupted in the same transaction; no extra
-                    # store write is needed for them.
+                    # ``create_thread_operation_atomic`` already marked any claimed
+                    # store rows as interrupted in the same transaction. Keep its
+                    # returned snapshots for post-commit event backfill; no extra
+                    # RunStore write is needed for them.
 
             # 3) Only now safe to register locally — store insert succeeded.
+            if stored_new_row is not None:
+                record.lease_expires_at = stored_new_row.get("lease_expires_at")
             self._runs[run_id] = record
             self._index_run_locked(record)
 
             # 4) Cancel local in-memory inflight (interrupt/rollback). The
             #    store-side counterparts were already cancelled in step 2.
             if multitask_strategy in ("interrupt", "rollback"):
-                for r in local_inflight:
+                claimed_rows_by_id = {row.get("run_id"): row for row in claimed_store_rows if row.get("run_id") is not None}
+                cancellable_local = local_inflight if self._store is None else [r for r in local_inflight if r.run_id in claimed_rows_by_id]
+                for r in cancellable_local:
                     if r.finalizing:
                         continue
-                    r.abort_action = multitask_strategy
+                    claimed_row = claimed_rows_by_id.get(r.run_id)
+                    winning_action = claimed_row.get("cancel_action") if claimed_row is not None else multitask_strategy
+                    if winning_action not in ("interrupt", "rollback"):
+                        winning_action = multitask_strategy
+                    r.abort_action = winning_action
                     r.abort_event.set()
                     task_active = r.task is not None and not r.task.done()
                     r.finalizing = task_active
                     if task_active:
+                        # ``record.task`` may still be the Gateway metadata
+                        # wrapper and never enter ``run_agent``'s cleanup. Drop
+                        # the barrier when either kind of worker actually ends;
+                        # the real run worker's own clear is idempotent.
+                        self._clear_finalizing_when_task_done(r)
                         r.task.cancel()
                     r.status = RunStatus.interrupted
+                    if claimed_row is not None:
+                        r.durable_terminal_status = RunStatus.interrupted
+                        r.lease_expires_at = claimed_row.get("lease_expires_at")
+                        if claimed_row.get("stop_reason") == LOCAL_FINALIZER_PENDING_STOP_REASON:
+                            r.stop_reason = LOCAL_FINALIZER_PENDING_STOP_REASON
+                            r.terminal_status_staged = True
+                            r.terminal_status_persisted = False
                     r.updated_at = now
                     interrupted_records.append(r)
 
         # Outside the lock: persist interrupted status for locally-cancelled
-        # runs. Store-side claimed rows are already finalised. Cancellation at
-        # this point happens after the replacement was admitted, so close that
-        # new run before propagating cancellation to the caller.
+        # runs, then backfill terminal events for store-only claimed runs.
+        # Store-side claimed rows are already finalised. Cancellation at this
+        # point happens after the replacement was admitted, so close that new
+        # run before propagating cancellation to the caller.
         try:
             for interrupted_record in interrupted_records:
+                if interrupted_record.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON:
+                    continue
                 await self._persist_status(interrupted_record, RunStatus.interrupted)
+            claimed_records: list[RunRecord] = []
+            for claimed_row in claimed_store_rows:
+                if claimed_row.get("operation_kind", ThreadOperationKind.run.value) != ThreadOperationKind.run.value:
+                    continue
+                try:
+                    claimed_record = self._record_from_store(claimed_row)
+                except Exception:
+                    logger.warning("Failed to map atomically claimed run for terminal event backfill", exc_info=True)
+                    continue
+                if claimed_record.stop_reason != LOCAL_FINALIZER_PENDING_STOP_REASON and claimed_record.run_id not in local_finalizer_run_ids:
+                    claimed_records.append(claimed_record)
+            recovery_markers_ready = supports_recovery_markers
+            if claimed_records and not supports_recovery_markers and self._store is not None:
+                # Legacy/custom stores keep the original atomic-create API.
+                # After its transaction commits, add the no-producer marker
+                # through the long-standing status API before attempting END.
+                # Built-in stores do this atomically and never enter this path.
+                recovery_markers_ready = True
+                for claimed_record in claimed_records:
+                    try:
+                        marked = await self._call_store_with_retry(
+                            "backfill claimed-run recovery marker",
+                            claimed_record.run_id,
+                            lambda claimed_record=claimed_record: self._store.update_status(
+                                claimed_record.run_id,
+                                claimed_record.status.value,
+                                error=claimed_record.error,
+                                stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+                            ),
+                        )
+                    except Exception:
+                        marked = False
+                        logger.warning(
+                            "Failed to backfill recovery marker for claimed run %s",
+                            claimed_record.run_id,
+                            exc_info=True,
+                        )
+                    if marked is False:
+                        recovery_markers_ready = False
+                    else:
+                        claimed_record.stop_reason = ORPHAN_RECOVERY_STOP_REASON
+
+            if claimed_records and not await self.terminalize_recovered_runs(claimed_records):
+                claimed_run_ids = [claimed.run_id for claimed in claimed_records]
+                if recovery_markers_ready:
+                    logger.warning(
+                        "Atomic admission committed with incomplete terminal observability for run_ids=%s; durable recovery markers will release stream waiters",
+                        claimed_run_ids,
+                    )
+                else:
+                    logger.error(
+                        "Atomic admission committed with incomplete terminal observability for run_ids=%s, and RunStore %s has not opted into atomic recovery markers",
+                        claimed_run_ids,
+                        type(self._store).__name__,
+                    )
+            if deferred_cancellation is not None:
+                raise deferred_cancellation
         except asyncio.CancelledError:
             cleanup = asyncio.create_task(self._close_cancelled_admission(record))
             cleanup.set_name(f"deerflow-close-cancelled-admission-{record.run_id}")
@@ -1887,8 +2857,9 @@ class RunManager:
                 claimed = await self._call_store_with_retry(
                     "claim_for_takeover",
                     record.run_id,
-                    lambda: self._store.claim_for_takeover(
+                    lambda: self._store.claim_for_takeover_as(
                         record.run_id,
+                        owner_worker_id=self._worker_id,
                         grace_seconds=grace_seconds,
                         error=error,
                         stop_reason=stop_reason,
@@ -1906,6 +2877,7 @@ class RunManager:
             record.status = RunStatus.error
             record.error = error
             record.stop_reason = stop_reason
+            record.owner_worker_id = self._worker_id
             record.updated_at = now
             if record.operation_kind == ThreadOperationKind.run:
                 # The atomic takeover above must win before writing a zero-delivery
@@ -1913,7 +2885,7 @@ class RunManager:
                 # permanently overwrite a live run's later detailed receipt. The
                 # receipt remains best-effort, matching normal terminal delivery
                 # when its event store is unavailable.
-                await self._ensure_delivery_receipt(record)
+                await self._ensure_recovered_run_events(record)
                 recovered.append(record)
 
         if recovered:
@@ -1979,6 +2951,70 @@ class RunManager:
             deadline = deadline.replace(tzinfo=UTC)
         return deadline
 
+    @staticmethod
+    def _record_needs_lease_renewal(record: RunRecord) -> bool:
+        """Return whether local work still depends on an active durable row."""
+        if record.ownership_lost:
+            return False
+        if record.terminal_status_persistence_inflight > 0:
+            return False
+        task_active = record.task is not None and not record.task.done()
+        local_finalizer_pending = record.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON and record.finalizing and task_active
+        if record.durable_terminal_status is not None and not local_finalizer_pending:
+            return False
+        if local_finalizer_pending:
+            return True
+        return (record.status in (RunStatus.pending, RunStatus.running) and (record.task is None or task_active)) or (record.terminal_status_staged and record.finalizing and task_active)
+
+    async def _sync_owned_terminal_from_store(
+        self,
+        record: RunRecord,
+        *,
+        require_staged: bool = True,
+    ) -> bool:
+        """Adopt a same-owner durable terminal result before fencing its finalizer.
+
+        The terminal owner CAS can commit immediately before the cached lease
+        deadline while ``persist_current_status`` is still waiting to reacquire
+        the manager lock. A heartbeat must re-read that row before declaring
+        ownership lost, otherwise it can cancel the only task able to publish
+        the already-authoritative run.end and stream END.
+        """
+        if self._store is None:
+            return False
+        async with self._lock:
+            if self._runs.get(record.run_id) is not record:
+                return False
+            if record.durable_terminal_status is not None and record.stop_reason != LOCAL_FINALIZER_PENDING_STOP_REASON:
+                return True
+            if require_staged and not record.terminal_status_staged:
+                return False
+
+        try:
+            durable = await self._store.get(record.run_id, user_id=record.user_id)
+        except Exception:
+            logger.debug(
+                "Failed to verify staged terminal status for run %s before lease fencing",
+                record.run_id,
+                exc_info=True,
+            )
+            return False
+        if durable is None or durable.get("status") in (RunStatus.pending.value, RunStatus.running.value) or durable.get("owner_worker_id") != self._worker_id or durable.get("stop_reason") == LOCAL_FINALIZER_PENDING_STOP_REASON:
+            return False
+        try:
+            durable_status = RunStatus(durable["status"])
+        except (KeyError, ValueError):
+            return False
+
+        async with self._lock:
+            if self._runs.get(record.run_id) is not record:
+                return False
+            record.durable_terminal_status = durable_status
+            if durable_status == record.status:
+                record.terminal_status_staged = False
+                record.terminal_status_persisted = True
+        return True
+
     async def _mark_ownership_lost(
         self,
         record: RunRecord,
@@ -1997,11 +3033,8 @@ class RunManager:
             current = self._runs.get(record.run_id)
             if current is not record:
                 return False
-            if require_active:
-                if record.status not in (RunStatus.pending, RunStatus.running):
-                    return False
-                if record.task is not None and record.task.done():
-                    return False
+            if require_active and not self._record_needs_lease_renewal(record):
+                return False
             if record.ownership_lost:
                 return True
             record.ownership_lost = True
@@ -2116,11 +3149,13 @@ class RunManager:
             # saturation, slow checkpoint hydrate on a fresh worker), peer
             # reconciliation will reclaim the run as an orphan and mark it
             # ``error`` even though this worker still intends to execute it.
-            active_runs = [(rid, record) for rid, record in self._runs.items() if record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())]
+            active_runs = [(rid, record) for rid, record in self._runs.items() if record.owner_worker_id == self._worker_id and self._record_needs_lease_renewal(record)]
 
         for run_id, record in active_runs:
             confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
             if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
+                if await self._sync_owned_terminal_from_store(record):
+                    continue
                 await self._mark_ownership_lost(
                     record,
                     reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
@@ -2142,6 +3177,8 @@ class RunManager:
                     )
                 if renewal.renewed:
                     if confirmed_deadline <= datetime.now(UTC):
+                        if await self._sync_owned_terminal_from_store(record):
+                            continue
                         await self._mark_ownership_lost(
                             record,
                             reason="Lease renewal completed after the last confirmed lease had already expired.",
@@ -2171,7 +3208,23 @@ class RunManager:
                     # we don't waste CPU or overwrite the takeover status on
                     # finalisation.
                     async with self._lock:
-                        still_active = self._runs.get(run_id) is record and record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())
+                        current = self._runs.get(run_id)
+                        already_persisted = current is record and record.terminal_status_persisted and record.stop_reason != LOCAL_FINALIZER_PENDING_STOP_REASON
+                    if already_persisted:
+                        continue
+
+                    # A renewal selected just before this worker's terminal
+                    # status commit may return False just after that commit.
+                    # Verify the durable outcome before treating it as a peer
+                    # takeover and fencing the finalizer.
+                    if await self._sync_owned_terminal_from_store(
+                        record,
+                        require_staged=False,
+                    ):
+                        continue
+
+                    async with self._lock:
+                        still_active = self._runs.get(run_id) is record and record.owner_worker_id == self._worker_id and self._record_needs_lease_renewal(record)
                     if still_active:
                         logger.warning(
                             "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
@@ -2185,6 +3238,8 @@ class RunManager:
                         )
             except Exception:
                 if confirmed_deadline <= datetime.now(UTC):
+                    if await self._sync_owned_terminal_from_store(record):
+                        continue
                     await self._mark_ownership_lost(
                         record,
                         reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
@@ -2334,9 +3389,13 @@ class RunManager:
                     # is not reported as "never retrieved", and keep its status.
                     task.exception()  # type: ignore[union-attr]  # done & not cancelled
                     continue
-                if record.status in (RunStatus.pending, RunStatus.running):
-                    record.status = RunStatus.interrupted
-                    record.updated_at = _now_iso()
+                if record.status not in (RunStatus.pending, RunStatus.running):
+                    # The worker reached its own terminal path before the task
+                    # settled.  Do not re-persist or re-publish its outcome.
+                    continue
+                record.status = RunStatus.interrupted
+                record.stop_reason = ORPHAN_RECOVERY_STOP_REASON
+                record.updated_at = _now_iso()
                 to_persist.append(record)
 
         # Bound the trailing status persistence within the remaining budget so a
@@ -2349,7 +3408,17 @@ class RunManager:
             else:
                 try:
                     results = await asyncio.wait_for(
-                        asyncio.gather(*(self._persist_status(record, RunStatus.interrupted) for record in to_persist), return_exceptions=True),
+                        asyncio.gather(
+                            *(
+                                self._persist_status(
+                                    record,
+                                    RunStatus.interrupted,
+                                    stop_reason=record.stop_reason,
+                                )
+                                for record in to_persist
+                            ),
+                            return_exceptions=True,
+                        ),
                         timeout=remaining,
                     )
                 except TimeoutError:
@@ -2359,11 +3428,39 @@ class RunManager:
                     # own failures, returning ``False``. Inspect the aggregate so a
                     # partial failure is surfaced at shutdown level (with the
                     # run_id) instead of being silently swallowed by the gather.
+                    persisted_terminal_records: list[RunRecord] = []
                     for record, result in zip(to_persist, results):
                         if isinstance(result, Exception):
                             logger.warning("Unexpected error persisting interrupted status for run %s during shutdown: %r", record.run_id, result)
                         elif result is False:
                             logger.warning("Could not persist interrupted status for run %s during shutdown", record.run_id)
+                        else:
+                            persisted_terminal_records.append(record)
+
+                    # A Gateway metadata wrapper can be cancelled before it ever
+                    # enters ``run_agent``.  In that case no worker finally block
+                    # exists to write run.delivery/run.end or the retained-stream
+                    # END marker, so shutdown must complete the same idempotent
+                    # terminal observability contract after status is durable.
+                    if persisted_terminal_records:
+                        remaining = deadline - loop.time()
+                        if remaining <= 0:
+                            logger.warning(
+                                "Run drain budget exhausted before terminalizing %d interrupted run(s)",
+                                len(persisted_terminal_records),
+                            )
+                        else:
+                            try:
+                                await asyncio.wait_for(
+                                    self.terminalize_recovered_runs(persisted_terminal_records),
+                                    timeout=remaining,
+                                )
+                            except TimeoutError:
+                                logger.warning(
+                                    "Run drain terminal observability exceeded the %.1fs budget; %d run(s) may need recovery",
+                                    timeout,
+                                    len(persisted_terminal_records),
+                                )
 
         if pending:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
