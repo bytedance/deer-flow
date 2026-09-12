@@ -75,6 +75,10 @@ deer-flow/
     └── custom/                # Custom skills (gitignored)
 ```
 
+ATX outline closing markers use a linear suffix scan; do not use unanchored
+whitespace regex searches on unbounded uploaded headings. The long-heading
+regression exercises the production extractor under a generous process deadline.
+
 ## Important Development Guidelines
 
 ### Documentation Update Policy
@@ -333,11 +337,11 @@ Title fallback: result URL, then request URL.
 
 ### File Upload
 
-Multi-file uploads convert documents; outlines skip fenced code:
+Outlines use ATX syntax (1–6 hashes, space/tab separator, ≤3 leading spaces), strip closing hashes and skip fenced code.
 - Endpoint: `POST /api/threads/{thread_id}/uploads`
 - Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
-- Rejects directory inputs before copying so uploads stay all-or-nothing
-- Reuses one conversion worker per request when called from an active event loop
+- Rejects directories before copying to keep uploads all-or-nothing
+- One conversion worker per request when called from an active event loop
 - Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
 - Duplicate filenames within one request get `_N` suffixes to prevent overwrites.
 - Gateway HTTP uploads stage bytes as `.upload-*.part` files and atomically replace the destination only after size validation. These staging files are hidden from upload listings, agent upload context, and sandbox listing/search tools, and swept on Gateway startup if a hard crash leaves one behind.

@@ -540,6 +540,17 @@ export const zhCN: Translations = {
       failed: "已失败",
       cancelled: "已取消",
     },
+    history: {
+      navigation: "执行记录分页",
+      newer: "较新记录",
+      older: "更早记录",
+      latest: "最新记录",
+      page: "第 {page} 页",
+      paused: "浏览历史页时暂停自动刷新，返回最新记录可查看当前执行情况。",
+      loading: "正在加载执行记录…",
+      loadFailed: "无法加载执行记录。",
+      retry: "重试加载",
+    },
     runTrigger: { scheduled: "定时", manual: "手动" },
     runStatus: {
       queued: "排队中",

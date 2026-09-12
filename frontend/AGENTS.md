@@ -44,6 +44,14 @@ Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
+The dedicated `run-history.ts` hook replaces the unpaged runs hook. Show counts
+only after a successful history read, never during initial loading or errors.
+Scheduled run history uses task/page query keys and the existing live offset API.
+Fetch 51 rows to display 50 plus a next-page sentinel; never append pages. Only
+page zero polls or refreshes on focus/reconnect. Task switches reset to page zero,
+and consumed AbortSignals cancel obsolete reads. Live offsets are not snapshots;
+explicit mutations or navigation may observe newly inserted runs.
+
 ## Architecture
 
 ```
