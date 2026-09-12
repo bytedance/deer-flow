@@ -425,6 +425,10 @@ start
         assert "Docker socket not found" in result.stdout
 
 
+@pytest.mark.skipif(
+    Path("/var/run/docker.sock").is_socket(),
+    reason="Host has real /var/run/docker.sock",
+)
 def test_aio_dood_socket_preflight_rejects_windows_when_docker_unreachable():
     """Windows Git Bash must fail if Docker daemon is not reachable."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -572,6 +576,10 @@ def test_aio_deploy_socket_preflight_rejects_missing_custom_socket_on_windows(tm
     assert "Docker socket not found" in result.stdout + result.stderr
 
 
+@pytest.mark.skipif(
+    Path("/var/run/docker.sock").is_socket(),
+    reason="Host has real /var/run/docker.sock",
+)
 def test_aio_deploy_socket_preflight_rejects_windows_when_docker_unreachable(tmp_path):
     """deploy.sh on Windows Git Bash fails if Docker daemon is not reachable."""
     worktree = _setup_deploy_worktree(tmp_path)
