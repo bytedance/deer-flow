@@ -56,6 +56,7 @@ from deerflow.runtime.context_compaction import (
     ThreadCompactionResult,
     compact_thread_context,
 )
+from deerflow.runtime.context_keys import checkpoint_agent_binding_metadata
 from deerflow.runtime.events.message_seq import stamp_messages_with_seq
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -548,7 +549,7 @@ class ThreadCompactRequest(BaseModel):
 
     force: bool = Field(default=True, description="Run compaction even if automatic summarization thresholds are not met")
     keep: ContextSize | None = Field(default=None, description="Optional retention policy for this compaction only")
-    agent_name: str | None = Field(default=None, max_length=128, description="Optional custom agent name for memory attribution")
+    agent_name: str | None = Field(default=None, max_length=128, description="Optional legacy agent hint for model selection; memory policy is bound to checkpoint metadata")
     model_name: str | None = Field(default=None, max_length=128, description="Optional model to summarize with; resolved request override -> custom-agent model -> default, mirroring run model selection")
 
 
@@ -1023,6 +1024,7 @@ async def _branch_thread_with_reservation(
     # Stamp both synthetic checkpoints with the branch-creation time because
     # serializers fall back to metadata when snapshot.created_at is absent.
     checkpoint_metadata_updates = {
+        **checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None)),
         **branch_metadata,
         "source": "branch",
         "updated_at": now,
@@ -1487,8 +1489,14 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     updates = {key: Overwrite(value) if key in reducer_fields else value for key, value in values.items()}
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            source_snapshot = await accessor.aget(read_config)
+            update_config = {
+                **read_config,
+                "configurable": dict(read_config.get("configurable", {})),
+                "metadata": checkpoint_agent_binding_metadata(getattr(source_snapshot, "metadata", None)),
+            }
             updated_config = await accessor.aupdate(
-                read_config,
+                update_config,
                 updates,
                 as_node=mutation_node,
             )

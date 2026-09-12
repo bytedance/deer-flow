@@ -129,6 +129,7 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     tool_prompt = prompt_module.apply_prompt_template(app_config=tool_config)
+    stateless_agent_prompt = prompt_module.apply_prompt_template(app_config=tool_config, memory_enabled=False)
     middleware_prompt = prompt_module.apply_prompt_template(app_config=middleware_config)
 
     assert "<memory_tool_system>" in tool_prompt
@@ -136,6 +137,7 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     assert "memory_add" in tool_prompt
     assert "agent facts are not injected automatically" in tool_prompt
     assert "When present, the injected <memory> block contains only global user and history summaries" in tool_prompt
+    assert "<memory_tool_system>" not in stateless_agent_prompt
     assert "<memory_tool_system>" not in middleware_prompt
 
 

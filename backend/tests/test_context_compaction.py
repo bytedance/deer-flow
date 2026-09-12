@@ -14,10 +14,11 @@ from deerflow.agents.middlewares.summarization_middleware import SummaryGenerati
 from deerflow.runtime import context_compaction
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_compaction import ContextCompactionFailed, compact_thread_context
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
 
 
 class _FakeAccessor:
-    def __init__(self, values: dict) -> None:
+    def __init__(self, values: dict, *, metadata: dict | None = None) -> None:
         self.snapshot = SimpleNamespace(
             values=values,
             config={
@@ -27,7 +28,7 @@ class _FakeAccessor:
                     "checkpoint_ns": "",
                 }
             },
-            metadata={"step": 4, "created_at": "2026-07-06T00:00:00+00:00"},
+            metadata=metadata if metadata is not None else {"step": 4, "created_at": "2026-07-06T00:00:00+00:00"},
         )
         self.update_args = None
 
@@ -144,6 +145,9 @@ async def test_compact_thread_context_real_mutation_graph_finishes_without_sched
         thread_id="thread-real-compaction",
         as_node="seed",
     )
+    seed_config["metadata"] = {
+        CHECKPOINT_AGENT_NAME_METADATA_KEY: DEFAULT_AGENT_NAME_METADATA_VALUE,
+    }
     await seed_accessor.aupdate(
         seed_config,
         {
@@ -174,6 +178,7 @@ async def test_compact_thread_context_real_mutation_graph_finishes_without_sched
     assert [message.id for message in snapshot.values["messages"]] == ["h2"]
     assert snapshot.values["summary_text"] == "COMPRESSED SUMMARY"
     assert snapshot.next == ()
+    assert snapshot.metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] == DEFAULT_AGENT_NAME_METADATA_VALUE
 
 
 @pytest.mark.asyncio
@@ -436,3 +441,214 @@ async def test_compact_thread_context_threads_selected_model_to_factory(monkeypa
     # 3. No request model, no agent → default.
     await compact_thread_context(_FakeAccessor({"messages": messages}), "thread-1", app_config=app_config, user_id="user-1")
     assert captured["run_model_name"] == "default-model"
+
+
+@pytest.mark.asyncio
+async def test_manual_compaction_skips_memory_flush_for_opted_out_agent(monkeypatch):
+    """The /compact path must honor the Custom Agent's complete memory opt-out."""
+    import deerflow.config.agents_config as agents_config
+
+    config_reads: list[tuple[str, str | None]] = []
+
+    def _load_agent_config(name, *, user_id=None):
+        config_reads.append((name, user_id))
+        return SimpleNamespace(model="agent-model", memory_enabled=False)
+
+    monkeypatch.setattr(
+        agents_config,
+        "load_agent_config",
+        _load_agent_config,
+    )
+    app_config = _model_app_config("default-model", "agent-model", "requested-model")
+    captured: dict[str, object] = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return _FakeCompactionMiddleware()
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", _capture)
+    messages = [HumanMessage(content="old"), AIMessage(content="answer"), HumanMessage(content="new")]
+
+    result = await compact_thread_context(
+        _FakeAccessor(
+            {"messages": messages},
+            metadata={CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+        ),
+        "thread-1",
+        app_config=app_config,
+        user_id="user-1",
+        agent_name="stateless-worker",
+        model_name="requested-model",
+    )
+
+    assert result.compacted is True
+    assert captured["run_model_name"] == "requested-model"
+    assert captured["skip_memory_flush"] is True
+    assert config_reads == [("stateless-worker", "user-1")]
+
+
+@pytest.mark.asyncio
+async def test_manual_compaction_fails_closed_when_agent_policy_cannot_load(monkeypatch):
+    """An unreadable Custom Agent config must not authorize a durable write."""
+    import deerflow.config.agents_config as agents_config
+
+    def _raise(*_args, **_kwargs):
+        raise OSError("agent config unavailable")
+
+    monkeypatch.setattr(agents_config, "load_agent_config", _raise)
+    app_config = _model_app_config("default-model", "requested-model")
+    captured: dict[str, object] = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return _FakeCompactionMiddleware()
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", _capture)
+    messages = [HumanMessage(content="old"), AIMessage(content="answer"), HumanMessage(content="new")]
+
+    result = await compact_thread_context(
+        _FakeAccessor(
+            {"messages": messages},
+            metadata={CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+        ),
+        "thread-1",
+        app_config=app_config,
+        user_id="user-1",
+        agent_name="stateless-worker",
+        model_name="requested-model",
+    )
+
+    assert result.compacted is True
+    assert captured["run_model_name"] == "requested-model"
+    assert captured["skip_memory_flush"] is True
+
+
+@pytest.mark.parametrize(
+    "request_agent_name",
+    [None, "memory-enabled-impostor"],
+    ids=["omitted-agent", "forged-agent"],
+)
+@pytest.mark.asyncio
+async def test_manual_compaction_uses_checkpoint_agent_for_memory_policy(monkeypatch, request_agent_name):
+    """The state-producing run, not the request body, owns memory policy."""
+    import deerflow.config.agents_config as agents_config
+
+    config_reads: list[str] = []
+
+    def _load_agent_config(name, **_kwargs):
+        config_reads.append(name)
+        if name != "stateless-worker":
+            raise AssertionError(f"untrusted agent name reached policy lookup: {name}")
+        return SimpleNamespace(model="agent-model", memory_enabled=False)
+
+    monkeypatch.setattr(agents_config, "load_agent_config", _load_agent_config)
+    captured: dict[str, object] = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return _FakeCompactionMiddleware()
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", _capture)
+    messages = [HumanMessage(content="old"), AIMessage(content="answer"), HumanMessage(content="new")]
+    accessor = _FakeAccessor(
+        {"messages": messages},
+        metadata={CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+    )
+
+    result = await compact_thread_context(
+        accessor,
+        "thread-1",
+        app_config=_model_app_config("default-model", "agent-model"),
+        user_id="user-1",
+        agent_name=request_agent_name,
+    )
+
+    assert result.compacted is True
+    assert captured["skip_memory_flush"] is True
+    assert config_reads == ["stateless-worker"]
+    assert accessor.update_args[0]["metadata"][CHECKPOINT_AGENT_NAME_METADATA_KEY] == "stateless-worker"
+
+
+@pytest.mark.asyncio
+async def test_manual_compaction_uses_checkpoint_agent_for_flush_bucket(monkeypatch):
+    """A trusted policy and its memory bucket must come from the same binding."""
+    import deerflow.config.agents_config as agents_config
+
+    config_reads: list[str] = []
+
+    def _load_agent_config(name, **_kwargs):
+        config_reads.append(name)
+        return SimpleNamespace(model=None, memory_enabled=True)
+
+    monkeypatch.setattr(agents_config, "load_agent_config", _load_agent_config)
+    middleware = _FakeCompactionMiddleware()
+    captured: dict[str, object] = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return middleware
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", _capture)
+    messages = [HumanMessage(content="old"), AIMessage(content="answer"), HumanMessage(content="new")]
+
+    await compact_thread_context(
+        _FakeAccessor(
+            {"messages": messages},
+            metadata={CHECKPOINT_AGENT_NAME_METADATA_KEY: "real-agent"},
+        ),
+        "thread-1",
+        app_config=_model_app_config("default-model"),
+        user_id="user-1",
+        agent_name="memory-enabled-impostor",
+    )
+
+    assert captured["skip_memory_flush"] is False
+    assert config_reads == ["real-agent"]
+    assert middleware.runtime_contexts == [
+        {"thread_id": "thread-1", "user_id": "user-1", "agent_name": "real-agent"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_metadata", "request_agent_name", "expected_skip"),
+    [
+        ({}, "memory-enabled-impostor", True),
+        ({CHECKPOINT_AGENT_NAME_METADATA_KEY: None}, "memory-enabled-impostor", True),
+        ({CHECKPOINT_AGENT_NAME_METADATA_KEY: "../invalid"}, "memory-enabled-impostor", True),
+        ({CHECKPOINT_AGENT_NAME_METADATA_KEY: DEFAULT_AGENT_NAME_METADATA_VALUE}, "memory-enabled-impostor", False),
+    ],
+    ids=["legacy-missing", "non-string-binding", "invalid-binding", "bound-default-agent"],
+)
+@pytest.mark.asyncio
+async def test_manual_compaction_fails_closed_without_valid_checkpoint_agent_binding(
+    monkeypatch,
+    checkpoint_metadata,
+    request_agent_name,
+    expected_skip,
+):
+    """Only an explicit valid checkpoint binding may authorize memory flush."""
+    import deerflow.config.agents_config as agents_config
+
+    monkeypatch.setattr(
+        agents_config,
+        "load_agent_config",
+        lambda name, **_kwargs: SimpleNamespace(model=None, memory_enabled=True),
+    )
+    captured: dict[str, object] = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return _FakeCompactionMiddleware()
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", _capture)
+    messages = [HumanMessage(content="old"), AIMessage(content="answer"), HumanMessage(content="new")]
+
+    await compact_thread_context(
+        _FakeAccessor({"messages": messages}, metadata=checkpoint_metadata),
+        "thread-1",
+        app_config=_model_app_config("default-model"),
+        user_id="user-1",
+        agent_name=request_agent_name,
+    )
+
+    assert captured["skip_memory_flush"] is expected_skip
