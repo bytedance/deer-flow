@@ -45,7 +45,15 @@ _CODE_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 # ATX headings require 1-6 hashes and a space/tab separator (or end of line).
 # Match the original indentation so indented code cannot become a heading.
 _ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*))?$")
-_ATX_CLOSING_RE = re.compile(r"(?:^|[ \t]+)#+[ \t]*$")
+
+
+def _strip_atx_closing_hashes(raw: str) -> str:
+    """Remove a whitespace-separated terminal hash run in linear time."""
+    trimmed = raw.rstrip(" \t")
+    prefix = trimmed.rstrip("#")
+    if len(prefix) < len(trimmed) and (not prefix or prefix[-1] in " \t"):
+        return prefix.rstrip(" \t")
+    return trimmed
 
 
 def _clean_bold_title(raw: str) -> str:
@@ -125,7 +133,7 @@ def extract_outline(md_path: Path) -> list[dict]:
 
                 # Style 1: standard Markdown heading
                 if m := _ATX_HEADING_RE.fullmatch(line.rstrip("\r\n")):
-                    title = _clean_bold_title(_ATX_CLOSING_RE.sub("", m.group(1) or "").strip())
+                    title = _clean_bold_title(_strip_atx_closing_hashes(m.group(1) or "").strip())
                     if title:
                         outline.append({"title": title, "line": lineno})
 

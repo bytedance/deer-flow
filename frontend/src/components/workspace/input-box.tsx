@@ -300,6 +300,7 @@ export function InputBox({
   onPrepareThread,
   onSubmit,
   onStop,
+  canStopStreaming = true,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -356,6 +357,13 @@ export function InputBox({
     options?: InputBoxSubmitOptions,
   ) => void | Promise<void>;
   onStop?: () => void;
+  /**
+   * Whether the caller's role holds `runs:cancel` (RFC #4063 Phase 4).
+   * Defaults to true so callers that don't resolve permissions (pre-Phase-4
+   * backends, storybook) keep today's behavior; the Gateway route guard
+   * stays the enforcement point.
+   */
+  canStopStreaming?: boolean;
 }) {
   const { locale, t } = useI18n();
   const queryClient = useQueryClient();
@@ -1163,6 +1171,14 @@ export function InputBox({
   );
 
   const handleStopStreaming = useCallback(() => {
+    // Roles denied runs:cancel must not interrupt the in-progress turn —
+    // the Gateway would 403 the cancel anyway. The submit-button click is
+    // the only live entry point today (handleSubmit returns early with the
+    // pleaseWaitStreaming toast while streaming), but gate in the handler
+    // as defense-in-depth so any future stop path is covered too.
+    if (!canStopStreaming) {
+      return;
+    }
     // Mark the in-progress turn as user-interrupted so the next
     // streaming->ready transition does not suggest follow-ups for it.
     stoppedByUserRef.current = true;
@@ -1170,7 +1186,7 @@ export function InputBox({
     setFollowupsHidden(true);
     setFollowupsLoading(false);
     onStop?.();
-  }, [onStop]);
+  }, [canStopStreaming, onStop]);
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
@@ -1367,6 +1383,9 @@ export function InputBox({
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
   const composerLocked = isComposerDisabled || polishingInput;
+  // A denied runs:cancel role sees a disabled stop affordance, not a removed
+  // one — the composer must still show that a turn is in flight.
+  const stopDenied = status === "streaming" && !canStopStreaming;
   const inputPolishUndoAvailable =
     !polishingInput &&
     inputPolishUndo !== null &&
@@ -2739,9 +2758,21 @@ export function InputBox({
             </ModelSelector>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={composerLocked}
+              disabled={composerLocked || stopDenied}
               variant="outline"
               status={status}
+              // A bare disabled stop square reads as a broken composer;
+              // explain the permission boundary (native title, since a
+              // Radix tooltip won't fire on a disabled button). Spread
+              // conditionally: an explicitly-undefined aria-label would
+              // clobber PromptInputSubmit's default aria-label="Submit"
+              // and strip the submit control's accessible name.
+              {...(stopDenied
+                ? {
+                    "aria-label": t.inputBox.stopStreamingUnavailable,
+                    title: t.inputBox.stopStreamingUnavailable,
+                  }
+                : {})}
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();

@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaRepository
 
@@ -24,11 +25,13 @@ class TestThreadMetaRepository:
         record = await repo.create("t1")
         assert record["thread_id"] == "t1"
         assert record["status"] == "idle"
+        assert len(record["incarnation"]) == 32
         assert "created_at" in record
 
         fetched = await repo.get("t1")
         assert fetched is not None
         assert fetched["thread_id"] == "t1"
+        assert fetched["incarnation"] == record["incarnation"]
 
     @pytest.mark.anyio
     async def test_create_with_assistant_id(self, repo):
@@ -45,6 +48,46 @@ class TestThreadMetaRepository:
     async def test_create_with_metadata(self, repo):
         record = await repo.create("t1", metadata={"key": "value"})
         assert record["metadata"] == {"key": "value"}
+
+    @pytest.mark.anyio
+    async def test_duplicate_create_raises_integrity_error(self, repo):
+        await repo.create("t1", display_name="original")
+
+        with pytest.raises(IntegrityError):
+            await repo.create("t1", display_name="replacement")
+
+        record = await repo.get("t1")
+        assert record is not None
+        assert record["display_name"] == "original"
+
+    @pytest.mark.anyio
+    async def test_claim_unowned_only_updates_null_owner(self, repo):
+        legacy = await repo.create("legacy", user_id=None)
+        await repo.create("owned", user_id="original-owner")
+
+        assert await repo.claim_unowned("missing", "owner-a") is False
+        assert await repo.claim_unowned("owned", "owner-a") is False
+        assert await repo.claim_unowned("legacy", "owner-a") is True
+        assert await repo.claim_unowned("legacy", "owner-b") is False
+
+        owned = await repo.get("owned", user_id=None)
+        claimed = await repo.get("legacy", user_id=None)
+        assert owned["user_id"] == "original-owner"
+        assert claimed["user_id"] == "owner-a"
+        assert claimed["updated_at"] == legacy["updated_at"]
+
+    @pytest.mark.anyio
+    async def test_concurrent_claim_unowned_has_exactly_one_winner(self, repo):
+        await repo.create("legacy-race", user_id=None)
+
+        outcomes = await asyncio.gather(
+            repo.claim_unowned("legacy-race", "owner-a"),
+            repo.claim_unowned("legacy-race", "owner-b"),
+        )
+
+        assert sorted(outcomes) == [False, True]
+        record = await repo.get("legacy-race", user_id=None)
+        assert record["user_id"] in {"owner-a", "owner-b"}
 
     @pytest.mark.anyio
     async def test_update_display_name_can_remove_stale_metadata_atomically(self, repo):
@@ -587,6 +630,7 @@ class TestThreadMetaRepository:
         p = await projects.create(name="P", user_id="u1")
         record = await repo.create("t1", user_id="u1", project_id=p["id"])
         assert record["metadata"]["deerflow_project_id"] == p["id"]
+        assert len(record["incarnation"]) == 32
 
         with pytest.raises(ProjectNotAssignableError):
             await repo.create("t2", user_id="u1", project_id="missing")
