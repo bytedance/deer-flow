@@ -38,6 +38,7 @@ export const zhCN: Translations = {
     custom: "自定义",
     notAvailableInDemoMode: "在演示模式下不可用",
     loading: "加载中...",
+    error: "错误：",
     version: "版本",
     lastUpdated: "最后更新",
     code: "代码",
@@ -123,6 +124,35 @@ export const zhCN: Translations = {
     previewFailed: "无法预览此文件，但仍可下载原始文件。",
     viewSource: "查看原始文件",
     missingTarget: "该链接没有指明要展示哪个文件。",
+  },
+
+  artifactTable: {
+    title: "表格预览",
+    header: "首行作为表头",
+    column: (index) => `列 ${index}`,
+    total: (count) => `共 ${count} 行`,
+    sample: (count) => `预览前 ${count} 行`,
+    range: (start, end, limited) =>
+      `${limited ? "预览 " : ""}${start}–${end} 行`,
+    columnsLimited: "仅展示预览样本的前 50 列。",
+    uneven: "部分行的字段数量不同，缺失字段已标记。",
+    empty: "文件为空。",
+    incomplete: "当前预览范围内没有完整记录，请查看源码或下载文件。",
+    failed: "无法可靠预览此表格，请查看源码或下载文件。",
+    retry: "重新预览",
+    previous: "上一页",
+    next: "下一页",
+    cell: (row, column) => `查看第 ${row} 行、第 ${column} 列`,
+    cellValue: "单元格内容",
+    missing: "缺失",
+    savedVersion: "打开或下载的是已保存文件，当前草稿尚未保存。",
+  },
+
+  artifactArchive: {
+    downloadCurrent: (count) => `下载当前版本（${count} 个文件）`,
+    currentVersionNotice:
+      "文件列表来自此回复；内容为当前版本，可能已发生变化。",
+    downloadFailed: "文件压缩包下载失败。",
   },
 
   // Citations
@@ -276,6 +306,7 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    stopStreamingUnavailable: "你的角色无权停止正在运行的回合。",
   },
 
   // Sidebar
@@ -288,6 +319,37 @@ export const zhCN: Translations = {
     agents: "智能体",
     scheduledTasks: "定时任务",
     agentsDisabledTooltip: "功能未启用",
+  },
+  // Sidebar projects section
+  projects: {
+    title: "项目",
+    newProject: "新建项目",
+    namePlaceholder: "项目名称",
+    moveToProject: "移动到项目",
+    moveToProjectHint: "移动对话不会移除其中已有的内容。",
+    removeFromProject: "移出项目",
+    archive: "归档",
+    restore: "恢复",
+    deleteProject: "删除项目",
+    deleteProjectConfirm:
+      "删除项目将解除其对话的关联。对话、历史记录及文件均不会被删除。",
+    archived: "已归档",
+    empty: "该项目下还没有对话。",
+    newChat: "新建对话",
+    create: "创建",
+    createFailed: "创建项目失败",
+    moveFailed: "移动对话失败",
+    archiveFailed: "归档项目失败",
+    restoreFailed: "恢复项目失败",
+    deleteFailed: "删除项目失败",
+    switchToGrouped: "按项目分组对话",
+    switchToFlat: "显示平铺对话列表",
+    threads: "对话",
+    threadsLoadFailed: "无法加载项目对话",
+    untitled: "未命名",
+    settings: "设置",
+    notFound: "项目不存在或已被删除。",
+    projectUnavailable: "无法关联到该项目，消息未发送。请重试。",
   },
 
   backgroundTasks: {
@@ -365,6 +427,7 @@ export const zhCN: Translations = {
     scheduleType: {
       cron: "重复",
       once: "单次",
+      interval: "间隔",
     },
     preset: {
       label: "重复方式",
@@ -383,6 +446,11 @@ export const zhCN: Translations = {
       cronPlaceholder: "0 9 * * *",
       runAt: "运行时间",
       timezone: "时区",
+      intervalAmount: "每",
+      intervalUnitSeconds: "秒",
+      intervalUnitMinutes: "分钟",
+      intervalUnitHours: "小时",
+      intervalMinHint: "最短 60 秒（默认服务端下限）。",
     },
     weekdays: {
       mon: "周一",
@@ -399,6 +467,8 @@ export const zhCN: Translations = {
       title: "创建定时任务",
       taskTitle: "任务标题",
       prompt: "提示词",
+      agent: "Agent",
+      leadAgent: "默认 Agent（lead_agent）",
       submit: "创建",
       fillRequired: "请填写所有必填项",
     },
@@ -419,9 +489,11 @@ export const zhCN: Translations = {
       allTypes: "全部类型",
       cron: "定时",
       once: "单次",
+      interval: "间隔",
     },
     detail: {
       contextMode: "上下文模式",
+      agent: "Agent",
       thread: "线程",
       lastThread: "上个线程",
       schedule: "调度",
@@ -600,6 +672,21 @@ export const zhCN: Translations = {
 
   // Chats
   chats: {
+    noActiveChats: "暂无近期会话",
+    activeChats: "近期会话",
+    archivedChats: "已归档",
+    archiveChat: "归档",
+    restoreChat: "恢复",
+    archiveSuccess: "已归档",
+    restoreSuccess: "已恢复",
+    archiveFailed: "更新会话归档状态失败",
+    archiveDescription:
+      "归档会保留消息和文件，不会停止运行中的任务或暂停定时任务。",
+    undoArchive: "撤销",
+    noArchivedChats: "暂无已归档会话",
+    noMatchingChats: "已加载的会话中没有匹配结果",
+    loadChatsFailed: "加载会话失败",
+    retryLoadChats: "重试",
     searchChats: "搜索对话",
     branchLabel: (title, parentTitle) => `${title}，分叉自 ${parentTitle}`,
     loadMoreToSearch: "加载更多以搜索更早的对话",
@@ -681,6 +768,15 @@ export const zhCN: Translations = {
 
   // Tool calls
   toolCalls: {
+    details: "工具详情",
+    toolName: "工具名称",
+    callId: "调用 ID",
+    input: "输入",
+    result: "结果",
+    error: "错误",
+    noResult: "尚未收到结果",
+    emptyResult: "空结果",
+    truncated: "预览已截断；复制仅包含当前显示的内容。",
     moreSteps: (count: number) => `查看其他 ${count} 个步骤`,
     lessSteps: "隐藏步骤",
     executeCommand: "执行命令",
@@ -908,6 +1004,33 @@ export const zhCN: Translations = {
       description: "管理 MCP 工具的配置和启用状态。",
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
       empty: "暂无 MCP 工具。",
+      addServer: "添加服务器",
+      addServerDescription:
+        "粘贴 MCP 服务器提供的 JSON 定义。直接的服务器映射和带 `mcpServers` 外层的写法都可以。已有名称请通过“编辑”修改。",
+      addServerPlaceholder: `{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"]
+    }
+  }
+}`,
+      serverDefinitionLabel: "MCP 服务器 JSON 定义",
+      definitionEmpty: "请粘贴 MCP 服务器定义。",
+      definitionInvalidJson: "请输入有效的 JSON。",
+      definitionRootNotObject: "请输入描述一个或多个 MCP 服务器的 JSON 对象。",
+      definitionNoServers: "定义中未找到 MCP 服务器。",
+      definitionServerNotObject: "服务器“{name}”的配置必须是 JSON 对象。",
+      editServer: "编辑 MCP 服务器",
+      editServerDescription:
+        "编辑“{name}”的完整 JSON 定义。服务器名称不可修改；如需重命名，请添加新服务器后移除当前服务器。",
+      editSingleServer: "每次只能编辑一个 MCP 服务器。",
+      editServerNameMismatch: "编辑时请保留现有服务器名称“{name}”。",
+      serverAlreadyExists: "MCP 服务器“{name}”已存在，请使用“编辑”。",
+      removeServer: "移除 MCP 服务器",
+      removeServerDescription:
+        "确定从 MCP 配置中移除“{name}”吗？它的工具将不再提供给智能体。",
+      unnamedServer: "（空名称）",
     },
     subagents: {
       title: "子智能体",
@@ -1157,6 +1280,59 @@ export const zhCN: Translations = {
       },
     },
     skills: {
+      exportPrevious: "上 50 项",
+      exportNotices: {
+        skill_export_yaml_alias:
+          "导出暂不支持 YAML 别名，请在 SKILL.md 中改为明确的值。",
+        skill_export_yaml_complexity:
+          "YAML 声明的嵌套层级或结构复杂度超出导出限制。",
+        skill_export_invalid_declaration:
+          "已忽略格式无效的凭据声明，请检查 SKILL.md。",
+        skill_export_link: "外链文件或目录暂不支持导出。",
+        skill_export_unsupported_node:
+          "仅支持普通文件和目录；硬链接和特殊文件无法导出。",
+        skill_export_invalid_path: "此路径不符合跨平台要求，或与其他路径重名。",
+        skill_export_nested_skill: "安装器不接受嵌套的 SKILL.md 文件。",
+        skill_export_executable_binary: "安装器不接受可执行二进制文件。",
+        skill_export_invalid_frontmatter:
+          "SKILL.md 的声明必须有效，且名称须与技能目录一致。",
+        skill_export_sensitive_filename:
+          "此文件名可能对应本地凭据或代码仓库元数据。",
+        skill_export_platform_declarations:
+          "请在目标环境重新配置已声明的工具和凭据。",
+      },
+      exportSkill: "导出",
+      exportTitle: "导出技能",
+      exportDescription: "将当前已保存的技能下载为 .skill 文件。",
+      exportLoading: "正在准备文件清单…",
+      exportFiles: "文件",
+      exportDirectories: "目录",
+      exportSize: "未压缩体积",
+      exportContents: "包内文件",
+      exportMore: "下 50 项",
+      exportRequirements: "已声明的环境要求",
+      exportCompatibility: "运行环境",
+      exportTools: "允许的工具",
+      exportSecrets: "凭据名称",
+      exportOptional: "可选",
+      exportRequired: "必需",
+      exportUndeclared: "未声明",
+      exportScope:
+        "包含此技能目录内的全部文件。账号配置、对话和目录外的历史不会导出；目标环境需重新配置工具与凭据。",
+      exportWarnings: "请检查包内文件",
+      exportWarningDescription:
+        "以下提示来自文件名和声明。写在包内文件中的秘密也会原样导出；此操作不进行安全扫描。",
+      exportBlocked: "此技能包暂时无法导出",
+      exportDownload: "下载 .skill",
+      exportDownloading: "正在准备下载…",
+      exportHandedOff: "文件已交给浏览器下载。",
+      exportChanged: "技能已修改，请刷新文件清单后下载。",
+      exportRefresh: "刷新文件清单",
+      exportFailed: "导出失败，请重试。",
+      exportBusy: "当前导出任务已满，请稍后重试。",
+      exportTimeout: "准备技能包超时，请稍后重试。",
+      exportLimit: "技能包超出导出的大小、数量或路径限制。",
+      exportNotFound: "此自定义技能已不存在，请刷新技能列表。",
       title: "技能",
       description: "管理 Agent Skill 配置和启用状态。",
       createSkill: "新建技能",

@@ -127,24 +127,24 @@ src/
 
 ## Scripts
 
-| Command             | Description                                                        |
-| ------------------- | ------------------------------------------------------------------ |
-| `pnpm dev`          | Start development server (Webpack on Windows, Turbopack elsewhere) |
-| `pnpm build`        | Build for production                                               |
-| `pnpm start`        | Start production server                                            |
-| `pnpm test`         | Run unit tests with Rstest                                         |
-| `pnpm test:e2e`     | Run E2E tests with Playwright                                      |
-| `pnpm format`       | Check formatting with Prettier                                     |
-| `pnpm format:write` | Apply formatting with Prettier                                     |
-| `pnpm lint`         | Run ESLint                                                         |
-| `pnpm lint:fix`     | Fix ESLint issues                                                  |
-| `pnpm typecheck`    | Run TypeScript type checking                                       |
-| `pnpm check`        | Run both lint and typecheck                                        |
+| Command             | Description                           |
+| ------------------- | ------------------------------------- |
+| `pnpm dev`          | Start development server with Webpack |
+| `pnpm build`        | Build for production                  |
+| `pnpm start`        | Start production server               |
+| `pnpm test`         | Run unit tests with Rstest            |
+| `pnpm test:e2e`     | Run E2E tests with Playwright         |
+| `pnpm format`       | Check formatting with Prettier        |
+| `pnpm format:write` | Apply formatting with Prettier        |
+| `pnpm lint`         | Run ESLint                            |
+| `pnpm lint:fix`     | Fix ESLint issues                     |
+| `pnpm typecheck`    | Run TypeScript type checking          |
+| `pnpm check`        | Run both lint and typecheck           |
 
 ## Development Notes
 
 - Uses pnpm workspaces (see `packageManager` in package.json)
-- Turbopack is used by default in development except on Windows, where Webpack avoids known Turbopack runtime instability. Set `DEER_FLOW_DEV_BUNDLER=turbo` or `DEER_FLOW_DEV_BUNDLER=webpack` to override the platform default for local diagnosis.
+- Webpack is the default development bundler until the upstream Turbopack PostCSS worker leak is fixed in a stable Next.js release (#5132). Set `DEER_FLOW_DEV_BUNDLER=turbo` to opt in to Turbopack for local diagnosis, or `DEER_FLOW_DEV_BUNDLER=webpack` to select Webpack explicitly. Reconsider the default after the stable fix is verified on macOS arm64 and Linux.
 - Environment validation can be skipped with `SKIP_ENV_VALIDATION=1` (useful for Docker)
 - Backend API URLs are optional; nginx proxy is used by default in development
 

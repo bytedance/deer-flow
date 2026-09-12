@@ -52,15 +52,17 @@ class BackgroundTaskState(TypedDict):
 class ViewedImageData(TypedDict):
     """Metadata for a viewed image file.
 
-    Only lightweight metadata is persisted in checkpoint state; the actual
-    image bytes are read on-demand from disk when the model needs them.
-    This avoids duplicating large base64 payloads across every checkpoint
-    (see #4138).
+    Only lightweight metadata is persisted in checkpoint state. Image bytes are
+    read on-demand from the active sandbox or from a synchronized host copy whose
+    size and SHA-256 match the previously viewed bytes. This avoids duplicating
+    large base64 payloads across every checkpoint (see #4138).
     """
 
     mime_type: str
     size: int
     actual_path: str
+    sha256: str
+    source_sandbox_id: NotRequired[str]
 
 
 def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> SandboxState | None:
@@ -180,6 +182,9 @@ class DelegationEntry(TypedDict):
     # RFC #4651 PR2: parent-side citation-check verdict (advisory execution
     # evidence), stamped at task write-back; absent on legacy history.
     receipt_verdict: NotRequired[dict]
+    # RFC #4651 PR4: deterministic acceptance-checklist verdict, same
+    # provenance as receipt_verdict.
+    acceptance_verdict: NotRequired[dict]
     created_at: str
 
 

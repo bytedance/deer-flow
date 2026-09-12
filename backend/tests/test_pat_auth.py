@@ -1,8 +1,9 @@
 """Integration tests for PAT authentication (#4849).
 
 Covers credential precedence in AuthMiddleware, the CSRF boundary for
-Bearer-authenticated requests, scope intersection, PAT management routes,
-and the self-protection rules (a PAT may not manage PATs or auth state).
+Bearer-authenticated requests and for the safe-method stream join (#5092),
+scope intersection, PAT management routes, and the self-protection rules
+(a PAT may not manage PATs or auth state).
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from starlette.testclient import TestClient
@@ -113,6 +114,20 @@ def _make_pat_app(with_pat_repo: bool = True):
     @require_permission("runs", "read")
     async def cancel_then_stream(thread_id: str, run_id: str, request: Request, action: str | None = None):
         require_cancel_permission_when_action(request, action)
+        return {"ok": True}
+
+    # Mirrors the real GET-only join surface (thread_runs.py
+    # join_existing_run_stream): registers the production route dependency
+    # that rejects cancel actions before thread ownership or run lookup, so
+    # the guard is exercised through the production middleware order above.
+    from app.gateway.routers.thread_runs import _reject_get_stream_action
+
+    @app.get(
+        "/api/threads/{thread_id}/runs/{run_id}/stream",
+        dependencies=[Depends(_reject_get_stream_action)],
+    )
+    @require_permission("runs", "read")
+    async def join_stream(thread_id: str, run_id: str, request: Request):
         return {"ok": True}
 
     # Mirrors the real run-creation entrypoints (thread_runs.py / runs.py):
@@ -309,6 +324,26 @@ def test_auth_endpoint_origin_check_not_bypassed_by_bearer(client):
     )
     assert response.status_code == 403
     assert response.json()["detail"] == "Cross-site auth request denied."
+
+
+def test_session_get_stream_action_dies_at_route_gate_not_csrf(client):
+    """#5092 defence-in-depth, end-to-end through the production middleware
+    order: SameSite=Lax still attaches the session cookie to a cross-site
+    top-level GET, and CSRF exempts safe methods — so the route gate is the
+    only thing standing between that navigation and a run cancel. An
+    authenticated GET with ?action=interrupt is answered 405 + Allow: POST by
+    the real _reject_get_stream_action dependency, while the same
+    unauthenticated GET dies at AuthMiddleware's 401 before any route logic
+    runs."""
+    _session_cookie(client)
+    denied = client.get("/api/threads/t1/runs/run-1/stream?action=interrupt")
+    assert denied.status_code == 405
+    assert denied.headers["allow"] == "POST"
+    assert denied.json()["detail"] == "`action` is only supported on POST requests"
+
+    client.cookies.clear()
+    unauthed = client.get("/api/threads/t1/runs/run-1/stream?action=interrupt")
+    assert unauthed.status_code == 401
 
 
 # ── Management routes + self-protection (#4849 point 6) ───────────────────
@@ -524,6 +559,46 @@ def test_pat_runs_policy_admits_exactly_the_mounted_routes():
         ("GET", "/api/threads/t1/runs/r1/transfer"),
     ]:
         assert not is_pat_allowed_route(method, path), f"{method} {path} is not implemented and must stay denied"
+
+
+def test_pat_projects_policy_admits_exactly_the_mounted_routes():
+    """Projects subtree (and the thread move endpoint) follow the same
+    enumerated-no-dead-methods discipline as the runs subtree: every
+    method/path the projects router actually implements is admitted (derived
+    from the mounted router, not a hand-maintained list), and deliberately
+    unimplemented neighbors stay default-denied. A new projects route fails
+    here until explicitly allowlisted; a removed one leaves a dead rule
+    visible."""
+    from fastapi.routing import APIRoute
+
+    from app.gateway.auth.pat import is_pat_allowed_route
+    from app.gateway.routers.projects import router
+
+    def concrete(path: str) -> str:
+        return path.replace("{project_id}", "p1")
+
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        path = concrete(route.path)
+        for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
+            assert is_pat_allowed_route(method, path), f"{method} {path} is implemented but PAT-denied"
+
+    for method, path in [
+        ("PUT", "/api/projects"),
+        ("DELETE", "/api/projects"),
+        ("PUT", "/api/projects/p1"),
+        ("GET", "/api/projects/p1/archive"),
+        ("GET", "/api/projects/p1/restore"),
+        ("POST", "/api/projects/p1/threads"),
+    ]:
+        assert not is_pat_allowed_route(method, path), f"{method} {path} is not implemented and must stay denied"
+
+    # Thread move (POST /api/threads/{id}/move) is admitted for PATs holding
+    # threads:write; other methods on the same path stay denied.
+    move_path = "/api/threads/6f1c2f0e-3b7a-4d2e-9c1a-2b5f0e8a1d3c/move"
+    assert is_pat_allowed_route("POST", move_path) is True
+    assert is_pat_allowed_route("GET", move_path) is False
 
 
 def test_pat_scopes_enforced_on_stateless_run_entry(client):

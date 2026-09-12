@@ -218,10 +218,24 @@ describe("formatThreadAsJSON", () => {
     expect(raw).toContain("final visible text");
   });
 
-  it("strips <uploaded_files> markers from content", () => {
+  it("strips <current_uploads> markers from content", () => {
+    const message = human(
+      "real prompt\n<current_uploads>\n/mnt/user-data/uploads/secret.pdf\n</current_uploads>",
+      { id: "h-clean" } as Partial<Message>,
+    );
+    const raw = formatThreadAsJSON(makeThread(), [message]);
+    expect(raw).not.toContain("<current_uploads>");
+    expect(raw).not.toContain("secret.pdf");
+    expect(raw).toContain("real prompt");
+  });
+
+  it("strips legacy <uploaded_files> markers from content", () => {
+    // Display-only backward compatibility (#4212): pre-#4174 history still
+    // carries <uploaded_files> blocks; exports must keep stripping the
+    // legacy spelling so server-side upload paths never leak.
     const message = human(
       "real prompt\n<uploaded_files>\n/mnt/user-data/uploads/secret.pdf\n</uploaded_files>",
-      { id: "h-clean" } as Partial<Message>,
+      { id: "h-legacy-clean" } as Partial<Message>,
     );
     const raw = formatThreadAsJSON(makeThread(), [message]);
     expect(raw).not.toContain("<uploaded_files>");

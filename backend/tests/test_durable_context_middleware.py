@@ -651,7 +651,7 @@ class TestGraphIntegration:
         assert "AUTH_USES_JWT_SENTINEL" in ledger[0]["result_brief"]
 
         last_call_messages = model.received[-1]
-        injected = [message for message in last_call_messages if isinstance(message, HumanMessage) and message.additional_kwargs.get("durable_context_data") and "do NOT delegate" in message.content]
+        injected = [message for message in last_call_messages if isinstance(message, HumanMessage) and message.additional_kwargs.get("durable_context_data") and "## Work already delegated" in message.content]
         assert injected, "delegation ledger was not injected into the model request"
         assert "research auth" in injected[0].content
 
@@ -705,11 +705,56 @@ class TestGraphIntegration:
         assert "call_1" not in compacted_ids
 
         last_call_messages = model.received[-1]
-        injected = [message for message in last_call_messages if isinstance(message, HumanMessage) and message.additional_kwargs.get("durable_context_data") and "do NOT delegate" in message.content]
+        injected = [message for message in last_call_messages if isinstance(message, HumanMessage) and message.additional_kwargs.get("durable_context_data") and "## Work already delegated" in message.content]
         assert injected, "delegation ledger was not injected after summarization"
         assert "research auth" in injected[0].content
         assert "AUTH_USES_JWT_SENTINEL" in injected[0].content
         assert "compressed summary" in injected[0].content
+
+
+def test_mixed_acceptance_gaps_stay_actionable_in_data_after_real_compaction():
+    messages = _msgs_with_completed_task()
+    verdict = {
+        "source": "acceptance_checklist",
+        "requirement": "delegation_acceptance_criteria",
+        "leaves": [
+            {"criterion": "file:../outputs/missing.csv exists", "family": "file_exists", "checked": True, "holds": False, "detail": "file missing"},
+            {"criterion": "PRIMARY_SOURCE_SENTINEL", "family": "undecidable", "checked": False, "holds": False, "detail": "cannot check deterministically"},
+        ],
+        "unchecked": ["PRIMARY_SOURCE_SENTINEL"],
+        "all_hold": False,
+    }
+    messages[-1].additional_kwargs = make_subagent_additional_kwargs("completed", result="partial report", acceptance_verdict=verdict)
+    model = RecordingFakeModel(responses=[AIMessage(content="partial result retained"), AIMessage(content="follow up")])
+    agent = create_agent(
+        model=model,
+        tools=[fake_task],
+        middleware=[
+            DurableContextMiddleware(),
+            DeerFlowSummarizationMiddleware(
+                model=FakeToolCallingModel(responses=[AIMessage(content="compressed summary without checklist")]),
+                trigger=("messages", 4),
+                keep=("messages", 2),
+                token_counter=len,
+            ),
+        ],
+        state_schema=ThreadState,
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "mixed-acceptance-compaction"}}
+    agent.invoke({"messages": messages}, config)
+    result = agent.invoke({"messages": [HumanMessage(content="continue")]}, config)
+
+    assert result["summary_text"] == "compressed summary without checklist"
+    assert not any(isinstance(message, ToolMessage) and message.tool_call_id == "call_1" for message in result["messages"])
+    assert result["delegations"][0]["status"] == "completed"
+    data = next(message.content for message in model.received[-1] if isinstance(message, HumanMessage) and message.additional_kwargs.get("durable_context_data"))
+    assert "[does not hold] file:../outputs/missing.csv exists" in data
+    assert "[UNVERIFIED] PRIMARY_SOURCE_SENTINEL" in data
+    assert "repair/recheck unmet criteria" in data
+    assert "preserve uncertainty" in data
+    assert "do NOT delegate again" not in data
+    assert all("PRIMARY_SOURCE_SENTINEL" not in message.content for message in model.received[-1] if isinstance(message, SystemMessage))
 
 
 class TestSkillContextCapture:

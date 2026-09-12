@@ -136,20 +136,25 @@ class _FakeCommands:
             return _execution(exit_code=9)
         if command == "missing-complete":
             return _execution(stderr=("stream ended",), exit_code=None)
-        if command.startswith("find "):
+        if command.startswith("find ") or "find -H " in command:
             return self._find(command)
         if command.startswith(("grep ", "{ grep ")):
             return self._grep(command)
         return _execution()
 
     def _find(self, command: str) -> _Execution:
-        tokens = shlex.split(command)
-        root = tokens[1].rstrip("/") or "/"
-        include_dirs = "d" in tokens
+        match = re.search(r"(?:^|[\s;{])find(?:\s+-[HLP])*\s+(\S+)", command)
+        root = (match.group(1).strip("'\"") if match else "").rstrip("/") or "/"
+        include_dirs = "-type d" in command
         paths = list(self._owner.file_data)
         if include_dirs:
             paths.extend(self._owner.directories)
         matches = sorted(path for path in set(paths) if path == root or path.startswith(f"{root}/"))
+        if "__DF_FIND_STATUS__:" in command:
+            status = 0 if matches else 1
+            marker = f"__DF_FIND_STATUS__:{status}"
+            stdout = (*matches, "", marker) if matches else ("", marker)
+            return _execution(stdout=stdout, exit_code=status)
         return _execution(stdout=tuple(matches))
 
     def _grep(self, command: str) -> _Execution:
@@ -464,7 +469,9 @@ def test_shutdown_stops_idle_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_execute_forwards_env_timeout_and_combines_streams() -> None:
     remote = _FakeRemote("remote")
     box = _box(remote, default_env={"BASE": "1"})
-    assert box.execute_command("mixed-output", env={"EXTRA": "2"}, timeout=5) == "out-1\nout-2\nerr-1"
+    # A nonzero exit with non-empty output keeps the authoritative marker
+    # (LocalSandbox parity) instead of losing the failure.
+    assert box.execute_command("mixed-output", env={"EXTRA": "2"}, timeout=5) == "out-1\nout-2\nerr-1\nExit Code: 7"
     _, opts = remote.commands.calls[-1]
     assert opts is not None
     assert opts.envs == {"BASE": "1", "EXTRA": "2"}
@@ -755,3 +762,34 @@ def test_sandbox_id_matches_shared_identity():
 
     assert OpenSandboxProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
     assert OpenSandboxProvider._sandbox_id("t-1", "") == derive_sandbox_scope_token(user_id="", thread_id="t-1")
+
+
+def test_list_dir_raises_when_find_returns_no_entries() -> None:
+    remote = _FakeRemote("remote")
+    box = _box(remote)
+
+    with pytest.raises(FileNotFoundError):
+        box.list_dir("/mnt/user-data/missing")
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
+    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    box = _box(_FakeRemote("remote"))
+    box._run = lambda *args, **kwargs: _execution(exit_code=127)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        box.list_dir("/mnt/user-data/workspace")
+
+
+def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
+    # "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    # verbatim, one entry per line, so a per-line strip() corrupts the name.
+    remote = _FakeRemote("remote")
+    box = _box(remote)
+    box.write_file("/mnt/user-data/workspace/notes.txt ", "payload")
+
+    assert "/mnt/user-data/workspace/notes.txt " in box.list_dir("/mnt/user-data/workspace")
+
+    found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
+    assert found == ["/mnt/user-data/workspace/notes.txt "]
+    assert truncated is False

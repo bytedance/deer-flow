@@ -16,9 +16,7 @@ from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
-    mark_trace_id_from_request_header,
     request_trace_context,
-    reset_trace_id_from_request_header,
 )
 
 
@@ -296,15 +294,20 @@ async def test_run_agent_preserves_caller_metadata_overrides(monkeypatch):
     # Caller-supplied keys win.
     assert metadata["langfuse_session_id"] == "custom-session-id"
     assert metadata["langfuse_user_id"] == "explicit-user"
-    assert metadata[DEERFLOW_TRACE_METADATA_KEY] == "explicit-deerflow-trace"
-    assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "explicit-deerflow-trace"
+    # ...except deerflow_trace_id, which the server issues. Honouring the
+    # caller here would let the persisted run point at an id that matches
+    # neither the response header nor the log lines for the same request.
+    assert metadata[DEERFLOW_TRACE_METADATA_KEY] != "explicit-deerflow-trace"
+    assert metadata[DEERFLOW_TRACE_METADATA_KEY] == fake_agent.captured_config["context"][DEERFLOW_TRACE_METADATA_KEY]
     # Worker still fills in keys that the caller didn't set.
     assert metadata["langfuse_trace_name"] == "lead-agent"
 
 
 @pytest.mark.asyncio
-async def test_run_agent_inbound_header_trace_overrides_metadata(monkeypatch):
-    """A valid inbound ``X-Trace-Id`` wins over ``config.metadata.deerflow_trace_id``."""
+async def test_run_agent_overwrites_caller_supplied_trace_id(monkeypatch):
+    """The bound request trace is the only source. A ``deerflow_trace_id`` in
+    the caller's metadata is replaced, not honoured, so the persisted run
+    cannot disagree with the header and the logs from the same request."""
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
@@ -328,24 +331,20 @@ async def test_run_agent_inbound_header_trace_overrides_metadata(monkeypatch):
     ctx = RunContext(checkpointer=None)
 
     with request_trace_context("header-trace-1"):
-        header_token = mark_trace_id_from_request_header(from_header=True)
-        try:
-            await run_agent(
-                _FakeBridge(),
-                _FakeRunManager(),
-                record,
-                ctx=ctx,
-                agent_factory=agent_factory,
-                graph_input={"messages": []},
-                config={
-                    "configurable": {"thread_id": "thread-header"},
-                    "metadata": {
-                        DEERFLOW_TRACE_METADATA_KEY: "metadata-trace-ignored",
-                    },
+        await run_agent(
+            _FakeBridge(),
+            _FakeRunManager(),
+            record,
+            ctx=ctx,
+            agent_factory=agent_factory,
+            graph_input={"messages": []},
+            config={
+                "configurable": {"thread_id": "thread-header"},
+                "metadata": {
+                    DEERFLOW_TRACE_METADATA_KEY: "metadata-trace-ignored",
                 },
-            )
-        finally:
-            reset_trace_id_from_request_header(header_token)
+            },
+        )
 
     metadata = fake_agent.captured_config.get("metadata") or {}
     assert metadata[DEERFLOW_TRACE_METADATA_KEY] == "header-trace-1"

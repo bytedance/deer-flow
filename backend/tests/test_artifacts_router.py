@@ -15,12 +15,20 @@ from starlette.responses import FileResponse
 
 import app.gateway.routers.artifacts as artifacts_router
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
-from deerflow.config.paths import make_safe_user_id
+from deerflow.config.paths import Paths, make_safe_user_id
+from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+# Browsers render any XML MIME type as a document, so an XHTML-namespaced
+# script in a plain .xml file runs in the application origin as well.
+XHTML_SCRIPT_XML = '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><script>alert("xss")</script></html>'
 
 ACTIVE_ARTIFACT_CASES = [
     ("poc.html", "<html><body><script>alert('xss')</script></body></html>"),
     ("page.xhtml", '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body>hello</body></html>'),
     ("image.svg", '<svg xmlns="http://www.w3.org/2000/svg"><script>alert("xss")</script></svg>'),
+    ("report.xml", XHTML_SCRIPT_XML),
+    ("transform.xsl", XHTML_SCRIPT_XML),
+    ("graph.rdf", XHTML_SCRIPT_XML),
 ]
 
 
@@ -66,12 +74,16 @@ class _RemoteSandbox:
     def __init__(self, *, fail_next_update: bool = False) -> None:
         self.updates: list[tuple[str, bytes]] = []
         self.fail_next_update = fail_next_update
+        self.released_scopes: list[str] = []
 
     def update_file(self, path: str, content: bytes) -> None:
         if self.fail_next_update:
             self.fail_next_update = False
             raise RuntimeError("sandbox sync failed")
         self.updates.append((path, content))
+
+    def release_command_scope(self, scope_id: str) -> None:
+        self.released_scopes.append(scope_id)
 
 
 class _RemoteSandboxProvider:
@@ -97,7 +109,7 @@ def _artifact_sha256(content: str) -> str:
 
 
 def _patch_artifact_update_dependencies(monkeypatch, artifact_path: Path, provider=None) -> None:
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    monkeypatch.setattr(artifacts_router, "resolve_outputs_confined_path", lambda _thread_id, _path, user_id=None: artifact_path)
     monkeypatch.setattr(artifacts_router, "reserve_artifact_write", _allow_artifact_write)
     monkeypatch.setattr(artifacts_router, "get_sandbox_provider", lambda: provider or _MountedSandboxProvider())
 
@@ -188,6 +200,107 @@ def test_update_artifact_rejects_non_output_path(tmp_path, monkeypatch) -> None:
     assert artifact_path.read_text(encoding="utf-8") == "before"
 
 
+_REAL_PATHS_THREAD_ID = "thread-1"
+_REAL_PATHS_USER_ID = "user-1"
+
+
+def _patch_real_thread_paths(monkeypatch, tmp_path: Path, provider=None) -> tuple[Path, Path]:
+    """Route ``update_artifact`` through the real virtual-path resolver rooted at *tmp_path*.
+
+    The other update tests stub ``resolve_outputs_confined_path`` so they never
+    exercise the outputs confinement; these tests need the real thread layout.
+    Returns the thread's ``outputs`` and ``uploads`` host directories.
+    """
+    paths = Paths(tmp_path)
+    monkeypatch.setattr("app.gateway.path_utils.get_paths", lambda: paths)
+    monkeypatch.setattr(artifacts_router, "get_effective_user_id", lambda: _REAL_PATHS_USER_ID)
+    monkeypatch.setattr(artifacts_router, "get_trusted_internal_owner_user_id", lambda _request: None)
+    monkeypatch.setattr(artifacts_router, "reserve_artifact_write", _allow_artifact_write)
+    monkeypatch.setattr(artifacts_router, "get_sandbox_provider", lambda: provider or _MountedSandboxProvider())
+
+    outputs = paths.sandbox_outputs_dir(_REAL_PATHS_THREAD_ID, user_id=_REAL_PATHS_USER_ID)
+    uploads = paths.sandbox_uploads_dir(_REAL_PATHS_THREAD_ID, user_id=_REAL_PATHS_USER_ID)
+    outputs.mkdir(parents=True)
+    uploads.mkdir(parents=True)
+    return outputs, uploads
+
+
+def _update_artifact_via_handler(path: str, *, current: str, content: str):
+    return asyncio.run(
+        call_unwrapped(
+            artifacts_router.update_artifact,
+            _REAL_PATHS_THREAD_ID,
+            path,
+            artifacts_router.ArtifactUpdateRequest(content=content, expected_sha256=_artifact_sha256(current)),
+            _make_request(),
+        )
+    )
+
+
+def test_update_artifact_rejects_dot_dot_escape_from_outputs(tmp_path, monkeypatch) -> None:
+    # The outputs-only guard used to be a string-prefix check on the raw path,
+    # so ``outputs/../uploads/...`` passed it and the resolver only confines to
+    # ``user-data/`` — letting PUT overwrite a sibling upload.
+    _, uploads = _patch_real_thread_paths(monkeypatch, tmp_path)
+    victim = uploads / "victim.txt"
+    victim.write_text("before", encoding="utf-8")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _update_artifact_via_handler("mnt/user-data/outputs/../uploads/victim.txt", current="before", content="after")
+
+    assert exc_info.value.status_code == 400
+    assert victim.read_text(encoding="utf-8") == "before"
+
+
+def test_update_artifact_rejects_percent_encoded_dot_dot_over_http(tmp_path, monkeypatch) -> None:
+    # Browsers and HTTP clients collapse a literal ``..`` before sending, but
+    # ``%2e%2e`` reaches the route intact and Starlette decodes it to ``..``.
+    _, uploads = _patch_real_thread_paths(monkeypatch, tmp_path)
+    victim = uploads / "victim.txt"
+    victim.write_text("before", encoding="utf-8")
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.put(
+            f"/api/threads/{_REAL_PATHS_THREAD_ID}/artifacts/mnt/user-data/outputs/%2e%2e/uploads/victim.txt",
+            json={"content": "after", "expected_sha256": _artifact_sha256("before")},
+        )
+
+    assert response.status_code == 400
+    assert victim.read_text(encoding="utf-8") == "before"
+
+
+def test_update_artifact_rejects_symlink_escaping_outputs(tmp_path, monkeypatch) -> None:
+    outputs, uploads = _patch_real_thread_paths(monkeypatch, tmp_path)
+    victim = uploads / "victim.txt"
+    victim.write_text("before", encoding="utf-8")
+    link = outputs / "linked.txt"
+    try:
+        link.symlink_to(victim)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _update_artifact_via_handler("mnt/user-data/outputs/linked.txt", current="before", content="after")
+
+    assert exc_info.value.status_code == 400
+    assert victim.read_text(encoding="utf-8") == "before"
+
+
+def test_update_artifact_normalizes_dot_segments_before_syncing(tmp_path, monkeypatch) -> None:
+    provider = _RemoteSandboxProvider()
+    outputs, _ = _patch_real_thread_paths(monkeypatch, tmp_path, provider=provider)
+    artifact_path = outputs / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+
+    response = _update_artifact_via_handler("mnt/user-data/outputs/./nested/../note.txt", current="before", content="after")
+
+    assert artifact_path.read_text(encoding="utf-8") == "after"
+    assert response.path == "/mnt/user-data/outputs/note.txt"
+    assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"after")]
+
+
 def test_update_artifact_rejects_binary_file(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "blob.bin"
     artifact_path.write_bytes(b"before\x00binary")
@@ -226,6 +339,37 @@ def test_update_artifact_syncs_non_mounted_sandbox(tmp_path, monkeypatch) -> Non
     assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"after")]
     assert provider.released == ["sandbox-1"]
     assert artifact_path.read_text(encoding="utf-8") == "after"
+
+
+def test_update_artifact_does_not_release_under_active_execution_lease(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    provider = _RemoteSandboxProvider()
+    manager = get_sandbox_lease_manager(provider)
+    manager.retain(
+        "active-agent",
+        "sandbox-1",
+        thread_id="thread-1",
+        user_id="default",
+    )
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path, provider)
+
+    asyncio.run(
+        call_unwrapped(
+            artifacts_router.update_artifact,
+            "thread-1",
+            "mnt/user-data/outputs/note.txt",
+            artifacts_router.ArtifactUpdateRequest(content="after", expected_sha256=_artifact_sha256("before")),
+            _make_request(),
+        )
+    )
+
+    assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"after")]
+    assert manager.binding_for("active-agent") == "sandbox-1"
+    assert provider.released == []
+
+    manager.release("active-agent")
+    assert provider.released == ["sandbox-1"]
 
 
 def test_update_artifact_releases_sandbox_when_initial_sync_fails(tmp_path, monkeypatch) -> None:
@@ -448,6 +592,79 @@ def test_get_artifact_forces_download_for_active_content_in_skill_archive(tmp_pa
 
     assert response.headers.get("content-disposition", "").startswith("attachment;")
     assert bytes(response.body) == content.encode("utf-8")
+
+
+@pytest.mark.parametrize("in_skill_archive", [False, True])
+def test_get_artifact_forces_download_for_any_xml_subtype(tmp_path, monkeypatch, in_skill_archive: bool) -> None:
+    # Whether .rss guesses to application/rss+xml depends on the host's
+    # mime.types file, so pin the guess to exercise the +xml rule on both paths.
+    content = '<?xml version="1.0"?><rss><x:script xmlns:x="http://www.w3.org/1999/xhtml">alert("xss")</x:script></rss>'
+    monkeypatch.setattr(artifacts_router.mimetypes, "guess_type", lambda *_args, **_kwargs: ("application/rss+xml", None))
+    if in_skill_archive:
+        artifact_path = tmp_path / "sample.skill"
+        with zipfile.ZipFile(artifact_path, "w") as zip_ref:
+            zip_ref.writestr("feed.rss", content)
+        path = "mnt/user-data/outputs/sample.skill/feed.rss"
+    else:
+        artifact_path = tmp_path / "feed.rss"
+        artifact_path.write_text(content, encoding="utf-8")
+        path = "mnt/user-data/outputs/feed.rss"
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+
+    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", path, _make_request()))
+
+    assert response.headers.get("content-disposition", "").startswith("attachment;")
+
+
+@pytest.mark.parametrize(
+    "mime_type",
+    [
+        "text/html",
+        "application/xhtml+xml",
+        "image/svg+xml",
+        "text/xml",
+        "application/xml",
+        "text/xsl",
+        "application/rss+xml",
+        "application/atom+xml",
+        "application/xslt+xml",
+        "TEXT/XML",
+    ],
+)
+def test_is_active_content_mime_type_covers_html_and_xml_documents(mime_type: str) -> None:
+    # Whether .rss or .atom guess to a +xml type depends on the host's
+    # mime.types file, so the classification is pinned on MIME types directly.
+    assert artifacts_router._is_active_content_mime_type(mime_type)
+
+
+@pytest.mark.parametrize(
+    "mime_type",
+    [None, "text/plain", "text/markdown", "text/csv", "application/json", "application/pdf", "image/png", "application/xml-dtd"],
+)
+def test_is_active_content_mime_type_keeps_passive_types_inline(mime_type: str | None) -> None:
+    assert not artifacts_router._is_active_content_mime_type(mime_type)
+
+
+def test_get_artifact_xml_download_supports_bounded_range_requests(tmp_path, monkeypatch) -> None:
+    # The artifacts panel previews .xml as code through a Range fetch, so
+    # forcing the attachment disposition must keep the bounded preview.
+    payload = ('<?xml version="1.0"?><items>' + "<item>0123456789</item>" * 50_000 + "</items>").encode()
+    artifact_path = tmp_path / "large.xml"
+    artifact_path.write_bytes(payload)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        preview = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/large.xml",
+            headers={"Range": "bytes=0-1048575"},
+        )
+
+    assert preview.status_code == 206
+    assert preview.content == payload[:1_048_576]
+    assert preview.headers["content-range"] == f"bytes 0-1048575/{len(payload)}"
+    assert preview.headers["content-disposition"].startswith("attachment;")
 
 
 def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeypatch) -> None:

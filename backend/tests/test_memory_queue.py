@@ -403,3 +403,104 @@ def test_flush_sync_skips_inter_item_delay_on_drain_path() -> None:
     # No inter-item rate-limit sleep on the drain path.
     mock_sleep.assert_not_called()
     assert mock_updater.update_memory.call_count == 3
+
+
+def test_cancel_by_agent_drops_matching_pending_and_preserves_others() -> None:
+    """#5037: deleting/clearing an agent must drop its debounce buffer only."""
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["keep"], agent_name="alice", user_id="u1")
+        queue.add(thread_id="t2", messages=["drop"], agent_name="bob", user_id="u1")
+        queue.add(thread_id="t3", messages=["other-user"], agent_name="bob", user_id="u2")
+
+    existing_timer = MagicMock()
+    queue._timer = existing_timer
+
+    removed = queue.cancel_by_agent("bob", user_id="u1")
+
+    assert removed == 1
+    assert queue.pending_count == 2
+    assert {(c.agent_name, c.user_id) for c in queue._items} == {("alice", "u1"), ("bob", "u2")}
+    existing_timer.cancel.assert_not_called()
+
+
+def test_cancel_by_agent_all_agents_for_user_cancels_timer_when_empty() -> None:
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["a"], agent_name="alice", user_id="u1")
+        queue.add(thread_id="t2", messages=["b"], agent_name="bob", user_id="u1")
+        queue.add(thread_id="t3", messages=["c"], agent_name="alice", user_id="u2")
+
+    existing_timer = MagicMock()
+    queue._timer = existing_timer
+
+    removed = queue.cancel_by_agent(user_id="u1", all_agents=True)
+
+    assert removed == 2
+    assert queue.pending_count == 1
+    assert queue._items[0].user_id == "u2"
+    existing_timer.cancel.assert_not_called()
+
+    removed_rest = queue.cancel_by_agent(user_id="u2", all_agents=True)
+    assert removed_rest == 1
+    assert queue.pending_count == 0
+    existing_timer.cancel.assert_called_once_with()
+    assert queue._timer is None
+
+
+def test_cancel_by_agent_without_user_id_only_drops_legacy_scope() -> None:
+    """user_id=None mirrors storage: legacy root only, not every user."""
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["legacy"], agent_name="bob", user_id=None)
+        queue.add(thread_id="t2", messages=["alice"], agent_name="bob", user_id="u1")
+        queue.add(thread_id="t3", messages=["other"], agent_name="alice", user_id=None)
+
+    removed = queue.cancel_by_agent("bob", user_id=None)
+
+    assert removed == 1
+    assert {(c.agent_name, c.user_id) for c in queue._items} == {("bob", "u1"), ("alice", None)}
+
+
+def test_cancel_all_agents_without_user_id_only_drops_legacy_scope() -> None:
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["legacy-a"], agent_name="a", user_id=None)
+        queue.add(thread_id="t2", messages=["legacy-b"], agent_name="b", user_id=None)
+        queue.add(thread_id="t3", messages=["named"], agent_name="a", user_id="u1")
+
+    removed = queue.cancel_by_agent(user_id=None, all_agents=True)
+
+    assert removed == 2
+    assert queue.pending_count == 1
+    assert queue._items[0].user_id == "u1"
+
+
+def test_cancel_by_agent_does_not_touch_in_flight_batch() -> None:
+    """Contexts already pulled out of `_items` keep running (#5037 residual)."""
+    mock_updater = MagicMock()
+    mock_updater.update_memory.return_value = True
+    queue = _queue(mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["in-flight"], agent_name="bob", user_id="u1")
+        queue.add(thread_id="t2", messages=["still-pending"], agent_name="bob", user_id="u1")
+
+    with queue._lock:
+        in_flight = queue._items[:1]
+        queue._items = queue._items[1:]
+        queue._processing = True
+
+    removed = queue.cancel_by_agent("bob", user_id="u1")
+    assert removed == 1
+    assert queue.pending_count == 0
+    # Simulate the worker finishing the already-pulled context.
+    mock_updater.update_memory(
+        messages=in_flight[0].messages,
+        thread_id=in_flight[0].thread_id,
+        agent_name=in_flight[0].agent_name,
+        signals=frozenset(),
+        user_id=in_flight[0].user_id,
+        trace_id=None,
+        bypass_watermark=False,
+    )
+    mock_updater.update_memory.assert_called_once()

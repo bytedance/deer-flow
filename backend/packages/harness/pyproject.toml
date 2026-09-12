@@ -6,6 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
     "agent-client-protocol>=0.4.0",
     "agent-sandbox>=0.0.30",
+    "beautifulsoup4>=4.12",
+    "html5lib>=1.1",
     "croniter>=6.0.0",
     # Exact pin by design (extension-system version contract): the host pins
     # the contract version it implements, extensions declare ranges. A range
@@ -50,6 +52,10 @@ dependencies = [
     "alembic>=1.13",
     "cryptography>=50.0.0",
     "e2b-code-interpreter>=2.8.0",
+    # zoneinfo fallback: ZoneInfo reads the OS zone database first and this
+    # wheel when the image has none (stripped containers, Windows without
+    # tzdata), keeping the DEER_FLOW_DATE_TIMEZONE knob portable.
+    "tzdata>=2025.1",
 ]
 
 [project.scripts]

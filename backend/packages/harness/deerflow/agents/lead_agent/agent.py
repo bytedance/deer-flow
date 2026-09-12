@@ -128,6 +128,7 @@ def _subagent_release_policy(
     enabled: bool,
     max_concurrent: int,
     max_total: int,
+    allowed_subagents: list[str] | None = None,
 ) -> dict[str, object]:
     """Delegation limits as the run will actually enforce them.
 
@@ -147,7 +148,7 @@ def _subagent_release_policy(
 
     from deerflow.subagents import get_available_subagent_names, get_subagent_config
 
-    type_allowlist = sorted(set(get_available_subagent_names(app_config=app_config)))
+    type_allowlist = sorted(set(get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents)))
     runtime_limits: dict[str, object] = {}
     for name in type_allowlist:
         subagent_config = get_subagent_config(name, app_config=app_config)
@@ -552,6 +553,14 @@ def build_middlewares(
             skill_authorization=skill_authorization,
         )
     )
+
+    # Observe the final tool_search Command after every inner policy/result
+    # transformer has run. Tool wrappers are first-in-list outermost, so this
+    # must be registered before SkillToolPolicyMiddleware.
+    if deferred_setup is not None and deferred_setup.deferred_names:
+        from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
+
+        middlewares.append(DeferredToolPromotionAuditMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
 
     # Enabled skills are only discoverable metadata. Apply allowed-tools at
     # runtime after explicit slash activation or an actual skill-file load.
@@ -1157,6 +1166,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                     enabled=subagent_enabled,
                     max_concurrent=max_concurrent_subagents,
                     max_total=max_total_subagents,
+                    allowed_subagents=allowed_subagents,
                 ),
                 "deferred_tools": {
                     "enabled": resolved_app_config.tool_search.enabled,
@@ -1278,6 +1288,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                 enabled=subagent_enabled,
                 max_concurrent=max_concurrent_subagents,
                 max_total=max_total_subagents,
+                allowed_subagents=allowed_subagents,
             ),
             "deferred_tools": {
                 "enabled": resolved_app_config.tool_search.enabled,

@@ -145,6 +145,7 @@ class FakeAccessor:
 
 @pytest.fixture(autouse=True)
 def _patch_checkpoint_accessor(monkeypatch):
+    from app.gateway import services
     from app.gateway.routers import thread_runs
 
     def build_accessor(request, *, thread_id, assistant_id=None, checkpoint_id=None):
@@ -156,7 +157,7 @@ def _patch_checkpoint_accessor(monkeypatch):
     async def build_thread_accessor(request, *, thread_id, checkpoint_id=None):
         return build_accessor(request, thread_id=thread_id, checkpoint_id=checkpoint_id)
 
-    monkeypatch.setattr(thread_runs, "build_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr(services, "build_checkpoint_state_accessor", build_accessor)
     monkeypatch.setattr(thread_runs, "build_thread_checkpoint_state_accessor", build_thread_accessor)
 
 
@@ -195,6 +196,7 @@ def _request(checkpointer, event_store, *, run_manager=None, user_id="user-1"):
 
 
 def test_run_wait_readers_return_materialized_final_values() -> None:
+    from app.gateway import services
     from app.gateway.routers import runs, thread_runs
 
     snapshot = SimpleNamespace(
@@ -237,7 +239,7 @@ def test_run_wait_readers_return_materialized_final_values() -> None:
             patch.object(thread_runs, "get_run_manager", return_value=object()),
             patch.object(thread_runs, "start_run", AsyncMock(return_value=record)),
             patch.object(
-                thread_runs,
+                services,
                 "build_checkpoint_state_accessor",
                 create=True,
                 return_value=(accessor, snapshot.config),
@@ -246,7 +248,7 @@ def test_run_wait_readers_return_materialized_final_values() -> None:
             patch.object(runs, "get_run_manager", return_value=object()),
             patch.object(runs, "start_run", AsyncMock(return_value=record)),
             patch.object(
-                runs,
+                services,
                 "build_checkpoint_state_accessor",
                 create=True,
                 return_value=(accessor, snapshot.config),
@@ -263,6 +265,7 @@ def test_run_wait_readers_return_materialized_final_values() -> None:
 
 
 def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
+    from app.gateway import services
     from app.gateway.routers import runs, thread_runs
 
     snapshot = SimpleNamespace(
@@ -291,7 +294,7 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
             patch.object(thread_runs, "get_run_manager", return_value=object()),
             patch.object(thread_runs, "start_run", AsyncMock(return_value=record)),
             patch.object(
-                thread_runs,
+                services,
                 "build_checkpoint_state_accessor",
                 return_value=(accessor, snapshot.config),
             ),
@@ -299,7 +302,7 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
             patch.object(runs, "get_run_manager", return_value=object()),
             patch.object(runs, "start_run", AsyncMock(return_value=record)),
             patch.object(
-                runs,
+                services,
                 "build_checkpoint_state_accessor",
                 return_value=(accessor, snapshot.config),
             ),
@@ -317,6 +320,7 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
 
 @pytest.mark.parametrize("route_name", ["thread", "stateless"])
 def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(route_name: str) -> None:
+    from app.gateway import services
     from app.gateway.routers import runs, thread_runs
 
     record = SimpleNamespace(
@@ -336,7 +340,7 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
                 patch.object(thread_runs, "get_run_manager", return_value=object()),
                 patch.object(thread_runs, "start_run", AsyncMock(return_value=record)),
                 patch.object(
-                    thread_runs,
+                    services,
                     "build_checkpoint_state_accessor",
                     side_effect=RuntimeError("graph construction failed"),
                 ),
@@ -348,7 +352,7 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
             patch.object(runs, "get_run_manager", return_value=object()),
             patch.object(runs, "start_run", AsyncMock(return_value=record)),
             patch.object(
-                runs,
+                services,
                 "build_checkpoint_state_accessor",
                 side_effect=RuntimeError("graph construction failed"),
             ),
@@ -365,7 +369,7 @@ def test_prepare_regenerate_payload_returns_clean_input_and_base_checkpoint():
 
     human = HumanMessage(
         id="human-1",
-        content="<uploaded_files>injected</uploaded_files>\n\n/data-analysis analyze data.csv",
+        content="<current_uploads>injected</current_uploads>\n\n/data-analysis analyze data.csv",
         additional_kwargs={
             ORIGINAL_USER_CONTENT_KEY: "/data-analysis analyze data.csv",
             "files": [{"filename": "data.csv", "path": "/mnt/user-data/uploads/data.csv"}],
@@ -649,7 +653,7 @@ def test_prepare_edit_regenerate_payload_returns_new_human_and_edit_metadata():
 
     human = HumanMessage(
         id="human-1",
-        content="<uploaded_files>injected</uploaded_files>\n\noriginal question",
+        content="<current_uploads>injected</current_uploads>\n\noriginal question",
         name="researcher",
         additional_kwargs={
             ORIGINAL_USER_CONTENT_KEY: "original question",

@@ -1,4 +1,5 @@
 import logging
+import threading
 
 from langchain.tools import BaseTool
 
@@ -49,10 +50,22 @@ def _is_host_bash_tool(tool: object) -> bool:
     return False
 
 
+_sync_invocable_tool_lock = threading.Lock()
+
+
 def _ensure_sync_invocable_tool(tool: BaseTool) -> BaseTool:
-    """Attach a sync wrapper to async-only tools used by sync agent callers."""
-    if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
-        tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
+    """Attach a sync wrapper to async-only tools used by sync agent callers.
+
+    The wrapped objects are process-wide singletons (BUILTIN_TOOLS /
+    SUBAGENT_TOOLS / MCP cache entries) and tool assembly may now run on
+    worker threads concurrently; double-checked locking makes the in-place
+    ``tool.func`` wrap explicitly single-shot instead of incidental.
+    """
+    if getattr(tool, "func", None) is not None or getattr(tool, "coroutine", None) is None:
+        return tool
+    with _sync_invocable_tool_lock:
+        if getattr(tool, "func", None) is None:
+            tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
     return tool
 
 
@@ -76,8 +89,9 @@ def get_available_tools(
         model_name: Optional model name to determine if vision tools should be included.
         subagent_enabled: Whether to include subagent tools (task, task_status).
         include_upload_tool: Whether to include ``list_uploaded_files`` (default: True).
-            Set to False for subagent tool assembly — subagents have independent
-            ThreadState and cannot exclude current-run files.
+            Ordinary task subagents enable it only after snapshotting the
+            parent's current-run upload state. Durable batch and non-standard
+            subagent callers without that state keep it disabled.
 
     Returns:
         List of available tools.

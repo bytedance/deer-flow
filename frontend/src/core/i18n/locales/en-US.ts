@@ -38,6 +38,7 @@ export const enUS: Translations = {
     custom: "Custom",
     notAvailableInDemoMode: "Not available in demo mode",
     loading: "Loading...",
+    error: "Error:",
     version: "Version",
     lastUpdated: "Last updated",
     code: "Code",
@@ -126,6 +127,40 @@ export const enUS: Translations = {
       "This file could not be previewed. You can still download it.",
     viewSource: "View source",
     missingTarget: "This link does not say which artifact to display.",
+  },
+
+  artifactTable: {
+    title: "Table preview",
+    header: "First row as header",
+    column: (index) => `Column ${index}`,
+    total: (count) => `${count} rows`,
+    sample: (count) => `Preview of first ${count} rows`,
+    range: (start, end, limited) =>
+      `${start}–${end}${limited ? " of preview" : ""}`,
+    columnsLimited: "Showing the first 50 columns of the preview.",
+    uneven:
+      "Some rows have different numbers of fields. Missing fields are marked.",
+    empty: "This file is empty.",
+    incomplete:
+      "No complete records fit in this preview. View the source or download the file.",
+    failed:
+      "Unable to preview this table reliably. View the source or download the file.",
+    retry: "Retry preview",
+    previous: "Previous page",
+    next: "Next page",
+    cell: (row, column) => `View cell: row ${row}, column ${column}`,
+    cellValue: "Cell value",
+    missing: "Missing",
+    savedVersion:
+      "Opens or downloads the saved file. Your draft has not been saved.",
+  },
+
+  artifactArchive: {
+    downloadCurrent: (count) =>
+      `Download current versions (${count} ${count === 1 ? "file" : "files"})`,
+    currentVersionNotice:
+      "The file list comes from this response. Contents are the current versions and may have changed.",
+    downloadFailed: "Failed to download artifact archive.",
   },
 
   // Citations
@@ -292,6 +327,8 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    stopStreamingUnavailable:
+      "Stopping the running turn is not permitted for your role.",
   },
 
   // Sidebar
@@ -304,6 +341,39 @@ export const enUS: Translations = {
     agents: "Agents",
     scheduledTasks: "Scheduled tasks",
     agentsDisabledTooltip: "Feature not enabled",
+  },
+  // Sidebar projects section
+  projects: {
+    title: "Projects",
+    newProject: "New project",
+    namePlaceholder: "Project name",
+    moveToProject: "Move to project",
+    moveToProjectHint:
+      "Moving a chat doesn't remove the content already in it.",
+    removeFromProject: "Remove from project",
+    archive: "Archive",
+    restore: "Restore",
+    deleteProject: "Delete project",
+    deleteProjectConfirm:
+      "Deleting this project unlinks its chats. Chats, their history, and their files are not deleted.",
+    archived: "Archived",
+    empty: "No chats in this project yet.",
+    newChat: "New chat",
+    create: "Create",
+    createFailed: "Failed to create project",
+    moveFailed: "Failed to move chat",
+    archiveFailed: "Failed to archive project",
+    restoreFailed: "Failed to restore project",
+    deleteFailed: "Failed to delete project",
+    switchToGrouped: "Group chats by project",
+    switchToFlat: "Show flat chat list",
+    threads: "Chats",
+    threadsLoadFailed: "Couldn't load project chats",
+    untitled: "Untitled",
+    settings: "Settings",
+    notFound: "Project not found or deleted.",
+    projectUnavailable:
+      "Couldn't link the chat to the project. Your message was not sent — try again.",
   },
 
   backgroundTasks: {
@@ -383,6 +453,7 @@ export const enUS: Translations = {
     scheduleType: {
       cron: "Recurring",
       once: "One-time",
+      interval: "Interval",
     },
     preset: {
       label: "Repeat",
@@ -401,6 +472,11 @@ export const enUS: Translations = {
       cronPlaceholder: "0 9 * * *",
       runAt: "Run at",
       timezone: "Timezone",
+      intervalAmount: "Every",
+      intervalUnitSeconds: "seconds",
+      intervalUnitMinutes: "minutes",
+      intervalUnitHours: "hours",
+      intervalMinHint: "Minimum 60 seconds (the default server floor).",
     },
     weekdays: {
       mon: "Mon",
@@ -417,6 +493,8 @@ export const enUS: Translations = {
       title: "Create scheduled task",
       taskTitle: "Task title",
       prompt: "Prompt",
+      agent: "Agent",
+      leadAgent: "Default agent (lead_agent)",
       submit: "Create",
       fillRequired: "Fill all required fields",
     },
@@ -437,9 +515,11 @@ export const enUS: Translations = {
       allTypes: "All types",
       cron: "Cron",
       once: "Once",
+      interval: "Interval",
     },
     detail: {
       contextMode: "Context mode",
+      agent: "Agent",
       thread: "Thread",
       lastThread: "Last thread",
       schedule: "Schedule",
@@ -628,6 +708,21 @@ export const enUS: Translations = {
 
   // Chats
   chats: {
+    noActiveChats: "No recent chats",
+    activeChats: "Recent chats",
+    archivedChats: "Archived",
+    archiveChat: "Archive chat",
+    restoreChat: "Restore chat",
+    archiveSuccess: "Chat archived",
+    restoreSuccess: "Chat restored",
+    archiveFailed: "Failed to update archived chat",
+    archiveDescription:
+      "Archiving keeps messages and files. Running and scheduled tasks continue.",
+    undoArchive: "Undo",
+    noArchivedChats: "No archived chats",
+    noMatchingChats: "No matching chats in the loaded conversations",
+    loadChatsFailed: "Failed to load conversations",
+    retryLoadChats: "Retry",
     searchChats: "Search chats",
     branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
     loadMoreToSearch: "Load more to search older conversations",
@@ -709,6 +804,16 @@ export const enUS: Translations = {
 
   // Tool calls
   toolCalls: {
+    details: "Tool details",
+    toolName: "Tool name",
+    callId: "Call ID",
+    input: "Input",
+    result: "Result",
+    error: "Error",
+    noResult: "No result received",
+    emptyResult: "Empty result",
+    truncated:
+      "Preview truncated; copying includes only the displayed preview.",
     moreSteps: (count: number) => `${count} more step${count === 1 ? "" : "s"}`,
     lessSteps: "Less steps",
     executeCommand: "Execute command",
@@ -944,6 +1049,37 @@ export const enUS: Translations = {
       description: "Manage the configuration and enabled status of MCP tools.",
       adminRequired: "Admin privileges are required to manage MCP tools.",
       empty: "No MCP tools configured.",
+      addServer: "Add server",
+      addServerDescription:
+        "Paste the JSON definition published by the MCP server. Both a bare server map and one wrapped in `mcpServers` are accepted. Existing names must be changed through Edit.",
+      addServerPlaceholder: `{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"]
+    }
+  }
+}`,
+      serverDefinitionLabel: "MCP server JSON definition",
+      definitionEmpty: "Paste an MCP server definition.",
+      definitionInvalidJson: "Enter valid JSON.",
+      definitionRootNotObject:
+        "Enter a JSON object describing one or more MCP servers.",
+      definitionNoServers: "No MCP server was found in the definition.",
+      definitionServerNotObject:
+        'The configuration for server "{name}" must be a JSON object.',
+      editServer: "Edit MCP server",
+      editServerDescription:
+        'Edit the complete JSON definition for "{name}". The server name is fixed; add a new server and remove this one to rename it.',
+      editSingleServer: "Edit exactly one MCP server at a time.",
+      editServerNameMismatch:
+        'Keep the existing server name "{name}" while editing.',
+      serverAlreadyExists:
+        'MCP server "{name}" already exists. Use Edit instead.',
+      removeServer: "Remove MCP server",
+      removeServerDescription:
+        'Remove "{name}" from the MCP configuration? Its tools stop being available to agents.',
+      unnamedServer: "(empty name)",
     },
     subagents: {
       title: "Subagents",
@@ -1210,6 +1346,64 @@ export const enUS: Translations = {
       },
     },
     skills: {
+      exportPrevious: "Previous 50 files",
+      exportNotices: {
+        skill_export_yaml_alias:
+          "YAML aliases are not supported for export. Replace aliases with explicit values in SKILL.md.",
+        skill_export_yaml_complexity:
+          "The YAML declarations are too deeply nested or complex to export.",
+        skill_export_invalid_declaration:
+          "A malformed credential declaration was omitted; inspect SKILL.md.",
+        skill_export_link: "Linked files or directories cannot be exported.",
+        skill_export_unsupported_node:
+          "Only ordinary files and directories are supported; hard links and special files cannot be exported.",
+        skill_export_invalid_path:
+          "This path is not portable or conflicts with another path.",
+        skill_export_nested_skill:
+          "Nested SKILL.md files are not accepted by the installer.",
+        skill_export_executable_binary:
+          "Executable binaries are not accepted by the installer.",
+        skill_export_invalid_frontmatter:
+          "SKILL.md must have valid declarations and its name must match the skill folder.",
+        skill_export_sensitive_filename:
+          "This filename may contain local credentials or repository metadata.",
+        skill_export_platform_declarations:
+          "Configure the declared tools and credentials in the destination environment.",
+      },
+      exportSkill: "Export",
+      exportTitle: "Export skill",
+      exportDescription: "Download the currently saved skill as a .skill file.",
+      exportLoading: "Preparing file list…",
+      exportFiles: "Files",
+      exportDirectories: "Directories",
+      exportSize: "Uncompressed size",
+      exportContents: "Package contents",
+      exportMore: "Next 50 files",
+      exportRequirements: "Declared requirements",
+      exportCompatibility: "Compatibility",
+      exportTools: "Allowed tools",
+      exportSecrets: "Credential names",
+      exportOptional: "optional",
+      exportRequired: "required",
+      exportUndeclared: "Not declared",
+      exportScope:
+        "Includes all files inside this skill. Account settings, conversations and history outside the skill folder are excluded. Configure tools and credentials again on the destination.",
+      exportWarnings: "Check package contents",
+      exportWarningDescription:
+        "These notices are based on filenames and declarations. Secrets written inside package files are included unchanged. This is not a security scan.",
+      exportBlocked: "This package cannot be exported",
+      exportDownload: "Download .skill",
+      exportDownloading: "Preparing download…",
+      exportHandedOff: "File handed to your browser for download.",
+      exportChanged:
+        "The skill changed. Refresh the file list before downloading.",
+      exportRefresh: "Refresh file list",
+      exportFailed: "Could not export this skill. Try again.",
+      exportBusy: "Two exports are active. Try again shortly.",
+      exportTimeout: "Preparing the package timed out. Try again shortly.",
+      exportLimit: "The package exceeds an export limit.",
+      exportNotFound:
+        "This custom skill no longer exists. Refresh the skill list.",
       title: "Agent Skills",
       description:
         "Manage the configuration and enabled status of the agent skills.",

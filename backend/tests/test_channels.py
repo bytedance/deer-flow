@@ -31,6 +31,7 @@ def test_known_channel_command_detection_only_matches_control_commands():
     from app.channels.commands import is_known_channel_command
 
     assert is_known_channel_command("/new")
+    assert is_known_channel_command("/agent list")
     assert is_known_channel_command("/HELP now")
     assert not is_known_channel_command("/mnt/user-data/uploads/report.pdf")
     assert not is_known_channel_command("/data-analysis analyze uploads/foo.csv")
@@ -2425,6 +2426,7 @@ class TestChannelManager:
             manager._get_client = MagicMock(return_value=object())
             manager._get_or_create_thread = AsyncMock(return_value=(thread_id, False))
             manager._update_thread_channel_metadata = AsyncMock()
+            manager._load_thread_agent = AsyncMock(return_value=None)
             manager._publish_progress_update = AsyncMock(side_effect=asyncio.CancelledError())
             manager._handle_chat_on_thread = AsyncMock()
 
@@ -3135,6 +3137,250 @@ class TestChannelManager:
 
             # threads.create should be called for /new
             mock_client.threads.create.assert_called_once()
+
+        _run(go())
+
+    def test_handle_command_agent_list_is_owner_scoped(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        seen_user_ids = []
+
+        def fake_list_custom_agents(*, user_id=None):
+            seen_user_ids.append(user_id)
+            return [
+                SimpleNamespace(name="researcher", description="Researches sources"),
+                SimpleNamespace(name="writer", description=""),
+            ]
+
+        monkeypatch.setattr("app.channels.manager.list_custom_agents", fake_list_custom_agents)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received = []
+
+            async def capture_outbound(message):
+                outbound_received.append(message)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="platform-user",
+                    owner_user_id="deerflow-user-1",
+                    text="/agent list",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            assert seen_user_ids == ["deerflow-user-1"]
+            assert outbound_received[0].text == ("Available agents:\n• lead_agent — Default agent\n• researcher — Researches sources\n• writer")
+
+        _run(go())
+
+    def test_handle_command_agent_use_starts_pinned_conversation(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        loaded = []
+
+        def fake_load_agent_config(name, *, user_id=None):
+            loaded.append((name, user_id))
+            return SimpleNamespace(name=name)
+
+        monkeypatch.setattr("app.channels.manager.load_agent_config", fake_load_agent_config)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("test", "chat1", "old-thread")
+            manager = ChannelManager(bus=bus, store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="research-thread")
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                owner_user_id="deerflow-user-1",
+                text="/agent use Researcher",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_agent_command(msg, "use Researcher")
+
+            assert loaded == [("researcher", "deerflow-user-1")]
+            assert store.get_thread_id("test", "chat1") == "research-thread"
+            create_kwargs = mock_client.threads.create.call_args.kwargs
+            assert create_kwargs["metadata"]["channel_agent_name"] == "researcher"
+            assert create_kwargs["metadata"]["agent_name"] == "researcher"
+            assert reply == "Agent 'researcher' selected. New conversation started."
+            _, _, run_context = manager._resolve_run_params(msg, "research-thread")
+            assert run_context["agent_name"] == "researcher"
+
+        _run(go())
+
+    @pytest.mark.parametrize("config_carrier", ["context", "configurable"])
+    def test_agent_use_custom_agent_overrides_every_gateway_config_carrier(self, monkeypatch, config_carrier):
+        """The command pin must win after the real Gateway config merge.
+
+        Channel session config can carry ``agent_name`` in either RunnableConfig
+        container.  Leaving an inherited value in one container makes Gateway's
+        ``setdefault`` merge preserve a stale agent even though the command
+        reports that the new agent was selected.
+        """
+        from app.channels.manager import ChannelManager
+        from app.gateway.services import build_run_config, merge_run_context_overrides
+        from deerflow.agents.lead_agent.agent import _get_runtime_config
+
+        monkeypatch.setattr(
+            "app.channels.manager.load_agent_config",
+            lambda name, *, user_id=None: SimpleNamespace(name=name),
+        )
+
+        async def go():
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                channel_sessions={
+                    "test": {
+                        "config": {config_carrier: {"agent_name": "configured-writer"}},
+                    }
+                },
+            )
+            manager._client = _make_mock_langgraph_client(thread_id="research-thread")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                owner_user_id="deerflow-user-1",
+                text="/agent use researcher",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            await manager._handle_agent_command(msg, "use researcher")
+            assistant_id, run_config, run_context = manager._resolve_run_params(msg, "research-thread")
+            gateway_config = build_run_config(
+                "research-thread",
+                run_config,
+                None,
+                assistant_id=assistant_id,
+            )
+            merge_run_context_overrides(gateway_config, run_context, internal=True)
+
+            assert gateway_config["configurable"]["agent_name"] == "researcher"
+            assert gateway_config["context"]["agent_name"] == "researcher"
+            assert _get_runtime_config(gateway_config)["agent_name"] == "researcher"
+
+        _run(go())
+
+    def test_selected_agent_is_restored_from_thread_metadata(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            manager = ChannelManager(
+                bus=bus,
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                channel_sessions={
+                    "test": {
+                        "assistant_id": "configured-writer",
+                        "context": {"agent_name": "configured-context-agent"},
+                    }
+                },
+            )
+            mock_client = _make_mock_langgraph_client(thread_id="research-thread")
+            mock_client.threads.get.return_value = {
+                "thread_id": "research-thread",
+                "metadata": {"channel_agent_name": "researcher"},
+            }
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                owner_user_id="deerflow-user-1",
+                text="Continue",
+            )
+
+            await manager._load_thread_agent(mock_client, msg, "research-thread")
+            mock_client.threads.get.assert_awaited_once()
+            _, _, run_context = manager._resolve_run_params(msg, "research-thread")
+            assert run_context["agent_name"] == "researcher"
+
+        _run(go())
+
+    def test_agent_use_lead_agent_overrides_configured_default(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                channel_sessions={"test": {"assistant_id": "configured-writer"}},
+            )
+            mock_client = _make_mock_langgraph_client(thread_id="default-thread")
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/agent use lead_agent",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            await manager._handle_agent_command(msg, "use lead_agent")
+
+            create_metadata = mock_client.threads.create.call_args.kwargs["metadata"]
+            assert create_metadata["channel_agent_name"] == "lead_agent"
+            assert "agent_name" not in create_metadata
+            _, _, run_context = manager._resolve_run_params(msg, "default-thread")
+            assert "agent_name" not in run_context
+
+        _run(go())
+
+    @pytest.mark.parametrize("config_carrier", ["context", "configurable"])
+    def test_agent_use_lead_agent_clears_every_gateway_config_carrier(self, config_carrier):
+        """Resetting to lead_agent must remove every inherited custom-agent pin."""
+        from app.channels.manager import ChannelManager
+        from app.gateway.services import build_run_config, merge_run_context_overrides
+        from deerflow.agents.lead_agent.agent import _get_runtime_config
+
+        async def go():
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                channel_sessions={
+                    "test": {
+                        "config": {config_carrier: {"agent_name": "configured-writer"}},
+                    }
+                },
+            )
+            manager._client = _make_mock_langgraph_client(thread_id="default-thread")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/agent use lead_agent",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            await manager._handle_agent_command(msg, "use lead_agent")
+            assistant_id, run_config, run_context = manager._resolve_run_params(msg, "default-thread")
+            gateway_config = build_run_config(
+                "default-thread",
+                run_config,
+                None,
+                assistant_id=assistant_id,
+            )
+            merge_run_context_overrides(gateway_config, run_context, internal=True)
+
+            assert "agent_name" not in gateway_config["configurable"]
+            assert "agent_name" not in gateway_config["context"]
+            assert "agent_name" not in _get_runtime_config(gateway_config)
 
         _run(go())
 
@@ -5461,6 +5707,9 @@ class TestHandleChatWithArtifacts:
 
         paths = Paths(tmp_path)
         monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+        # Attachment resolution goes through the shared outputs-confinement
+        # helper, which binds ``get_paths`` at import like the other consumers.
+        monkeypatch.setattr("app.gateway.path_utils.get_paths", lambda: paths)
         outputs_dir = paths.sandbox_outputs_dir("test-thread-123", user_id="owner-1")
         outputs_dir.mkdir(parents=True)
         (outputs_dir / "report.md").write_text("owner report", encoding="utf-8")
@@ -7269,6 +7518,367 @@ class TestChannelService:
 
             assert results == [True, True]
             assert start_calls == ["telegram"]
+            await service.stop()
+
+        _run(go())
+
+    def test_readiness_retry_defers_when_old_instance_fails_to_stop(self):
+        """A retained channel whose stop() fails must not be replaced this round.
+
+        The pre-retry cleanup retains the instance when stop() raises; the
+        readiness attempt then declines instead of letting _start_channel
+        overwrite the still-tracked, still-listening channel — the one-hop-
+        later orphan shape from the review.
+        """
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        class FailingStopChannel(Channel):
+            def __init__(self, bus, config):
+                super().__init__(name="telegram", bus=bus, config=config)
+                self.stop_calls = 0
+                self.bus.subscribe_outbound(self._on_outbound)
+
+            async def start(self):
+                self._running = True
+
+            async def stop(self):
+                self.stop_calls += 1
+                self._running = False
+                raise RuntimeError("stop boom")
+
+            async def send(self, msg):
+                raise NotImplementedError
+
+            async def _on_outbound(self, msg):
+                raise AssertionError("a listener slated for cleanup must never receive outbounds")
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            stale = FailingStopChannel(bus=service.bus, config={})
+            service._channels["telegram"] = stale
+
+            ready = await service.ensure_channel_ready("telegram", attempts=2)
+
+            assert ready is False
+            assert service._channels.get("telegram") is stale  # retained, not overwritten
+            assert stale.stop_calls == 1  # each retry stops the retained instance again
+            # The listener stays subscribed precisely because the instance is
+            # retained: only a completed stop may unsubscribe it.
+            assert any(getattr(listener, "__self__", None) is stale for listener in service.bus._outbound_listeners)
+
+            # Shutdown reports the retained channel's failing stop (ExceptionGroup)
+            # instead of silently orphaning it — expected here by construction.
+            with pytest.raises(Exception):
+                await service.stop()
+
+        _run(go())
+
+    def test_readiness_attempts_do_not_replace_retained_instance(self, monkeypatch):
+        """Within one ensure_channel_ready loop, a failed attempt whose cleanup
+        retains the instance must end the loop instead of being overwritten.
+
+        The reviewer repro on #5227: with attempts=2 (the production default),
+        a channel whose start() never reaches is_running AND whose stop()
+        raises used to let attempt 2 construct a fresh instance and overwrite
+        the retained one — returning True while the first instance's outbound
+        listener stayed subscribed forever.
+        """
+        import deerflow.reflection as reflection_module
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            created = []
+
+            class FailFastAndUncleanChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__(name="telegram", bus=bus, config=config)
+                    self.stop_calls = 0
+                    created.append(self)
+
+                async def start(self):
+                    # Subscribe the listener, then report a client thread that
+                    # died before start() returned (the Discord invalid-token
+                    # shape).
+                    self.bus.subscribe_outbound(self._on_outbound)
+                    self._running = True
+
+                @property
+                def is_running(self) -> bool:
+                    return False
+
+                async def stop(self):
+                    self.stop_calls += 1
+                    self._running = False
+                    raise RuntimeError("stop boom")
+
+                async def send(self, msg):
+                    raise NotImplementedError
+
+                async def _on_outbound(self, msg):
+                    raise AssertionError("a listener slated for cleanup must never receive outbounds")
+
+            monkeypatch.setattr(reflection_module, "resolve_class", lambda path, base_class=None: FailFastAndUncleanChannel)
+
+            ready = await service.ensure_channel_ready("telegram", attempts=2)
+
+            assert ready is False
+            assert len(created) == 1  # attempt 2 never constructed a replacement
+            retained = created[0]
+            assert service._channels.get("telegram") is retained
+            assert retained.stop_calls == 1
+            assert any(getattr(listener, "__self__", None) is retained for listener in service.bus._outbound_listeners)
+
+            with pytest.raises(Exception):
+                await service.stop()
+
+        _run(go())
+
+    def test_restart_and_remove_retain_channel_when_stop_fails(self):
+        """restart_channel and remove_channel defer instead of orphaning a failed stop."""
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        class FailingStopChannel(Channel):
+            def __init__(self, bus, config):
+                super().__init__(name="telegram", bus=bus, config=config)
+                self.stop_calls = 0
+                self.bus.subscribe_outbound(self._on_outbound)
+
+            async def start(self):
+                self._running = True
+
+            async def stop(self):
+                self.stop_calls += 1
+                self._running = False
+                raise RuntimeError("stop boom")
+
+            async def send(self, msg):
+                raise NotImplementedError
+
+            async def _on_outbound(self, msg):
+                raise AssertionError("a listener slated for cleanup must never receive outbounds")
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            original = FailingStopChannel(bus=service.bus, config={})
+            service._channels["telegram"] = original
+
+            assert await service.restart_channel("telegram") is False
+            assert service._channels.get("telegram") is original
+            assert original.stop_calls == 1
+            assert any(getattr(listener, "__self__", None) is original for listener in service.bus._outbound_listeners)
+
+            assert await service.remove_channel("telegram") is False
+            assert service._channels.get("telegram") is original
+            assert original.stop_calls == 2
+            assert any(getattr(listener, "__self__", None) is original for listener in service.bus._outbound_listeners)
+
+            with pytest.raises(Exception):
+                await service.stop()
+
+        _run(go())
+
+    def test_failed_channel_startup_is_transactional(self, monkeypatch):
+        """A channel that never reaches is_running must be stopped before discard.
+
+        start() subscribes the outbound listener before the transport is
+        confirmed up, so a client thread that dies immediately (the Discord
+        invalid-token shape) must not leave a stale listener behind on the
+        bus — repeated readiness attempts would otherwise accumulate dead
+        listeners the service can no longer clean up.
+        """
+        import deerflow.reflection as reflection_module
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            created = []
+
+            class DeadOnArrivalChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__(name="telegram", bus=bus, config=config)
+                    self.stop_calls = 0
+                    created.append(self)
+
+                async def start(self):
+                    # Every adapter subscribes outbound before its transport is up.
+                    self.bus.subscribe_outbound(self._on_outbound)
+                    self._running = True
+
+                @property
+                def is_running(self) -> bool:
+                    return False
+
+                async def stop(self):
+                    self.stop_calls += 1
+                    self._running = False
+                    self.bus.unsubscribe_outbound(self._on_outbound)
+
+                async def send(self, msg):
+                    raise NotImplementedError
+
+                async def _on_outbound(self, msg):
+                    raise AssertionError("a dead listener must never receive outbounds")
+
+            monkeypatch.setattr(reflection_module, "resolve_class", lambda path, base_class=None: DeadOnArrivalChannel)
+
+            ready = await service.ensure_channel_ready("telegram", attempts=3)
+
+            assert ready is False
+            assert len(created) == 3
+            assert all(channel.stop_calls == 1 for channel in created)
+            assert service.bus._outbound_listeners == []
+            assert "telegram" not in service._channels
+
+            await service.stop()
+
+        _run(go())
+
+    def test_cancelled_failed_start_cleanup_retains_channel_until_cleaned(self, monkeypatch):
+        """Cancellation during failed-start cleanup must not orphan the channel.
+
+        ``_stop_and_discard_channel`` keeps the half-started instance tracked
+        until its ``stop()`` completes: cancelling the readiness request
+        mid-cleanup (review repro) leaves the instance reachable, so a later
+        readiness retry stops it again before replacing it and service
+        shutdown can still clean it up. Untracking first would leave the
+        subscribed outbound listener owned by nobody — stop count stuck at
+        one and the listener still registered after ``service.stop()``.
+        """
+        import deerflow.reflection as reflection_module
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            release = asyncio.Event()
+            created = []
+
+            class SuspendableStopChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__(name="telegram", bus=bus, config=config)
+                    self.stop_calls = 0
+                    self.stop_entered = asyncio.Event()
+                    created.append(self)
+
+                async def start(self):
+                    # Every adapter subscribes outbound before its transport is up.
+                    self.bus.subscribe_outbound(self._on_outbound)
+                    self._running = True
+
+                @property
+                def is_running(self) -> bool:
+                    return False
+
+                async def stop(self):
+                    self.stop_calls += 1
+                    self.stop_entered.set()
+                    if not release.is_set():
+                        await release.wait()
+                    self._running = False
+                    self.bus.unsubscribe_outbound(self._on_outbound)
+
+                async def send(self, msg):
+                    raise NotImplementedError
+
+            monkeypatch.setattr(reflection_module, "resolve_class", lambda path, base_class=None: SuspendableStopChannel)
+
+            # Phase 1: readiness cancelled while the failed-start cleanup is
+            # suspended inside stop().
+            readiness = asyncio.ensure_future(service.ensure_channel_ready("telegram", attempts=1))
+            while not created:
+                await asyncio.sleep(0.01)
+            await created[0].stop_entered.wait()
+            readiness.cancel()
+            try:
+                await readiness
+            except asyncio.CancelledError:
+                pass
+
+            retained = service._channels.get("telegram")
+            assert retained is created[0]  # retained for retry/shutdown, not orphaned
+            assert retained.stop_calls == 1  # first cleanup was interrupted
+            assert service.bus._outbound_listeners  # listener still registered
+
+            # Phase 2: a later readiness retry stops the retained instance
+            # before replacing it — never swaps an uncleaned channel out.
+            release.set()
+            ready = await service.ensure_channel_ready("telegram", attempts=1)
+            assert ready is False
+            assert len(created) == 2
+            assert created[0].stop_calls == 2  # cleanup completed on retry
+            assert created[1].stop_calls == 1  # replacement got its own teardown
+            assert service.bus._outbound_listeners == []
+            assert "telegram" not in service._channels
+
+            await service.stop()
+
+        _run(go())
+
+    def test_start_channel_exception_stops_and_discards(self, monkeypatch):
+        """A start() that raises mid-way must also stop the half-started channel."""
+        import deerflow.reflection as reflection_module
+        from app.channels.base import Channel
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(channels_config={"telegram": {"enabled": True, "bot_token": "x"}})
+            await service.manager.start()
+            service._running = True
+
+            created = []
+
+            class StartRaisesChannel(Channel):
+                def __init__(self, bus, config):
+                    super().__init__(name="telegram", bus=bus, config=config)
+                    self.stop_calls = 0
+                    created.append(self)
+
+                async def start(self):
+                    self.bus.subscribe_outbound(self._on_outbound)
+                    self._running = True
+                    raise RuntimeError("simulated invalid token")
+
+                async def stop(self):
+                    self.stop_calls += 1
+                    self._running = False
+                    self.bus.unsubscribe_outbound(self._on_outbound)
+
+                async def send(self, msg):
+                    raise NotImplementedError
+
+                async def _on_outbound(self, msg):
+                    raise AssertionError("a discarded listener must never receive outbounds")
+
+            monkeypatch.setattr(reflection_module, "resolve_class", lambda path, base_class=None: StartRaisesChannel)
+
+            ready = await service.ensure_channel_ready("telegram", attempts=2)
+
+            assert ready is False
+            assert len(created) == 2
+            assert all(channel.stop_calls == 1 for channel in created)
+            assert service.bus._outbound_listeners == []
+            assert "telegram" not in service._channels
+
             await service.stop()
 
         _run(go())

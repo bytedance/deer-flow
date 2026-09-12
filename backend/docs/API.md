@@ -189,7 +189,37 @@ Execute the agent with input.
 ```http
 POST /api/langgraph/threads/{thread_id}/runs
 Content-Type: application/json
+Idempotency-Key: <unique key for this logical request>  # optional
 ```
+
+The thread-scoped create, stream, and wait endpoints accept an optional
+`Idempotency-Key` header. Retrying with the same authenticated user, `thread_id`,
+and key reuses the existing run instead of executing the input again. The key is
+shared across `/runs`, `/runs/stream`, and `/runs/wait` for a given user and
+thread, so the same key string cannot back two different calls even across those
+endpoints. Reuse is bound to the original `input` and `assistant_id`; a retry
+that changes either returns 409. Generate a new key for every intentional user
+action; reuse a key only when retrying that same action after an uncertain HTTP
+result. Keys may be at most 255 characters. Stateless `/api/langgraph/runs/*`
+endpoints do not support this header because requests without an explicit thread
+create a new temporary conversation.
+
+Retrying a still-running run that this worker cannot stream returns 409 from
+`/runs/stream` (`Run ... is not active on this worker and cannot be streamed`)
+with no `Retry-After`. The same shape on `/runs/wait` returns 200
+`{"status": "<durable status>", "error": ...}` without blocking for a final
+state. Retrying a finished run through `/runs/wait` also returns that durable
+status payload rather than the latest thread checkpoint: a later run on the
+same thread may have advanced the head, and `/wait` does not claim that head
+as this run's result. That status is the durable row after completion, not
+the hydrated record from admission time. The original creating `/wait` still
+returns this run's checkpoint even if a retry overlaps while it is waiting. Retrying a finished run whose SSE log is gone emits a `gap` frame
+(`stream_replay_gap`, `recovery: reload_durable_state`) on the creating
+`/runs/stream` endpoint and closes without an `end` frame; reload durable
+thread/run state instead of treating the stream as empty. Observer joins of
+that same run still end with `end`. Stateless `/api/langgraph/runs/stream`
+does not accept this header and keeps the existing missing-stream close of
+`end`; the `gap` signal is only on a thread-scoped creating retry.
 
 **Request Body:**
 ```json
@@ -290,6 +320,7 @@ Stream responses in real-time.
 ```http
 POST /api/langgraph/threads/{thread_id}/runs/stream
 Content-Type: application/json
+Idempotency-Key: <unique key for this logical request>  # optional
 ```
 
 Same request body as Create Run. Returns SSE stream.
@@ -437,7 +468,10 @@ GET /api/mcp/config
 ```
 
 Requires an authenticated admin session. Sensitive env/header/OAuth secret
-values are masked in the response.
+values are masked in the response. Environment placeholders outside secret
+containers are returned in their raw form so editing cannot expose or persist
+their expanded values. Invalid operator-authored JSON/config shapes return
+`400` instead of being reported as a Gateway fault.
 
 **Response:**
 ```json
@@ -536,6 +570,63 @@ DeerFlow's `type` field or the MCP-spec `transport` field.
 The response is the full masked MCP configuration, matching `GET` and `PUT`.
 An unknown `server_name` returns `404`; attempting to enable a server with a
 disallowed `stdio` command returns `400`.
+
+#### Add MCP Servers
+
+Add one or more servers without replacing existing entries. The Gateway
+re-reads the file under the shared configuration lock, so concurrent sibling
+changes are preserved. Existing names return `409`.
+
+```http
+POST /api/mcp/config/servers
+Content-Type: application/json
+```
+
+The request body uses the same `mcp_servers` map as the full `PUT` endpoint.
+
+#### Replace One MCP Server
+
+Completely replace one existing server while preserving sibling entries.
+Omitted ordinary fields are deleted or reset; explicit `***` placeholders
+restore the corresponding stored secret.
+
+A disabled `stdio` replacement may keep a syntactically valid command outside
+the allowlist for offline editing. Command-shape and code-injecting environment
+variable checks still run when saving; the allowlist and executable-argument
+policy run when the server is enabled.
+
+```http
+PUT /api/mcp/config/server
+Content-Type: application/json
+```
+
+```json
+{
+  "server_name": "github",
+  "server": {
+    "enabled": true,
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env": {"GITHUB_TOKEN": "***"}
+  }
+}
+```
+
+#### Delete One MCP Server
+
+Delete one server without replacing sibling entries. The server name is a
+path parameter and the DELETE request has no body. Percent-encode names before
+placing them in the URL; the path converter also keeps legacy empty and
+slash-containing names addressable.
+
+```http
+DELETE /api/mcp/config/servers/{server_name}
+```
+
+All targeted mutations return the full masked MCP configuration. Before any
+write, the Gateway resolves environment variables in a copy and validates the
+same expanded document the runtime will load while persisting the original raw
+placeholders.
 
 #### Reset MCP Tools Cache
 
@@ -663,6 +754,17 @@ Content-Type: multipart/form-data
   }
 }
 ```
+
+#### Export a Custom Skill
+
+Admin session authentication is required for both requests. PAT credentials cannot export. Only the current user's custom skill is eligible; public, legacy and integration fallback is never used. A disabled custom skill remains eligible.
+
+1. `GET /api/skills/custom/{skill_name}/export-manifest` returns `skill_name`, `revision` (SHA-256 or null), `can_export`, `file_count`, `directory_count`, `total_bytes`, `files` (`path`, `type`, `size`, `executable`), `requirements` (`compatibility`, `allowed_tools`, `required_secrets` names and optional flags), and structured `warnings`/`blockers`. Paths are relative; `.` is the package root, counted in directory/entry totals. Structural blockers return a non-downloadable manifest. Declarations are not credential values or dependency verification.
+2. `GET /api/skills/custom/{skill_name}/export?expected_revision=<64 lowercase hex characters>` recaptures content and rejects stale previews with 409 before sending ZIP headers. Successful responses carry `application/zip`, attachment `<skill_name>.skill`, accurate `Content-Length`, `Cache-Control: private, no-store`, and `X-Content-Type-Options: nosniff`.
+
+Error `detail` contains a safe `code`, `message`, and optional relative `path`. Codes/statuses: `skill_not_found` 404, `skill_changed` 409, `skill_export_limit_exceeded` 413, `skill_export_unsupported` 422, `skill_export_busy` 429, `skill_export_timeout` 503, `skill_export_failed` 500; existing 401/403 auth behavior applies. Limits are 4096 entries including directories, 64 MiB/file, 100 MiB raw/ZIP, 1 MiB frontmatter, 1024 UTF-8 bytes per ZIP path and depth 32. Frontmatter preflight rejects YAML aliases and bounds structure to 32 nesting levels / 16384 parser events before constructing YAML objects. A 5-second lock wait and 60-second cooperative worker deadline bound work; blocking OS calls cannot be forcibly interrupted. Two export slots are shared across all users in each Gateway process; both previews and downloads use them, and 429 means that process-wide capacity is occupied. Slots remain held through worker drain and temporary-file cleanup. The streaming phase has a separate 120-second inactivity deadline, reset after each successful ASGI send. A continuously progressing transfer may exceed 120 seconds overall; a stalled send does not reset the deadline. Expiry aborts the incomplete download (no replacement JSON after ZIP headers); clients must retry. Client disconnect during preparation cancels and drains the worker, then exits the handler normally rather than leaking a synthetic task cancellation. No export cache, persistent job or sharing URL is created.
+
+Raw skill files, sidecars and empty directories are preserved. No hooks/scripts run during export and no secrets are redacted from package files. Import still uses normal security scanning and conflict checks. Export requires no-follow descriptor-relative host filesystem operations; unsupported platforms receive 422 rather than following links unsafely.
 
 #### Reload Skills
 
@@ -825,7 +927,7 @@ GET /api/threads/{thread_id}/artifacts/{path}
 **Query Parameters:**
 - `download` (boolean): If `true`, force download with Content-Disposition header
 
-**Response:** File content with appropriate Content-Type
+**Response:** File content with appropriate Content-Type. HTML and XML documents (`.html`, `.xml`, `.xhtml`, `.svg`, and other `+xml` types) are always returned as attachments, regardless of `download`, so generated markup never renders in the application origin.
 
 ---
 
@@ -1156,3 +1258,18 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs/stream \
 > `config.recursion_limit` explicitly — see the [Create Run](#create-run)
 > section for details. Scheduled-task launches use
 > `scheduler.recursion_limit` from `config.yaml` instead of a client body.
+
+## Chat archive and restore
+
+`POST /api/threads/search` accepts `archived: true` for archived chats or
+`archived: false` for recent chats (including legacy rows without an archive flag).
+Omit the field or use null to include both. Filtering applies before `limit` and
+`offset` and is scoped to the authenticated user. Combine it with the existing
+`metadata` and `status` filters when needed.
+
+Archive with `PATCH /api/threads/{thread_id}` and body
+`{"metadata":{"deerflow_archived":true}}`; use false to restore. The flag must be
+a JSON boolean. Writes containing only boolean pin/archive flags preserve
+`updated_at` and all other metadata. The owner-checked endpoint returns the normal
+thread metadata response; original thread and artifact URLs remain available.
+Archiving does not cancel runs, pause schedules, or change retention.

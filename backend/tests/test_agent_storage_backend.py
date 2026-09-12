@@ -263,9 +263,82 @@ def test_get_agent_store_falls_back_to_file_without_config(tmp_path, monkeypatch
     """The ``except -> file`` fallback is for genuinely unresolvable config only
     (CLI/tests); it must not fire when a config exists — that asymmetry is what
     keeps a misconfigured graph process from silently downgrading db to file."""
-    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "does-not-exist.yaml"))
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+    from deerflow.config import app_config
+
+    monkeypatch.setattr(app_config, "_legacy_config_candidates", lambda: ())
     try:
         reset_app_config()
         assert isinstance(get_agent_store(), FileAgentStore)
+    finally:
+        reset_app_config()
+
+
+def test_get_agent_store_does_not_fallback_when_explicit_config_is_missing(tmp_path, monkeypatch):
+    """An explicit config path is an operator assertion and must fail closed."""
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "does-not-exist.yaml"))
+    try:
+        reset_app_config()
+        with pytest.raises(FileNotFoundError, match="DEER_FLOW_CONFIG_PATH"):
+            get_agent_store()
+    finally:
+        reset_app_config()
+
+
+def test_get_agent_store_does_not_hide_invalid_config(monkeypatch):
+    """Only missing config falls back; config errors must reach the caller."""
+    from deerflow.config import app_config
+
+    def raise_invalid_config():
+        raise ValueError("invalid config")
+
+    monkeypatch.setattr(app_config, "get_app_config", raise_invalid_config)
+    with pytest.raises(ValueError, match="invalid config"):
+        get_agent_store()
+
+
+def test_get_agent_store_propagates_invalid_on_disk_config(tmp_path, monkeypatch):
+    """A present config with an invalid backend must fail instead of falling back."""
+    cfg_path = tmp_path / "config.yaml"
+    _write_min_config(cfg_path, {"agent_storage": {"backend": "invalid"}})
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
+    try:
+        reset_app_config()
+        with pytest.raises(ValueError, match="agent_storage.backend"):
+            get_agent_store()
+    finally:
+        reset_app_config()
+
+
+def test_get_agent_store_propagates_malformed_yaml(tmp_path, monkeypatch):
+    """An unparseable config.yaml must surface the parse error, not fall back to file."""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("agent_storage: [oops\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
+    try:
+        reset_app_config()
+        with pytest.raises(yaml.YAMLError):  # ParserError/ScannerError, previously swallowed
+            get_agent_store()
+    finally:
+        reset_app_config()
+
+
+def test_get_agent_store_does_not_fallback_when_extensions_config_is_missing(tmp_path, monkeypatch):
+    """A missing nested config must not look like a missing main config."""
+    cfg_path = tmp_path / "config.yaml"
+    _write_min_config(
+        cfg_path,
+        {
+            "agent_storage": {"backend": "db"},
+            "database": {"backend": "sqlite", "sqlite_dir": str(tmp_path / "db")},
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(tmp_path / "missing-extensions.json"))
+    try:
+        reset_app_config()
+        with pytest.raises(FileNotFoundError, match="Extensions config"):
+            get_agent_store()
     finally:
         reset_app_config()

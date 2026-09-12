@@ -11,18 +11,21 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from e2b import FileNotFoundException, TimeoutException
 from pydantic import ValidationError
 
 from deerflow.community.e2b_sandbox.capacity import (
     CapacityBackendError,
     ReserveStatus,
 )
+from deerflow.community.e2b_sandbox.e2b_sandbox_provider import MountUploadResult
 from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
@@ -261,6 +264,7 @@ def _make_provider(
     provider._sandboxes = {}
     provider._thread_sandboxes = {}
     provider._acquire_serializer = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
+    provider._mount_results = {}
     provider._warm_pool = OrderedDict()
     provider._eviction_tombstones = set()
     provider._evictions_in_progress = set()
@@ -1425,6 +1429,171 @@ def test_apply_mounts_deadline_reason_shows_configured_value(monkeypatch, tmp_pa
     assert "attempted_files=1" in caplog.text
 
 
+def test_apply_mounts_returns_result_on_success(monkeypatch, tmp_path):
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(), user_id="user-1")
+
+    assert result.truncated is False
+    assert result.reason is None
+    assert result.completed_files == 2
+    assert result.completed_bytes == 11
+    assert result.attempted_files == 2
+    assert result.attempted_bytes == 11
+
+
+def test_apply_mounts_returns_truncated_result_on_deadline(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 2.0
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    provider._config["mount_upload_deadline_seconds"] = 1
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(files=DeadlineFilesAPI()), user_id="user-1")
+
+    assert result.truncated is True
+    assert result.reason == "time budget 1s"
+    assert result.completed_files <= result.attempted_files
+
+
+def test_apply_mounts_returns_truncated_result_on_file_count(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.txt").write_text("first", encoding="utf-8")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(), user_id="user-1")
+
+    assert result.truncated is True
+    assert result.reason is not None
+    assert "file count cap" in result.reason
+
+
+def test_apply_mounts_returns_truncated_result_on_byte_budget(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 7)
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.bin").write_bytes(b"1234")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.bin").write_bytes(b"5678")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(), user_id="user-1")
+
+    assert result.truncated is True
+    assert result.reason is not None
+    assert "byte budget" in result.reason
+
+
+def test_apply_mounts_non_limit_failure_is_not_reported_as_truncation(monkeypatch, tmp_path):
+    class FailWriteAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            raise RuntimeError("SDK write failed")
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(files=FailWriteAPI()), user_id="user-1")
+
+    assert result.truncated is False
+    assert result.reason is None
+
+
+def test_apply_mounts_missing_host_path_is_not_reported_as_truncation(monkeypatch, tmp_path):
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(tmp_path / "nonexistent"), container_path="/mnt/data", read_only=False),
+    ]
+
+    result = provider._apply_mounts(FakeClient(), user_id="user-1")
+
+    assert result.truncated is False
+    assert result.reason is None
+    assert result.attempted_files == 0
+
+
+def test_create_sandbox_stores_mount_result_on_sandbox(monkeypatch):
+    provider = _make_provider()
+    _install_fake_sdk(monkeypatch, provider)
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id, _thread_id=None: [])
+    provider._config["mounts"] = []
+
+    sandbox_id = provider._create_sandbox("t1", user_id="u1")
+    sandbox = provider.get(sandbox_id)
+
+    assert sandbox is not None
+    assert sandbox.mount_upload_result is not None
+    assert sandbox.mount_upload_result.truncated is False
+    assert sandbox.mount_upload_result.reason is None
+
+
+def test_mount_result_survives_warm_pool_reclaim(monkeypatch):
+    provider = _make_provider()
+    _install_fake_sdk(monkeypatch, provider)
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id, _thread_id=None: [])
+    provider._config["mounts"] = []
+
+    sandbox_id = provider._create_sandbox("t1", user_id="u1")
+    sandbox = provider.get(sandbox_id)
+    assert sandbox is not None
+    original_result = sandbox.mount_upload_result
+    assert original_result is not None
+
+    provider.release(sandbox_id)
+    reclaimed_id = provider.acquire("t1", user_id="u1")
+    reclaimed_sandbox = provider.get(reclaimed_id)
+
+    assert reclaimed_id == sandbox_id
+    assert reclaimed_sandbox is not None
+    assert reclaimed_sandbox.mount_upload_result == original_result
+
+
 def test_skill_projection_and_configured_mount_share_upload_budget(monkeypatch, tmp_path):
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
@@ -1574,6 +1743,15 @@ def test_execute_command_returns_stdout_on_success():
     sb = _make_sandbox(client)
     assert sb.execute_command("printf hello").rstrip() == "hello"
     assert sb.is_dead is False
+
+
+def test_execute_command_appends_exit_marker_when_failure_has_output():
+    """LocalSandbox parity: a nonzero exit must survive in the output text
+    even when the command produced output, so evidence consumers (acceptance
+    checklist) recover the actual shell status."""
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="5 passed, 1 error\n", stderr="", exit_code=1)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
 
 
 def test_execute_command_does_not_mark_dead_on_unrelated_error():
@@ -4890,3 +5068,265 @@ def test_stable_seed_matches_shared_identity():
     ).hexdigest()[:16]
 
     assert provider._stable_seed("t-1", "u-1") == expected
+
+
+def test_evict_oldest_warm_cleans_mount_result(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="sb-warm")
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    provider._warm_pool["sb-warm"] = ("seed", 12345.0)
+    provider._mount_results["sb-warm"] = MountUploadResult(
+        truncated=True,
+        reason="byte budget",
+        attempted_files=8,
+        attempted_bytes=4000,
+        completed_files=5,
+        completed_bytes=2500,
+    )
+    provider._kill_client = MagicMock(return_value=None)
+
+    assert provider._evict_oldest_warm() == "sb-warm"
+    assert "sb-warm" not in provider._mount_results
+
+
+def test_reuse_evicts_dead_sandbox_cleans_mount_result():
+    provider = _make_provider()
+    sandbox = _make_sandbox(FakeClient(), sandbox_id="sb-dead")
+    sandbox._dead = True
+    provider._sandboxes["sb-dead"] = sandbox
+    provider._thread_sandboxes[provider._thread_key("t1", "u1")] = "sb-dead"
+    provider._mount_results["sb-dead"] = MountUploadResult(
+        truncated=True,
+        reason="time budget 120s",
+        attempted_files=0,
+        attempted_bytes=0,
+        completed_files=0,
+        completed_bytes=0,
+    )
+
+    provider._reuse_in_process_sandbox("t1", user_id="u1")
+
+    assert "sb-dead" not in provider._mount_results
+
+
+def test_reclaim_warm_pool_cleans_mount_result_on_reconnect_failure(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+
+    def fail_connect(_sandbox_id, **_kwargs):
+        raise RuntimeError("404 Not Found")
+
+    fake_cls.connect_factory = fail_connect
+    provider._warm_pool["sb-broken"] = (provider._stable_seed("t1", "u1"), 12345.0)
+    provider._mount_results["sb-broken"] = MountUploadResult(
+        truncated=False,
+        reason=None,
+        attempted_files=0,
+        attempted_bytes=0,
+        completed_files=0,
+        completed_bytes=0,
+    )
+
+    provider._reclaim_warm_pool_sandbox("t1", user_id="u1")
+
+    assert "sb-broken" not in provider._mount_results
+
+
+def test_reclaim_warm_pool_cleans_mount_result_on_dead_entry(monkeypatch):
+    provider = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="sb-zombie", commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
+    fake_cls.connect_factory = lambda _sandbox_id, **_kwargs: client
+    provider._warm_pool["sb-zombie"] = (provider._stable_seed("t1", "u1"), 12345.0)
+    provider._mount_results["sb-zombie"] = MountUploadResult(
+        truncated=True,
+        reason="file count cap",
+        attempted_files=0,
+        attempted_bytes=0,
+        completed_files=0,
+        completed_bytes=0,
+    )
+
+    provider._reclaim_warm_pool_sandbox("t1", user_id="u1")
+
+    assert "sb-zombie" not in provider._mount_results
+
+
+def test_forget_local_sandbox_cleans_mount_result():
+    provider = _make_provider()
+    provider._sandboxes["sb-peer"] = _make_sandbox(FakeClient(), sandbox_id="sb-peer")
+    provider._mount_results["sb-peer"] = MountUploadResult(
+        truncated=False,
+        reason=None,
+        attempted_files=0,
+        attempted_bytes=0,
+        completed_files=0,
+        completed_bytes=0,
+    )
+
+    provider._forget_local_sandbox("sb-peer")
+
+    assert "sb-peer" not in provider._mount_results
+    assert "sb-peer" not in provider._sandboxes
+
+
+def test_mount_upload_deadline_none_returns_default():
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    def option(name, default=None):
+        return None if name == "mount_upload_deadline_seconds" else default
+
+    assert mod.E2BSandboxProvider._resolve_mount_upload_deadline(option) == mod._MOUNT_PASS_DEADLINE_SECONDS
+
+
+def test_mount_upload_result_is_frozen():
+    result = MountUploadResult(
+        truncated=False,
+        reason=None,
+        attempted_files=0,
+        attempted_bytes=0,
+        completed_files=0,
+        completed_bytes=0,
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        result.truncated = True  # type: ignore[misc]
+
+
+def test_list_dir_preserves_trailing_space_in_filename():
+    # "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    # verbatim, one entry per line, so a per-line strip() corrupts the name and
+    # every follow-up file API call on the listed path misses the real file.
+    listing = SimpleNamespace(stdout="/home/user/notes.txt \n/home/user/sub\n\n__DF_FIND_STATUS__:0\n", stderr="", exit_code=0)
+    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    sb = _make_sandbox(client)
+
+    assert sb.list_dir("/home/user") == ["/home/user/notes.txt ", "/home/user/sub"]
+
+
+def test_list_dir_raises_when_command_fails():
+    client = FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(OSError, match="Failed to list_dir"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_raises_when_client_closed():
+    sb = _make_sandbox(FakeClient())
+    sb.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_raises_when_find_returns_no_entries():
+    # `find ... 2>/dev/null` on a missing path yields empty stdout; that is not
+    # a real empty directory (`find -type d` still prints the directory itself).
+    listing = SimpleNamespace(stdout="\n__DF_FIND_STATUS__:1\n", stderr="", exit_code=1)
+    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(FileNotFoundError):
+        sb.list_dir("/home/user/missing")
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path():
+    listing = SimpleNamespace(stdout="", stderr="", exit_code=127)
+    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    sb = _make_sandbox(client)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        sb.list_dir("/home/user")
+
+
+def test_list_dir_uses_find_H_to_dereference_start_point():
+    # find defaults to -P, so a symlink start point (E2B /mnt/acp-workspace)
+    # would produce empty stdout and raise FileNotFoundError without -H.
+    listing = SimpleNamespace(stdout="/mnt/acp-workspace\n\n__DF_FIND_STATUS__:0\n", stderr="", exit_code=0)
+    commands = FakeCommandsAPI([listing])
+    sb = _make_sandbox(FakeClient(commands=commands))
+
+    assert sb.list_dir("/mnt/acp-workspace") == ["/mnt/acp-workspace"]
+    assert commands.calls and "find -H " in commands.calls[0]
+
+
+def test_glob_preserves_trailing_space_in_filename():
+    listing = SimpleNamespace(stdout="/home/user/notes.txt \n", stderr="", exit_code=0)
+    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    sb = _make_sandbox(client)
+
+    matches, truncated = sb.glob("/home/user", "notes*")
+
+    assert matches == ["/home/user/notes.txt "]
+    assert truncated is False
+
+
+@pytest.mark.parametrize("missing_exc", [FileNotFoundError, FileNotFoundException])
+def test_append_creates_file_when_file_does_not_exist(missing_exc):
+    # Append has no native write mode, so a missing file must still create one
+    # containing only the new fragment. Both the e2b SDK exception and the
+    # stdlib one used by FakeFilesAPI / compatible clients count as not-found.
+    class MissingFilesAPI(FakeFilesAPI):
+        def read(self, path: str, *, format: str | None = None):
+            self.read_calls.append((path, format))
+            raise missing_exc(path)
+
+    files = MissingFilesAPI()
+    sb = _make_sandbox(FakeClient(files=files))
+
+    sb.write_file("/mnt/user-data/outputs/report.txt", "conclusion", append=True)
+
+    assert files.write_calls == [("/home/user/outputs/report.txt", "conclusion")]
+
+
+def test_append_does_not_overwrite_when_read_fails(caplog):
+    # If the pre-read fails for any reason other than not-found, we cannot
+    # confirm the existing contents. Continuing would write only the tail and
+    # destroy the original file. Fail closed: raise, and never call write.
+    existing = b"important report body"
+
+    class TimeoutFilesAPI(FakeFilesAPI):
+        def read(self, path: str, *, format: str | None = None):
+            self.read_calls.append((path, format))
+            raise TimeoutException("read timed out")
+
+    files = TimeoutFilesAPI(store={"/home/user/outputs/report.txt": existing})
+    sb = _make_sandbox(FakeClient(files=files))
+
+    with caplog.at_level("ERROR"), pytest.raises(TimeoutException, match="read timed out"):
+        sb.write_file("/mnt/user-data/outputs/report.txt", "conclusion", append=True)
+
+    assert files.write_calls == []
+    assert files.store["/home/user/outputs/report.txt"] == existing
+    assert "refusing to overwrite" in caplog.text
+    assert "Failed to write file" not in caplog.text
+
+
+def test_append_accumulates_existing_content():
+    # The rewrite exists to keep read-modify-write. If someone later drops
+    # `existing` and writes only the tail, the not-found / fail-closed tests
+    # would still pass.
+    files = FakeFilesAPI(store={"/home/user/outputs/report.txt": b"hello"})
+    sb = _make_sandbox(FakeClient(files=files))
+
+    sb.write_file("/mnt/user-data/outputs/report.txt", " world", append=True)
+
+    assert files.write_calls == [("/home/user/outputs/report.txt", "hello world")]
+
+
+def test_append_decodes_bytes_preimage():
+    # FakeFilesAPI.read() returns str for valid utf-8. A bytes pre-image is
+    # what hits the decode branch before concatenation.
+    class BytesFilesAPI(FakeFilesAPI):
+        def read(self, path: str, *, format: str | None = None):
+            self.read_calls.append((path, format))
+            return self.store[path]
+
+    files = BytesFilesAPI(store={"/home/user/outputs/report.txt": b"hello"})
+    sb = _make_sandbox(FakeClient(files=files))
+
+    sb.write_file("/mnt/user-data/outputs/report.txt", " world", append=True)
+
+    assert files.write_calls == [("/home/user/outputs/report.txt", "hello world")]
