@@ -211,7 +211,7 @@ def test_run_case_fails_when_warm_cache_is_not_hit(tmp_path, monkeypatch) -> Non
     # so warm reads trip the contract assertion. The factory returns a
     # LeadAgentAssembly, so this stub unwraps it exactly as the real accessor
     # does — the point here is the missing cache, not a different return shape.
-    async def uncached_state_accessor_graph(agent_factory, assistant_id, mode, snapshot_frequency, config):
+    def uncached_state_accessor_graph(agent_factory, assistant_id, mode, snapshot_frequency, config):
         return agent_factory(config=config).graph
 
     monkeypatch.setattr(

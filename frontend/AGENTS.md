@@ -15,6 +15,12 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 - **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
 - **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
 
+`pnpm-workspace.yaml` overrides vulnerable `@xmldom/xmldom` 0.9.x releases to
+0.9.12 for GHSA-965w-775f-mr7g. Nextra pulls it in through MathJax and
+`speech-rule-engine@4.1.2`, which pins 0.9.8. Keep the override until the
+upstream dependency chain resolves a patched version without it; regenerate
+`pnpm-lock.yaml` and verify the docs build when changing this constraint.
+
 ## Commands
 
 | Command          | Purpose                                       |
@@ -36,7 +42,15 @@ Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` wi
 
 Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
 
-E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
+
+The dedicated `run-history.ts` hook replaces the unpaged runs hook. Show counts
+only after a successful history read, never during initial loading or errors.
+Scheduled run history uses task/page query keys and the existing live offset API.
+Fetch 51 rows to display 50 plus a next-page sentinel; never append pages. Only
+page zero polls or refreshes on focus/reconnect. Task switches reset to page zero,
+and consumed AbortSignals cancel obsolete reads. Live offsets are not snapshots;
+explicit mutations or navigation may observe newly inserted runs.
 
 ## Architecture
 
@@ -50,7 +64,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/showcase/[thread_id]` (allowlisted public read-only demos), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/artifacts/view` (chrome-free window that renders one markdown artifact with the panel's own renderer), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
+- **`app/`** — Next.js App Router. Routes include `/` (landing), `/showcase/[thread_id]` (allowlisted public read-only demos), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/artifacts/view` (chrome-free window that renders Markdown or CSV/TSV artifacts with the panel's own renderer), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
 - **`components/`** — React components:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
@@ -69,6 +83,12 @@ More specific `AGENTS.md` files under `src/` contain the frontend sections split
 
 ## Code Style
 
+Custom Agent `display_name` is an optional Unicode UI label, edited in
+`AgentSettingsDialog`. Use it with a fallback to `name` for gallery/chat text;
+keep `name` for React identity, URLs, requests, and runtime `agent_name`.
+The 100-code-point budget uses `[...value.trim()].length`, matching Pydantic;
+do not use HTML `maxLength`, which counts UTF-16 code units instead.
+
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.
 - **Class names**: Use `cn()` from `@/lib/utils` for conditional Tailwind classes.
@@ -76,6 +96,13 @@ More specific `AGENTS.md` files under `src/` contain the frontend sections split
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
 
 ## Environment
+
+Scheduled-task interval forms preserve the initial `every_seconds` on mount,
+timezone changes, and untouched blur. The backend's configurable interval minimum
+can be lower than the UI's default 60-second floor. Apply that UI floor only after
+an explicit amount/unit edit so editing metadata or duplicating a task cannot
+silently change its cadence. Component regressions live in
+`tests/unit/components/workspace/scheduled-task-schedule-input.dom.test.tsx`.
 
 Backend API URLs are optional; an nginx proxy is used by default:
 
@@ -85,6 +112,16 @@ NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:8001/api
 ```
 
 Leave these unset for the standard `make dev` / Docker flow, where nginx serves the public `/api/langgraph/*` prefix and rewrites it to Gateway's native `/api/*` routes.
+
+`make build-static` creates a standalone read-only demo and copies `.next/static`
+and `public` into the output. In static mode, `core/api/static-response.ts`
+resolves Gateway REST reads with empty capability/catalog responses or existing
+same-origin `/mock/api` fixtures; writes and unknown API routes fail locally.
+The homepage client counter calls `/github-stars`, outside the Gateway proxy.
+That dynamic route reads the server-only `GITHUB_OAUTH_TOKEN` at runtime, caches
+GitHub data for one hour, and returns 204 when the count is unavailable. Start
+the standalone server from `frontend/` with `node --env-file=.env
+.next/standalone/server.js` to load the current credentials.
 
 To reach a dev server on anything other than localhost — a LAN address, or a proxied hostname — list the host in `DEER_FLOW_DEV_ALLOWED_ORIGINS` (comma-separated; a full URL is reduced to its host). It feeds Next's `allowedDevOrigins`, which gates `/_next/*`, fonts, and HMR. Without it those requests get a 403 and the page renders server-side but never hydrates, so nothing on it — including the login form — responds. Development only; production builds ignore it.
 
@@ -125,3 +162,13 @@ Pin/archive responses must not merge unrelated metadata flags: out-of-order
 organization requests can otherwise roll back each other's confirmed state.
 Run-created optimistic snapshots have no archive flag: refresh archive-filtered
 lists from the server instead of inserting those snapshots into either view.
+
+### Delimited artifact preview
+
+CSV/TSV previews share `artifact-table-preview.tsx` between the panel and standalone viewer. Papa Parse runs only inside `delimited-preview.worker.ts`; `use-delimited-preview.ts` bounds input before transfer, cancels stale work, and enforces a five-second timeout. The parser detects the first record separator outside quoted fields and passes it explicitly to Papa Parse, so embedded newlines in an incomplete quoted field cannot corrupt newline detection. It retains at most 202 logical records and 50 columns, discarding an incomplete final record from truncated input. UI pagination displays at most 200 data rows in pages of 50. Keep the table mounted but inactive when switching to source so header/pagination state survives; changing file identity resets it. Pending `write_file` content stays in source mode until success.
+
+Custom skill export is admin-only and disabled in static demos. The lazy
+`skill-export-dialog.tsx` must abort requests and ignore stale callbacks on close
+or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob download;
+HTTP 409 requires explicit preview refresh. Keep file lists paginated and diagnostics
+localized. Browser handoff does not prove the file was saved to disk.

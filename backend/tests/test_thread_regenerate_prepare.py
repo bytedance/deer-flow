@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from _router_auth_helpers import call_unwrapped
@@ -145,18 +145,19 @@ class FakeAccessor:
 
 @pytest.fixture(autouse=True)
 def _patch_checkpoint_accessor(monkeypatch):
+    from app.gateway import services
     from app.gateway.routers import thread_runs
 
-    async def build_accessor(request, *, thread_id, assistant_id=None, checkpoint_id=None):
+    def build_accessor(request, *, thread_id, assistant_id=None, checkpoint_id=None):
         config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
         if checkpoint_id is not None:
             config["configurable"]["checkpoint_id"] = checkpoint_id
         return FakeAccessor(request.app.state.checkpointer), config
 
     async def build_thread_accessor(request, *, thread_id, checkpoint_id=None):
-        return await build_accessor(request, thread_id=thread_id, checkpoint_id=checkpoint_id)
+        return build_accessor(request, thread_id=thread_id, checkpoint_id=checkpoint_id)
 
-    monkeypatch.setattr(thread_runs, "build_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr(services, "build_checkpoint_state_accessor", build_accessor)
     monkeypatch.setattr(thread_runs, "build_thread_checkpoint_state_accessor", build_thread_accessor)
 
 
@@ -195,6 +196,7 @@ def _request(checkpointer, event_store, *, run_manager=None, user_id="user-1"):
 
 
 def test_run_wait_readers_return_materialized_final_values() -> None:
+    from app.gateway import services
     from app.gateway.routers import runs, thread_runs
 
     snapshot = SimpleNamespace(
@@ -237,19 +239,19 @@ def test_run_wait_readers_return_materialized_final_values() -> None:
             patch.object(thread_runs, "get_run_manager", return_value=object()),
             patch.object(thread_runs, "start_run", AsyncMock(return_value=record)),
             patch.object(
-                thread_runs,
+                services,
                 "build_checkpoint_state_accessor",
                 create=True,
-                new=AsyncMock(return_value=(accessor, snapshot.config)),
+                new=MagicMock(return_value=(accessor, snapshot.config)),
             ),
             patch.object(runs, "get_stream_bridge", return_value=object()),
             patch.object(runs, "get_run_manager", return_value=object()),
             patch.object(runs, "start_run", AsyncMock(return_value=record)),
             patch.object(
-                runs,
+                services,
                 "build_checkpoint_state_accessor",
                 create=True,
-                new=AsyncMock(return_value=(accessor, snapshot.config)),
+                new=MagicMock(return_value=(accessor, snapshot.config)),
             ),
         ):
             thread_result = await call_unwrapped(thread_runs.wait_run, "thread-1", body, request)
@@ -263,6 +265,7 @@ def test_run_wait_readers_return_materialized_final_values() -> None:
 
 
 def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
+    from app.gateway import services
     from app.gateway.routers import runs, thread_runs
 
     snapshot = SimpleNamespace(
@@ -291,17 +294,17 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
             patch.object(thread_runs, "get_run_manager", return_value=object()),
             patch.object(thread_runs, "start_run", AsyncMock(return_value=record)),
             patch.object(
-                thread_runs,
+                services,
                 "build_checkpoint_state_accessor",
-                new=AsyncMock(return_value=(accessor, snapshot.config)),
+                new=MagicMock(return_value=(accessor, snapshot.config)),
             ),
             patch.object(runs, "get_stream_bridge", return_value=object()),
             patch.object(runs, "get_run_manager", return_value=object()),
             patch.object(runs, "start_run", AsyncMock(return_value=record)),
             patch.object(
-                runs,
+                services,
                 "build_checkpoint_state_accessor",
-                new=AsyncMock(return_value=(accessor, snapshot.config)),
+                new=MagicMock(return_value=(accessor, snapshot.config)),
             ),
         ):
             thread_result = await call_unwrapped(thread_runs.wait_run, "thread-1", body, request)
@@ -317,6 +320,7 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
 
 @pytest.mark.parametrize("route_name", ["thread", "stateless"])
 def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(route_name: str) -> None:
+    from app.gateway import services
     from app.gateway.routers import runs, thread_runs
 
     record = SimpleNamespace(
@@ -336,9 +340,9 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
                 patch.object(thread_runs, "get_run_manager", return_value=object()),
                 patch.object(thread_runs, "start_run", AsyncMock(return_value=record)),
                 patch.object(
-                    thread_runs,
+                    services,
                     "build_checkpoint_state_accessor",
-                    new=AsyncMock(side_effect=RuntimeError("graph construction failed")),
+                    new=MagicMock(side_effect=RuntimeError("graph construction failed")),
                 ),
             ):
                 return await call_unwrapped(thread_runs.wait_run, "thread-1", body, request)
@@ -348,9 +352,9 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
             patch.object(runs, "get_run_manager", return_value=object()),
             patch.object(runs, "start_run", AsyncMock(return_value=record)),
             patch.object(
-                runs,
+                services,
                 "build_checkpoint_state_accessor",
-                new=AsyncMock(side_effect=RuntimeError("graph construction failed")),
+                new=MagicMock(side_effect=RuntimeError("graph construction failed")),
             ),
         ):
             return await call_unwrapped(runs.stateless_wait, body, request)

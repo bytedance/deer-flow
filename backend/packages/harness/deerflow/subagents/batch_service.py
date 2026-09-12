@@ -10,6 +10,7 @@ from typing import Any
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.subagents.batch_acceptance import check_batch_acceptance
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -20,6 +21,7 @@ from deerflow.subagents.executor import (
     get_background_task_result,
     request_cancel_background_task,
 )
+from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
 
@@ -194,13 +196,33 @@ class SubagentBatchService:
                 spec.get("parent_model"),
                 app_config=app_config,
             )
-            tools = get_available_tools(
+            # Assemble off-loop: tool assembly may block on MCP cache
+            # initialization, which must not stall the calling event loop (issue #5172).
+            tools = await run_assembly(
+                get_available_tools,
                 groups=spec.get("tool_groups"),
                 model_name=effective_model,
                 subagent_enabled=False,
                 include_upload_tool=False,
                 app_config=app_config,
             )
+            # Revalidate durable state before launching: cancel_batch may have
+            # terminalized this item (or its lease may have been lost) while
+            # assembly blocked in the worker thread — the poll loop's checks
+            # only start after execute_async(), so launching without this
+            # check would run work the user already cancelled.
+            lease = await self._repository.renew_item_lease(
+                item_id,
+                lease_owner=self._lease_owner,
+                lease_seconds=self._config.lease_seconds,
+                now=datetime.now(UTC),
+            )
+            if not lease["valid"]:
+                logger.info(
+                    "Durable batch item %s cancelled or lease lost during tool assembly; skipping launch",
+                    item_id,
+                )
+                return
             executor = SubagentExecutor(
                 config=config,
                 tools=tools,
@@ -216,6 +238,7 @@ class SubagentBatchService:
                 is_internal=spec.get("is_internal") is True,
                 authz_attributes=spec.get("authz_attributes"),
                 execution_capacity=self._execution_capacity,
+                acceptance_criteria=item.get("acceptance_criteria"),
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
             execution_id = executor.execute_async(prompt, task_id=item_id)
@@ -276,6 +299,16 @@ class SubagentBatchService:
             truncated = len(raw_result) > self._config.max_result_chars
             stored_result = raw_result[: self._config.max_result_chars] if raw_result else None
             preview = raw_result[: self._config.result_preview_max_chars] if raw_result else None
+            acceptance_verdict = None
+            if result.status is SubagentStatus.COMPLETED and item.get("acceptance_criteria"):
+                try:
+                    valid, acceptance_verdict = await self._check_acceptance_with_lease(item, result, app_config)
+                    if not valid:
+                        return
+                except Exception:
+                    # Advisory like ordinary task acceptance: an unavailable
+                    # checker must not discard useful work or trigger a retry.
+                    logger.warning("Batch acceptance check failed; result remains unchecked (item_id=%s)", item_id, exc_info=True)
             await self._repository.finalize_item(
                 item_id,
                 lease_owner=self._lease_owner,
@@ -288,6 +321,7 @@ class SubagentBatchService:
                 token_usage=_usage(result.token_usage_records),
                 model_name=effective_model,
                 completed_at=datetime.now(UTC),
+                acceptance_verdict=acceptance_verdict,
             )
         except asyncio.CancelledError:
             if execution_id is not None:
@@ -318,3 +352,39 @@ class SubagentBatchService:
             self._item_batches.pop(item_id, None)
             if execution_id is not None:
                 cleanup_background_task(execution_id)
+
+    async def _check_acceptance_with_lease(self, item, result, app_config):
+        """Keep a completed execution leased until its advisory check drains."""
+
+        async def renew():
+            lease = await self._repository.renew_item_lease(
+                item["id"],
+                lease_owner=self._lease_owner,
+                lease_seconds=self._config.lease_seconds,
+                now=datetime.now(UTC),
+            )
+            return lease["valid"]
+
+        if not await renew():
+            return False, None
+        check = asyncio.create_task(
+            check_batch_acceptance(
+                item["acceptance_criteria"],
+                batch=item["batch"],
+                app_config=app_config,
+                bash_executions=getattr(result, "bash_executions", None),
+            )
+        )
+        try:
+            while True:
+                done, _ = await asyncio.wait({check}, timeout=max(1.0, self._config.lease_seconds / 3))
+                if done:
+                    return True, check.result()
+                if not await renew():
+                    return False, None
+        finally:
+            if not check.done():
+                check.cancel()
+            # The checklist's sandbox offload drains before releasing its
+            # holder, even when shutdown or a lost lease cancels this task.
+            await asyncio.gather(check, return_exceptions=True)

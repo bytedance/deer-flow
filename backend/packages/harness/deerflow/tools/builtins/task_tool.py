@@ -43,6 +43,7 @@ from deerflow.subagents.status_contract import (
 )
 from deerflow.tools.types import Runtime
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.custom_events import aemit_custom_event
 
 if TYPE_CHECKING:
@@ -713,6 +714,18 @@ async def task_tool(
       every criterion that cannot be checked deterministically is marked
       UNVERIFIED — never silently passed. A `holds` leaf is execution evidence,
       not a guarantee that the deliverable is correct.
+    - `completed` means execution ended, not task acceptance. Read each criterion
+      and retain useful work. For `does not hold`, inspect the reason and repair
+      or recheck only the unmet condition, reusing unaffected outputs.
+      `UNVERIFIED` is missing evidence, not a failed condition: verify load-bearing
+      criteria against actual artifacts or primary evidence; when confirmation
+      is unavailable, preserve uncertainty. Handle both kinds in mixed results.
+    - Reuse outputs with `holds` checks while spot-checking load-bearing claims
+      beyond their scope. Without a checklist, inspect the self-report's handles.
+      Any further delegation must name the missing condition and cover only
+      remaining work. Do not repeat an unchanged attempt or restart the whole
+      task. Stay within the remaining delegation and execution budget; when
+      exhausted, deliver confirmed results with explicit gaps and uncertainty.
 
     Args:
         prompt: The task description for the subagent. Be specific and clear about what needs to be done.
@@ -869,7 +882,9 @@ async def task_tool(
     }
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
-    tools = get_available_tools(**available_tools_kwargs)
+    # Assemble off-loop: tool assembly may block on MCP cache initialization,
+    # which must not stall the calling event loop (issue #5172).
+    tools = await run_assembly(get_available_tools, **available_tools_kwargs)
 
     # Create executor
     executor_kwargs = {

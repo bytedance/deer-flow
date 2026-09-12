@@ -41,12 +41,14 @@ from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
-    SkillStateConfig,
     atomic_write_extensions_config,
     extensions_config_file_lock,
     extensions_config_write_lock,
     get_extensions_config,
+    read_raw_extensions_config,
     reload_extensions_config,
+    set_raw_skill_enabled,
+    validate_raw_extensions_config,
 )
 from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
@@ -127,7 +129,7 @@ class StreamEvent:
     """A single event from the streaming agent response.
 
     Event types align with the LangGraph SSE protocol:
-        - ``"values"``: Full state snapshot (title, messages, artifacts).
+        - ``"values"``: State snapshot (title, messages, artifacts, summary_text).
         - ``"messages-tuple"``: Per-message update (AI text, tool calls, tool results).
         - ``"end"``: Stream finished.
 
@@ -259,6 +261,19 @@ class DeerFlowClient:
     def _atomic_write_json(path: Path, data: dict) -> None:
         """Write JSON to *path* atomically (temp file + replace)."""
         atomic_write_extensions_config(path, data)
+
+    @classmethod
+    def _write_skill_enabled_state(cls, config_path: Path, name: str, enabled: bool) -> None:
+        """Persist one skill state and reload; callers hold the extensions config locks.
+
+        Works on the raw file so ``$VAR`` placeholders are never written back as
+        resolved secrets.
+        """
+        config_data = read_raw_extensions_config(config_path)
+        set_raw_skill_enabled(config_data, name, enabled)
+        validate_raw_extensions_config(config_data)
+        cls._atomic_write_json(config_path, config_data)
+        reload_extensions_config()
 
     def _get_runnable_config(self, thread_id: str, **overrides) -> RunnableConfig:
         """Build a RunnableConfig for agent invocation."""
@@ -853,7 +868,7 @@ class DeerFlowClient:
 
         Yields:
             StreamEvent with one of:
-            - type="values"          data={"title": str|None, "messages": [...], "artifacts": [...]}
+            - type="values"          data={"title": str|None, "messages": [...], "artifacts": [...], "summary_text": str|None}
             - type="custom"          data={...}
             - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str}
             - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str, "usage_metadata": {...}}
@@ -1102,6 +1117,7 @@ class DeerFlowClient:
                 type="values",
                 data={
                     "title": chunk.get("title"),
+                    "summary_text": chunk.get("summary_text"),
                     "messages": [self._serialize_message(m) for m in messages],
                     "artifacts": chunk.get("artifacts", []),
                 },
@@ -1267,6 +1283,7 @@ class DeerFlowClient:
             ``McpConfigResponse`` schema.
 
         Raises:
+            ValueError: If the resulting config would not load; nothing is written.
             OSError: If the config file cannot be written.
         """
         config_path = ExtensionsConfig.resolve_config_path()
@@ -1276,10 +1293,11 @@ class DeerFlowClient:
         with extensions_config_write_lock, extensions_config_file_lock(config_path):
             # The singleton is process-local, so re-read the shared file under
             # the cross-process lock before merging the replacement MCP map.
-            current_config = ExtensionsConfig.from_file(config_path)
-            config_data = current_config.to_file_dict()
+            # Read it raw so sibling keys keep their $VAR placeholders.
+            config_data = read_raw_extensions_config(config_path)
             config_data["mcpServers"] = mcp_servers
 
+            validate_raw_extensions_config(config_data)
             self._atomic_write_json(config_path, config_data)
             reloaded = reload_extensions_config()
 
@@ -1323,7 +1341,8 @@ class DeerFlowClient:
             Updated skill info dict.
 
         Raises:
-            ValueError: If the skill is not found.
+            ValueError: If the skill is not found, or extensions_config.json
+                is invalid (nothing is written).
             OSError: If the config file cannot be written.
         """
         storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
@@ -1347,14 +1366,8 @@ class DeerFlowClient:
             with skill_projection_mutation(storage, "public", remove_names=removal_names):
                 with extensions_config_write_lock, extensions_config_file_lock(config_path):
                     # The projection lock is cross-process, but the singleton
-                    # cache is not. Reload from disk under the config lock.
-                    extensions_config = ExtensionsConfig.from_file(config_path)
-                    extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
-
-                    config_data = extensions_config.to_file_dict()
-
-                    self._atomic_write_json(config_path, config_data)
-                    reload_extensions_config()
+                    # cache is not. Reload raw from disk under the config lock.
+                    self._write_skill_enabled_state(config_path, name, enabled)
         else:
             # CUSTOM / LEGACY: write per-user state
             from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
@@ -1367,11 +1380,7 @@ class DeerFlowClient:
                 if config_path is None:
                     raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
                 with extensions_config_write_lock, extensions_config_file_lock(config_path):
-                    extensions_config = ExtensionsConfig.from_file(config_path)
-                    extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
-                    config_data = extensions_config.to_file_dict()
-                    self._atomic_write_json(config_path, config_data)
-                    reload_extensions_config()
+                    self._write_skill_enabled_state(config_path, name, enabled)
 
         # Invalidate the prompt cache for this caller (and for all users if
         # the changed skill is PUBLIC, since PUBLIC state is shared). Mirrors

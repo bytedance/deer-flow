@@ -297,8 +297,10 @@ export function InputBox({
   onContextChange,
   onFollowupsVisibilityChange,
   onGoalChange,
+  onPrepareThread,
   onSubmit,
   onStop,
+  canStopStreaming = true,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -340,11 +342,28 @@ export function InputBox({
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
   onGoalChange?: (goal: GoalState | null) => void;
+  /**
+   * Prepare a not-yet-materialized thread before a builtin command creates
+   * it server-side. The `/goal <condition>` PUT endpoint materializes a
+   * missing thread row itself, so a project-scoped new chat uses this to
+   * assign membership first — the later idempotent thread create would
+   * otherwise return that unassigned row without the project. Only runs for
+   * goal-set: status/clear never create a thread server-side. Rejecting
+   * aborts the command and keeps the composer's text for a retry.
+   */
+  onPrepareThread?: () => void | Promise<void>;
   onSubmit?: (
     message: PromptInputMessage,
     options?: InputBoxSubmitOptions,
   ) => void | Promise<void>;
   onStop?: () => void;
+  /**
+   * Whether the caller's role holds `runs:cancel` (RFC #4063 Phase 4).
+   * Defaults to true so callers that don't resolve permissions (pre-Phase-4
+   * backends, storybook) keep today's behavior; the Gateway route guard
+   * stays the enforcement point.
+   */
+  canStopStreaming?: boolean;
 }) {
   const { locale, t } = useI18n();
   const queryClient = useQueryClient();
@@ -1152,6 +1171,14 @@ export function InputBox({
   );
 
   const handleStopStreaming = useCallback(() => {
+    // Roles denied runs:cancel must not interrupt the in-progress turn —
+    // the Gateway would 403 the cancel anyway. The submit-button click is
+    // the only live entry point today (handleSubmit returns early with the
+    // pleaseWaitStreaming toast while streaming), but gate in the handler
+    // as defense-in-depth so any future stop path is covered too.
+    if (!canStopStreaming) {
+      return;
+    }
     // Mark the in-progress turn as user-interrupted so the next
     // streaming->ready transition does not suggest follow-ups for it.
     stoppedByUserRef.current = true;
@@ -1159,7 +1186,7 @@ export function InputBox({
     setFollowupsHidden(true);
     setFollowupsLoading(false);
     onStop?.();
-  }, [onStop]);
+  }, [canStopStreaming, onStop]);
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
@@ -1192,6 +1219,35 @@ export function InputBox({
           // Reject so the composer keeps the user's text for editing instead of
           // clearing it (PromptInput only preserves input on a rejected submit).
           return Promise.reject(new Error("goal-too-long"));
+        }
+        if (submitAction.command.kind === "set") {
+          // A goal-set PUT creates the thread server-side when missing, so a
+          // project-scoped new chat must assign membership first. The prepare
+          // callback toasts its own failure; reject so the composer keeps the
+          // text for a retry instead of issuing an unassigned goal.
+          //
+          // Fence against conversation switches while preparation runs: the
+          // goal PUT registers its AbortController only when it starts, so
+          // the thread-change/unmount cleanup cannot cancel an in-flight
+          // prepare. Capture the goal-request epoch before the await — the
+          // cleanup bumps it via abortGoalRequest — and drop the stale
+          // continuation before it can clear the new conversation's composer
+          // or launch the abandoned submission.
+          const requestEpoch = goalRequestStateRef.current.sequence;
+          try {
+            await onPrepareThread?.();
+          } catch (error) {
+            return Promise.reject(
+              error instanceof Error
+                ? error
+                : new Error("thread preparation failed"),
+            );
+          }
+          if (goalRequestStateRef.current.sequence !== requestEpoch) {
+            // Reject (not resolve) so PromptInput keeps the current
+            // conversation's composer text untouched.
+            return Promise.reject(new Error("goal-preparation-stale"));
+          }
         }
         promptHistoryIndexRef.current = null;
         promptHistoryDraftRef.current = "";
@@ -1229,6 +1285,7 @@ export function InputBox({
       handleCompactCommand,
       handleGoalCommand,
       handleStopStreaming,
+      onPrepareThread,
       selectedSlashSkill,
       status,
       submitThreadMessage,
@@ -1326,6 +1383,9 @@ export function InputBox({
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
   const composerLocked = isComposerDisabled || polishingInput;
+  // A denied runs:cancel role sees a disabled stop affordance, not a removed
+  // one — the composer must still show that a turn is in flight.
+  const stopDenied = status === "streaming" && !canStopStreaming;
   const inputPolishUndoAvailable =
     !polishingInput &&
     inputPolishUndo !== null &&
@@ -2698,9 +2758,21 @@ export function InputBox({
             </ModelSelector>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={composerLocked}
+              disabled={composerLocked || stopDenied}
               variant="outline"
               status={status}
+              // A bare disabled stop square reads as a broken composer;
+              // explain the permission boundary (native title, since a
+              // Radix tooltip won't fire on a disabled button). Spread
+              // conditionally: an explicitly-undefined aria-label would
+              // clobber PromptInputSubmit's default aria-label="Submit"
+              // and strip the submit control's accessible name.
+              {...(stopDenied
+                ? {
+                    "aria-label": t.inputBox.stopStreamingUnavailable,
+                    title: t.inputBox.stopStreamingUnavailable,
+                  }
+                : {})}
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();

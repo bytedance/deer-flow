@@ -16,7 +16,7 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import build_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import abuild_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import serialize_channel_values_for_api
 from deerflow.utils.thread_id import resolve_thread_id
 
@@ -76,7 +76,7 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
 
     if completed:
         try:
-            accessor, config = await build_checkpoint_state_accessor(
+            accessor, config = await abuild_checkpoint_state_accessor(
                 request,
                 thread_id=thread_id,
                 assistant_id=body.assistant_id,

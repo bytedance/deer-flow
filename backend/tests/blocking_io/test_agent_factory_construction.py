@@ -95,7 +95,7 @@ async def test_gateway_checkpoint_state_factory_runs_off_the_event_loop() -> Non
             patch.object(services, "get_run_context", return_value=ctx),
             patch.object(services, "resolve_agent_factory", return_value=agent_factory),
         ):
-            await services.build_checkpoint_state_accessor(request, thread_id="thread-checkpoint-state")
+            await services.abuild_checkpoint_state_accessor(request, thread_id="thread-checkpoint-state")
 
     try:
         await _assert_factory_runs_off_the_event_loop(invoke)
@@ -122,9 +122,9 @@ async def test_gateway_checkpoint_state_factory_is_single_flight() -> None:
         patch.object(services, "resolve_agent_factory", return_value=agent_factory),
     ):
         try:
-            first = asyncio.create_task(services.build_checkpoint_state_accessor(request, thread_id="thread-single-flight"))
+            first = asyncio.create_task(services.abuild_checkpoint_state_accessor(request, thread_id="thread-single-flight"))
             assert await asyncio.to_thread(factory_started.wait, 1)
-            second = asyncio.create_task(services.build_checkpoint_state_accessor(request, thread_id="thread-single-flight"))
+            second = asyncio.create_task(services.abuild_checkpoint_state_accessor(request, thread_id="thread-single-flight"))
             await asyncio.sleep(0)
             release_factory.set()
             first_accessor, second_accessor = await asyncio.gather(first, second)
@@ -155,13 +155,13 @@ async def test_gateway_checkpoint_state_factory_survives_waiter_cancellation() -
         patch.object(services, "resolve_agent_factory", return_value=agent_factory),
     ):
         try:
-            first = asyncio.create_task(services.build_checkpoint_state_accessor(request, thread_id="thread-cancelled-single-flight"))
+            first = asyncio.create_task(services.abuild_checkpoint_state_accessor(request, thread_id="thread-cancelled-single-flight"))
             assert await asyncio.to_thread(factory_started.wait, 1)
             first.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await first
 
-            second = asyncio.create_task(services.build_checkpoint_state_accessor(request, thread_id="thread-cancelled-single-flight"))
+            second = asyncio.create_task(services.abuild_checkpoint_state_accessor(request, thread_id="thread-cancelled-single-flight"))
             await asyncio.sleep(0)
             assert len(factory_calls) == 1
             release_factory.set()
