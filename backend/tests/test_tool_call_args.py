@@ -503,3 +503,44 @@ class TestPairToolCallResults:
         occurrences = pair_tool_call_results([ai, first, HumanMessage(content="reminder"), second])
 
         assert [(o.call_id, o.result) for o in occurrences] == [("call-1", first), ("call-2", second)]
+
+
+class TestDuplicateIdsWithinOneMessage:
+    """Review on #5374: surfaces are addressed by id, so an id that repeats inside one AIMessage can never be rewritten for just one occurrence."""
+
+    @staticmethod
+    def _message():
+        calls = [
+            {"name": "write_file", "id": "dup", "args": {"path": "a.md", "content": "a" * 50}},
+            {"name": "write_file", "id": "dup", "args": {"path": "b.md", "content": "b" * 50}},
+            {"name": "write_file", "id": "solo", "args": {"path": "c.md", "content": "c" * 50}},
+        ]
+        return AIMessage(
+            content=[{"type": "tool_use", "id": call["id"], "name": call["name"], "input": dict(call["args"])} for call in calls],
+            tool_calls=[dict(call, args=dict(call["args"])) for call in calls],
+            additional_kwargs={"tool_calls": [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": json.dumps(call["args"])}} for call in calls]},
+        )
+
+    def test_duplicated_ids_are_never_offered_or_rewritten_on_any_surface(self):
+        message = self._message()
+        offered: list[str] = []
+
+        def replacement_for(_message, tool_call):
+            offered.append(tool_call["id"])
+            return {**tool_call["args"], "content": "[elided]"}
+
+        (rewritten,) = rewrite_messages_tool_call_args([message], replacement_for)
+
+        assert offered == ["solo"]
+        assert [call["args"]["content"][:1] for call in rewritten.tool_calls] == ["a", "b", "["]
+        assert [block["input"]["content"][:1] for block in rewritten.content] == ["a", "b", "["]
+        raw = [json.loads(entry["function"]["arguments"])["content"][:1] for entry in rewritten.additional_kwargs["tool_calls"]]
+        assert raw == ["a", "b", "["]
+        assert [call["args"]["path"] for call in rewritten.tool_calls] == ["a.md", "b.md", "c.md"]
+
+    def test_message_with_only_duplicated_ids_passes_through_by_identity(self):
+        message = self._message()
+        message.tool_calls.pop()  # leave the two ``dup`` calls only
+
+        assert rewrite_messages_tool_call_args([message], lambda _m, tool_call: {"content": "[elided]"}) is None
+        assert rewrite_tool_call_args(message, {"dup": {"content": "[elided]"}}) is not message  # the low-level rewriter itself stays id-keyed

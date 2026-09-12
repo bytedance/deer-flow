@@ -2101,3 +2101,23 @@ class TestSupersededWriteElision:
 
         assert forwarded is request
         assert interrupted.tool_calls[0]["args"]["content"] == draft
+
+    def test_duplicate_ids_in_one_turn_are_never_rewritten(self):
+        """Review on #5374: a failed sibling sharing the id of a superseded successful write must not be rewritten into it."""
+        mw = self._middleware()
+        turn = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "write_file", "id": "dup", "args": {"path": self.PATH, "content": "a" * 5000}},
+                {"name": "write_file", "id": "dup", "args": {"path": self.OTHER, "content": "b" * 5000}},
+            ],
+        )
+        results = [_meta_result("write_file", "dup"), _meta_result("write_file", "dup", "Error: boom", status="error")]
+        rd, rr = _read("call-2", self.PATH)
+        last, last_ok = _write("call-3", "/mnt/user-data/outputs/last.md", "l" * 5000)
+
+        request, forwarded = self._forward(mw, [turn, *results, rd, rr, last, last_ok])
+
+        assert forwarded is request
+        assert [call["args"]["path"] for call in turn.tool_calls] == [self.PATH, self.OTHER]
+        assert turn.tool_calls[1]["args"]["content"] == "b" * 5000

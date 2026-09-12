@@ -48,7 +48,7 @@ billed either way, so replay costs no more).
 from __future__ import annotations
 
 import json
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -68,8 +68,13 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
     was replaced. Untouched messages pass through by identity, except that once
     anything was rewritten every AIMessage loses its ``resp_`` response id (see
     the module docstring: the server-side history behind that id still holds
-    the original arguments). Only calls with a non-empty string id are offered
-    to the selector, since nothing else can be matched across surfaces.
+    the original arguments). Only calls with a non-empty string id that is
+    unique within its message are offered to the selector: every surface is
+    addressed by id, so nothing else can be matched across surfaces, and an id
+    a malformed provider payload repeats inside one AIMessage could only be
+    rewritten for *all* of its occurrences at once — a failed sibling would
+    take on the successful call's arguments (review on #5374). Such calls are
+    conservatively left alone.
     """
     updated: list[Any] = []
     changed = False
@@ -77,11 +82,12 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
         patched = message
         if isinstance(message, AIMessage) and message.tool_calls:
             replacements: dict[str, dict[str, Any]] = {}
+            duplicated = _duplicated_call_ids(message.tool_calls)
             for tool_call in message.tool_calls:
                 if not isinstance(tool_call, dict):
                     continue
                 call_id = tool_call.get("id")
-                if not isinstance(call_id, str) or not call_id:
+                if not isinstance(call_id, str) or not call_id or call_id in duplicated:
                     continue
                 new_args = replacement_for(message, tool_call)
                 if new_args is not None:
@@ -94,6 +100,12 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
     if not changed:
         return None
     return [_without_response_chain_id(message) for message in updated]
+
+
+def _duplicated_call_ids(tool_calls: Sequence[Any]) -> set[str]:
+    """Ids that occur more than once in one message's structured tool-call list (the list every surface mirrors)."""
+    counts = Counter(tool_call.get("id") for tool_call in tool_calls if isinstance(tool_call, dict))
+    return {call_id for call_id, count in counts.items() if count > 1 and isinstance(call_id, str) and call_id}
 
 
 @dataclass(frozen=True, slots=True)

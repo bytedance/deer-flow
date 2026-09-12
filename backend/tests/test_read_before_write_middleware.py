@@ -807,3 +807,24 @@ class TestBlockedPayloadElision:
         captured = self._captured(handler).messages
         assert captured[1] is interrupted
         assert captured[2].tool_calls[0]["args"]["content"].startswith("[payload elided: 5000 chars")
+
+    def test_duplicate_ids_in_one_turn_are_never_rewritten(self):
+        """Review on #5374: a successful sibling sharing the id of a blocked write must not be rewritten into it."""
+        from deerflow.agents.middlewares.read_before_write_middleware import WRITE_BLOCK_KEY
+
+        mw = self._middleware()
+        turn = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "write_file", "id": "dup", "args": {"description": "d", "path": self.PATH, "content": "a" * 5000}},
+                {"name": "write_file", "id": "dup", "args": {"description": "d", "path": "/mnt/user-data/outputs/other.md", "content": "b" * 5000}},
+            ],
+        )
+        blocked = ToolMessage(content="Error: blocked", tool_call_id="dup", name="write_file", status="error", additional_kwargs={WRITE_BLOCK_KEY: {"path": self.PATH, "tool": "write_file"}})
+        ok = ToolMessage(content="OK", tool_call_id="dup", name="write_file")
+        request = self._model_request([HumanMessage(content="go"), turn, blocked, ok])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        assert self._captured(handler) is request
