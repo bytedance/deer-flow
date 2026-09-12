@@ -1,4 +1,7 @@
 packages: []
+overrides:
+  # GHSA-965w-775f-mr7g: speech-rule-engine 4.1.2 pins vulnerable 0.9.8.
+  "@xmldom/xmldom@>=0.9.0 <0.9.12": 0.9.12
 ignoredBuiltDependencies:
   - esbuild
   - sharp

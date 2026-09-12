@@ -49,9 +49,11 @@ export type MockThread = {
 
 export type MockAgent = {
   name: string;
+  display_name?: string | null;
   description?: string;
   system_prompt?: string;
   tool_groups?: string[] | null;
+  skills?: string[] | null;
 };
 
 export type MockSkill = {

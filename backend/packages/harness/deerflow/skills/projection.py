@@ -813,3 +813,53 @@ def ensure_public_skill_projection(*, app_config=None) -> bool:
             logger.error("Failed to clear the public skill projection after a boot-time error", exc_info=True)
         return False
     return True
+
+
+@contextmanager
+def skill_projection_read_lock(storage: SkillStorage, *, timeout: float = 5.0, check=None) -> Iterator[None]:
+    """Bounded, non-mutating acquisition of the existing user projection lock."""
+    import time
+
+    root = (storage.get_skills_root_path() / "custom") if getattr(storage, "user_id", None) is None else get_skill_projection_paths(storage).custom.parent
+    lock_path = root.parent / f".{root.name}.projection.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    process_lock = _lock_for(lock_path)
+    deadline = time.monotonic() + timeout
+    acquired = False
+    try:
+        while not acquired:
+            if check:
+                check()
+            acquired = process_lock.acquire(timeout=min(0.05, max(0, deadline - time.monotonic())))
+            if not acquired and time.monotonic() >= deadline:
+                raise TimeoutError("Skill projection lock timeout")
+        with lock_path.open("a", encoding="utf-8") as lock_file:
+            locked = False
+            try:
+                while not locked:
+                    if check:
+                        check()
+                    try:
+                        if fcntl is not None:
+                            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        else:  # pragma: no cover - Windows
+                            lock_file.seek(0)
+                            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                        locked = True
+                    except OSError as error:
+                        if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                            raise
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("Skill projection lock timeout") from None
+                        time.sleep(0.02)
+                yield
+            finally:
+                if locked:
+                    if fcntl is not None:
+                        fcntl.flock(lock_file, fcntl.LOCK_UN)
+                    else:  # pragma: no cover - Windows
+                        lock_file.seek(0)
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        if acquired:
+            process_lock.release()
