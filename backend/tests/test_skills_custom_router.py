@@ -1027,10 +1027,10 @@ def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_
 
     assert response.status_code == 200, response.text
     assert response.json()["enabled"] is False
+    # Only skill states are seeded; the cached model is never serialized because
+    # its $VAR values are already resolved.
     assert json.loads(config_path.read_text(encoding="utf-8")) == {
-        "mcpServers": {},
         "skills": {"public-skill": {"enabled": False}},
-        "middlewares": [],
     }
 
 

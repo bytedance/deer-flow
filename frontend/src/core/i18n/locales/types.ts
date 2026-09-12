@@ -245,6 +245,7 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    stopStreamingUnavailable: string;
   };
 
   // Sidebar
@@ -530,6 +531,9 @@ export interface Translations {
     backToGallery: string;
     settings: string;
     settingsTitle: string;
+    settingsDisplayName: string;
+    settingsDisplayNameTooLong: string;
+    settingsDisplayNameHint: string;
     settingsDescription: string;
     settingsModel: string;
     settingsModelDefault: string;
@@ -666,6 +670,15 @@ export interface Translations {
 
   // Tool calls
   toolCalls: {
+    details: string;
+    toolName: string;
+    callId: string;
+    input: string;
+    result: string;
+    error: string;
+    noResult: string;
+    emptyResult: string;
+    truncated: string;
     moreSteps: (count: number) => string;
     lessSteps: string;
     executeCommand: string;

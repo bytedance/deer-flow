@@ -843,6 +843,9 @@ memory-zh = [
 monocle = [
     { name = "deerflow-harness", extra = ["monocle"] },
 ]
+ollama = [
+    { name = "deerflow-harness", extra = ["ollama"] },
+]
 postgres = [
     { name = "deerflow-harness", extra = ["postgres"] },
 ]
@@ -874,6 +877,7 @@ requires-dist = [
     { name = "deerflow-harness", extras = ["browser"], marker = "extra == 'browser'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["memory-zh"], marker = "extra == 'memory-zh'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["monocle"], marker = "extra == 'monocle'", editable = "packages/harness" },
+    { name = "deerflow-harness", extras = ["ollama"], marker = "extra == 'ollama'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["redis"], marker = "extra == 'redis'", editable = "packages/harness" },
     { name = "dingtalk-stream", specifier = ">=0.24.3" },
@@ -894,7 +898,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
     { name = "wecom-aibot-python-sdk", specifier = ">=0.1.6" },
 ]
-provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "browser", "memory-zh"]
+provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "ollama", "browser", "memory-zh"]
 
 [package.metadata.requires-dev]
 dev = [
