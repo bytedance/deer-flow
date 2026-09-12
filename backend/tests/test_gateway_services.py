@@ -623,6 +623,26 @@ def test_build_run_config_basic():
     assert config["recursion_limit"] == 100
 
 
+def test_build_run_config_uses_configured_default_recursion_limit(_stub_app_config):
+    """Runs without a request override use the operator-configured default."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "recursion_limit": 700,
+            }
+        )
+    )
+    try:
+        config = build_run_config("thread-1", None, None)
+        assert config["recursion_limit"] == 700
+    finally:
+        reset_app_config()
+
+
 def test_build_run_config_with_overrides():
     from app.gateway.services import build_run_config
 
@@ -721,6 +741,26 @@ def test_build_run_config_preserves_reasonable_recursion_limit(_stub_app_config)
     assert config["recursion_limit"] == 250
 
 
+def test_build_run_config_client_recursion_limit_overrides_configured_default(_stub_app_config):
+    """An explicit valid client value takes precedence over the server default."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "recursion_limit": 700,
+            }
+        )
+    )
+    try:
+        config = build_run_config("thread-1", {"recursion_limit": 250}, None)
+        assert config["recursion_limit"] == 250
+    finally:
+        reset_app_config()
+
+
 def test_build_run_config_rejects_invalid_recursion_limit(_stub_app_config):
     """Non-positive / non-int / bool values fall back to the server default."""
     from app.gateway.services import _DEFAULT_RECURSION_LIMIT, build_run_config
@@ -728,6 +768,49 @@ def test_build_run_config_rejects_invalid_recursion_limit(_stub_app_config):
     for bad in (0, -5, "1000", 3.5, True, None):
         config = build_run_config("thread-1", {"recursion_limit": bad}, None)
         assert config["recursion_limit"] == _DEFAULT_RECURSION_LIMIT, bad
+
+
+def test_build_run_config_invalid_client_recursion_limit_uses_configured_default(_stub_app_config):
+    """An invalid client value cannot erase the operator-configured default."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "recursion_limit": 700,
+            }
+        )
+    )
+    try:
+        config = build_run_config("thread-1", {"recursion_limit": 0}, None)
+        assert config["recursion_limit"] == 700
+    finally:
+        reset_app_config()
+
+
+def test_build_run_config_clamps_configured_default_to_ceiling(_stub_app_config, caplog):
+    """The operator default remains bounded by max_recursion_limit."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "recursion_limit": 700,
+                "max_recursion_limit": 500,
+            }
+        )
+    )
+    try:
+        caplog.set_level(logging.WARNING, logger="app.gateway.services")
+        config = build_run_config("thread-1", None, None)
+        assert config["recursion_limit"] == 500
+        assert any("recursion_limit 700 exceeds max_recursion_limit 500" in record.message for record in caplog.records)
+    finally:
+        reset_app_config()
 
 
 def test_build_run_config_clamps_recursion_limit_with_context(_stub_app_config):

@@ -215,10 +215,15 @@ class AppConfig(BaseModel):
             ),
         ),
     )
+    recursion_limit: int = Field(
+        default=100,
+        ge=1,
+        description="Default LangGraph recursion_limit for Gateway runs when the client does not provide one. Applied per run and capped by max_recursion_limit.",
+    )
     max_recursion_limit: int = Field(
         default=1000,
         ge=1,
-        description="Hard server-side ceiling for a client-supplied run recursion_limit. Client values above this are clamped; prevents runaway LangGraph super-steps (LLM cost / DoS).",
+        description="Hard server-side ceiling for configured defaults and client-supplied run recursion_limit values. Values above this are clamped; prevents runaway LangGraph super-steps (LLM cost / DoS).",
     )
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(
