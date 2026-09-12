@@ -1,0 +1,82 @@
+{
+  "base_commit": "4501c76b0f44cc55af6332d65ac2e7f5311f71fd",
+  "format": "passed",
+  "lint": "passed",
+  "focused": {
+    "passed": 582,
+    "warnings": 1
+  },
+  "full_branch": {
+    "passed": 15451,
+    "failed": 15,
+    "skipped": 182,
+    "deselected": 3,
+    "seconds": 375.89
+  },
+  "full_base": {
+    "passed": 15427,
+    "failed": 15,
+    "skipped": 182,
+    "deselected": 3,
+    "seconds": 440.22
+  },
+  "branch_only_failures": [],
+  "base_only_failures": [],
+  "shared_failure_ids": [
+    "tests/test_browser_automation.py::TestBrowserTools::test_navigate_emits_screenshot_artifact_and_browser_view",
+    "tests/test_browser_automation.py::TestBrowserTools::test_navigate_returns_snapshot",
+    "tests/test_browser_automation.py::TestBrowserTools::test_navigate_screenshot_failure_does_not_break_action",
+    "tests/test_browser_router.py::test_validate_browser_url_rejects_private_and_non_http",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_and_web_capture_tools_agree_on_target_error_warning",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_tool_no_warning_for_normal_target_status",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_tool_success",
+    "tests/test_browserless_client.py::TestBrowserlessTools::test_web_fetch_tool_warns_on_target_error_status",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_invalid_filter_falls_back_to_fit",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_passes_configured_filter",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_success",
+    "tests/test_crawl4ai_tools.py::TestCrawl4AiTools::test_web_fetch_tool_truncates_to_4096",
+    "tests/test_fastcrw_tools.py::TestWebFetchTool::test_fetch_returns_error_string_on_exception",
+    "tests/test_fastcrw_tools.py::TestWebFetchTool::test_fetch_returns_error_when_no_content",
+    "tests/test_fastcrw_tools.py::TestWebFetchTool::test_fetch_uses_web_fetch_config"
+  ],
+  "published_prototype_unit_tests": {
+    "passed": 12
+  },
+  "published_score_consistency": "all five tables matched per-case metadata",
+  "live_integration": {
+    "passed": 3,
+    "total": 3,
+    "results": "integration/final-network.json",
+    "protocol": "integration/protocol.json"
+  },
+  "validation_conditions": [
+    "Locked Python dependencies installed separately for branch and clean base.",
+    "Existing ReadabiliPy JavaScript dependencies and Hatchling fixture build requirements installed/cached for both.",
+    "Final full suites allowed the local test servers and package dependency access needed by existing tests.",
+    "The initial sandbox-restricted suite is not the final branch comparison."
+  ],
+  "source_sha256": {
+    "backend/packages/harness/deerflow/agents/lead_agent/agent.py": "7c55780374bc732e56a2ff8843a357daf8e525e3002e2342115fad7b9049b0be",
+    "backend/packages/harness/deerflow/agents/middlewares/durable_context_middleware.py": "cf9a931714a70bdc01f5fdf72ae46d32c642d4b991a691bcdd440c5566224680",
+    "backend/packages/harness/deerflow/agents/middlewares/summarization_middleware.py": "37bd2f91fd0f8b7e8dc96da9503b81a93be63a20f545de8038f7efc752396783",
+    "backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py": "4cdec0c2f614bdfb2b95d28065c142602beeff793aa6b43ba55695479519475c",
+    "backend/packages/harness/deerflow/agents/task_continuity/__init__.py": "8fba61f70e526bc45fe426f15746eb31b2d42e9d19b2852942787266a68bcd30",
+    "backend/packages/harness/deerflow/agents/task_continuity/archive.py": "291dfe26de4c9d7053f7f126d4fbff1ebc5ecfa6a91e04f1b5d9d9d3ab8ddb9e",
+    "backend/packages/harness/deerflow/agents/task_continuity/state.py": "7d18d259bc5ae6714532727fc92fb10b0647af1ef63a2bf8fa73d8efd78deb3d",
+    "backend/packages/harness/deerflow/agents/task_continuity/tools.py": "f78bf9406760ab47c5c2afd3817188e416396195c11b2cece3b8d387d16b5c8e",
+    "backend/packages/harness/deerflow/agents/thread_state.py": "e7f1e8c2caf74309c538175fe6f0038cbd5c9d8b7fa71808d6a647f6debc556f",
+    "backend/packages/harness/deerflow/client.py": "fd4264fddd86a21329ca79bbf9c0b4994d56fbe96ed6fbc67289770f8d1478dd",
+    "backend/packages/harness/deerflow/config/app_config.py": "fcae3bf34177bb52820f1469382c857f6845f1a46d5bfa8eb3333b18a7148eaa",
+    "backend/packages/harness/deerflow/config/task_continuity_config.py": "bdb062a43fe9d1ba6ac35818afe847ac049cc62cbac39a3ec7489c8fd22078da",
+    "backend/packages/harness/deerflow/runtime/context_compaction.py": "e1332bff82b68e3edb23859e7833bcd53696998a7b5541edd43392320277e09a",
+    "backend/scripts/manual_task_continuity_check.py": "763fdccdffd3bd9c2566638b5f199bb806a01951c48014ea9c63031b7765f548",
+    "backend/tests/test_authorization_enforcement.py": "89e349781a73aa212a973257d6ff4b59edc66bebc374e784aebe10007fb895ae",
+    "backend/tests/test_client.py": "2310b72f08db2f8d620bd41e213227290a6116e4998531912599d9aa6511b16a",
+    "backend/tests/test_task_continuity.py": "737370f6d34ffacdc40f8ade28a18bb635137e12196c0a61d003249c6df94b88",
+    "backend/tests/test_tool_error_handling_middleware.py": "fd4c3683028901e4d520abd615694f1bbbf44d8c244b8e520c15ad86d3fe03fb"
+  },
+  "log_sha256": {
+    "full_branch": "51d3b5ded85c5786c29a8177366ed5fb7ff8425f09036cc18c9fb8bf88a450c6",
+    "full_base": "87e730c5249f7e0bddacdbfa7b060e777858a7f3cd2b212a642f325ac9b853d3"
+  }
+}

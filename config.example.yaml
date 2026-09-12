@@ -1832,6 +1832,13 @@ title:
 # Automatically summarize conversation history when token limits are approached
 # This helps maintain context in long conversations without exceeding model limits
 
+# Optional task notes and keyword recall of compacted messages. See docs/task-continuity.md.
+task_continuity:
+  enabled: false
+  max_batches: 32
+  max_records_per_batch: 256
+  max_record_chars: 16000
+
 summarization:
   enabled: true
 

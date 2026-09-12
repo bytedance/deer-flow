@@ -1,0 +1,74 @@
+[
+  {
+    "id": "known-task-correction-00",
+    "original_case": "task-correction-00",
+    "family": "correction",
+    "history_hash": "f704c3961771529d7145c45fe846cfda37d23d7878a65746614fcb167aafaf4d"
+  },
+  {
+    "id": "known-task-correction-01",
+    "original_case": "task-correction-01",
+    "family": "correction",
+    "history_hash": "81e38b206a7329250c7b63fd43dcefd7e9a58856980f96787e293a0993403068"
+  },
+  {
+    "id": "known-task-failed_attempt-00",
+    "original_case": "task-failed_attempt-00",
+    "family": "failed_attempt",
+    "history_hash": "39ebf8604a118e293916cf58f072c4ef4a52a9b75a3516cd02a1f46b6bd03c8e"
+  },
+  {
+    "id": "known-task-failed_attempt-01",
+    "original_case": "task-failed_attempt-01",
+    "family": "failed_attempt",
+    "history_hash": "664db2183d45194ce857ce7f43b990bb3bbe8d6d4019d193e5a6e21b8c0a8365"
+  },
+  {
+    "id": "known-task-units-00",
+    "original_case": "task-units-00",
+    "family": "units",
+    "history_hash": "c0055e8dfa80d8215d98bdc345b03440ef7bd6cb590f733c06247cf8e1c649a4"
+  },
+  {
+    "id": "known-task-units-01",
+    "original_case": "task-units-01",
+    "family": "units",
+    "history_hash": "7c018f7c82e000c1415e33ec4e655b83773fe4af0a8aabc0721f5c57183db771"
+  },
+  {
+    "id": "known-task-artifact-00",
+    "original_case": "task-artifact-00",
+    "family": "artifact",
+    "history_hash": "98d7ca09494062c1708f960971178a0c0ff207c7f8d231e8c084f0d7c6aea554"
+  },
+  {
+    "id": "known-task-artifact-01",
+    "original_case": "task-artifact-01",
+    "family": "artifact",
+    "history_hash": "23f869a164e3b1fcb69beb553d4711419c9a4acae728c39629dfccdaadd0c887"
+  },
+  {
+    "id": "known-task-constraint-00",
+    "original_case": "task-constraint-00",
+    "family": "constraint",
+    "history_hash": "477fa37b9fd9a892621e13190ccbc4775b37900a3102a674e981ac3ff10fd537"
+  },
+  {
+    "id": "known-task-constraint-01",
+    "original_case": "task-constraint-01",
+    "family": "constraint",
+    "history_hash": "cd19453f380f9bdfad224639158a2231e22bea2b12bad5a999bb22c5232a4a4a"
+  },
+  {
+    "id": "known-task-provenance-00",
+    "original_case": "task-provenance-00",
+    "family": "provenance",
+    "history_hash": "8b79a66067c87ad71a32cf21ecf448055d31dd1866baae3e1c64fee9328553d7"
+  },
+  {
+    "id": "known-task-provenance-01",
+    "original_case": "task-provenance-01",
+    "family": "provenance",
+    "history_hash": "7327efb67b512e488fcdc3ef116584d8f4880eb76c422bed745cc6bc7bf8d769"
+  }
+]

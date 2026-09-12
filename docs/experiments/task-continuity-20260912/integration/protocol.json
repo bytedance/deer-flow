@@ -1,0 +1,28 @@
+{
+  "base_commit": "4501c76b0f44cc55af6332d65ac2e7f5311f71fd",
+  "script": "backend/scripts/manual_task_continuity_check.py",
+  "script_sha256": "763fdccdffd3bd9c2566638b5f199bb806a01951c48014ea9c63031b7765f548",
+  "model": "qwen3.8-flash-next",
+  "scope": "Synthetic controlled integration using the production compaction middleware, checkpoint state and tools; not a full DeerFlow Gateway or deployment benchmark.",
+  "summary_condition": "The live summary is explicitly instructed to omit exact batch codes.",
+  "acceptance": [
+    "source captured after compaction",
+    "code absent from active messages and summary",
+    "graph rebuilt using same checkpointer",
+    "history_search and history_read called by the model",
+    "cited task_note saved",
+    "model wrote an exactly correct JSON manifest"
+  ],
+  "phases": {
+    "environment-blocked.json": "Initial sandbox denied network access; three APIConnectionError outcomes retained.",
+    "initial-network.json": "First integrated archive/notes implementation: 3/3 passed.",
+    "pre-sync-network.json": "Notes consolidated into existing durable data channel: 3/3 passed.",
+    "final-network.json": "Final sync/async tools and lazy optional state channels: 3/3 passed."
+  },
+  "limitations": [
+    "No restart of the hosting process or deployment was exercised.",
+    "InMemorySaver is reused across graph reconstruction; filesystem source storage is real SQLite.",
+    "Tool instructions explicitly request search/read/note/write; these cases test execution and recovery mechanics, not spontaneous recall strategy.",
+    "Artifact bytes were verified before temporary workspaces were cleaned; the metadata retains SHA-256 hashes."
+  ]
+}
