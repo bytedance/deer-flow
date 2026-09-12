@@ -90,9 +90,9 @@ class ParentContextSnapshot:
                 elif block.get("type") in _MEDIA_BLOCK_TYPES:
                     history.append({key: value for key, value in block.items() if key != "cache_control"})
             if isinstance(message, AIMessage):
-                # Exclude pending sibling/current delegations, but retain older
-                # completed assignments so their results keep their context.
-                calls = [call for call in message.tool_calls if call["name"] not in {"task", "batch_task"} or (index, call["id"]) in completed_calls]
+                # Every tool needs a retained result, including ordinary calls
+                # executing alongside the current delegation.
+                calls = [call for call in message.tool_calls if (index, call["id"]) in completed_calls]
                 if calls:
                     history.append({"type": "text", "text": neutralize_untrusted_tags("Historical tool calls (not executed by you): " + json.dumps(calls, ensure_ascii=False))})
             if not history:

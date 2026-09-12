@@ -609,6 +609,14 @@ class TestAgentConstruction:
                         "human_input_response": {"version": 1, "kind": "human_input_response", "source": "ask_clarification", "request_id": "clarification:parent", "response_kind": "text", "value": "Clarified user requirement"},
                     },
                 ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "task", "args": {"prompt": "PENDING_PARENT_TASK"}, "id": "pending-task"},
+                        {"name": "write_file", "args": {"path": "pending-parent.txt", "content": "PENDING_PARENT_WRITE"}, "id": "pending-write"},
+                        {"name": "bash", "args": {"command": "PENDING_PARENT_CHECK"}, "id": "pending-check"},
+                    ],
+                ),
             ],
             "summary_text": "Preserve offline operation.",
         }
@@ -658,6 +666,8 @@ class TestAgentConstruction:
         assert all(not isinstance(message, (AIMessage, ToolMessage)) for message in observed[0])
         assert "Changed parent" not in str(observed)
         assert "PRIVATE_PARENT" not in str(observed)
+        assert "PENDING_PARENT" not in str(observed)
+        assert ("parent tests passed" in str(observed)) is inherit
         assert ("Clarified user requirement" in str(observed)) is inherit
         assert result.tool_receipts and {receipt["tool_call_id"] for receipt in result.tool_receipts} == {"child-call"}
         assert not result.bash_executions

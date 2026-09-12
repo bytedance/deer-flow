@@ -1263,8 +1263,9 @@ handoffs that depend on earlier requirements or failed approaches, at the cost
 of additional input tokens. Retained text, tool-call descriptions/results, and
 media input blocks are carried over; parent system prompts, hidden framework
 messages (such as injected memory and todo reminders), reasoning blocks, tool
-execution metadata, and pending delegation calls are excluded. Valid hidden
-user clarification responses remain part of the conversation. The child
+execution metadata, and pending tool calls are excluded. Tool-call descriptions
+require a retained matching result, including calls alongside the current task.
+Valid hidden user clarification responses remain part of the conversation. The child
 keeps its own role, model, tools, and skill restrictions. Parent tool records
 cannot satisfy child execution checks. Parent and child histories evolve
 independently afterward; shared sandbox/filesystem behavior is unchanged.

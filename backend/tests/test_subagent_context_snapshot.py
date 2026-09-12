@@ -119,7 +119,12 @@ def test_snapshot_excludes_real_framework_injections(injection):
 def test_snapshot_excludes_other_hidden_message_content_and_calls(message_type, hidden):
     kwargs = {"tool_call_id": "result-id"} if message_type is ToolMessage else {"tool_calls": [{"name": "bash", "args": {"command": "FRAMEWORK_COMMAND"}, "id": "call-id"}]}
     message = message_type(content="FRAMEWORK_CONTENT", additional_kwargs={"hide_from_ui": hidden}, **kwargs)
-    snapshot = ParentContextSnapshot.from_state({"messages": [HumanMessage(content="Keep the user request"), message]})
+    messages = [HumanMessage(content="Keep the user request"), message]
+    if message_type is AIMessage:
+        # A visible result keeps this test focused on call-frame visibility,
+        # rather than having an unfinished-call guard mask that boundary.
+        messages.append(ToolMessage(content="Command finished", tool_call_id="call-id"))
+    snapshot = ParentContextSnapshot.from_state({"messages": messages})
     assert ("FRAMEWORK_CONTENT" in snapshot.content_json) is not hidden
     if message_type is AIMessage:
         assert ("FRAMEWORK_COMMAND" in snapshot.content_json) is not hidden
@@ -149,21 +154,49 @@ def test_framework_only_history_has_no_snapshot(injection):
 
 
 @pytest.mark.parametrize("hidden_part", ["call", "result"])
-def test_hidden_tool_frames_do_not_complete_visible_delegations(hidden_part):
+@pytest.mark.parametrize("tool_name", ["task", "bash", "write_file"])
+def test_hidden_tool_frames_do_not_complete_visible_calls(hidden_part, tool_name):
     messages = [
         HumanMessage(content="Visible user request"),
-        AIMessage(content="", tool_calls=[{"name": "task", "args": {"prompt": "UNFINISHED_DELEGATION"}, "id": "reused-id"}]),
+        AIMessage(content="", tool_calls=[{"name": tool_name, "args": {"input": "UNFINISHED_CALL"}, "id": "reused-id"}]),
     ]
     if hidden_part == "call":
         # Removing this frame before matching IDs would attach its result to
         # the preceding visible delegation, which never actually completed.
-        messages.append(AIMessage(content="PRIVATE_CALL", tool_calls=[{"name": "task", "args": {"prompt": "PRIVATE_PROMPT"}, "id": "reused-id"}], additional_kwargs={"hide_from_ui": True}))
+        messages.append(AIMessage(content="PRIVATE_CALL", tool_calls=[{"name": tool_name, "args": {"input": "PRIVATE_ARGUMENT"}, "id": "reused-id"}], additional_kwargs={"hide_from_ui": True}))
     messages.append(ToolMessage(content="TOOL_RESULT", tool_call_id="reused-id", additional_kwargs={"hide_from_ui": hidden_part == "result"}))
     snapshot = ParentContextSnapshot.from_state({"messages": messages})
 
-    assert "UNFINISHED_DELEGATION" not in snapshot.content_json
+    assert "UNFINISHED_CALL" not in snapshot.content_json
     assert "PRIVATE" not in snapshot.content_json
     assert ("TOOL_RESULT" in snapshot.content_json) is (hidden_part == "call")
+
+
+@pytest.mark.parametrize("tool_name", ["task", "batch_task", "write_file", "bash", "custom_lookup"])
+@pytest.mark.parametrize("result_state", ["pending", "success", "error", "hidden"])
+def test_snapshot_keeps_only_result_paired_calls_in_mixed_dispatch(tool_name, result_state):
+    messages = [
+        HumanMessage(content="Use verified historical observations."),
+        AIMessage(content="", tool_calls=[{"name": tool_name, "args": {"input": "EARLIER_ARGUMENT"}, "id": "reused-id"}]),
+        ToolMessage(content="EARLIER_RESULT", tool_call_id="reused-id"),
+        AIMessage(
+            content="Current assistant explanation",
+            tool_calls=[
+                {"name": "task", "args": {"prompt": "CURRENT_DELEGATION"}, "id": "dispatch-id"},
+                {"name": tool_name, "args": {"input": "SIBLING_ARGUMENT"}, "id": "reused-id"},
+            ],
+        ),
+    ]
+    if result_state != "pending":
+        messages.append(ToolMessage(content="SIBLING_RESULT", tool_call_id="reused-id", status="error" if result_state == "error" else "success", additional_kwargs={"hide_from_ui": result_state == "hidden"}))
+
+    snapshot = ParentContextSnapshot.from_state({"messages": messages})
+    text = snapshot.content_json
+    assert "EARLIER_ARGUMENT" in text and "EARLIER_RESULT" in text
+    assert "Current assistant explanation" in text
+    assert "CURRENT_DELEGATION" not in text and "dispatch-id" not in text
+    assert ("SIBLING_ARGUMENT" in text) is (result_state in {"success", "error"})
+    assert ("SIBLING_RESULT" in text) is (result_state in {"success", "error"})
 
 
 @pytest.mark.parametrize("state", [{}, {"messages": [], "summary_text": ""}, {"messages": [SystemMessage(content="system only")]}])

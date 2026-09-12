@@ -1,6 +1,6 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-**Context**: Snapshots exclude framework state and keep genuine user replies, including hidden clarifications. Capture after validation, before setup.
+**Context**: Snapshot after validation, before setup. Exclude framework state; keep genuine replies, including hidden clarifications. Tool calls require retained call/result pairs.
 
 **Durable batch acceptance**: `batch_task` normalizes optional per-item criteria
 before persistence (empty becomes null; 20 items × 500 neutralized characters),
