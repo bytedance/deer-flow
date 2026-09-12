@@ -87,6 +87,11 @@ do not use HTML `maxLength`, which counts UTF-16 code units instead.
 - **Path alias**: `@/*` maps to `src/*`.
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
 
+Scheduled-task list search filters the current authorized query result by title or
+prompt, composing with status/type filters and thread scope. Selection must derive
+from the filtered list so hidden tasks cannot remain actionable. Keep literal
+matching in `core/scheduled-tasks/search.ts`; clearing search retains other filters.
+
 ## Environment
 
 Scheduled-task interval forms preserve the initial `every_seconds` on mount,

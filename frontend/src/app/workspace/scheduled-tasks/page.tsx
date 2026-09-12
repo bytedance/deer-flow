@@ -49,6 +49,7 @@ import {
   useThreadScheduledTasks,
 } from "@/core/scheduled-tasks/hooks";
 import { RECIPES, type Recipe } from "@/core/scheduled-tasks/recipes";
+import { matchesScheduledTaskQuery } from "@/core/scheduled-tasks/search";
 import type {
   ScheduledTask,
   ScheduledTaskRun,
@@ -143,6 +144,7 @@ export default function ScheduledTasksPage() {
   const [typeFilter, setTypeFilter] = useState<
     "all" | "once" | "cron" | "interval"
   >("all");
+  const [taskSearch, setTaskSearch] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
@@ -183,7 +185,9 @@ export default function ScheduledTasksPage() {
   const filteredData = (data ?? []).filter((task) => {
     const statusPass = statusFilter === "all" || task.status === statusFilter;
     const typePass = typeFilter === "all" || task.schedule_type === typeFilter;
-    return statusPass && typePass;
+    return (
+      statusPass && typePass && matchesScheduledTaskQuery(task, taskSearch)
+    );
   });
   const selectedTask =
     filteredData.find((task) => task.id === selectedTaskId) ?? filteredData[0];
@@ -464,6 +468,20 @@ export default function ScheduledTasksPage() {
               {st.detail.loadFailed}: {queryError.message}
             </div>
           ) : null}
+          <div className="flex gap-2">
+            <Input
+              type="search"
+              aria-label={st.search.placeholder}
+              placeholder={st.search.placeholder}
+              value={taskSearch}
+              onChange={(event) => setTaskSearch(event.target.value)}
+            />
+            {taskSearch && (
+              <Button variant="outline" onClick={() => setTaskSearch("")}>
+                {st.search.clear}
+              </Button>
+            )}
+          </div>
           <div className="flex flex-wrap gap-2">
             <Button
               variant={statusFilter === "all" ? "default" : "outline"}
@@ -534,6 +552,18 @@ export default function ScheduledTasksPage() {
               data-testid="scheduled-task-list"
               className="flex flex-col gap-3"
             >
+              {data &&
+                !queryError &&
+                taskSearch.trim() &&
+                filteredData.length === 0 && (
+                  <p
+                    role="status"
+                    data-testid="scheduled-task-search-empty"
+                    className="text-muted-foreground text-sm"
+                  >
+                    {st.search.noResults}
+                  </p>
+                )}
               {filteredData.map((task) => {
                 const isSelected = selectedTask?.id === task.id;
                 return (
