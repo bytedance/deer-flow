@@ -327,6 +327,8 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    stopStreamingUnavailable:
+      "Stopping the running turn is not permitted for your role.",
   },
 
   // Sidebar
@@ -659,10 +661,15 @@ export const enUS: Translations = {
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",
-    settings: "Model settings",
-    settingsTitle: "Model settings",
+    settings: "Agent settings",
+    settingsTitle: "Agent settings",
+    settingsDisplayName: "Display name",
+    settingsDisplayNameTooLong:
+      "Display name must be at most 100 Unicode code points.",
+    settingsDisplayNameHint:
+      "Supports Unicode. Leave blank to use the agent identifier",
     settingsDescription:
-      "Choose the default model and generation parameters for this agent. Changes take effect on the next message.",
+      "Choose a display name and model defaults for this agent. Model changes take effect on the next message.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
     settingsTemperature: "Temperature",
@@ -674,7 +681,7 @@ export const enUS: Translations = {
     settingsThinkingOff: "Off",
     settingsReasoningEffort: "Reasoning effort",
     settingsInherit: "Inherit",
-    settingsSaved: "Model settings saved",
+    settingsSaved: "Agent settings saved",
     settingsInvalidTemperature: "Temperature must be between 0 and 2",
     settingsInvalidMaxTokens:
       "Max output tokens must be a positive integer up to 200,000",
@@ -814,6 +821,16 @@ export const enUS: Translations = {
 
   // Tool calls
   toolCalls: {
+    details: "Tool details",
+    toolName: "Tool name",
+    callId: "Call ID",
+    input: "Input",
+    result: "Result",
+    error: "Error",
+    noResult: "No result received",
+    emptyResult: "Empty result",
+    truncated:
+      "Preview truncated; copying includes only the displayed preview.",
     moreSteps: (count: number) => `${count} more step${count === 1 ? "" : "s"}`,
     lessSteps: "Less steps",
     executeCommand: "Execute command",

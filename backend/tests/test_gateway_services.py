@@ -990,6 +990,67 @@ def test_state_accessor_graph_cache_honors_configured_cap():
         gateway_services._state_accessor_graph_cache.clear()
 
 
+def test_state_accessor_graph_serializes_same_key_cold_construction():
+    """Overlapping first reads with the same factory object and app-config
+    identity must run the factory exactly once (per-key construction
+    serialization, PR #5224 review), while a changed factory identity still
+    rebuilds instead of reusing the stored graph."""
+    import threading
+    import time
+    from typing import Any
+
+    from app.gateway import services as gateway_services
+
+    builds = []
+    first_inside = threading.Event()
+    release_first = threading.Event()
+
+    def slow_factory(*, config):
+        graph = object()
+        builds.append(graph)
+        first_inside.set()
+        release_first.wait(timeout=10)
+        return graph
+
+    gateway_services._state_accessor_graph_cache.clear()
+    results: list[Any] = []
+    errors: list[BaseException] = []
+
+    def reader() -> None:
+        try:
+            results.append(gateway_services._state_accessor_graph(slow_factory, None, "full", None, {}))
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    try:
+        first = threading.Thread(target=reader)
+        second = threading.Thread(target=reader)
+        first.start()
+        assert first_inside.wait(timeout=5)
+        second.start()
+        # The second reader blocks on the per-key lock while the first is
+        # still inside the factory: no duplicate construction.
+        deadline = time.monotonic() + 5
+        while second.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(builds) == 1, errors
+        assert second.is_alive(), "second cold reader must wait for the in-flight construction"
+
+        release_first.set()
+        first.join(timeout=10)
+        second.join(timeout=10)
+        assert not (first.is_alive() or second.is_alive())
+        assert len(builds) == 1
+        assert len(results) == 2 and results[0] is results[1]
+
+        # A different factory object is an identity change: rebuild, not reuse.
+        other = gateway_services._state_accessor_graph(lambda *, config: object(), None, "full", None, {})
+        assert other is not results[0]
+        assert len(builds) == 1
+    finally:
+        gateway_services._state_accessor_graph_cache.clear()
+
+
 def test_build_run_config_configurable_custom_agent_dual_writes_agent_name():
     """Regression for issue #3549: even when the caller uses the legacy
     ``configurable`` path, ``agent_name`` must also land in

@@ -43,6 +43,7 @@ from deerflow.subagents.status_contract import (
 )
 from deerflow.tools.types import Runtime
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.custom_events import aemit_custom_event
 
 if TYPE_CHECKING:
@@ -881,7 +882,9 @@ async def task_tool(
     }
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
-    tools = get_available_tools(**available_tools_kwargs)
+    # Assemble off-loop: tool assembly may block on MCP cache initialization,
+    # which must not stall the calling event loop (issue #5172).
+    tools = await run_assembly(get_available_tools, **available_tools_kwargs)
 
     # Create executor
     executor_kwargs = {

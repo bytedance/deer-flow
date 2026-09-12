@@ -125,6 +125,7 @@ test("history load failure is retriable and switching tasks resets the page", as
   await expect(
     page.getByRole("alert").filter({ hasText: "Could not load run history." }),
   ).toContainText("Could not load run history.", { timeout: 15000 });
+  await expect(page.getByTestId("scheduled-task-runs")).toHaveCount(0);
   fail = false;
   await page
     .getByRole("button", { name: "Retry history", exact: true })
@@ -202,4 +203,26 @@ test("Chinese history navigation and empty results are localized", async ({
   await expect(
     nav.getByRole("button", { name: "较新记录", exact: true }),
   ).toBeDisabled();
+});
+
+test("pending history does not report an empty run count", async ({ page }) => {
+  mockLangGraphAPI(page, { threads: [], scheduledTasks: [task] });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(endpoint, async (route) => {
+    await gate;
+    await route.fulfill({ json: [] });
+  });
+  try {
+    await page.goto("/workspace/scheduled-tasks");
+    await expect(
+      page.getByRole("status").filter({ hasText: "Loading runs" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("scheduled-task-runs")).toHaveCount(0);
+  } finally {
+    release();
+  }
+  await expect(page.getByTestId("scheduled-task-runs")).toContainText("0 runs");
 });

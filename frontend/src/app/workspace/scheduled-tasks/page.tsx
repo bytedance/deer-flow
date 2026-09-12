@@ -772,17 +772,19 @@ export default function ScheduledTasksPage() {
                       </Button>
                     </div>
                   )}
-                  <div data-testid="scheduled-task-runs">
-                    {(taskRunsQuery.data ?? []).length === 1
-                      ? st.detail.runsCountOne.replace(
-                          "{count}",
-                          String((taskRunsQuery.data ?? []).length),
-                        )
-                      : st.detail.runsCount.replace(
-                          "{count}",
-                          String((taskRunsQuery.data ?? []).length),
-                        )}
-                  </div>
+                  {!taskRunsQuery.isPending && !taskRunsQuery.isError && (
+                    <div data-testid="scheduled-task-runs">
+                      {(taskRunsQuery.data ?? []).length === 1
+                        ? st.detail.runsCountOne.replace(
+                            "{count}",
+                            String((taskRunsQuery.data ?? []).length),
+                          )
+                        : st.detail.runsCount.replace(
+                            "{count}",
+                            String((taskRunsQuery.data ?? []).length),
+                          )}
+                    </div>
+                  )}
                   <div
                     className="flex flex-col gap-2"
                     data-testid="scheduled-task-run-list"
