@@ -9,6 +9,7 @@ decide which fields to restore.
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -33,10 +34,23 @@ def restore_assistant_payloads(
     assistant_payloads = [m for m in payload_messages if m.get("role") == "assistant"]
     used_ai_indexes: set[int] = set()
 
+    # Index unused AI messages by signature so the unique-match lookup is O(1)
+    # per payload instead of rescanning every AI message (O(P*A) -> O(P+A)).
+    signature_by_index: list[tuple[str, str] | None] = [_ai_signature(m) for m in ai_messages]
+    unused_by_signature: dict[tuple[str, str], set[int]] = defaultdict(set)
+    for index, signature in enumerate(signature_by_index):
+        if signature is not None:
+            unused_by_signature[signature].add(index)
+
     for ordinal, payload_msg in enumerate(assistant_payloads):
-        ai_msg = _match_ai_message(payload_msg, ai_messages, used_ai_indexes, ordinal)
-        if ai_msg is not None:
-            restore(payload_msg, ai_msg)
+        ai_index = _match_ai_index(payload_msg, ai_messages, used_ai_indexes, unused_by_signature, ordinal)
+        if ai_index is None:
+            continue
+        used_ai_indexes.add(ai_index)
+        signature = signature_by_index[ai_index]
+        if signature is not None:
+            unused_by_signature[signature].discard(ai_index)
+        restore(payload_msg, ai_messages[ai_index])
 
 
 def restore_additional_kwargs_field(payload_msg: dict[str, Any], orig_msg: AIMessage, field_name: str) -> None:
@@ -51,25 +65,27 @@ def restore_reasoning_content(payload_msg: dict[str, Any], orig_msg: AIMessage) 
     restore_additional_kwargs_field(payload_msg, orig_msg, "reasoning_content")
 
 
-def _match_ai_message(
+def _match_ai_index(
     payload_msg: dict[str, Any],
     ai_messages: Sequence[AIMessage],
     used_ai_indexes: set[int],
+    unused_by_signature: dict[tuple[str, str], set[int]],
     fallback_ordinal: int,
-) -> AIMessage | None:
+) -> int | None:
+    """Return the index of the AI message to restore onto ``payload_msg`` (or None).
+
+    Prefers an unambiguous signature match — exactly one *unused* AI message
+    shares the payload's content/tool-call signature — looked up in O(1) via
+    ``unused_by_signature``; otherwise falls back to the next unused AI message
+    at or after the payload's ordinal. Pure: the caller records consumption.
+    """
     payload_key = _assistant_signature(payload_msg)
     if payload_key is not None:
-        matches = [index for index, ai_msg in enumerate(ai_messages) if index not in used_ai_indexes and _ai_signature(ai_msg) == payload_key]
-        if len(matches) == 1:
-            used_ai_indexes.add(matches[0])
-            return ai_messages[matches[0]]
+        candidates = unused_by_signature.get(payload_key)
+        if candidates is not None and len(candidates) == 1:
+            return next(iter(candidates))
 
-    fallback_index = _next_unused_index_at_or_after(len(ai_messages), used_ai_indexes, fallback_ordinal)
-    if fallback_index is not None:
-        used_ai_indexes.add(fallback_index)
-        return ai_messages[fallback_index]
-
-    return None
+    return _next_unused_index_at_or_after(len(ai_messages), used_ai_indexes, fallback_ordinal)
 
 
 def _next_unused_index_at_or_after(count: int, used_ai_indexes: set[int], start: int) -> int | None:
