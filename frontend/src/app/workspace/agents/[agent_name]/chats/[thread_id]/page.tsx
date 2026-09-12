@@ -36,6 +36,8 @@ import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicato
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { useAgent } from "@/core/agents";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import { useBrowserControlEnabled } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -63,6 +65,8 @@ import { cn } from "@/lib/utils";
 
 export default function AgentChatPage() {
   const { t } = useI18n();
+  const { user } = useAuth();
+  const canStopStreaming = hasPermission(user, PERMISSIONS.RUNS_CANCEL);
   const router = useRouter();
 
   const { agent_name } = useParams<{
@@ -457,6 +461,7 @@ export default function AgentChatPage() {
                     onGoalChange={setLocalGoal}
                     onSubmit={handleSubmit}
                     onStop={handleStop}
+                    canStopStreaming={canStopStreaming}
                   />
                   {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
                     <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">

@@ -946,6 +946,13 @@
 - **沙箱：** 沙箱子进程环境会清除 `SSH_AUTH_SOCK`——继承宿主机 ssh-agent socket
   会让沙箱内代码用智能体持有的所有密钥签名与认证——除非技能通过 required-secrets
   显式声明。([#5145])
+- **Artifact：** XML 产物现在与 HTML、SVG 一样以下载附件形式返回。
+  `GET /api/threads/{id}/artifacts/{path}` 此前会在应用源内联渲染 `.xml`、`.xsl`、
+  `.rdf` 文件（以及宿主 MIME 数据库映射为 `+xml` 的 `.rss` 等类型），被 prompt
+  注入的智能体写出带 XHTML 命名空间 `<script>` 的 XML 后，用户从聊天链接打开即可
+  以其会话调用 API。所有 XML MIME 类型（`text/xml`、`application/xml`、`text/xsl`
+  及任意 `+xml` 子类型）现均视为主动内容，`.skill` 归档成员同样适用；Artifact
+  面板仍通过 Range 请求预览 XML。([#5353])
 
 ### 文档
 
@@ -2110,4 +2117,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
 [#5321]: https://github.com/bytedance/deer-flow/pull/5321
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
+[#5353]: https://github.com/bytedance/deer-flow/pull/5353
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357

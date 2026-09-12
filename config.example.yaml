@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 40
+config_version: 41
 
 # ============================================================================
 # Logging
@@ -43,9 +43,13 @@ logging:
 # Optional AgentMiddleware classes loaded into the lead and subagent runtime
 # middleware chains after built-in runtime middlewares, but before the
 # safety/clarification tail. Missing packages, invalid classes, and broken
-# modules fail loudly at agent creation with an actionable import error.
-# The same zero-argument class list applies to both lead and subagent runtimes;
-# lead-only vs subagent-only configuration is not expressible yet. Treat these
+# modules fail at agent creation with an actionable import error; constructor
+# errors fail at agent creation with the underlying exception.
+# The same list applies to both lead and subagent runtimes; lead-only vs
+# subagent-only configuration is not expressible yet. Each entry is a class
+# path or `{class, kwargs}` for constructor arguments. kwargs values must be
+# JSON types (object, array, string, number, boolean, or null); YAML dates
+# and timestamps are coerced to ISO strings so they match JSON. Treat these
 # files as trusted operator config because middleware classes execute code.
 # Uncomment this block to define middlewares in config.yaml. Leaving it commented
 # lets extensions_config.json remain the source of truth for this fixed-slot
@@ -53,7 +57,9 @@ logging:
 # extensions:
 #   middlewares:
 #     - my_company.deerflow_middlewares:DomainGuardMiddleware
-#     - my_company.deerflow_middlewares:LatencyStampingMiddleware
+#     - class: my_company.deerflow_middlewares:LatencyStampingMiddleware
+#       kwargs:
+#         header: X-DeerFlow-Latency
 
 # ============================================================================
 # Tracing / Observability (Monocle)
@@ -252,6 +258,12 @@ models:
   #   max_retries: 2
   #   use_responses_api: true
   #   output_version: responses/v1
+  #   # Optional, forwarded to ChatOpenAI as-is (default false): send only the new
+  #   # turn plus previous_response_id instead of replaying the full history. The
+  #   # chained context is still billed as input tokens, and any client-side
+  #   # history rewrite (e.g. blocked-write payload elision) is only honored when
+  #   # the history is replayed.
+  #   use_previous_response_id: false
   #   context_window: 400000
   #   supports_vision: true
 
@@ -1236,6 +1248,7 @@ loop_detection:
   warn_threshold: 3
   hard_limit: 5
   window_size: 20
+  # Compatibility name: bounds retained (thread_id, run_id) histories, not whole threads.
   max_tracked_threads: 100
   tool_freq_warn: 30
   tool_freq_hard_limit: 50
@@ -1283,6 +1296,15 @@ loop_detection:
 
 read_before_write:
   enabled: true
+  # A blocked call never ran and must be re-issued after a re-read, so its
+  # payload (write_file content, str_replace old_str/new_str) is dead weight in
+  # every later model call. Replace it with a short placeholder in model-bound
+  # requests; stored history, receipts, and the run journal keep the original.
+  elide_blocked_payloads: true
+  # Only elide payload fields at least this many characters long (a character
+  # count, not tokens: CJK text costs ~3-4x more per character than ASCII).
+  # 0 elides every non-empty payload.
+  elide_min_chars: 2000
 
 # ============================================================================
 # Provider Safety Termination Configuration
