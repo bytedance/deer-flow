@@ -52,6 +52,7 @@ export type MockAgent = {
   description?: string;
   system_prompt?: string;
   tool_groups?: string[] | null;
+  skills?: string[] | null;
 };
 
 export type MockSkill = {
@@ -71,10 +72,11 @@ export type MockAPIOptions = {
     id: string;
     thread_id: string | null;
     context_mode?: "fresh_thread_per_run" | "reuse_thread";
+    assistant_id?: string | null;
     last_thread_id?: string | null;
     title: string;
     prompt: string;
-    schedule_type: "once" | "cron";
+    schedule_type: "once" | "cron" | "interval";
     schedule_spec: Record<string, unknown>;
     timezone: string;
     status:
@@ -484,10 +486,14 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         context_mode:
           (payload.context_mode as "fresh_thread_per_run" | "reuse_thread") ??
           "fresh_thread_per_run",
+        assistant_id:
+          typeof payload.assistant_id === "string"
+            ? payload.assistant_id
+            : "lead_agent",
         last_thread_id: null,
         title,
         prompt,
-        schedule_type: payload.schedule_type as "once" | "cron",
+        schedule_type: payload.schedule_type as "once" | "cron" | "interval",
         schedule_spec: (payload.schedule_spec as Record<string, unknown>) ?? {},
         timezone,
         status: "enabled" as const,
@@ -1093,6 +1099,71 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify(uploadLimits),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Token usage — the chat header polls this per thread. Without a mock the
+  // request falls through to a gateway that is not running under Playwright,
+  // and a 401 there redirects the whole page to /login mid-test.
+  void page.route("**/api/threads/*/token-usage", (route) => {
+    if (route.request().method() === "GET") {
+      const threadId = /\/api\/threads\/([^/]+)\/token-usage/.exec(
+        route.request().url(),
+      )?.[1];
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: threadId ?? "unknown",
+          total_tokens: 0,
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          total_runs: 0,
+          by_model: {},
+          by_caller: { lead_agent: 0, subagent: 0, middleware: 0 },
+          context_usage: null,
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // MCP background tasks — same fallthrough-to-401 problem as token-usage.
+  void page.route("**/api/threads/*/mcp-tasks*", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([]),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Workspace changes — the run-scoped badge query. Unmocked it 401s against
+  // the absent gateway and the fetcher redirects the page to /login.
+  void page.route("**/api/threads/*/runs/*/workspace-changes*", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          run_id: "mock-run",
+          thread_id: "mock-thread",
+          status: "success",
+          summary: {
+            created: 0,
+            modified: 0,
+            deleted: 0,
+            symlink_created: 0,
+            additions: 0,
+            deletions: 0,
+            truncated: false,
+          },
+          changes: [],
+        }),
       });
     }
     return route.fallback();

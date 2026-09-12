@@ -26,6 +26,7 @@ from deerflow.persistence.thread_meta import (
     THREAD_PROJECT_METADATA_KEY,
     InvalidMetadataFilterError,
     ThreadMetaRepository,
+    ThreadOwnershipConflictError,
 )
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 from deerflow.runtime import ConflictError, ThreadOperationKind
@@ -95,6 +96,17 @@ def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
     app.state.thread_store = _PermissiveThreadMetaStore(store)
     app.include_router(threads.router)
     return app, store, checkpointer
+
+
+def test_thread_response_excludes_internal_incarnation() -> None:
+    response = threads.ThreadResponse.model_validate(
+        {
+            "thread_id": "thread-with-incarnation",
+            "incarnation": "a" * 32,
+        }
+    )
+
+    assert "incarnation" not in response.model_dump()
 
 
 def test_compact_rejects_run_owned_by_another_worker(monkeypatch) -> None:
@@ -257,7 +269,10 @@ def _patch_checkpoint_state_builder(monkeypatch):
     async def _mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None):
         return _mutation_builder(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id)
 
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", _builder)
+    async def _abuild(request, *, thread_id, assistant_id=None, checkpoint_id=None):
+        return _builder(request, thread_id=thread_id, assistant_id=assistant_id, checkpoint_id=checkpoint_id)
+
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", _abuild)
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", _mutation_builder)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", _read_boundary)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", _mutation_boundary)
@@ -799,6 +814,125 @@ def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
     assert unscoped_lookup["user_id"] == "owner-1"
 
 
+def test_fast_path_concurrent_trusted_claims_have_one_winner() -> None:
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+
+    async def _scenario():
+        await thread_store.create("legacy-fast-race", user_id=None)
+        owners = ("owner-a", "owner-b")
+        outcomes = await asyncio.gather(
+            *(
+                threads._resolve_existing_thread(
+                    thread_store,
+                    "legacy-fast-race",
+                    owner,
+                    {"user_id": owner},
+                )
+                for owner in owners
+            )
+        )
+        return owners, outcomes, await thread_store.get("legacy-fast-race", user_id=None)
+
+    owners, outcomes, final_record = asyncio.run(_scenario())
+
+    winners = [owner for owner, outcome in zip(owners, outcomes, strict=True) if outcome is not None]
+    assert winners == [final_record["user_id"]]
+    assert final_record["user_id"] in owners
+
+
+def test_fast_path_trusted_claim_does_not_take_over_owned_row() -> None:
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+
+    async def _scenario():
+        await thread_store.create("already-owned", user_id="owner-a")
+        outcome = await threads._resolve_existing_thread(
+            thread_store,
+            "already-owned",
+            "owner-b",
+            {"user_id": "owner-b"},
+        )
+        return outcome, await thread_store.get("already-owned", user_id=None)
+
+    outcome, final_record = asyncio.run(_scenario())
+
+    assert outcome is None
+    assert final_record["user_id"] == "owner-a"
+
+
+def test_insert_race_concurrent_trusted_claims_have_one_winner() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    class _ConcurrentInsertRaceStore(MemoryThreadMetaStore):
+        def __init__(self):
+            super().__init__(InMemoryStore())
+            self._create_arrivals = 0
+            self._create_lock = asyncio.Lock()
+            self._legacy_row_committed = asyncio.Event()
+
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
+            async with self._create_lock:
+                self._create_arrivals += 1
+                if self._create_arrivals == 2:
+                    await super().create(thread_id, user_id=None, metadata=metadata)
+                    self._legacy_row_committed.set()
+            await self._legacy_row_committed.wait()
+            raise IntegrityError(
+                "INSERT INTO threads_meta",
+                {},
+                Exception("UNIQUE constraint failed: threads_meta.thread_id"),
+            )
+
+    thread_store = _ConcurrentInsertRaceStore()
+    checkpointer = InMemorySaver()
+
+    def _request(owner):
+        return SimpleNamespace(
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner},
+            state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+            app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+        )
+
+    async def _scenario():
+        owners = ("owner-a", "owner-b")
+        outcomes = await asyncio.gather(
+            *(
+                threads.create_thread(
+                    threads.ThreadCreateRequest(thread_id="legacy-insert-race"),
+                    _request(owner),
+                )
+                for owner in owners
+            ),
+            return_exceptions=True,
+        )
+        return owners, outcomes, await thread_store.get("legacy-insert-race", user_id=None)
+
+    owners, outcomes, final_record = asyncio.run(_scenario())
+
+    winners = [owner for owner, outcome in zip(owners, outcomes, strict=True) if isinstance(outcome, threads.ThreadResponse)]
+    failures = [outcome for outcome in outcomes if isinstance(outcome, HTTPException)]
+    assert winners == [final_record["user_id"]]
+    assert final_record["user_id"] in owners
+    assert len(failures) == 1
+    assert failures[0].status_code == 500
+
+
+def test_create_thread_maps_memory_owner_conflict_to_404() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    app.state.thread_store = SimpleNamespace(
+        get=AsyncMock(return_value=None),
+        create=AsyncMock(side_effect=ThreadOwnershipConflictError("foreign-thread")),
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "foreign-thread"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Thread not found"
+
+
 def test_create_thread_does_not_swallow_non_integrity_errors() -> None:
     """A non-race insert failure must surface as 500, even when a row now exists.
 
@@ -1040,9 +1174,8 @@ def test_latest_thread_readers_use_materialized_snapshot_values() -> None:
 
     with (
         patch(
-            "app.gateway.routers.threads.build_checkpoint_state_accessor",
-            create=True,
-            return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}),
+            "app.gateway.routers.threads.abuild_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
         ),
         patch(
             "app.gateway.routers.threads.build_thread_checkpoint_state_accessor",
@@ -1097,8 +1230,8 @@ def test_get_thread_status_uses_raw_pending_writes_for_materialized_checkpoint()
 
     with (
         patch(
-            "app.gateway.routers.threads.build_checkpoint_state_accessor",
-            return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}),
+            "app.gateway.routers.threads.abuild_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
         ),
         TestClient(app) as client,
     ):
@@ -1141,8 +1274,8 @@ def test_get_thread_preserves_metadata_status_without_checkpoint(stored_status: 
 
     with (
         patch(
-            "app.gateway.routers.threads.build_checkpoint_state_accessor",
-            return_value=(accessor, snapshot.config),
+            "app.gateway.routers.threads.abuild_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(accessor, snapshot.config)),
         ),
         TestClient(app) as client,
     ):
@@ -2614,7 +2747,7 @@ def test_branch_thread_uses_materialized_history_and_overwrites_fresh_seed(monke
             }
         }
 
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", AsyncMock(side_effect=build_accessor))
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", build_mutation_accessor)
 
     with TestClient(app) as client:
@@ -2733,7 +2866,7 @@ def test_branch_thread_preserves_unlinked_legacy_histories(
             }
         }
 
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", AsyncMock(side_effect=build_accessor))
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", build_mutation_accessor)
 
     with TestClient(app) as client:
@@ -2862,7 +2995,7 @@ def test_branch_thread_real_mutation_graph_finishes_without_scheduling(monkeypat
         }
 
     real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", source_builder)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", AsyncMock(side_effect=source_builder))
     monkeypatch.setattr(
         threads,
         "build_checkpoint_state_mutation_accessor",
@@ -2935,7 +3068,7 @@ def _wire_extension_agent(monkeypatch, app, checkpointer, mode):
     ctx = SimpleNamespace(checkpointer=checkpointer, store=None, checkpoint_channel_mode=mode, app_config=None)
     monkeypatch.setattr(gateway_services, "get_run_context", lambda _request: ctx)
     monkeypatch.setattr(gateway_services, "resolve_agent_factory", selective_factory)
-    monkeypatch.setattr(threads, "build_checkpoint_state_accessor", gateway_services.build_checkpoint_state_accessor)
+    monkeypatch.setattr(threads, "abuild_checkpoint_state_accessor", gateway_services.abuild_checkpoint_state_accessor)
     monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", gateway_services.build_checkpoint_state_mutation_accessor)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", gateway_services.build_thread_checkpoint_state_accessor)
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", gateway_services.build_thread_checkpoint_state_mutation_accessor)

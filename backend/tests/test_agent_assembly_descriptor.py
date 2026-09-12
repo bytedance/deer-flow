@@ -126,6 +126,7 @@ class TestLeadAgentAssembly:
         from deerflow.config.app_config import AppConfig
         from deerflow.config.model_config import ModelConfig
         from deerflow.config.sandbox_config import SandboxConfig
+        from deerflow.config.subagents_config import CustomSubagentConfig, SubagentsAppConfig
 
         app_config = AppConfig(
             models=[
@@ -139,6 +140,7 @@ class TestLeadAgentAssembly:
                     supports_vision=False,
                 )
             ],
+            subagents=SubagentsAppConfig(custom_agents={"researcher": CustomSubagentConfig(description="research", system_prompt="research")}),
             sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
         )
         monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
@@ -215,6 +217,34 @@ class TestLeadAgentAssembly:
         assert prompt_calls[0]["allowed_subagents"] == ["general-purpose"]
         assert assembly.graph["system_prompt"] == "allowed_subagents=['general-purpose']"
         assert assembly.descriptor.base_prompt_hash == canonical_hash(assembly.graph["system_prompt"])
+
+    def test_descriptor_subagent_policy_respects_custom_agent_allowed_subagents(self, monkeypatch):
+        """Fixes #5205: custom agent assembly descriptor must restrict its
+        subagents policy allowlist and runtime limits to allowed_subagents."""
+        from deerflow.agents.lead_agent import agent as lead_agent_module
+        from deerflow.agents.lead_agent.agent import assemble_lead_agent
+        from deerflow.config.agents_config import AgentConfig
+        from deerflow.extensions import bind_agent_build_extensions
+
+        self._isolate_from_the_ambient_config(monkeypatch)
+        agent_config = AgentConfig(name="custom", allowed_subagents=["general-purpose"])
+        monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name, *, user_id=None: agent_config)
+
+        with bind_agent_build_extensions(self._extensions_with_an_agent_assembly_observer()):
+            assembly = assemble_lead_agent(
+                {
+                    "configurable": {
+                        "thread_id": "t-scoped-subagents",
+                        "agent_name": "custom",
+                        "subagent_enabled": True,
+                    }
+                }
+            )
+
+        subagent_policy = assembly.descriptor.effective_policies["subagents"]
+        assert subagent_policy["enabled"] is True
+        assert subagent_policy["type_allowlist"] == ["general-purpose"]
+        assert list(subagent_policy["runtime_limits"].keys()) == ["general-purpose"]
 
     def test_observers_receive_the_descriptor(self, monkeypatch):
         from deerflow.agents.lead_agent.agent import assemble_lead_agent
