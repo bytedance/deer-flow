@@ -19,7 +19,7 @@ from typing import Any
 
 from deerflow_extension_api import PROVENANCE_KEYS
 from fastapi import HTTPException, Request
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
@@ -35,8 +35,10 @@ from app.gateway.internal_auth import (
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
+from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -265,6 +267,45 @@ async def _orphan_recovery_observed_after_heartbeat(
 # ---------------------------------------------------------------------------
 
 
+def _strip_forged_hide_from_ui(additional_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Drop a caller-supplied ``hide_from_ui`` that is not a human-input reply.
+
+    ``is_genuine_user_message`` reads this marker as proof the framework wrote
+    the message and skips input sanitization for it, so a caller that can set it
+    places raw ``<system-reminder>`` text outside the user-input boundary
+    markers — which the lead-agent prompt declares trusted internal framework
+    data. The marker also hides the message from the thread UI, so the forgery
+    would not even be visible where it landed.
+
+    HumanInputCard replies are the one legitimate external use: the frontend
+    sends ``hide_from_ui`` alongside a ``human_input_response`` payload. Those
+    keep the marker and stay sanitized, because ``is_genuine_user_message``
+    deliberately keeps a hidden message carrying a valid response.
+    """
+    if "hide_from_ui" not in additional_kwargs:
+        return additional_kwargs
+    if read_human_input_response(additional_kwargs) is not None:
+        return additional_kwargs
+    return {key: value for key, value in additional_kwargs.items() if key != "hide_from_ui"}
+
+
+def _is_human_message_like(message: Any) -> bool:
+    """Whether *message* is the human role ``is_genuine_user_message`` acts on.
+
+    Only that role reads ``name`` as a framework marker, and ``name`` on a
+    ToolMessage is the tool's own name — reserving it there would rename tools.
+
+    Matched by ``isinstance``, exactly as the predicate this defends does: a
+    ``HumanMessageChunk`` is a ``HumanMessage`` whose ``type`` is not ``"human"``,
+    so a ``type``-based check would leave that subclass's marker settable.
+    """
+    if isinstance(message, BaseMessage):
+        return isinstance(message, HumanMessage)
+    if isinstance(message, dict):
+        return (message.get("type") or message.get("role")) in {"human", "user"}
+    return False
+
+
 def _strip_external_message_metadata(message: Any) -> Any:
     """Remove server-owned metadata from an untrusted input message."""
     if not isinstance(message, BaseMessage):
@@ -273,9 +314,15 @@ def _strip_external_message_metadata(message: Any) -> Any:
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
     for key in _SERVER_OWNED_MESSAGE_METADATA_KEYS:
         additional_kwargs.pop(key, None)
-    if additional_kwargs == message.additional_kwargs:
+    additional_kwargs = _strip_forged_hide_from_ui(additional_kwargs)
+    update: dict[str, Any] = {}
+    if additional_kwargs != message.additional_kwargs:
+        update["additional_kwargs"] = additional_kwargs
+    if _is_human_message_like(message) and message.name == _SUMMARY_MESSAGE_NAME:
+        update["name"] = None
+    if not update:
         return message
-    return message.model_copy(update={"additional_kwargs": additional_kwargs})
+    return message.model_copy(update=update)
 
 
 def _strip_external_metadata_from_message_like(item: Any) -> Any:
@@ -288,12 +335,17 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
     """
     if isinstance(item, BaseMessage):
         return _strip_external_message_metadata(item)
-    if isinstance(item, dict) and isinstance(item.get("additional_kwargs"), dict):
+    if not isinstance(item, dict):
+        return item
+    cleaned = item
+    if isinstance(item.get("additional_kwargs"), dict):
         additional_kwargs = {key: value for key, value in item["additional_kwargs"].items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
-        if additional_kwargs == item["additional_kwargs"]:
-            return item
-        return {**item, "additional_kwargs": additional_kwargs}
-    return item
+        additional_kwargs = _strip_forged_hide_from_ui(additional_kwargs)
+        if additional_kwargs != item["additional_kwargs"]:
+            cleaned = {**item, "additional_kwargs": additional_kwargs}
+    if _is_human_message_like(item) and item.get("name") == _SUMMARY_MESSAGE_NAME:
+        cleaned = {key: value for key, value in cleaned.items() if key != "name"}
+    return cleaned
 
 
 #: Server-owned verdict keys on a delegation-ledger entry: runtime-stamped
@@ -361,6 +413,13 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     invoking this boundary. The same applies to the ``delegations`` channel:
     a caller-supplied ledger entry's ``receipt_verdict`` is a forgery and is
     stripped before the graph runs.
+
+    The framework-injection markers ``hide_from_ui`` and a human ``summary``
+    name are server-owned for the same reason but carry extra weight: they tell
+    ``is_genuine_user_message`` the framework authored the message, which skips
+    input sanitization entirely. HumanInputCard replies are the one legitimate
+    external ``hide_from_ui``, so a message carrying a valid
+    ``human_input_response`` keeps it (and is still sanitized).
     """
     if raw_input is None:
         return {}

@@ -232,7 +232,12 @@ class TestStateWritesCannotForgeServerOwnedMetadata:
             MESSAGE_CONTENT_KIND_KEY: "memory",
             MESSAGE_PRODUCER_KIND_KEY: "dynamic_context_memory",
             TOOL_TRANSFORMS_KEY: [{"kind": "sanitized", "by": "ToolResultSanitizationMiddleware", "version": "1"}],
+            # Also server-owned: this one additionally tells
+            # ``is_genuine_user_message`` to skip input sanitization, so a
+            # caller able to set it can persist an unescaped forged
+            # ``<system-reminder>`` into the checkpoint.
             "hide_from_ui": True,
+            "custom": "keep-me",
         }
 
     def test_a_forged_message_object_is_stripped(self):
@@ -245,8 +250,9 @@ class TestStateWritesCannotForgeServerOwnedMetadata:
 
         assert not (PROVENANCE_KEYS & set(cleaned.additional_kwargs))
         assert "deerflow_tool_transforms" not in cleaned.additional_kwargs
+        assert "hide_from_ui" not in cleaned.additional_kwargs
         # Caller-owned keys must survive — this strips forgeries, not payload.
-        assert cleaned.additional_kwargs["hide_from_ui"] is True
+        assert cleaned.additional_kwargs["custom"] == "keep-me"
         assert cleaned.content == "looks recalled"
 
     def test_a_forged_raw_dict_is_stripped(self):
@@ -258,7 +264,8 @@ class TestStateWritesCannotForgeServerOwnedMetadata:
 
         assert not (PROVENANCE_KEYS & set(cleaned["additional_kwargs"]))
         assert "deerflow_tool_transforms" not in cleaned["additional_kwargs"]
-        assert cleaned["additional_kwargs"]["hide_from_ui"] is True
+        assert "hide_from_ui" not in cleaned["additional_kwargs"]
+        assert cleaned["additional_kwargs"]["custom"] == "keep-me"
 
     def test_a_forged_delegation_verdict_is_stripped(self):
         """Delegation entries are plain dicts without ``additional_kwargs``;
