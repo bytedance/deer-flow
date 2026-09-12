@@ -397,6 +397,7 @@
 
 ### 修复
 
+- **上传：** 把转换后的 Markdown companion 暴露给 `<current_uploads>` 与 `list_uploaded_files`，并转发前端的 `markdown_file`，使智能体对 UTF-8 文本调用 `read_file`，而不是去读二进制原件。转换时写入的 `.deer-flow-companions.json` 保留碰撞改名映射（`a.pdf` → `a_1.md`）；身份用私有 hard-link 钉住转换时 inode，原地编辑仍挂在原文件上，删后同名重建（含 Linux inode 复用）则失效。sidecar 读取有字节/条目上限；转换用 temp+`os.replace` 写出，不跟随预占后被换成的 symlink。([#4981]，相关 [#3750])
 - **Gateway：** `disable_clarification` 与 `github_token` 现在与 `non_interactive`
   一样，仅对内部认证的调用方生效。此前这两个键无论调用方身份都会从 `body.context`
   透传，而且不会从被逐字复制进 run config 的自由格式 `body.config` 中清除，因此任何
