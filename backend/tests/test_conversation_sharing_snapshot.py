@@ -2485,6 +2485,33 @@ def test_plain_workspace_word_token_memory_stays_bounded():
     assert peak < 64 * 1024 * 1024, f"peak {peak / 1024 / 1024:.0f} MiB"
 
 
+def test_many_short_lines_strip_memory_stays_bounded():
+    """A many-short-lines message must not materialize per-line tuples.
+
+    The code-region walk precomputed one (start, content_end, line_end)
+    tuple per line before scanning — 500k ``a\n`` lines measured ~5.5 s
+    and ~207 MiB RSS — and the strip runs at creation and on every
+    anonymous re-sanitization, so concurrent reads could exhaust a
+    Gateway worker. The line iteration streams now; reasoning between
+    the lines still strips.
+    """
+    import tracemalloc
+
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    attack = "a\n" * 500_000
+    tracemalloc.start()
+    try:
+        out = strip(attack + "<think>secret-lines</think>\n")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert "secret-lines" not in out
+    assert peak < 48 * 1024 * 1024, f"peak {peak / 1024 / 1024:.0f} MiB"
+
+
 def test_plain_path_flood_time_stays_small():
     """The /a-repeated flood dropped from ~12s to well under a second."""
     from time import perf_counter

@@ -652,8 +652,8 @@ def _gfm_row_cell_ranges(
     return ranges
 
 
-def _segment_gfm_inline_contexts(segment: str) -> list[tuple[int, int]]:
-    """Disjoint inline contexts of one paragraph segment.
+def _segment_gfm_inline_contexts(segment):
+    """Yield the disjoint inline contexts of one paragraph segment.
 
     Every GFM table row and cell is its own inline context in the renderer
     (pipes split cells before inline parsing), so backticks can never pair
@@ -666,6 +666,13 @@ def _segment_gfm_inline_contexts(segment: str) -> list[tuple[int, int]]:
     never leaves a blank line inside a segment, and micromark accepts any
     non-blank line as a body row.
     """
+    # No table can exist without a pipe and a dash somewhere: skip the
+    # per-line materialization entirely for pipe-free (or dash-free)
+    # segments — a permitted many-short-lines message is one inline
+    # context, not one tuple-and-string pair per line.
+    if "|" not in segment or "-" not in segment:
+        yield 0, len(segment)
+        return
     lines: list[tuple[int, int, int]] = []
     for match in re.finditer(r"[^\r\n]*(?:\r\n|\r|\n|$)", segment):
         line_start, line_end = match.span()
@@ -681,7 +688,6 @@ def _segment_gfm_inline_contexts(segment: str) -> list[tuple[int, int]]:
         lines.append((line_start, content_end, line_end))
     views = [segment[start:end] for start, end, _ in lines]
 
-    ranges: list[tuple[int, int]] = []
     pre_start = 0
     i = 0
     while i + 1 < len(lines):
@@ -694,26 +700,23 @@ def _segment_gfm_inline_contexts(segment: str) -> list[tuple[int, int]]:
             i += 1
             continue
         if pre_start < i:
-            ranges.append((lines[pre_start][0], lines[i][0]))
-        ranges.extend(_gfm_row_cell_ranges(lines[i][0], header_prefix, header_content, header_pipes))
+            yield lines[pre_start][0], lines[i][0]
+        yield from _gfm_row_cell_ranges(lines[i][0], header_prefix, header_content, header_pipes)
         k = i + 2
         while k < len(lines) and not _is_commonmark_blank(views[k]):
             body_prefix = _gfm_row_prefix(views[k])
             body_content = views[k][body_prefix:]
-            ranges.extend(
-                _gfm_row_cell_ranges(
-                    lines[k][0],
-                    body_prefix,
-                    body_content,
-                    _gfm_unescaped_pipes(body_content),
-                ),
+            yield from _gfm_row_cell_ranges(
+                lines[k][0],
+                body_prefix,
+                body_content,
+                _gfm_unescaped_pipes(body_content),
             )
             k += 1
         i = k
         pre_start = k
     if pre_start < len(lines):
-        ranges.append((lines[pre_start][0], lines[-1][2]))
-    return ranges
+        yield lines[pre_start][0], lines[-1][2]
 
 
 def _quote_depth(content: str) -> int:
@@ -895,6 +898,30 @@ def _html_open(content: str) -> tuple[str | None, str | None, bool, bool]:
     return None, None, False, False
 
 
+def _iter_line_spans(text: str):
+    """Yield ``(start, content_end, line_end)`` per line, streaming.
+
+    CommonMark line endings are LF, CRLF, and bare CR; ``content_end``
+    excludes the terminator, ``line_end`` includes it. The walk consumes
+    lines strictly in order, so the extents are yielded one at a time
+    instead of materializing a per-line tuple list — a permitted
+    many-short-lines message must not pay ~1 tuple per line on every strip.
+    """
+    n = len(text)
+    for match in re.finditer(r"[^\r\n]*(?:\r\n|\r|\n|$)", text):
+        line_start, line_end = match.span()
+        if line_start == n:
+            break
+        content_end = line_end
+        if content_end > line_start and text[content_end - 1] == "\n":
+            content_end -= 1
+            if content_end > line_start and text[content_end - 1] == "\r":
+                content_end -= 1
+        elif content_end > line_start and text[content_end - 1] == "\r":
+            content_end -= 1
+        yield line_start, content_end, line_end
+
+
 def _code_regions(text: str) -> list[tuple[int, int]]:
     """Byte extents the Markdown renderer will treat as code: fenced code
     blocks (CommonMark opener/closer rules — backtick fences reject info
@@ -910,21 +937,11 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
     regions: list[tuple[int, int]] = []
     n = len(text)
 
-    # Precompute line extents (content end, line end including the line
-    # terminator). CommonMark line endings are LF, CRLF, and bare CR.
-    line_spans: list[tuple[int, int, int]] = []
-    for match in re.finditer(r"[^\r\n]*(?:\r\n|\r|\n|$)", text):
-        line_start, line_end = match.span()
-        if line_start == n:
-            break
-        content_end = line_end
-        if content_end > line_start and text[content_end - 1] == "\n":
-            content_end -= 1
-            if content_end > line_start and text[content_end - 1] == "\r":
-                content_end -= 1
-        elif content_end > line_start and text[content_end - 1] == "\r":
-            content_end -= 1
-        line_spans.append((line_start, content_end, line_end))
+    # Line extents stream: the walk consumes lines strictly in order, so
+    # they are never materialized as a list — a permitted many-short-lines
+    # message (~1M lines at the 2 MiB budget) must not pay one tuple per
+    # line (500k ``a\n`` lines measured ~5.5 s / ~207 MiB RSS) on every
+    # strip.
 
     fence_char: str | None = None
     fence_len = 0
@@ -979,7 +996,7 @@ def _code_regions(text: str) -> list[tuple[int, int]]:
             regions.append((indented_start, indented_end))
             indented_start = None
 
-    for start, content_end, line_end in line_spans:
+    for start, content_end, line_end in _iter_line_spans(text):
         content = text[start:content_end]
         if fence_char is not None:
             if _fence_closes(content, fence_char, fence_len):
