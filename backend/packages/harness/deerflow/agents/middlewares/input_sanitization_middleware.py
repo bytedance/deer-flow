@@ -36,7 +36,7 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 
-from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+from deerflow.agents.middlewares.message_utils import requires_input_sanitization
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
@@ -422,14 +422,15 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         each turn's rendering stable across model calls, so the prompt prefix no
         longer changes shape behind the newest turn.
 
-        Framework-injected messages stay excluded via ``is_genuine_user_message``
-        — escaping their blocks would corrupt trusted context, and the gateway
-        keeps their markers out of reach of external callers.
+        Scope comes from ``requires_input_sanitization``: framework-injected
+        messages stay excluded, because escaping their blocks would corrupt
+        trusted context, while a caller-supplied message is covered even when it
+        carries a framework marker — the Gateway marks those on the way in.
         """
         messages = list(request.messages)
         changed = False
         for index, msg in enumerate(messages):
-            if not is_genuine_user_message(msg):
+            if not requires_input_sanitization(msg):
                 if isinstance(msg, HumanMessage):
                     logger.debug(
                         "_process_request: skipping non-genuine HumanMessage at pos=%d name=%s hide_from_ui=%s content_preview=%.80r",

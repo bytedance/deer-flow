@@ -85,7 +85,7 @@ from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -134,6 +134,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             SUBAGENT_TOOL_RECEIPTS_KEY,
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
+            UNTRUSTED_INPUT_KEY,
         }
     )
     | PROVENANCE_KEYS
@@ -267,26 +268,43 @@ async def _orphan_recovery_observed_after_heartbeat(
 # ---------------------------------------------------------------------------
 
 
-def _strip_forged_hide_from_ui(additional_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Drop a caller-supplied ``hide_from_ui`` that is not a human-input reply.
+def _skips_input_guardrail(additional_kwargs: dict[str, Any], name: Any) -> bool:
+    """Whether these markers would make ``InputSanitizationMiddleware`` skip a message.
 
-    ``is_genuine_user_message`` reads this marker as proof the framework wrote
-    the message and skips input sanitization for it, so a caller that can set it
-    places raw ``<system-reminder>`` text outside the user-input boundary
-    markers — which the lead-agent prompt declares trusted internal framework
-    data. The marker also hides the message from the thread UI, so the forgery
-    would not even be visible where it landed.
-
-    HumanInputCard replies are the one legitimate external use: the frontend
-    sends ``hide_from_ui`` alongside a ``human_input_response`` payload. Those
-    keep the marker and stay sanitized, because ``is_genuine_user_message``
-    deliberately keeps a hidden message carrying a valid response.
+    Mirrors ``is_genuine_user_message``: a ``summary`` name, or ``hide_from_ui``
+    without a valid human-input reply.
     """
-    if "hide_from_ui" not in additional_kwargs:
+    if name == _SUMMARY_MESSAGE_NAME:
+        return True
+    return "hide_from_ui" in additional_kwargs and read_human_input_response(additional_kwargs) is None
+
+
+def _mark_untrusted_framework_markers(additional_kwargs: dict[str, Any], name: Any) -> dict[str, Any]:
+    """Mark a caller's message whose markers would skip the input guardrail.
+
+    ``is_genuine_user_message`` reads ``hide_from_ui`` and a human
+    ``name="summary"`` as proof the framework wrote the message, and the guardrail
+    skips those — so a caller able to set either one placed raw
+    ``<system-reminder>`` text outside the user-input boundary markers, which the
+    lead-agent prompt declares trusted internal framework data.
+
+    The markers are deliberately *kept*. ``hide_from_ui`` has a second,
+    legitimate role: three frontend senders (quoted conversation context, sidecar
+    context, the agent save command) set it purely to keep a context message out
+    of the transcript, carry no ``human_input_response``, and are hidden by
+    nothing else — removing it would render all three as chat bubbles. Only the
+    guardrail-skipping role is a vulnerability, so the two are separated here
+    instead: the message stays hidden, and ``requires_input_sanitization`` reads
+    this mark and sanitizes it anyway. Marking rather than removing also keeps
+    this boundary from silently changing behaviour that reads the marker for
+    presentation, persistence, or memory filtering.
+
+    HumanInputCard replies need no mark: a valid ``human_input_response`` already
+    makes them genuine, so they are sanitized on that path.
+    """
+    if not _skips_input_guardrail(additional_kwargs, name):
         return additional_kwargs
-    if read_human_input_response(additional_kwargs) is not None:
-        return additional_kwargs
-    return {key: value for key, value in additional_kwargs.items() if key != "hide_from_ui"}
+    return {**additional_kwargs, UNTRUSTED_INPUT_KEY: True}
 
 
 def _is_human_message_like(message: Any) -> bool:
@@ -314,15 +332,11 @@ def _strip_external_message_metadata(message: Any) -> Any:
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
     for key in _SERVER_OWNED_MESSAGE_METADATA_KEYS:
         additional_kwargs.pop(key, None)
-    additional_kwargs = _strip_forged_hide_from_ui(additional_kwargs)
-    update: dict[str, Any] = {}
-    if additional_kwargs != message.additional_kwargs:
-        update["additional_kwargs"] = additional_kwargs
-    if _is_human_message_like(message) and message.name == _SUMMARY_MESSAGE_NAME:
-        update["name"] = None
-    if not update:
+    if _is_human_message_like(message):
+        additional_kwargs = _mark_untrusted_framework_markers(additional_kwargs, message.name)
+    if additional_kwargs == message.additional_kwargs:
         return message
-    return message.model_copy(update=update)
+    return message.model_copy(update={"additional_kwargs": additional_kwargs})
 
 
 def _strip_external_metadata_from_message_like(item: Any) -> Any:
@@ -337,15 +351,14 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
         return _strip_external_message_metadata(item)
     if not isinstance(item, dict):
         return item
-    cleaned = item
-    if isinstance(item.get("additional_kwargs"), dict):
-        additional_kwargs = {key: value for key, value in item["additional_kwargs"].items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
-        additional_kwargs = _strip_forged_hide_from_ui(additional_kwargs)
-        if additional_kwargs != item["additional_kwargs"]:
-            cleaned = {**item, "additional_kwargs": additional_kwargs}
-    if _is_human_message_like(item) and item.get("name") == _SUMMARY_MESSAGE_NAME:
-        cleaned = {key: value for key, value in cleaned.items() if key != "name"}
-    return cleaned
+    if not isinstance(item.get("additional_kwargs"), dict):
+        return item
+    additional_kwargs = {key: value for key, value in item["additional_kwargs"].items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
+    if _is_human_message_like(item):
+        additional_kwargs = _mark_untrusted_framework_markers(additional_kwargs, item.get("name"))
+    if additional_kwargs == item["additional_kwargs"]:
+        return item
+    return {**item, "additional_kwargs": additional_kwargs}
 
 
 #: Server-owned verdict keys on a delegation-ledger entry: runtime-stamped

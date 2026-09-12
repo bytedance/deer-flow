@@ -9,6 +9,15 @@ from langchain_core.messages import HumanMessage
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 SUMMARY_MESSAGE_NAME = "summary"
 
+#: Server-owned mark the Gateway stamps on an untrusted caller's message when it
+#: carries a framework marker (``hide_from_ui``, a ``summary`` name) that would
+#: otherwise make the input guardrail skip it.  The marker keeps doing its
+#: presentation job — those messages stay hidden from the transcript — while this
+#: tells :func:`requires_input_sanitization` the content still came from outside
+#: the trust boundary.  Stripping the marker instead would unhide three
+#: legitimate frontend senders (quoted context, sidecar context, agent save).
+UNTRUSTED_INPUT_KEY = "untrusted_input"
+
 #: Suffix ``DynamicContextMiddleware``'s ID-swap gives the real user message; the
 #: reminder SystemMessage takes the original id so ``add_messages`` can replace it
 #: in place.  It lives here rather than beside the middleware because the message

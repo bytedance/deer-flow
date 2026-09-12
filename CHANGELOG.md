@@ -1422,12 +1422,14 @@ This section accumulates work toward the **2.1.0** milestone
   [#4157], [#4162], [#4099], [#4060], [#4097], [#4128])
 - **prompt-injection:** Close two input-sanitization bypasses. `hide_from_ui` and
   a human `name="summary"` tell `is_genuine_user_message` that the framework
-  authored a message, which skips sanitization entirely; both are now stripped
-  from untrusted run input and thread-state writes, so a caller can no longer
-  land a raw `<system-reminder>` outside the user-input boundary markers that the
-  lead-agent prompt declares trusted framework data. HumanInputCard replies keep
-  `hide_from_ui` through their validated `human_input_response` and stay
-  sanitized, and trusted internal launchers are unaffected. Sanitization also
+  authored a message, which skips sanitization entirely. Untrusted run input and
+  thread-state writes carrying either marker are now marked server-side and
+  sanitized regardless, so a caller can no longer land a raw `<system-reminder>`
+  outside the user-input boundary markers that the lead-agent prompt declares
+  trusted framework data. The markers themselves are preserved, so messages that
+  use `hide_from_ui` only to stay out of the transcript — quoted conversation
+  context, sidecar context, the agent save command, HumanInputCard replies — keep
+  doing that, and trusted internal launchers are unaffected. Sanitization also
   covers every genuine user message instead of only the newest: the
   transformation is request-scoped, so a last-turn-only scan neutralized a
   payload for exactly one model call and then replayed it verbatim from the next
