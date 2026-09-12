@@ -790,6 +790,7 @@ def _get_memory_context(
     config = None
     try:
         from deerflow.agents.memory import get_memory_manager
+        from deerflow.agents.memory.manager import context_query_kwargs
         from deerflow.runtime.user_context import resolve_runtime_user_id
 
         if app_config is None:
@@ -802,10 +803,11 @@ def _get_memory_context(
         if not config.enabled or not config.injection_enabled:
             return ""
 
-        memory_content = get_memory_manager().get_context(
+        manager = get_memory_manager()
+        memory_content = manager.get_context(
             user_id=user_id or resolve_runtime_user_id(None),
             agent_name=agent_name,
-            query=query,
+            **context_query_kwargs(manager.get_context, query),
         )
 
         if not memory_content.strip():

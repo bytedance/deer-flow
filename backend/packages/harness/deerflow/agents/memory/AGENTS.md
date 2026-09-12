@@ -291,10 +291,11 @@ runs by default.
   MMR caches token sets and incrementally updates maximum similarity penalties.
 - `retrieval_relevance_weight` blends lexical relevance with confidence;
   `retrieval_diversity_weight` demotes near-duplicate facts. Defaults preserve
-  the legacy confidence-only ordering exactly.
+  legacy ordering. Relevance is distinct-query-token IDF coverage; repeated
+  content cannot replace missing terms or saturate a partial match.
 - The current-turn query flows from `DynamicContextMiddleware` (bounded,
   user-message text) through the optional `query` keyword on
-  `MemoryManager.get_context` / `aget_context`. Backends without query-aware
-  ranking ignore the hint.
+  `MemoryManager.get_context` / `aget_context`. Shared signature inspection
+  omits `query` for old/uninspectable backends; backend errors never cause retries.
 - Ranking must be deterministic, network-free, and mutation-free: caller-owned
   fact dicts are read-only inputs.
