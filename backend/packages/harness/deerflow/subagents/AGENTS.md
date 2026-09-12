@@ -1,6 +1,6 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-**Context**: `task.context_mode` defaults to `isolated`. `snapshot` captures genuine user turns (including valid hidden clarifications), visible AI/tool history and summary after validation, before child setup. Exclude hidden framework messages and execution state; child role/tools stay independent.
+**Context**: Snapshots exclude framework state and keep genuine user replies, including hidden clarifications. Capture after validation, before setup.
 
 **Durable batch acceptance**: `batch_task` normalizes optional per-item criteria
 before persistence (empty becomes null; 20 items × 500 neutralized characters),

@@ -92,9 +92,8 @@ When making code changes, you MUST update the relevant documentation:
 
 ### Backend Benchmarks
 
-`scripts/benchmark/context_snapshot/` compares synthetic handoffs through the
-real executor. `run-live` requires provider env vars; `summarize` is offline.
-See its README. Keep live calls out of default CI.
+`scripts/benchmark/context_snapshot/`: explicit `run-live` needs provider env
+vars; `summarize` and pytest are offline. See its README for the protocol.
 
 `scripts/benchmark/` contains standalone, reproducible measurements and
 evaluations of production backend behavior. A benchmark may import the
