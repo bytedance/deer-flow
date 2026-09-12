@@ -1,10 +1,12 @@
 """Tests for RunManager."""
 
 import asyncio
+import gc
 import itertools
 import logging
 import re
 import sqlite3
+import weakref
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -747,6 +749,41 @@ async def test_schedule_cleanup_does_not_inherit_request_context(manager_with_st
         request_marker.reset(token)
 
     assert observed_markers == [None]
+
+
+@pytest.mark.anyio
+async def test_schedule_cleanup_done_callback_does_not_retain_request_objects(manager_with_store: RunManager):
+    """The eviction task's done callback must not capture request context either.
+
+    ``add_done_callback`` copies the caller's ContextVars unless given an
+    explicit context, and ``_cleanup_tasks`` strongly retains the task for the
+    whole delay — so a request-scoped object would otherwise stay reachable
+    until the timer fires.
+    """
+    mgr = manager_with_store
+    record = await mgr.create("thread-1")
+    await mgr.set_status(record.run_id, RunStatus.success)
+
+    class Payload:
+        pass
+
+    payload_marker: ContextVar[Payload | None] = ContextVar("payload_marker", default=None)
+    payload = Payload()
+    payload_ref = weakref.ref(payload)
+
+    token = payload_marker.set(payload)
+    try:
+        task = mgr.schedule_cleanup(record.run_id, delay=3600)
+        assert task is not None
+    finally:
+        payload_marker.reset(token)
+    del payload
+
+    gc.collect()
+    assert payload_ref() is None
+
+    await mgr.shutdown(timeout=0.1)
+    assert task.cancelled()
 
 
 @pytest.mark.anyio

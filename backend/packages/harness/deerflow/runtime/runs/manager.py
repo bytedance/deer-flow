@@ -1932,7 +1932,9 @@ class RunManager:
             return None
         task = asyncio.create_task(self.cleanup(run_id, delay=delay), context=Context())
         self._cleanup_tasks.add(task)
-        task.add_done_callback(self._cleanup_task_done)
+        # ``add_done_callback`` also copies the caller's ContextVars unless
+        # overridden, and ``_cleanup_tasks`` retains the task for the delay.
+        task.add_done_callback(self._cleanup_task_done, context=Context())
         return task
 
     def _cleanup_task_done(self, task: asyncio.Task[None]) -> None:
