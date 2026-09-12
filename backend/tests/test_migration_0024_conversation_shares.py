@@ -1,4 +1,4 @@
-"""Migration tests for 0022_conversation_shares (#4548).
+"""Migration tests for 0024_conversation_shares (#4548).
 
 Runs the full alembic chain on an empty SQLite database (not
 ``create_all`` + stamp), then exercises the parent-revision downgrade/upgrade cycle.
@@ -18,17 +18,17 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from deerflow.persistence.bootstrap import _MIGRATIONS_DIR
 
 _SCRIPT_LOCATION = str(_MIGRATIONS_DIR)
-_REVISION = "0022_conversation_shares"
-_PREVIOUS = "0019_thread_incarnations"
+_REVISION = "0024_conversation_shares"
+_PREVIOUS = "0022_scheduled_occurrence_seq"
 
 
 def test_pins_immediate_parent_revision() -> None:
-    """The renumber after main's 0019-0021 series must not drift again."""
+    """The renumbers after main's 0019-0021 and 0022 series must not drift again."""
     import importlib.util
     from pathlib import Path
 
-    module_path = Path(_MIGRATIONS_DIR) / "versions" / "0022_conversation_shares.py"
-    spec = importlib.util.spec_from_file_location("migration_0022", module_path)
+    module_path = Path(_MIGRATIONS_DIR) / "versions" / "0024_conversation_shares.py"
+    spec = importlib.util.spec_from_file_location("migration_0024", module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert module.down_revision == _PREVIOUS

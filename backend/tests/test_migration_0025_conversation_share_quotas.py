@@ -1,4 +1,4 @@
-"""Migration tests for 0023_conversation_share_quotas (#4548).
+"""Migration tests for 0025_conversation_share_quotas (#4548).
 
 Runs the real alembic chain on an empty SQLite database, seeds shares at
 the previous revision, and verifies the quota table is created, backfilled
@@ -19,8 +19,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from deerflow.persistence.bootstrap import _MIGRATIONS_DIR
 
 _SCRIPT_LOCATION = str(_MIGRATIONS_DIR)
-_REVISION = "0023_conversation_share_quotas"
-_PREVIOUS = "0022_conversation_shares"
+_REVISION = "0025_conversation_share_quotas"
+_PREVIOUS = "0024_conversation_shares"
 
 _EXPECTED_COLUMNS = {"owner_user_id", "stored_shares"}
 
@@ -135,7 +135,7 @@ def test_pins_immediate_parent_revision() -> None:
     import importlib.util
     from pathlib import Path
 
-    module_path = Path(_MIGRATIONS_DIR) / "versions" / "0023_conversation_share_quotas.py"
+    module_path = Path(_MIGRATIONS_DIR) / "versions" / "0025_conversation_share_quotas.py"
     spec = importlib.util.spec_from_file_location("migration_0023", module_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -9,7 +9,7 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
@@ -27,6 +27,7 @@ from deerflow.subagents import SubagentExecutor, get_available_subagent_names, g
 from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.context_snapshot import ParentContextSnapshot
 from deerflow.subagents.executor import (
     SubagentStatus,
     cleanup_background_task,
@@ -43,6 +44,7 @@ from deerflow.subagents.status_contract import (
 )
 from deerflow.tools.types import Runtime
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.custom_events import aemit_custom_event
 
 if TYPE_CHECKING:
@@ -651,6 +653,7 @@ async def task_tool(
     *,
     acceptance_criteria: list[str] | None = None,
     description: str = "",
+    context_mode: Literal["isolated", "snapshot"] = "isolated",
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -742,7 +745,15 @@ async def task_tool(
             ["file:../outputs/report.md non-empty"]. Omit for open-ended
             exploration where no crisp acceptance condition exists.
         description: Optional short (3-5 word) description of the task for logging/display.
+        context_mode: Defaults to isolated (only the delegated prompt). Choose
+            snapshot when relevant requirements or failed approaches are spread
+            across the parent conversation: it adds retained history and its
+            summary as background at dispatch time, increasing input tokens.
+            The child keeps its own role/tools; later parent turns are not synced.
+            Historical tool actions are not evidence of child completion.
     """
+    if context_mode not in {"isolated", "snapshot"}:
+        return _task_result_command(tool_call_id=tool_call_id, status="failed", error=f"Unknown context_mode '{context_mode}'. Use isolated or snapshot.")
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     allowed_subagents = metadata.get("allowed_subagents")
@@ -777,6 +788,10 @@ async def task_tool(
             status="failed",
             error=error,
         )
+    # Rejected delegations must not serialize the retained history. Capture
+    # after delegation validation, before child setup (including tool loading).
+    context_snapshot = ParentContextSnapshot.from_state(runtime.state) if context_mode == "snapshot" and runtime is not None else None
+
     # Build config overrides
     overrides: dict = {}
 
@@ -881,7 +896,9 @@ async def task_tool(
     }
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
-    tools = get_available_tools(**available_tools_kwargs)
+    # Assemble off-loop: tool assembly may block on MCP cache initialization,
+    # which must not stall the calling event loop (issue #5172).
+    tools = await run_assembly(get_available_tools, **available_tools_kwargs)
 
     # Create executor
     executor_kwargs = {
@@ -910,6 +927,8 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    if context_snapshot is not None:
+        executor_kwargs["context_snapshot"] = context_snapshot
     middleware_recorder = None
     parent_journal = parent_context.get("__run_journal")
     if parent_journal is not None:

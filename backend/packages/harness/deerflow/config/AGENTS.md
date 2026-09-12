@@ -1,5 +1,23 @@
 ### Configuration System
 
+Custom Agent `AgentConfig.display_name` is an optional, whitespace-trimmed Unicode
+label of at most 100 Unicode code points. C0/C1 controls and bidirectional
+formatting controls (U+202A–U+202E, U+2066–U+2069) are rejected before trimming.
+Also reject soft hyphen, Arabic letter mark, U+200B, U+200E–U+200F,
+U+2028–U+2029, U+2060–U+2065 and U+FEFF. Labels consisting only of
+marks, separators or other invisible characters are invalid; ZWNJ/ZWJ remain
+supported inside ordinary text and emoji.
+It is stored in the existing config document by
+both agent stores; it never participates in paths, routing, or authorization.
+Gateway create/update/response models share its validation. It remains outside
+`MANAGED_AGENT_CONFIG_FIELDS` so `update_agent` preserves it. `setup_agent`
+explicitly carries forward the existing owner's display name when re-bootstrapping;
+the Gateway explicitly overrides it when supplied, including null to clear.
+Both stores use `parse_agent_config` to ignore only an invalid stored
+`display_name` on read, logging the agent identifier without the invalid value
+and without rewriting storage. Other config errors still
+raise, and API create/update validation remains strict.
+
 **Main Configuration** (`config.yaml`):
 
 Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** directory.
@@ -67,9 +85,11 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`, `session_init_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools. `session_init_timeout` (default `DEFAULT_MCP_SESSION_INIT_TIMEOUT` = 60s, `null` to disable) bounds server bring-up: tool discovery and persistent stdio session initialization, so a hung server cannot block agent construction indefinitely; durable HTTP/SSE task calls use it for their ephemeral session initialization too. `tool_call_timeout` bounds individual stdio calls and durable-task calls on every transport; other HTTP/SSE tools use transport-level timeouts.
 - `tool_search.auto_promote_top_k` - Global MCP routing auto-promote breadth. Default `3`, clamped to `1..5`; applies only when `tool_search.enabled=true` and only to deferred MCP tools with `routing.mode="prefer"` and non-empty keywords. For lead agents the deferred catalog is built from the full configured MCP set; auto-promotion never grants authority because an active skill's runtime policy still filters model-visible schemas, `tool_search` results, and execution.
 - `skills` - Map of skill name → state (enabled)
-- `middlewares` - Zero-argument `AgentMiddleware` class paths for lead and subagent runtime extension. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
+- `middlewares` - `AgentMiddleware` entries for lead and subagent runtime extension: class-path strings or `{class, kwargs}` objects. `kwargs` values must be JSON types; YAML dates and timestamps are coerced to ISO strings so they match JSON. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
 
 Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and skill state at runtime; their `extensions_config.json` writes use the shared atomic replacement helper, while `middlewares` remains an operator-controlled config-file extension point.
+
+Values beginning with `$` are resolved from the environment when the file is loaded, and an unset variable becomes `""`. Runtime writers (MCP router, skill toggle, `DeerFlowClient`) therefore read the raw file with `read_raw_extensions_config`, merge into it (`set_raw_skill_enabled` for skill state), check the candidate with `validate_raw_extensions_config`, and write that raw dict. They never serialize an `ExtensionsConfig` model back to disk: its resolved values would persist secrets in plaintext and erase the references. When the file does not exist yet, the Gateway skill toggle seeds only the cached skill states. `tests/test_extensions_config_raw_writes.py` and the placeholder tests in `tests/test_client.py` pin this.
 
 `conversation_sharing` fields are read at request time and are not in the
 startup-only registry. The pepper is process-wide cached state rather than an
