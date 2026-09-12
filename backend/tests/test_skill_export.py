@@ -2,17 +2,10 @@ import os
 import zipfile
 
 import pytest
+from support.skill_export_platform import requires_safe_capture
 
 from deerflow.skills import export
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
-
-# Mirrors the feature guard in export._capture: platforms without fd-based
-# directory walking reject every export with 422 skill_export_unsupported.
-_SAFE_CAPTURE_REASON = "skill export capture needs os.O_NOFOLLOW and dir_fd directory walking, which this platform does not provide; export_manifest/build_skill_export return 422 skill_export_unsupported there"
-requires_safe_capture = pytest.mark.skipif(
-    not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd,
-    reason=_SAFE_CAPTURE_REASON,
-)
 
 
 @pytest.fixture

@@ -1,7 +1,6 @@
 """Real archive/router contracts; auth is stamped only for this isolated test app."""
 
 import asyncio
-import os
 import threading
 from io import BytesIO
 from types import SimpleNamespace
@@ -12,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import ClientDisconnect
+from support.skill_export_platform import requires_safe_capture
 
 from app.gateway import skill_export as service
 from app.gateway.auth.models import User
@@ -19,14 +19,6 @@ from app.gateway.deps import get_config
 from app.gateway.routers import skills
 from deerflow.skills.export import SkillExportArchive
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
-
-# Mirrors the feature guard in deerflow.skills.export._capture: platforms
-# without fd-based directory walking reject every export with 422
-# skill_export_unsupported, so these end-to-end export routes cannot run here.
-requires_safe_capture = pytest.mark.skipif(
-    not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd,
-    reason="skill export capture needs os.O_NOFOLLOW and dir_fd directory walking, which this platform does not provide; export routes return 422 skill_export_unsupported there",
-)
 
 
 @pytest.fixture
