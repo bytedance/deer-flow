@@ -116,6 +116,35 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+async def _await_off_thread(task: asyncio.Task[Any]) -> Any:
+    """Drain an already-dispatched worker operation before propagating cancellation."""
+    first_cancel: asyncio.CancelledError | None = None
+    while True:
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if first_cancel is None:
+                first_cancel = exc
+            if not task.done():
+                continue
+            task.result()
+            raise first_cancel
+        if first_cancel is not None:
+            raise first_cancel
+        return result
+
+
+async def _acquire_gate_lock(lock: threading.Lock) -> None:
+    """Acquire off-loop without orphaning a successful acquire on cancellation."""
+    acquire_task = asyncio.create_task(asyncio.to_thread(lock.acquire))
+    try:
+        await _await_off_thread(acquire_task)
+    except asyncio.CancelledError:
+        if acquire_task.done() and not acquire_task.cancelled() and acquire_task.exception() is None:
+            lock.release()
+        raise
+
+
 class ReadBeforeWriteMiddleware(AgentMiddleware):
     """Version gate: block writes to existing files not read at their current version."""
 
@@ -181,13 +210,11 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
                 return await handler(request)
             try:
                 async with sandbox_authorization_scope_async(request.runtime):
-                    # threading.Lock may be released from a different thread than the
-                    # acquiring one, so acquiring in a worker thread and releasing on
-                    # the event-loop thread is safe.
                     lock = self._lock_for(request, path)
-                    await asyncio.to_thread(lock.acquire)
+                    await _acquire_gate_lock(lock)
                     try:
-                        blocked = await asyncio.to_thread(self._check_write_gate, request)
+                        check_task = asyncio.create_task(asyncio.to_thread(self._check_write_gate, request))
+                        blocked = await _await_off_thread(check_task)
                         if blocked is not None:
                             return normalize_tool_result(blocked)
                         return await handler(request)
@@ -202,10 +229,11 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             try:
                 async with sandbox_authorization_scope_async(request.runtime):
                     lock = self._lock_for(request, path)
-                    await asyncio.to_thread(lock.acquire)
+                    await _acquire_gate_lock(lock)
                     try:
                         result = await handler(request)
-                        await asyncio.to_thread(self._attach_read_mark, request, result)
+                        mark_task = asyncio.create_task(asyncio.to_thread(self._attach_read_mark, request, result))
+                        await _await_off_thread(mark_task)
                         return result
                     finally:
                         lock.release()
