@@ -689,12 +689,13 @@ test.describe("Thread history", () => {
     await expect(textarea).toBeVisible();
   });
 
-  test("deleting the active newly created chat returns to the new chat screen", async ({
+  test("retrying deletion of the active newly created chat returns to the new chat screen", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
+    let cleanupAttempts = 0;
     await page.route(/\/api\/threads\/[^/]+$/, (route) => {
-      if (route.request().method() === "DELETE") {
+      if (route.request().method() === "DELETE" && ++cleanupAttempts === 1) {
         return route.fulfill({
           status: 500,
           contentType: "application/json",
@@ -730,6 +731,21 @@ test.describe("Thread history", () => {
       .getByRole("dialog")
       .getByRole("button", { name: "Delete", exact: true })
       .click();
+
+    // Remote deletion succeeded, but local cleanup failed. Keep the dialog
+    // and streamed content until the user retries the remaining cleanup.
+    await expect(
+      page.getByText("Failed to delete chat. Please try again.", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete", exact: true })
+      .click();
+    await expect(page.getByRole("dialog")).toBeHidden();
+    expect(cleanupAttempts).toBe(2);
 
     await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
     await expect(page.getByText("Previous question")).toHaveCount(0);

@@ -173,6 +173,9 @@ or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob down
 HTTP 409 requires explicit preview refresh. Keep file lists paginated and diagnostics
 localized. Browser handoff does not prove the file was saved to disk.
 
-Sidebar chat deletion is confirmed in `ThreadSidebarItem`, shared by flat and
-project-grouped lists. Keep the dialog mounted outside the dropdown menu, focus
-Cancel on open, and block dismissal while deletion is pending.
+Sidebar rows request deletion through `ThreadDeleteDialogProvider`, hosted in
+`WorkspaceSidebar` outside the virtualized flat/project lists. Keep the selected
+thread snapshot and retry UI alive when a partial deletion removes its row.
+Focus Cancel on open and block dismissal while deletion is pending. The shared
+delete helper accepts remote 404 (not 403) before retrying local cleanup, and
+`onDeleted` runs only after both deletion steps succeed.

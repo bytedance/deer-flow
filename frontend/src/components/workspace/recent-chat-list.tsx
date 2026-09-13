@@ -13,7 +13,7 @@ import {
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
-import { useParams, usePathname, useRouter } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -21,7 +21,6 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -46,7 +45,6 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { resetThreadChatAfterDelete } from "@/components/workspace/chats/use-thread-chat";
 import { getAPIClient } from "@/core/api";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
@@ -57,7 +55,6 @@ import { useLocalSettings } from "@/core/settings";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { exportThread, type ThreadExportFormat } from "@/core/threads/export";
 import {
-  useDeleteThread,
   useInfiniteThreads,
   useMoveThreadToProject,
   usePinThread,
@@ -81,6 +78,7 @@ import { isIMEComposing } from "@/lib/ime";
 
 import { MoveToProjectMenu, NewProjectDialog } from "./move-to-project-menu";
 import { ThreadChannelIcon } from "./thread-channel-source";
+import { useThreadDeleteDialog } from "./thread-delete-dialog";
 import { VirtualThreadList } from "./thread-list-virtualizer";
 import { useThreadArchiveAction } from "./use-thread-archive-action";
 
@@ -103,15 +101,7 @@ export function ThreadSidebarItem({
   const { t } = useI18n();
   const { user } = useAuth();
   const canDeleteThreads = hasPermission(user, PERMISSIONS.THREADS_DELETE);
-  const router = useRouter();
-  const pathname = usePathname();
-  const { thread_id: threadIdFromPath, agent_name: agentNameFromPath } =
-    useParams<{
-      thread_id: string;
-      agent_name?: string;
-    }>();
-  const { mutateAsync: deleteThread, isPending: isDeleting } =
-    useDeleteThread();
+  const requestDelete = useThreadDeleteDialog();
   const { mutate: renameThread } = useRenameThread();
   const { mutate: updatePinnedThread } = usePinThread();
   // The move mutation is owned here (not inside `MoveToProjectMenu`) because
@@ -141,56 +131,6 @@ export function ThreadSidebarItem({
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [newProjectDialogOpen, setNewProjectDialogOpen] = useState(false);
-
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const deleteInFlight = useRef(false);
-  const deleteCancelRef = useRef<HTMLButtonElement>(null);
-
-  const handleDelete = useCallback(async () => {
-    if (deleteInFlight.current) return;
-    deleteInFlight.current = true;
-    const currentPathname =
-      typeof window === "undefined" ? pathname : window.location.pathname;
-    const threadPath = pathOfThread(thread);
-    const nextThreadPath = pathOfThread("new", {
-      agent_name: agentNameFromPath,
-    });
-    const isNewThreadPath = currentPathname === nextThreadPath;
-    const isCurrentThread =
-      thread.thread_id === threadIdFromPath ||
-      threadPath === currentPathname ||
-      (isNewThreadPath && recentThreadId === thread.thread_id);
-
-    try {
-      await deleteThread({
-        threadId: thread.thread_id,
-        onRemoteDeleted: isCurrentThread
-          ? () => {
-              resetThreadChatAfterDelete({
-                deletedThreadId: thread.thread_id,
-                nextPath: nextThreadPath,
-                force: true,
-              });
-              void router.replace(nextThreadPath);
-            }
-          : undefined,
-      });
-      setDeleteDialogOpen(false);
-    } catch {
-      toast.error(t.chats.deleteFailed);
-    } finally {
-      deleteInFlight.current = false;
-    }
-  }, [
-    agentNameFromPath,
-    deleteThread,
-    pathname,
-    recentThreadId,
-    router,
-    thread,
-    threadIdFromPath,
-    t.chats.deleteFailed,
-  ]);
 
   const handleRenameSubmit = useCallback(() => {
     if (renameValue.trim()) {
@@ -395,7 +335,9 @@ export function ThreadSidebarItem({
             {canDeleteThreads && (
               <>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => setDeleteDialogOpen(true)}>
+                <DropdownMenuItem
+                  onSelect={() => requestDelete({ thread, recentThreadId })}
+                >
                   <Trash2 className="text-muted-foreground" />
                   <span>{t.common.delete}</span>
                 </DropdownMenuItem>
@@ -404,51 +346,6 @@ export function ThreadSidebarItem({
           </DropdownMenuContent>
         </DropdownMenu>
       )}
-
-      <Dialog
-        open={deleteDialogOpen}
-        onOpenChange={(open) => {
-          if (!deleteInFlight.current) setDeleteDialogOpen(open);
-        }}
-      >
-        <DialogContent
-          showCloseButton={!isDeleting}
-          onOpenAutoFocus={(event) => {
-            event.preventDefault();
-            deleteCancelRef.current?.focus();
-          }}
-          onEscapeKeyDown={(event) => {
-            if (deleteInFlight.current) event.preventDefault();
-          }}
-          onInteractOutside={(event) => {
-            if (deleteInFlight.current) event.preventDefault();
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>{t.chats.deleteChat}</DialogTitle>
-            <DialogDescription className="break-words">
-              {t.chats.deleteConfirm(titleOfThread(thread))}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              ref={deleteCancelRef}
-              variant="outline"
-              onClick={() => setDeleteDialogOpen(false)}
-              disabled={isDeleting}
-            >
-              {t.common.cancel}
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => void handleDelete()}
-              disabled={isDeleting}
-            >
-              {isDeleting ? t.common.loading : t.common.delete}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Rename Dialog */}
       <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>

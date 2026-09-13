@@ -107,3 +107,75 @@ test("confirmation waits for deletion, prevents dismissal, and permits retry aft
   ).toHaveCount(0);
   expect(attempts).toBe(2);
 });
+
+for (const active of [true, false]) {
+  test(`cleanup failure keeps ${active ? "active" : "inactive"} chat deletion retryable after the row disappears`, async ({
+    page,
+  }) => {
+    const other = "00000000-0000-0000-0000-000000000902";
+    mockLangGraphAPI(page, {
+      threads: [
+        { thread_id: CHAT, title: TITLE },
+        { thread_id: other, title: "Keep open" },
+      ],
+    });
+    let releaseCleanup!: () => void;
+    const cleanupGate = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    let remoteAttempts = 0;
+    let cleanupAttempts = 0;
+    await page.route(`**/api/langgraph/threads/${CHAT}`, (route) => {
+      if (route.request().method() !== "DELETE") return route.fallback();
+      remoteAttempts++;
+      // The real gateway has require_existing=True: after the first successful
+      // deletion, a retry must accept 404 and continue with local cleanup.
+      if (remoteAttempts > 1)
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "Thread not found" }),
+        });
+      return route.fallback();
+    });
+    await page.route(`**/api/threads/${CHAT}`, async (route) => {
+      if (route.request().method() !== "DELETE") return route.fallback();
+      cleanupAttempts++;
+      if (cleanupAttempts > 1) return route.fallback();
+      await cleanupGate;
+      return route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Cleanup failed" }),
+      });
+    });
+    const originalPath = `/workspace/chats/${active ? CHAT : other}`;
+    await page.goto(originalPath);
+    const dialog = await openDeleteDialog(page);
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    await expect.poll(() => cleanupAttempts).toBe(1);
+    await expect(page).toHaveURL(new RegExp(`${originalPath}$`));
+    await expect(dialog).toBeVisible();
+    releaseCleanup();
+    await expect(
+      page.getByText("Failed to delete chat. Please try again.", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    // onSettled refetches the list, which no longer contains this thread.
+    await expect(
+      page.locator(
+        `a[data-sidebar="menu-button"][href="/workspace/chats/${CHAT}"]`,
+      ),
+    ).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText(TITLE);
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect.poll(() => cleanupAttempts).toBe(2);
+    expect(remoteAttempts).toBe(2);
+    await expect(page).toHaveURL(
+      active ? /\/workspace\/chats\/new$/ : new RegExp(`${originalPath}$`),
+    );
+  });
+}
