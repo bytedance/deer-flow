@@ -224,6 +224,17 @@ This section accumulates work toward the **2.1.0** milestone
   `use_previous_response_id` chaining cannot resume the original server-side
   history. Controlled by `read_before_write.elide_blocked_payloads` (default
   on) and `read_before_write.elide_min_chars` (default 2000).
+- **agents:** `ToolOutputBudgetMiddleware` now also elides the `content` of a
+  successful `write_file` call from model-bound requests once the same path
+  was read or modified again later in the conversation. After a successful
+  write the file on disk is the source of truth, and the read-before-write
+  gate forces a `read_file` before the next modification, so the historical
+  copy was redundant with that read and long report-writing runs carried every
+  section twice. The newest `tool_output.keep_recent_writes` successful writes
+  (default 1) always stay visible, `str_replace` payloads are never touched,
+  and stored history, receipts, and the run journal keep the original
+  arguments. Controlled by `tool_output.elide_superseded_writes` (default on)
+  and `tool_output.superseded_write_min_chars` (default 2000).
 
 #### Memory
 
@@ -251,6 +262,9 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Skills
 
+- **skills:** The built-in image-generation skill can use OpenAI-compatible
+  Images APIs for generation and reference-image editing, with configurable
+  endpoint, model, size, and output format.
 - **skills:** Native SkillScan (phase 1) statically analyzes skill packages at
   load, and `describe_skill` enables deferred discovery so the model fetches a
   skill's schema on demand instead of loading all skills up front. ([#3033],
@@ -568,6 +582,28 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **runtime:** Stop a keyed run retry from failing with 500 on the SQL run
+  store. HTTP admissions do not pass a `user_id`; the SQL store stamps the
+  request user on the row, but the process-local run record kept `None`. A
+  retry with the same `Idempotency-Key` that reached another Gateway worker, or
+  the same worker after the finished run was cleaned up, compared the two
+  owners, took its own run for another user's, and raised. The same mismatch
+  dropped HTTP runs from owner-scoped history reads and skipped the MCP
+  `background_tasks` projection for them, so `values` events for these runs now
+  include `background_tasks`. `RunManager` now resolves an omitted owner from
+  the request user the way the SQL store does, so every store records the same
+  owner. ([#5401])
+- **runtime:** Stop a cross-worker idempotent run reuse from permanently
+  blocking the thread on the reusing worker. The reuse registered the hydrated
+  store row as a local run record, but only the owning worker finalizes and
+  cleans up its records, so the copy kept its admission-time `pending`/`running`
+  status forever: every later `reject` admission for that thread on the worker
+  returned 409 until a restart, its run reads kept reporting the stale status,
+  and orphan reconciliation skipped the run if the owner crashed. A cancel sent
+  to that worker also took the local-owner path and marked the owner's
+  still-running row `interrupted`. The reusing worker now returns a detached
+  store-only handle instead, so cancel follows the non-owner contract.
+  ([#5393])
 - **skills:** Stop writing resolved secrets into `extensions_config.json` when a
   skill is toggled. The Gateway skill toggle and `DeerFlowClient.update_skill`
   loaded the file through `ExtensionsConfig.from_file()`, which replaces every
@@ -2747,3 +2783,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
 [#5353]: https://github.com/bytedance/deer-flow/pull/5353
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357
+[#5393]: https://github.com/bytedance/deer-flow/pull/5393
+[#5401]: https://github.com/bytedance/deer-flow/pull/5401
