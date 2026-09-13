@@ -76,6 +76,7 @@ def get_available_tools(
     subagent_enabled: bool = False,
     *,
     include_upload_tool: bool = True,
+    include_conversation_reader: bool = False,
     app_config: AppConfig | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
@@ -92,12 +93,17 @@ def get_available_tools(
             Ordinary task subagents enable it only after snapshotting the
             parent's current-run upload state. Durable batch and non-standard
             subagent callers without that state keep it disabled.
+        include_conversation_reader: Allow the configured conversation reader
+            only when the host provides its authorized runtime capability.
+            Defaults to false for embedded callers and subagents.
 
     Returns:
         List of available tools.
     """
     config = app_config or get_app_config()
     tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
+    if not include_conversation_reader:
+        tool_configs = [tool for tool in tool_configs if tool.use != "deerflow.tools.conversation:read_conversation"]
 
     # Do not expose host bash by default when LocalSandboxProvider is active.
     if not is_host_bash_allowed(config):
