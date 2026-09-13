@@ -808,6 +808,20 @@ client.clear_goal("thread-1")
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
 
+## 项目成员归属（Project Membership）
+
+会话在创建时（选择了某个 project）或之后通过移动菜单加入一个 project。Run
+永远不会修改成员归属：提交消息不能给会话指派或重新指派 project。将会话移出
+某个 project 后，它会保持未指派状态，直到被再次显式移动。
+
+移动会话时会同时刷新其头部归属信息和 project 列表，即使此前的元数据请求仍
+在途中也是如此。
+
+Projects 需要当前版本的数据库表和列。如果数据库已打上旧 0018 迁移序列的
+`0019_thread_incarnations` 版本标记而缺少 project schema，本次构建会在启动
+时拒绝该数据库。针对这类数据库启动此构建前，请先遵循
+[离线数据库恢复流程](docs/database-forward-revision-recovery.md)。
+
 ## 定时任务 (Scheduled Tasks)
 
 DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled-task）MVP。
