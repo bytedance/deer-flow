@@ -48,6 +48,31 @@ def test_provisioner_request_defaults_skills_container_path(provisioner_module) 
     )
 
     assert request.skills_container_path == "/mnt/skills"
+    assert request.max_shell_sessions is None
+
+
+def test_provisioner_threads_shell_capacity_into_sandbox_pod(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(
+        event_loop_thread_id=-1,
+        ready_after_service_reads={"sandbox-capacity": 1},
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    response = provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-capacity",
+            thread_id="thread-1",
+            max_shell_sessions=13,
+        )
+    )
+
+    assert response.status == "Running"
+    pod = fake_core_v1.created_pod_specs["sandbox-capacity"]
+    env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+    assert env["MAX_SHELL_SESSIONS"] == "13"
 
 
 class _RecordingCoreV1:
