@@ -47,11 +47,11 @@ class SubagentBatchesFeature(BaseModel):
 
 
 class KnowledgeBaseFeature(BaseModel):
-    """Availability of RAGFlow retrieval in custom-agent chat."""
+    """Availability of RAGFlow retrieval scope selection in chat."""
 
     scope_selection_enabled: bool = Field(
         ...,
-        description="Whether custom-agent chat may select a per-message RAGFlow retrieval scope",
+        description="Whether chat may select a per-message RAGFlow retrieval scope",
     )
 
 
