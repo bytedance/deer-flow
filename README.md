@@ -802,8 +802,10 @@ finalization) keep the existing completion-data behavior: they receive the
 zero-delivery receipt but do not overwrite RunStore completion fields with an
 empty snapshot.
 
-The same run event history records loop-detection decisions and deferred MCP
-tool promotions for both the lead agent and ordinary task subagents. Promotion
+When `tool_progress.enabled` is true, the same run event history also records
+result-quality guard phase changes. It records loop-detection decisions and
+deferred MCP tool promotions for both the lead agent and ordinary task
+subagents. Promotion
 events identify newly promoted deferred-tool names and whether routing metadata or
 `tool_search` selected them, without copying the search query, routing keywords,
 schemas, arguments, results, or catalog hash into the promotion event itself.

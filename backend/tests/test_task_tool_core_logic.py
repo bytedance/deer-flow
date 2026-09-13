@@ -36,6 +36,18 @@ from deerflow.subagents.status_contract import (
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
 
+def test_parent_loop_middleware_recorder_requires_the_journal_owner_loop():
+    owner_loop = asyncio.new_event_loop()
+    other_loop = asyncio.new_event_loop()
+    journal = SimpleNamespace(_owner_loop=owner_loop)
+    try:
+        with pytest.raises(ValueError, match="must match"):
+            task_tool_module._ParentLoopMiddlewareRecorderProxy(journal, other_loop)
+    finally:
+        owner_loop.close()
+        other_loop.close()
+
+
 def test_parent_loop_middleware_recorder_proxy_delivers_on_owner_loop():
     """Subagent middleware events must never call RunJournal from the child loop."""
     calls: list[tuple[object, dict]] = []
@@ -462,6 +474,7 @@ def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
     kwargs = captured["executor_kwargs"]
     proxy = kwargs["loop_detection_recorder"]
     assert kwargs["tool_promotion_recorder"] is proxy
+    assert kwargs["tool_progress_recorder"] is proxy
     assert proxy.is_closed is True
     proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="warn", changes={})
     journal.record_middleware.assert_not_called()

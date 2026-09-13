@@ -438,6 +438,11 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "is_internal",
             "authz_attributes",
             "channel_user_id",
+            "is_subagent",
+            "agent_id",
+            "__run_loop_detection_recorder",
+            "__run_tool_promotion_recorder",
+            "__run_tool_progress_recorder",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
         }
@@ -480,7 +485,7 @@ _CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable
 # credential that ``bash`` exports as ``GH_TOKEN``/``GITHUB_TOKEN``, and a copy
 # smuggled through ``body.config['configurable']`` would be written to the
 # checkpoint store.
-_INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS
+_INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS
 
 
 def strip_internal_context_keys(config: dict[str, Any]) -> None:

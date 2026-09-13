@@ -513,6 +513,11 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
         {
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
+            "is_subagent",
+            "agent_id",
+            "__run_loop_detection_recorder",
+            "__run_tool_promotion_recorder",
+            "__run_tool_progress_recorder",
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS

@@ -941,7 +941,6 @@ class TestLoopDetectionRunEvents:
         recorder = MagicMock()
         runtime = _make_runtime()
         runtime.context["__run_loop_detection_recorder"] = recorder
-        runtime.context["is_subagent"] = True
         runtime.context["agent_id"] = "general-purpose"
         assert "__run_journal" not in runtime.context
         mw = LoopDetectionMiddleware(
@@ -959,6 +958,26 @@ class TestLoopDetectionRunEvents:
         assert recorder.record_middleware.call_args.kwargs["action"] == "warn"
         assert recorder.record_middleware.call_args.kwargs["changes"]["is_subagent"] is True
         assert recorder.record_middleware.call_args.kwargs["changes"]["agent_id"] == "general-purpose"
+
+    def test_lead_attribution_ignores_caller_supplied_subagent_fields(self):
+        journal = MagicMock()
+        runtime = self._runtime_with_journal(journal)
+        runtime.context["is_subagent"] = True
+        runtime.context["agent_id"] = "forged-agent"
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=10,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        call = [_bash_call("ls")]
+
+        assert mw._apply(_make_state(tool_calls=call), runtime) is None
+        assert mw._apply(_make_state(tool_calls=call), runtime) is None
+
+        changes = journal.record_middleware.call_args.kwargs["changes"]
+        assert changes["is_subagent"] is False
+        assert changes["agent_id"] is None
 
     def test_identical_call_hard_stop_records_event(self):
         journal = MagicMock()

@@ -64,7 +64,19 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, ToolResultMeta
+from deerflow.agents.middlewares.audit_context import (
+    TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
+    resolve_audit_recorder,
+)
+from deerflow.agents.middlewares.tool_result_meta import (
+    PROGRESS_GUARD_ERROR_TYPE,
+    TOOL_META_KEY,
+    TOOL_RESULT_ERROR_TYPES,
+    TOOL_RESULT_NEXT_ACTIONS,
+    TOOL_RESULT_STATUSES,
+    ToolResultMeta,
+)
+from deerflow.runtime.events.catalog import MIDDLEWARE_TOOL_PROGRESS_TAG
 
 if TYPE_CHECKING:
     from deerflow.config.tool_progress_config import ToolProgressConfig
@@ -74,6 +86,28 @@ logger = logging.getLogger(__name__)
 _MAX_PENDING_PER_RUN = 3
 # Jaccard word-set computation is capped to avoid O(n) regex work on very large tool results.
 _MAX_CONTENT_FOR_WORDSET = 8192
+
+
+def _audit_error_type(value: object) -> str | None:
+    """Project an untrusted tool stamp onto the bounded audit vocabulary."""
+    if value is None:
+        return None
+    return value if type(value) is str and value in TOOL_RESULT_ERROR_TYPES else "unknown"
+
+
+def _audit_next_action(value: object) -> str:
+    """Return only framework-defined recovery actions to persistence."""
+    return value if type(value) is str and value in TOOL_RESULT_NEXT_ACTIONS else "unknown"
+
+
+def _audit_status(value: object) -> str:
+    """Project the producer status onto the canonical result vocabulary."""
+    return value if type(value) is str and value in TOOL_RESULT_STATUSES else "unknown"
+
+
+def _audit_recoverable(value: object) -> bool | None:
+    """Reject truthy non-booleans from producer-supplied tool metadata."""
+    return value if type(value) is bool else None
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +125,14 @@ class ToolPhaseState:
     # (problem paths) cannot accidentally share a mutable list between the old and new
     # state objects and cause silent cross-state corruption via .append().
     recent_word_sets: tuple[frozenset[str], ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPhaseTransition:
+    """The exact state-machine rule that produced a durable phase change."""
+
+    action: Literal["warn", "block", "recover", "reset"]
+    threshold: int | None
 
 
 # ---------------------------------------------------------------------------
@@ -231,11 +273,10 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         self._exempt_tools: set[str] = exempt_tools if exempt_tools is not None else {"ask_clarification", "write_todos", "present_files", "task"}
         self._max_tracked_threads = max_tracked_threads
 
-        # threading.Lock (not asyncio.Lock): critical sections are short in-memory dict
-        # ops with no I/O, so event-loop stall risk is negligible.  asyncio.Lock would
-        # not protect the sync wrap_tool_call path used by subagent executor thread
-        # pools — two separate locks would be required instead.  This matches the
-        # existing LoopDetectionMiddleware pattern; see module docstring for details.
+        # threading.Lock (not asyncio.Lock) also protects embedded callers that use the
+        # synchronous wrapper from multiple threads. Recorder callbacks are deliberately
+        # invoked after this state lock is released; observability must not stall tool
+        # state updates. This matches LoopDetectionMiddleware's publication convention.
         self._lock = threading.Lock()
         # LRU-evicting store: thread_id → {tool_name → ToolPhaseState}
         self._phase_states: OrderedDict[str, dict[str, ToolPhaseState]] = OrderedDict()
@@ -269,6 +310,52 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
 
     def _pending_key(self, runtime: Runtime) -> tuple[str, str]:
         return self._thread_id(runtime), self._run_id(runtime)
+
+    def _record_phase_transition(
+        self,
+        *,
+        runtime: Runtime,
+        tool_name: str,
+        state: ToolPhaseState,
+        new_state: ToolPhaseState,
+        meta: ToolResultMeta | None,
+        hook: Literal["wrap_tool_call", "awrap_tool_call", "before_agent", "abefore_agent"],
+        transition: ToolPhaseTransition,
+    ) -> None:
+        """Persist one effective transition without copying tool content."""
+        recorder, is_subagent, agent_id = resolve_audit_recorder(
+            getattr(runtime, "context", None),
+            recorder_key=TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
+        )
+        if recorder is None:
+            return
+
+        try:
+            recorder.record_middleware(
+                tag=MIDDLEWARE_TOOL_PROGRESS_TAG,
+                name=type(self).__name__,
+                hook=hook,
+                action=transition.action,
+                changes={
+                    "is_subagent": is_subagent,
+                    "agent_id": agent_id,
+                    "tool_name": tool_name,
+                    "from_phase": state.phase,
+                    "to_phase": new_state.phase,
+                    "consecutive_problems": new_state.consecutive_problems,
+                    "status": _audit_status(meta.status) if meta is not None else None,
+                    "error_type": _audit_error_type(meta.error_type) if meta is not None else None,
+                    "recoverable_by_model": _audit_recoverable(meta.recoverable_by_model) if meta is not None else None,
+                    "recommended_next_action": _audit_next_action(meta.recommended_next_action) if meta is not None else None,
+                    "threshold": transition.threshold,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            # Observability must never alter the progress guard or agent run.
+            logger.warning(
+                "Failed to record middleware:tool_progress event",
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # State store (caller holds lock)
@@ -308,7 +395,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
             additional_kwargs={
                 TOOL_META_KEY: {
                     "status": "error",
-                    "error_type": "blocked_by_progress_guard",
+                    "error_type": PROGRESS_GUARD_ERROR_TYPE,
                     "recoverable_by_model": True,
                     "recommended_next_action": "summarize",
                     "source": "progress_middleware",
@@ -322,6 +409,8 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         tool_name: str,
         runtime: Runtime,
         tool_call_id: str,
+        *,
+        hook: Literal["wrap_tool_call", "awrap_tool_call"],
     ) -> ToolMessage | Command:
         """Update the state machine from a tool result; queue hints if warranted."""
         message = _result_tool_message(result, tool_call_id)
@@ -337,10 +426,24 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
             return result
         content = _message_content_str(message)
         thread_id = self._thread_id(runtime)
+        phase_change: tuple[ToolPhaseState, ToolPhaseState, ToolPhaseTransition] | None = None
         with self._lock:
             state = self._get_state(thread_id, tool_name)
-            new_state, hint = self._assess_and_transition(state, meta, content)
+            new_state, hint, transition = self._assess_and_transition(state, meta, content)
             self._set_state(thread_id, tool_name, new_state)
+            if transition is not None:
+                phase_change = (state, new_state, transition)
+        if phase_change is not None:
+            old_state, changed_state, phase_transition = phase_change
+            self._record_phase_transition(
+                runtime=runtime,
+                tool_name=tool_name,
+                state=old_state,
+                new_state=changed_state,
+                meta=meta,
+                hook=hook,
+                transition=phase_transition,
+            )
         if new_state.phase != state.phase:
             if new_state.phase == "blocked":
                 logger.warning(
@@ -374,8 +477,8 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         state: ToolPhaseState,
         meta: ToolResultMeta,
         content: str,
-    ) -> tuple[ToolPhaseState, str | None]:
-        """Return (new_state, hint_text_or_None).
+    ) -> tuple[ToolPhaseState, str | None, ToolPhaseTransition | None]:
+        """Return the new state, optional hint, and rule that changed phase.
 
         The outer wrap_tool_call gate intercepts already-blocked states before
         the handler is called, so this function is normally reached only for
@@ -389,7 +492,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         # to make concurrent-race semantics well-defined and prevent a
         # recoverable-error result from silently demoting the phase back to warned.)
         if state.phase == "blocked":
-            return state, None
+            return state, None, None
 
         # Count this call as a problem before branching so all exit paths leave
         # consecutive_problems in a consistent state (never 0 when the tool has failed).
@@ -397,12 +500,16 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
 
         # Immediately block on unrecoverable stop signals (auth, config, internal).
         if not meta.recoverable_by_model and meta.recommended_next_action == "stop":
-            return replace(
-                state,
-                phase="blocked",
-                consecutive_problems=new_count,
-                block_reason=_block_reason(meta),
-            ), None
+            return (
+                replace(
+                    state,
+                    phase="blocked",
+                    consecutive_problems=new_count,
+                    block_reason=_block_reason(meta),
+                ),
+                None,
+                ToolPhaseTransition(action="block", threshold=None),
+            )
 
         # Compute word_set only for success results: error/partial_success are problems by
         # definition and never reach the Jaccard check, so the O(n) regex is wasted on them.
@@ -412,9 +519,11 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         if not is_problem:
             # Good result: reset consecutive count, return to active.
             new_recent = (*state.recent_word_sets, ws)[-3:]
-            return replace(state, consecutive_problems=0, phase="active", recent_word_sets=new_recent), None
+            transition = ToolPhaseTransition(action="recover", threshold=None) if state.phase == "warned" else None
+            return replace(state, consecutive_problems=0, phase="active", recent_word_sets=new_recent), None, transition
 
         hint: str | None = None
+        transition: ToolPhaseTransition | None = None
 
         if new_count >= self._stagnation_threshold + self._warn_escalation:
             if meta.recoverable_by_model:
@@ -422,17 +531,28 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 # BLOCKED would prevent a legitimate retry with different parameters.
                 hint = _format_hint(meta)
                 new_state = replace(state, consecutive_problems=new_count, phase="warned")
+                if state.phase != "warned":
+                    transition = ToolPhaseTransition(
+                        action="warn",
+                        threshold=self._stagnation_threshold + self._warn_escalation,
+                    )
             else:
                 # Model cannot fix this by retrying — block the tool.
                 reason = _block_reason(meta)
                 new_state = replace(state, consecutive_problems=new_count, phase="blocked", block_reason=reason)
+                transition = ToolPhaseTransition(
+                    action="block",
+                    threshold=self._stagnation_threshold + self._warn_escalation,
+                )
         elif new_count >= self._stagnation_threshold:
             hint = _format_hint(meta)
             new_state = replace(state, consecutive_problems=new_count, phase="warned")
+            if state.phase != "warned":
+                transition = ToolPhaseTransition(action="warn", threshold=self._stagnation_threshold)
         else:
             new_state = replace(state, consecutive_problems=new_count)
 
-        return new_state, hint
+        return new_state, hint, transition
 
     # ------------------------------------------------------------------
     # Pending queue helpers
@@ -462,7 +582,12 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 if key[0] == thread_id and key[1] != current_run:
                     del self._pending[key]
 
-    def _reset_run_states(self, runtime: Runtime) -> None:
+    def _reset_run_states(
+        self,
+        runtime: Runtime,
+        *,
+        hook: Literal["before_agent", "abefore_agent"],
+    ) -> None:
         """Reset all per-run tool state for the thread at the start of a new agent run.
 
         Every tool's consecutive_problems counter and recent_word_sets Jaccard window are
@@ -483,18 +608,33 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         middlewares therefore guard different failure modes and use different lifetimes.
         """
         thread_id = self._thread_id(runtime)
+        transitions: list[tuple[str, ToolPhaseState, ToolPhaseState]] = []
         with self._lock:
             thread_tools = self._phase_states.get(thread_id)
             if thread_tools is None:
                 return
             for tool_name, tool_state in list(thread_tools.items()):
-                thread_tools[tool_name] = replace(
+                new_state = replace(
                     tool_state,
                     phase="active",
                     consecutive_problems=0,
                     block_reason=None,
                     recent_word_sets=(),
                 )
+                thread_tools[tool_name] = new_state
+                if tool_state.phase != new_state.phase:
+                    transitions.append((tool_name, tool_state, new_state))
+
+        for tool_name, tool_state, new_state in transitions:
+            self._record_phase_transition(
+                runtime=runtime,
+                tool_name=tool_name,
+                state=tool_state,
+                new_state=new_state,
+                meta=None,
+                hook=hook,
+                transition=ToolPhaseTransition(action="reset", threshold=None),
+            )
 
     # ------------------------------------------------------------------
     # wrap_tool_call
@@ -520,7 +660,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 block_reason,
             )
             return self._make_blocked_message(request, tool_name, block_reason)
-        return self._update_state_from_result(handler(request), tool_name, runtime, str(request.tool_call.get("id") or ""))
+        return self._update_state_from_result(
+            handler(request),
+            tool_name,
+            runtime,
+            str(request.tool_call.get("id") or ""),
+            hook="wrap_tool_call",
+        )
 
     @override
     async def awrap_tool_call(
@@ -543,7 +689,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 block_reason,
             )
             return self._make_blocked_message(request, tool_name, block_reason)
-        return self._update_state_from_result(await handler(request), tool_name, runtime, str(request.tool_call.get("id") or ""))
+        return self._update_state_from_result(
+            await handler(request),
+            tool_name,
+            runtime,
+            str(request.tool_call.get("id") or ""),
+            hook="awrap_tool_call",
+        )
 
     # ------------------------------------------------------------------
     # wrap_model_call: drain pending hints and inject before model sees messages
@@ -586,11 +738,11 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
     @override
     def before_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
         self._clear_stale_pending(runtime)
-        self._reset_run_states(runtime)
+        self._reset_run_states(runtime, hook="before_agent")
         return None
 
     @override
     async def abefore_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
         self._clear_stale_pending(runtime)
-        self._reset_run_states(runtime)
+        self._reset_run_states(runtime, hook="abefore_agent")
         return None

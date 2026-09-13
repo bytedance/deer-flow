@@ -96,6 +96,9 @@ class _ParentLoopMiddlewareRecorderProxy:
     """
 
     def __init__(self, journal: Any, loop: asyncio.AbstractEventLoop) -> None:
+        journal_owner_loop = getattr(journal, "_owner_loop", None)
+        if isinstance(journal_owner_loop, asyncio.AbstractEventLoop) and journal_owner_loop is not loop:
+            raise ValueError("subagent middleware recorder loop must match the RunJournal owner loop")
         self._journal = journal
         self._loop = loop
         self._state_lock = threading.Lock()
@@ -941,6 +944,7 @@ async def task_tool(
         )
         executor_kwargs["loop_detection_recorder"] = middleware_recorder
         executor_kwargs["tool_promotion_recorder"] = middleware_recorder
+        executor_kwargs["tool_progress_recorder"] = middleware_recorder
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
     if run_extensions is not None:

@@ -26,7 +26,11 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
-from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY, TOOL_PROMOTION_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.audit_context import (
+    LOOP_DETECTION_RECORDER_CONTEXT_KEY,
+    TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
+    TOOL_PROMOTION_RECORDER_CONTEXT_KEY,
+)
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
@@ -791,6 +795,7 @@ class SubagentExecutor:
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
         tool_promotion_recorder: Any | None = None,
+        tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
     ):
         """Initialize the executor.
@@ -841,6 +846,8 @@ class SubagentExecutor:
                 ``RunJournal`` itself.
             tool_promotion_recorder: Optional loop-safe recorder for deferred-tool
                 promotion events. It follows the same isolated-loop boundary.
+            tool_progress_recorder: Optional loop-safe recorder for tool-progress
+                phase transitions. It follows the same isolated-loop boundary.
             context_snapshot: Optional immutable parent history captured by the
                 ordinary task tool at dispatch. Rendered as background data,
                 never as child execution evidence or inherited system authority.
@@ -894,6 +901,7 @@ class SubagentExecutor:
         self.acceptance_criteria = acceptance_criteria
         self.loop_detection_recorder = loop_detection_recorder
         self.tool_promotion_recorder = tool_promotion_recorder
+        self.tool_progress_recorder = tool_progress_recorder
 
         self._base_tools = _filter_tools(
             tools,
@@ -1511,6 +1519,8 @@ class SubagentExecutor:
                 context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder
             if self.tool_promotion_recorder is not None:
                 context[TOOL_PROMOTION_RECORDER_CONTEXT_KEY] = self.tool_promotion_recorder
+            if self.tool_progress_recorder is not None:
+                context[TOOL_PROGRESS_RECORDER_CONTEXT_KEY] = self.tool_progress_recorder
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 

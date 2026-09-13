@@ -3196,6 +3196,28 @@ def test_strip_internal_context_keys_scrubs_config_smuggled_context_only_keys():
     assert "disable_clarification" not in via_configurable["configurable"]
 
 
+def test_strip_internal_context_keys_scrubs_audit_attribution_and_recorders():
+    from app.gateway.services import build_run_config, strip_internal_context_keys
+
+    server_owned = {
+        "is_subagent": True,
+        "agent_id": "forged-agent",
+        "__run_loop_detection_recorder": "forged",
+        "__run_tool_promotion_recorder": "forged",
+        "__run_tool_progress_recorder": "forged",
+    }
+    config = build_run_config(
+        "thread-1",
+        {"context": dict(server_owned), "configurable": dict(server_owned)},
+        None,
+    )
+
+    strip_internal_context_keys(config)
+
+    for section in ("context", "configurable"):
+        assert not server_owned.keys() & config[section].keys()
+
+
 def test_start_run_sequence_drops_context_only_keys_for_session_caller():
     """Replay the real ``start_run`` assembly order for a session-authenticated caller
     that pushes the keys through *both* smuggling surfaces at once."""

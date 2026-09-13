@@ -135,6 +135,24 @@ their per-execution parent-loop proxy, preserving separate events when two
 different delegated agents promote the same tool. The active catalog is fixed
 for one graph execution, so the claim needs no persisted catalog hash.
 
+**Tool-progress phase events** (`agents/middlewares/tool_progress_middleware.py`):
+effective ACTIVE → WARNED, WARNED/ACTIVE → BLOCKED, WARNED → ACTIVE recovery,
+and later-invocation WARNED/BLOCKED → ACTIVE resets append
+`middleware:tool_progress` through `RunJournal`. Recorder calls happen after
+the middleware releases its state lock, matching LoopDetectionMiddleware, so a
+slow recorder cannot stall tool-state updates. Cross-thread middleware
+producers (currently slash-skill activation via `asyncio.to_thread`) schedule
+journal mutation directly onto its owning event loop; they never mutate or
+flush `RunJournal._buffer` from the worker thread. The task-tool subagent proxy
+rejects a loop that differs from the journal owner, so its close fence always
+drains the only scheduling hop.
+The persisted projection accepts
+only framework-defined error/action values and strict booleans (using null for
+invalid values) from the producer-supplied tool stamp; tool content, args,
+prompts, and derived hashes do not enter the event. Ordinary task-tool subagents use the narrow parent-loop
+recorder proxy, never the journal itself; durable batch runs have no parent
+journal and emit no such event. Recorder failures are fail-open.
+
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
 contract. Its default implementation walks `list_messages()` backward in
