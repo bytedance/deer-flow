@@ -403,7 +403,7 @@
   agent 的常规构建总会转发请求的 effort（即使未设置），导致该参数两次传给 provider 构造函数，抛出
   `TypeError: got multiple values for keyword argument 'reasoning_effort'`。现在请求值
   按每个 agent 的 `model_settings` 方式叠加：替换 profile 顶层的值，未设置时保留该值，
-  最终值仍由 thinking 模式相关设置决定。Codex 保留自己的级别校验。
+  最终值仍由 thinking 模式相关设置决定。Codex 保留自己的级别校验。([#5403])
 - **运行时：** 带 `Idempotency-Key` 的 run 重试在 SQL run 存储上不再返回 500。HTTP
   准入不会传入 `user_id`，SQL 存储会把请求用户写入该行，但进程内的 run 记录仍为
   `None`。同一 key 的重试若落到另一个 Gateway worker，或在已完成的 run 被清理后回到
@@ -2142,3 +2142,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357
 [#5393]: https://github.com/bytedance/deer-flow/pull/5393
 [#5401]: https://github.com/bytedance/deer-flow/pull/5401
+[#5403]: https://github.com/bytedance/deer-flow/pull/5403

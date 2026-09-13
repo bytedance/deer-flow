@@ -591,7 +591,7 @@ This section accumulates work toward the **2.1.0** milestone
   multiple values for keyword argument 'reasoning_effort'`. The requested value now
   layers like per-agent `model_settings`: it replaces a top-level profile
   value, an unset request keeps that value, and the thinking-mode settings still
-  decide the final one. Codex keeps its own level check.
+  decide the final one. Codex keeps its own level check. ([#5403])
 - **runtime:** Stop a keyed run retry from failing with 500 on the SQL run
   store. HTTP admissions do not pass a `user_id`; the SQL store stamps the
   request user on the row, but the process-local run record kept `None`. A
@@ -2795,3 +2795,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357
 [#5393]: https://github.com/bytedance/deer-flow/pull/5393
 [#5401]: https://github.com/bytedance/deer-flow/pull/5401
+[#5403]: https://github.com/bytedance/deer-flow/pull/5403
