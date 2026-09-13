@@ -582,6 +582,17 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **runtime:** Stop a keyed run retry from failing with 500 on the SQL run
+  store. HTTP admissions do not pass a `user_id`; the SQL store stamps the
+  request user on the row, but the process-local run record kept `None`. A
+  retry with the same `Idempotency-Key` that reached another Gateway worker, or
+  the same worker after the finished run was cleaned up, compared the two
+  owners, took its own run for another user's, and raised. The same mismatch
+  dropped HTTP runs from owner-scoped history reads and skipped the MCP
+  `background_tasks` projection for them, so `values` events for these runs now
+  include `background_tasks`. `RunManager` now resolves an omitted owner from
+  the request user the way the SQL store does, so every store records the same
+  owner.
 - **runtime:** Stop a cross-worker idempotent run reuse from permanently
   blocking the thread on the reusing worker. The reuse registered the hydrated
   store row as a local run record, but only the owning worker finalizes and

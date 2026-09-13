@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
-from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
@@ -61,6 +61,21 @@ _SQLITE_UNIQUE_ERRORCODE = sqlite3.SQLITE_CONSTRAINT_UNIQUE
 def _generate_worker_id() -> str:
     """Generate a unique worker identifier: ``hostname:hex_uuid``."""
     return f"{socket.gethostname()}:{uuid.uuid4().hex}"
+
+
+def _resolve_record_user_id(user_id: str | None) -> str | None:
+    """Fill an omitted run owner from the ambient user, as the SQL store does.
+
+    The SQL store stamps ``user_id=None`` with the request user, so a local
+    record left at ``None`` disagrees with its own durable row: owner-scoped
+    reads skip it and idempotent reuse rejects it as another user's run.
+    Resolving here gives every store the same owner. Without a user in context
+    the owner stays ``None``.
+    """
+    if user_id is not None:
+        return user_id
+    user = get_current_user()
+    return str(user.id) if user is not None else None
 
 
 def _cursor_part(value: str | None) -> str | None:
@@ -609,6 +624,7 @@ class RunManager:
         """
         run_id = str(uuid.uuid4())
         now = _now_iso()
+        user_id = _resolve_record_user_id(user_id)
         lease_expires_at = self._compute_lease_expires_at()
         record = RunRecord(
             run_id=run_id,
@@ -1581,6 +1597,8 @@ class RunManager:
         """
         run_id = str(uuid.uuid4())
         now = _now_iso()
+        # Resolve before the idempotency checks below compare it with stored rows.
+        user_id = _resolve_record_user_id(user_id)
 
         _supported_strategies = ("reject", "interrupt", "rollback")
         if multitask_strategy not in _supported_strategies:

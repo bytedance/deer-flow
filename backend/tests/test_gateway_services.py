@@ -2579,8 +2579,13 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
 
 
 @pytest.mark.asyncio
-async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_owner_completes(_stub_app_config):
-    """Two Gateway workers share one run store; a retry landing on the peer must not strand the thread."""
+@pytest.mark.parametrize("run_store_backend", ["memory", "sql"])
+async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_owner_completes(_stub_app_config, run_store_backend, tmp_path):
+    """Two Gateway workers share one run store; a retry landing on the peer must not strand the thread.
+
+    HTTP admissions omit ``user_id``; the SQL store stamps the ambient user on
+    the row, so the peer's reuse check must see the same owner there too.
+    """
     from unittest.mock import patch
 
     from fastapi import HTTPException
@@ -2600,27 +2605,38 @@ async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_
         await run_manager.set_status(record.run_id, RunStatus.success)
         await run_manager.cleanup(record.run_id, delay=0)
 
-    run_store = MemoryRunStore()
+    if run_store_backend == "sql":
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.persistence.run import RunRepository
+
+        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}", sqlite_dir=str(tmp_path))
+        run_store = RunRepository(get_session_factory())
+    else:
+        run_store = MemoryRunStore()
     owner = RunManager(store=run_store, worker_id="worker-a")
     peer = RunManager(store=run_store, worker_id="worker-b")
     thread_store = MemoryThreadMetaStore(InMemoryStore())
     body = _run_create_request()
-    with (
-        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
-        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
-    ):
-        first = await start_run(body, "thread-peer-reuse", _make_start_run_request(owner, thread_store=thread_store), idempotency_key="http-run:retry")
-        reused = await start_run(body, "thread-peer-reuse", _make_start_run_request(peer, thread_store=thread_store), idempotency_key="http-run:retry")
-        assert reused.run_id == first.run_id
-        assert reused.status in (RunStatus.pending, RunStatus.running)
+    try:
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            first = await start_run(body, "thread-peer-reuse", _make_start_run_request(owner, thread_store=thread_store), idempotency_key="http-run:retry")
+            reused = await start_run(body, "thread-peer-reuse", _make_start_run_request(peer, thread_store=thread_store), idempotency_key="http-run:retry")
+            assert reused.run_id == first.run_id
+            assert reused.status in (RunStatus.pending, RunStatus.running)
 
-        release_owner_run.set()
-        await asyncio.wait_for(first.task, timeout=1)
-        try:
-            follow_up = await start_run(_run_create_request("next turn"), "thread-peer-reuse", _make_start_run_request(peer, thread_store=thread_store))
-        except HTTPException as exc:
-            pytest.fail(f"peer rejected a new run after the owner finished: {exc.status_code} {exc.detail}")
-        await asyncio.wait_for(follow_up.task, timeout=1)
+            release_owner_run.set()
+            await asyncio.wait_for(first.task, timeout=1)
+            try:
+                follow_up = await start_run(_run_create_request("next turn"), "thread-peer-reuse", _make_start_run_request(peer, thread_store=thread_store))
+            except HTTPException as exc:
+                pytest.fail(f"peer rejected a new run after the owner finished: {exc.status_code} {exc.detail}")
+            await asyncio.wait_for(follow_up.task, timeout=1)
+    finally:
+        if run_store_backend == "sql":
+            await close_engine()
 
     assert follow_up.run_id != first.run_id
 

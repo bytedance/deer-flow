@@ -397,6 +397,13 @@
 
 ### 修复
 
+- **运行时：** 带 `Idempotency-Key` 的 run 重试在 SQL run 存储上不再返回 500。HTTP
+  准入不会传入 `user_id`，SQL 存储会把请求用户写入该行，但进程内的 run 记录仍为
+  `None`。同一 key 的重试若落到另一个 Gateway worker，或在已完成的 run 被清理后回到
+  同一 worker，就会比较两边的拥有者，把自己的 run 误判为其他用户的并抛错。同一不一致
+  还让 HTTP run 被按拥有者过滤的历史读取漏掉，并跳过了 MCP `background_tasks` 投影，
+  因此这类 run 的 `values` 事件现在会包含 `background_tasks`。`RunManager` 现在按
+  SQL 存储的方式用请求用户补全缺省的拥有者，各存储记录的拥有者保持一致。
 - **运行时：** 跨 worker 的幂等 run 复用不再让复用方 worker 永久阻塞该线程。此前复用会
   把从存储中读取的行注册为本地 run 记录，但只有拥有该 run 的 worker 才会结束并清理自己的
   记录，因此这份副本会一直停留在准入时的 `pending`/`running` 状态：该 worker 上此线程后续
