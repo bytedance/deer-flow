@@ -63,7 +63,9 @@ class RunEvidenceReader(Protocol):
 
         Callers persist ``next_cursor`` only after their own output is durable.
         Reusing the input cursor is valid and may replay items. An empty page
-        means caught up; unsupported hosts omit the reader instead.
+        means caught up; unsupported hosts omit the reader instead. Deletions
+        do not produce tombstones in this feed. Consumers reconciling a run
+        they already know must treat ``get_run_status(...) is None`` as absent.
         """
         raise NotImplementedError("the host does not provide changed-run discovery")
 

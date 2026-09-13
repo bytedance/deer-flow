@@ -1100,9 +1100,11 @@ the discovery cursor valid across Gateway restarts; the memory run store provide
 ordering only for the current process lifetime. Event metadata is secret-redacted at this
 boundary, but event content is returned unchanged. The production Gateway supplies an
 app-scoped, cross-user reader to trusted operator extensions; an embedded host may bind the
-same adapter to one user. Extensions still execute with Gateway privileges and retain the legacy
-`session_factory`, so the reader is an API-stability and least-accidental-privilege boundary,
-not a sandbox for untrusted Python packages. Extension HTTP
+same adapter to one user. Changed-run pages contain creations and changes to retained rows,
+not deletion tombstones; consumers that reconcile deletions must poll status for known runs
+and treat a missing result as absent. Extensions still execute with Gateway privileges and
+retain the legacy `session_factory`, so the reader is an API-stability and
+least-accidental-privilege boundary, not a sandbox for untrusted Python packages. Extension HTTP
 routers are mounted after every host route; definite shadows and routes entering the
 host's authentication- or CSRF-exempt paths are rejected with attributed diagnostics,
 while unrelated routers continue to load. Because the host's public paths are a reserved

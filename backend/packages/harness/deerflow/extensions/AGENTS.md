@@ -282,8 +282,11 @@ app store, projected host policy, session factory, and optional read-only
 services so the reader is usable from `start()`. Changed-run discovery uses an opaque,
 scope-bound cursor over `(change_seq, run_id)`; a run that changes after it was returned may
 be replayed, but an unreturned run cannot be skipped. Legacy rows start at `change_seq=0`
-and sort by run id. A DB run store preserves positions across restarts, while memory only
-provides process-lifetime ordering. Per-run events retain the event store's thread-scoped
+and sort by run id. Deletion is deliberately not represented by a tombstone, so the feed
+covers creations and changes to retained rows only; synchronization consumers must poll
+`get_run_status()` for known runs and treat `None` as absent when deletion reconciliation
+is required. A DB run store preserves positions across restarts, while memory only provides
+process-lifetime ordering. Per-run events retain the event store's thread-scoped
 `after_seq` semantics; metadata is secret-redacted, but event content is returned unchanged,
 and status comes from the authoritative run store. The production Gateway injects one
 app-scoped reader with `user_id=None`, deliberately granting trusted operator extensions

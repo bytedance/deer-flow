@@ -167,6 +167,9 @@ run row's latest `updated_at` and accumulated progress fields to internal reader
 Rows from before the migration retain `change_seq=0` and page deterministically
 by run id. Because a later mutation only moves a row forward, concurrent paging
 may replay a run but cannot move an unseen run behind the committed cursor.
+Deletes produce no tombstone and therefore do not advance the cursor; consumers
+that require deletion reconciliation must poll authoritative status for known
+runs and treat a missing result as absent.
 The extension-facing cursor is versioned, opaque, and bound to the reader's
 fixed user scope.
 
