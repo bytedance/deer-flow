@@ -378,7 +378,10 @@ class DeerFlowClient:
             enabled=self._app_config.skills.deferred_discovery,
             container_base_path=self._app_config.skills.container_path,
         )
+        from deerflow.agents.task_continuity.tools import append_task_continuity_tools
+
         late_tools = []
+        append_task_continuity_tools(late_tools, self._app_config, existing_names={tool.name for tool in tools})
         if skill_setup.describe_skill_tool:
             late_tools.append(skill_setup.describe_skill_tool)
 

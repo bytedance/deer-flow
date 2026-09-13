@@ -373,9 +373,15 @@ fi
 
 if [ "$sandbox_mode" = "aio" ]; then
     if [ ! -S "$DEER_FLOW_DOCKER_SOCKET" ]; then
-        echo -e "${RED}⚠ Docker socket not found at $DEER_FLOW_DOCKER_SOCKET${NC}"
-        echo "  AioSandboxProvider (DooD) will not work."
-        exit 1
+        # On Windows (Git Bash / MSYS), Docker Desktop mounts the default
+        # /var/run/docker.sock into containers even though no host socket file exists.
+        if [ "$DEER_FLOW_DOCKER_SOCKET" = "/var/run/docker.sock" ] && [[ "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]] && docker info >/dev/null 2>&1; then
+            :
+        else
+            echo -e "${RED}⚠ Docker socket not found at $DEER_FLOW_DOCKER_SOCKET${NC}"
+            echo "  AioSandboxProvider (DooD) will not work."
+            exit 1
+        fi
     fi
     echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
     echo -e "${YELLOW}  Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
