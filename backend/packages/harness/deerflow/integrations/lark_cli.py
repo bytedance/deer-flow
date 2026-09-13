@@ -413,6 +413,20 @@ def _walk_and_harden(root: Path, apply_: Callable[[Path, str], None]) -> None:
             pending.extend(path.iterdir())
 
 
+def _stat_is_reparse_point(info: os.stat_result) -> bool:
+    """True when *info* carries Windows ``FILE_ATTRIBUTE_REPARSE_POINT``.
+
+    ``st_file_attributes`` exists only on Windows; ``getattr(..., 0)`` is a
+    no-op on POSIX, so callers do not need an ``os.name`` branch.
+    """
+    return bool(getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _stat_is_symlink_or_reparse(info: os.stat_result) -> bool:
+    """True for a symlink or any Windows reparse point (junction, cloud, ProjFS, ...)."""
+    return bool(stat.S_ISLNK(info.st_mode) or _stat_is_reparse_point(info))
+
+
 def _credential_tree_path_kind(path: Path) -> str:
     """Return ``"dir"`` or ``"file"`` for a safe real entry, else raise.
 
@@ -422,7 +436,7 @@ def _credential_tree_path_kind(path: Path) -> str:
     info = path.lstat()
     if stat.S_ISLNK(info.st_mode):
         raise ValueError(f"Lark CLI credential path must not be a symlink: {path}")
-    if os.name == "nt" and (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+    if _stat_is_reparse_point(info):
         raise ValueError(f"Lark CLI credential path must not be a reparse point: {path}")
     if stat.S_ISDIR(info.st_mode):
         return "dir"
@@ -435,7 +449,7 @@ def _reject_reparse_stat(path: Path, info: os.stat_result) -> None:
     """Reject a symlink or Windows reparse point *path* with stat *info*."""
     if stat.S_ISLNK(info.st_mode):
         raise ValueError(f"Lark CLI credential path must not be a symlink: {path}")
-    if os.name == "nt" and (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+    if _stat_is_reparse_point(info):
         raise ValueError(f"Lark CLI credential path must not be a reparse point: {path}")
 
 
@@ -1244,24 +1258,55 @@ def _extract_lark_cli_runtime_binary(archive: bytes, destination: Path) -> None:
 def _write_lark_cli_sandbox_launcher(staging: Path) -> None:
     launcher = staging / "bin" / "lark-cli"
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LARK_CLI_SANDBOX_LAUNCHER_SCRIPT, encoding="utf-8")
+    # LF-only, matching docker/lark-cli-init. Path.write_text() uses os.linesep
+    # and would emit \r\n on Windows, which Linux then parses as #!/bin/sh\r.
+    launcher.write_bytes(LARK_CLI_SANDBOX_LAUNCHER_SCRIPT.encode("utf-8"))
     launcher.chmod(0o755)
 
 
+def _is_symlink_or_reparse(path: Path) -> bool:
+    """True for a symlink or any Windows ``FILE_ATTRIBUTE_REPARSE_POINT``.
+
+    Matches the credential-tree policy (:func:`_stat_is_symlink_or_reparse`):
+    not only ``IO_REPARSE_TAG_SYMLINK`` / ``IO_REPARSE_TAG_MOUNT_POINT``, but
+    also OneDrive/cloud placeholders, ProjFS, dedup, AppExecLink, and any other
+    reparse tag. Those report ``is_dir()``/``is_file()`` as True while
+    ``is_symlink()`` and ``is_junction()`` stay False, so
+    ``copytree(..., symlinks=False)`` would still copy them into the
+    bind-mounted runtime.
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return _stat_is_symlink_or_reparse(info)
+
+
 def _validate_lark_cli_sandbox_runtime(root: Path) -> None:
-    if root.is_symlink() or not root.is_dir():
-        raise ValueError("Managed Lark CLI sandbox runtime root must be a regular directory, not a symlink.")
+    if _is_symlink_or_reparse(root) or not root.is_dir():
+        raise ValueError("Managed Lark CLI sandbox runtime root must be a regular directory, not a symlink or reparse point.")
     for path in root.rglob("*"):
-        if path.is_symlink():
-            raise ValueError(f"Managed Lark CLI sandbox runtime must not contain a symlink: {path}")
+        if _is_symlink_or_reparse(path):
+            raise ValueError(f"Managed Lark CLI sandbox runtime must not contain a symlink or reparse point: {path.as_posix()}")
         if not (path.is_dir() or path.is_file()):
-            raise ValueError(f"Managed Lark CLI sandbox runtime contains an unsupported file type: {path}")
+            raise ValueError(f"Managed Lark CLI sandbox runtime contains an unsupported file type: {path.as_posix()}")
     for relative in (Path("bin/lark-cli"), *(Path(f"linux-{arch}/lark-cli") for arch in LARK_CLI_LINUX_ARCHES)):
         candidate = root / relative
         if not candidate.is_file():
-            raise ValueError(f"Managed Lark CLI sandbox runtime is missing a regular file: {relative}")
-        if candidate.stat().st_mode & 0o111 == 0:
-            raise ValueError(f"Managed Lark CLI sandbox runtime file is not executable: {relative}")
+            raise ValueError(f"Managed Lark CLI sandbox runtime is missing a regular file: {relative.as_posix()}")
+        # There is no in-sandbox chmod: the runtime is bind-mounted read-only and
+        # the launcher just execs linux-$arch/lark-cli. NTFS cannot represent
+        # POSIX exec bits. Docker Desktop (gRPC-FUSE/virtiofs) typically
+        # synthesizes ~0755 for Windows-shared files, which is why this check is
+        # skipped on Windows. A mount that faithfully preserved host modes
+        # (SMB/9p, non-Docker-Desktop runtimes) would fail at exec.
+        if os.name == "nt":
+            logger.debug(
+                "Skipping POSIX exec-bit check for %s on a Windows host; Docker Desktop virtiofs/gRPC-FUSE typically synthesizes ~0755, but a mount that preserves host modes (SMB/9p) will fail at exec",
+                relative.as_posix(),
+            )
+        elif candidate.stat().st_mode & 0o111 == 0:
+            raise ValueError(f"Managed Lark CLI sandbox runtime file is not executable: {relative.as_posix()}")
 
 
 def _read_json_object_file(path: Path) -> dict[str, Any] | None:

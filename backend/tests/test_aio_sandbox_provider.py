@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import importlib
+import os
 import stat
 import threading
 from types import SimpleNamespace
@@ -218,9 +219,10 @@ def test_get_lark_cli_runtime_mounts_uses_user_auth_dirs(tmp_path, monkeypatch):
         str(tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "data"),
         False,
     )
-    assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config").stat().st_mode) == 0o700
-    assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config" / "locks").stat().st_mode) == 0o700
-    assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "data").stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config").stat().st_mode) == 0o700
+        assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config" / "locks").stat().st_mode) == 0o700
+        assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "data").stat().st_mode) == 0o700
     assert container_paths["/mnt/integrations/lark-cli/runtime"] == (
         str(runtime_dir),
         True,
