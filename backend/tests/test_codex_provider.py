@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from deerflow.agents.middlewares.tool_args_compaction_middleware import ToolArgsCompactionMiddleware
 from deerflow.models.credential_loader import CodexCliCredential
 
 
@@ -200,6 +201,35 @@ def test_convert_messages_ai_with_tool_calls():
     )
     _, items = model._convert_messages([ai])
     assert any(item.get("type") == "function_call" and item["name"] == "search" for item in items)
+
+
+def test_convert_messages_uses_compacted_write_file_args_for_completed_pairs():
+    model = _make_model()
+    large_content = "<html>" + ("x" * 3000) + "</html>"
+    middleware = ToolArgsCompactionMiddleware()
+    msgs = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "write_file",
+                    "args": {"path": "/mnt/user-data/report.html", "content": large_content, "append": False},
+                    "id": "tc1",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(content="ok", tool_call_id="tc1"),
+    ]
+
+    patched = middleware._build_compacted_messages(msgs)
+    assert patched is not None
+
+    _, items = model._convert_messages(patched)
+    function_call = next(item for item in items if item.get("type") == "function_call")
+    assert large_content not in function_call["arguments"]
+    assert "[write_file content omitted in model context: " in function_call["arguments"]
+    assert len(function_call["arguments"]) < len(json.dumps({"path": "/mnt/user-data/report.html", "content": large_content, "append": False}))
 
 
 def test_convert_messages_tool_message():
