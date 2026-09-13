@@ -5,7 +5,7 @@ import concurrent.futures
 import sys
 import threading
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -100,6 +100,32 @@ def test_owner_completion_does_not_remove_a_replacement(loop_pool):
         assert await pool.get_session("s", "u:t", {}) is replacement
 
     run(0, replace())
+
+
+@pytest.mark.parametrize("retirement", ["lru", "explicit"])
+def test_abandoned_closed_loop_entry_can_be_retired(loop_pool, retirement):
+    """Model the registry left by unsupported loop.close() with pending owners.
+
+    Use a synthetic pending owner so the test itself does not leak a real task
+    or transport on a closed loop. Normal owner shutdown is tested separately.
+    """
+    pool, run, _closed = loop_pool
+    closed_loop = asyncio.new_event_loop()
+    closed_loop.close()
+    owner = MagicMock(spec=asyncio.Task)
+    owner.done.return_value = False
+    key = ("s", "u:t", closed_loop)
+    pool._entries[key] = (MagicMock(), closed_loop, owner, asyncio.Event())
+    pool.MAX_SESSIONS = 1
+    if retirement == "explicit":
+        run(0, pool.close_scope("u:t"))
+        assert not pool._entries
+    else:
+        replacement = run(0, pool.get_session("s", "u:t", {}))
+        assert key not in pool._entries
+        assert len(pool._entries) == 1
+        assert run(0, pool.get_session("s", "u:t", {})) is replacement
+    owner.cancel.assert_not_called()
 
 
 @pytest.mark.parametrize("operation", ["scope", "server", "session", "all"])

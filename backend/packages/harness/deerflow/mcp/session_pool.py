@@ -289,13 +289,8 @@ class MCPSessionPool:
         # Phase 1: inspect/mutate the registry under the thread lock (no awaits).
         # Decide one of three outcomes atomically: return an existing session,
         # join an in-flight creation, or become the creator for this key.
-        # Each item: (loop, owner_task, close_event, cancel, ready_future).
-        # ``cancel`` is True for in-flight creations, whose owner may be blocked
-        # inside ``initialize()`` where close_evt cannot wake it — it must be
-        # cancelled (guarded: never when the owner already failed and is
-        # unwinding in __aexit__). ``ready`` is the creation's future, used only
-        # for that guard.
-        evicted: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event, bool, asyncio.Future[ClientSession] | None]] = []
+        # LRU victims are established sessions: (loop, owner_task, close_event).
+        evicted: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]] = []
         join: asyncio.Future[ClientSession] | None = None
         ready: asyncio.Future[ClientSession] | None = None
         close_evt: asyncio.Event | None = None
@@ -325,27 +320,20 @@ class MCPSessionPool:
             while len(self._entries) >= self.MAX_SESSIONS:
                 oldest_key, (_, loop, ent_task, ent_close) = next(iter(self._entries.items()))
                 self._entries.pop(oldest_key)
-                evicted.append((loop, ent_task, ent_close, False, None))
+                evicted.append((loop, ent_task, ent_close))
 
-        # Phase 2: shut down evicted sessions/creations. Signal EVERY removed
+        # Phase 2: shut down evicted sessions. Signal EVERY removed
         # owner first — the signal loop contains no awaits, so it completes
         # atomically and a cancellation during the teardown awaits below can
         # never strand an owner that was already removed from the registries.
-        # Then await teardowns (same-loop deterministically; foreign-loop
-        # in-flight creations routed to their loop). In every case the owner
-        # task — never this one — runs __aexit__.
-        for loop, ent_task, ent_close, cancel, ent_ready in evicted:
+        # Then await same-loop teardowns; foreign-loop owners finish on their
+        # own loops. The owner task — never this one — runs __aexit__.
+        for loop, _ent_task, ent_close in evicted:
             self._signal_close(loop, ent_close)
-            if cancel:
-                self._cancel_owner(loop, ent_task, ent_ready)
         try:
-            for loop, ent_task, ent_close, cancel, ent_ready in evicted:
+            for loop, ent_task, ent_close in evicted:
                 if loop is current_loop and not loop.is_closed():
-                    await self._shutdown(ent_close, ent_task, cancel=False, ready=ent_ready)
-                elif cancel:
-                    await self._shutdown_entry(loop, ent_task, ent_close, cancel=False, ready=ent_ready)
-                # else: foreign-loop registered entry — already signalled above;
-                # its teardown completes on its own loop.
+                    await self._shutdown(ent_close, ent_task)
         except BaseException:
             # We may already be the creator for ``key``: the in-flight record
             # and owner task were published under the lock *before* these

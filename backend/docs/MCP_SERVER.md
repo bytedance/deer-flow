@@ -207,6 +207,12 @@ its loop after each call; use the asynchronous path on a shared loop when
 session continuity is required. Explicit pool cleanup covers all loops for the
 selected server/thread scope.
 
+If you manage event loops manually, close the pool or cancel and await its owner
+tasks before closing their loop. Calling `loop.close()` with pending owners
+prevents transport teardown and completion callbacks. Abandoned live-registry
+records can be removed by LRU eviction or explicit cleanup, but those operations
+cannot finish transport cleanup on a loop that has already closed.
+
 ## Server Timeouts
 
 Two independent settings bound stdio MCP servers and durable HTTP/SSE task
