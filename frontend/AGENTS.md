@@ -172,3 +172,7 @@ Custom skill export is admin-only and disabled in static demos. The lazy
 or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob download;
 HTTP 409 requires explicit preview refresh. Keep file lists paginated and diagnostics
 localized. Browser handoff does not prove the file was saved to disk.
+
+Sidebar chat deletion is confirmed in `ThreadSidebarItem`, shared by flat and
+project-grouped lists. Keep the dialog mounted outside the dropdown menu, focus
+Cancel on open, and block dismissal while deletion is pending.

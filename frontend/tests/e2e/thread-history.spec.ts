@@ -533,6 +533,10 @@ test.describe("Thread history", () => {
     await inactiveThreadItem.hover();
     await inactiveThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete", exact: true })
+      .click();
 
     await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));
     await expect(
@@ -722,6 +726,10 @@ test.describe("Thread history", () => {
     await recentThreadItem.hover();
     await recentThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete", exact: true })
+      .click();
 
     await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
     await expect(page.getByText("Previous question")).toHaveCount(0);
