@@ -271,12 +271,14 @@ async def _orphan_recovery_observed_after_heartbeat(
 def _skips_input_guardrail(additional_kwargs: dict[str, Any], name: Any) -> bool:
     """Whether these markers would make ``InputSanitizationMiddleware`` skip a message.
 
-    Mirrors ``is_genuine_user_message``: a ``summary`` name, or ``hide_from_ui``
-    without a valid human-input reply.
+    Mirrors ``is_genuine_user_message`` exactly, truthiness included: a
+    ``summary`` name, or a truthy ``hide_from_ui`` without a valid human-input
+    reply. Keying off key presence instead would mark ``hide_from_ui: False``,
+    which never skipped the guardrail and so needs no mark.
     """
     if name == _SUMMARY_MESSAGE_NAME:
         return True
-    return "hide_from_ui" in additional_kwargs and read_human_input_response(additional_kwargs) is None
+    return bool(additional_kwargs.get("hide_from_ui")) and read_human_input_response(additional_kwargs) is None
 
 
 def _mark_untrusted_framework_markers(additional_kwargs: dict[str, Any], name: Any) -> dict[str, Any]:
@@ -357,12 +359,20 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
         return _strip_external_message_metadata(item)
     if not isinstance(item, dict):
         return item
-    if not isinstance(item.get("additional_kwargs"), dict):
-        return item
-    additional_kwargs = {key: value for key, value in item["additional_kwargs"].items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
+    # A missing (or non-dict) ``additional_kwargs`` is the most natural request
+    # shape, and it still needs the mark: the messages reducer coerces the dict
+    # with ``convert_to_messages``, which supplies ``additional_kwargs={}``, so an
+    # unmarked ``name="summary"`` would reach the model on the guardrail's
+    # genuine-user fallback. Treat it as empty for both steps rather than
+    # returning early.
+    source_kwargs = item.get("additional_kwargs")
+    source_kwargs = source_kwargs if isinstance(source_kwargs, dict) else {}
+    additional_kwargs = {key: value for key, value in source_kwargs.items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
     if _is_human_message_like(item):
         additional_kwargs = _mark_untrusted_framework_markers(additional_kwargs, item.get("name"))
-    if additional_kwargs == item["additional_kwargs"]:
+    if additional_kwargs == source_kwargs:
+        # Nothing to change — including the ordinary key-omitted message, which
+        # must not gain an empty dict just by passing through here.
         return item
     return {**item, "additional_kwargs": additional_kwargs}
 

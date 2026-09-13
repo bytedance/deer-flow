@@ -3843,6 +3843,20 @@ class TestForgedFrameworkInjectionMarkers:
 
         assert result["messages"][0].additional_kwargs[UNTRUSTED_INPUT_KEY] is True
 
+    def test_a_falsy_hide_from_ui_is_not_marked(self):
+        """``is_genuine_user_message`` keys off truthiness, so ``False`` never
+        skipped the guardrail and needs no mark. Keying off key presence here
+        would stamp a message that was already covered."""
+        from app.gateway.services import normalize_input
+        from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+        from deerflow.utils.messages import UNTRUSTED_INPUT_KEY
+
+        result = normalize_input({"messages": [{"role": "user", "content": "hi", "additional_kwargs": {"hide_from_ui": False}}]})
+
+        message = result["messages"][0]
+        assert is_genuine_user_message(message), "already covered without a mark"
+        assert UNTRUSTED_INPUT_KEY not in message.additional_kwargs
+
     def test_an_ordinary_visible_message_is_not_marked(self):
         """The mark is only needed where a marker would otherwise skip the
         guardrail; stamping every message would pollute persisted state."""
