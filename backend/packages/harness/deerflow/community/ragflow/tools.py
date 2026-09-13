@@ -116,7 +116,7 @@ def _settings_from_extra(extra: Mapping[str, object]) -> _RAGFlowRetrievalSettin
 def _settings_or_error(app_config: Any | None = None) -> tuple[_RAGFlowRetrievalSettings | None, str | None]:
     app_config = app_config or get_app_config()
     get_tool_config = getattr(app_config, "get_tool_config", lambda _name: None)
-    tool_config = get_tool_config("knowledge_search") or get_tool_config("list_knowledge_bases")
+    tool_config = get_tool_config("knowledge_search")
     if tool_config is None:
         return None, "Error: knowledge_search is not configured; add its RAGFlow settings to the tools list in config.yaml."
     tool_values = dict(getattr(tool_config, "model_extra", None) or {})

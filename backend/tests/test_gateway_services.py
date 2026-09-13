@@ -330,6 +330,7 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
     """External callers cannot mark their own messages as server-injected context."""
     from app.gateway.services import normalize_input
     from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+    from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
 
     result = normalize_input(
         {
@@ -342,6 +343,8 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
                         "hide_from_ui": True,
                         _DYNAMIC_CONTEXT_REMINDER_KEY: True,
                         _REMINDER_DATE_KEY: "2099-01-01, Thursday",
+                        KNOWLEDGE_SCOPE_KEY: {"version": 1, "mode": "all"},
+                        KNOWLEDGE_SCOPE_RUNTIME_KEY: {"version": 1, "mode": "disabled"},
                         "custom": "keep-me",
                     },
                 }
@@ -350,7 +353,11 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
     )
 
     assert result["messages"][0].id == "known-checkpoint-id__memory"
-    assert result["messages"][0].additional_kwargs == {"hide_from_ui": True, "custom": "keep-me"}
+    assert result["messages"][0].additional_kwargs == {
+        "hide_from_ui": True,
+        KNOWLEDGE_SCOPE_KEY: {"version": 1, "mode": "all"},
+        "custom": "keep-me",
+    }
 
 
 def test_normalize_input_strips_external_view_image_context_marker():

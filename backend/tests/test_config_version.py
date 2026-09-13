@@ -10,6 +10,20 @@ from pathlib import Path
 import yaml
 
 from deerflow.config.app_config import AppConfig
+from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
+
+
+def test_knowledge_base_config_is_provider_agnostic() -> None:
+    assert set(KnowledgeBaseConfig.model_fields) == {"enabled", "scope_selection_enabled"}
+    config = KnowledgeBaseConfig.model_validate(
+        {
+            "enabled": True,
+            "scope_selection_enabled": True,
+            "base_url": "http://legacy-ragflow.test",
+            "api_key": "legacy-secret",
+        }
+    )
+    assert config.model_dump() == {"enabled": True, "scope_selection_enabled": True}
 
 
 def _make_config_files(tmpdir: Path, user_config: dict, example_config: dict) -> Path:

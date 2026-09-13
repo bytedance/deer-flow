@@ -125,6 +125,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+            KNOWLEDGE_SCOPE_RUNTIME_KEY,
             TOOL_RECEIPT_KEY,
             TOOL_RECEIPT_LEDGER_KEY,
             TOOL_TRANSFORMS_KEY,
@@ -358,8 +359,9 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     validation errors are the right shape for clients to retry against.
 
     ``original_user_content``, dynamic-context reminder markers, the
-    transient view-image context marker, tool receipts, and delegated receipt
-    metadata/verdicts are server-owned. External callers cannot supply them;
+    transient view-image context marker, the execution-only knowledge-scope
+    marker, tool receipts, and delegated receipt metadata/verdicts are
+    server-owned. External callers cannot supply them;
     trusted internal channel calls may preserve metadata they added before
     invoking this boundary. The same applies to the ``delegations`` channel:
     a caller-supplied ledger entry's ``receipt_verdict`` is a forgery and is
@@ -1422,30 +1424,16 @@ async def _recover_run_knowledge_scope(
     return additional_kwargs.get(KNOWLEDGE_SCOPE_KEY)
 
 
-def _graph_input_is_human_input_response(graph_input: object) -> bool:
+def _current_human_message(graph_input: object) -> HumanMessage | None:
     if not isinstance(graph_input, Mapping):
-        return False
+        return None
     messages = graph_input.get("messages")
     if not isinstance(messages, list):
-        return False
-    current = next(
+        return None
+    return next(
         (message for message in reversed(messages) if isinstance(message, HumanMessage)),
         None,
     )
-    return current is not None and "human_input_response" in current.additional_kwargs
-
-
-def _current_human_message_has_knowledge_scope(graph_input: object) -> bool:
-    if not isinstance(graph_input, Mapping):
-        return False
-    messages = graph_input.get("messages")
-    if not isinstance(messages, list):
-        return False
-    current = next(
-        (message for message in reversed(messages) if isinstance(message, HumanMessage)),
-        None,
-    )
-    return current is not None and KNOWLEDGE_SCOPE_KEY in current.additional_kwargs
 
 
 async def _load_scope_agent_config(
@@ -1624,9 +1612,10 @@ async def start_run(
         target_message_id = run_metadata.get("regenerate_from_message_id")
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
         candidate_has_scope = any(isinstance(message, BaseMessage) and KNOWLEDGE_SCOPE_KEY in message.additional_kwargs for message in scope_graph_input.get("messages", []))
-        current_message_has_scope = _current_human_message_has_knowledge_scope(graph_input)
+        current_human_message = _current_human_message(graph_input)
+        current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
         replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
-        is_human_input_response = _graph_input_is_human_input_response(graph_input)
+        is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
         # Clarification and edit-replay messages may intentionally replace the
         # source scope. If either client omits its current selector snapshot,
         # inherit the source turn's authoritative scope instead of widening the

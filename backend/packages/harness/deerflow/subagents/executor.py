@@ -53,7 +53,6 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_con
 from deerflow.tracing import (
     build_tracing_callbacks,
     inject_langfuse_metadata,
-    redact_knowledge_scope_callbacks,
 )
 from deerflow.utils.messages import message_content_to_text
 
@@ -1460,7 +1459,7 @@ class SubagentExecutor:
             # produces one trace with all node / LLM / tool calls as child spans.
             # This mirrors the lead agent pattern: graph-level tracing paired with
             # attach_tracing=False on the model avoids double-counted traces.
-            tracing_callbacks = redact_knowledge_scope_callbacks(build_tracing_callbacks())
+            tracing_callbacks = build_tracing_callbacks()
             if tracing_callbacks:
                 existing_callbacks = list(run_config.get("callbacks") or [])
                 run_config["callbacks"] = [*existing_callbacks, *tracing_callbacks]

@@ -72,7 +72,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import configured_subagent_max_running
-from deerflow.tracing import build_tracing_callbacks, redact_knowledge_scope_callbacks
+from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
 
@@ -989,7 +989,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     # actually propagates ``langfuse_session_id`` / ``langfuse_user_id`` from
     # ``config["metadata"]`` onto the trace. Without root-level attachment the
     # model is a nested observation and the handler strips ``langfuse_*`` keys.
-    tracing_callbacks = redact_knowledge_scope_callbacks(build_tracing_callbacks())
+    tracing_callbacks = build_tracing_callbacks()
     if tracing_callbacks:
         existing = config.get("callbacks") or []
         if not isinstance(existing, list):

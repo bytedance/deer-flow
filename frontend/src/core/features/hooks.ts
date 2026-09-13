@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import {
   fetchBrowserControlEnabled,
+  fetchKnowledgeBaseFeature,
   fetchMcpTasksEnabled,
   fetchSubagentBatchesCapability,
 } from "./api";
@@ -48,6 +49,20 @@ export function useSubagentBatchesCapability() {
     repositoryAvailable: data?.repositoryAvailable ?? false,
     workerRunning: data?.workerRunning ?? false,
     maxRunning: data?.maxRunning ?? 0,
+    isLoading: isPending,
+  };
+}
+
+export function useKnowledgeBaseEnabled() {
+  const { data, isPending } = useQuery({
+    queryKey: ["features", "knowledge_base"],
+    queryFn: fetchKnowledgeBaseFeature,
+    staleTime: 0,
+    refetchOnMount: true,
+    retry: false,
+  });
+  return {
+    scopeSelectionEnabled: data?.scopeSelectionEnabled ?? false,
     isLoading: isPending,
   };
 }
