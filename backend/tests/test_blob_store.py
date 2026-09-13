@@ -156,13 +156,28 @@ def test_get_missing_blob_raises_not_found(store: LocalFsBlobStore):
     assert store.exists(ref) is False
 
 
-def test_get_detects_content_mismatch(store: LocalFsBlobStore):
+def test_get_detects_size_mismatch(store: LocalFsBlobStore):
     data = b"intact"
     ref = store.put_bytes(data, kind="tool-output")
-    # Corrupt the stored bytes behind the store's back.
+    # Corrupt the stored bytes behind the store's back with a DIFFERENT length:
+    # this is the truncation / partial-write failure mode.
     data_path = next((store._root / "tool-output").rglob(ref.sha256))
     data_path.write_bytes(b"tampered")
-    with pytest.raises(BlobReadError):
+    with pytest.raises(BlobReadError, match="size mismatch"):
+        store.get_bytes(ref)
+
+
+def test_get_detects_same_size_digest_mismatch(store: LocalFsBlobStore):
+    """Same-size corruption (bit rot) must hit the digest branch, not the size one.
+
+    ``data[::-1]`` keeps the length and flips every byte, so the size check
+    passes and the digest comparison is the only guard that can catch it.
+    """
+    data = b"intact"
+    ref = store.put_bytes(data, kind="tool-output")
+    data_path = next((store._root / "tool-output").rglob(ref.sha256))
+    data_path.write_bytes(data[::-1])
+    with pytest.raises(BlobReadError, match="digest mismatch"):
         store.get_bytes(ref)
 
 
