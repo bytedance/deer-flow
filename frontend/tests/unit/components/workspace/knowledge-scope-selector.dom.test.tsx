@@ -55,7 +55,9 @@ describe("KnowledgeScopeSelector trigger", () => {
     const trigger = screen.getByRole("button", { name: "Knowledge · All" });
     expect(trigger.textContent).toBe("");
     expect(trigger.getAttribute("aria-pressed")).toBe("true");
-    expect(trigger.className).toContain("bg-primary/10");
+    expect(trigger.className).toContain("text-foreground");
+    expect(trigger.className).not.toContain("bg-primary/10");
+    expect(trigger.className).not.toContain("border-primary/20");
     expect(trigger.querySelector("svg")).not.toBeNull();
   });
 
