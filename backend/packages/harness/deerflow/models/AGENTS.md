@@ -3,6 +3,7 @@
 - `create_chat_model(name, thinking_enabled)` instantiates LLM from config via reflection
 - Supports `thinking_enabled` flag with per-model `when_thinking_enabled` overrides
 - Supports vLLM-style thinking toggles via `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking` for Qwen reasoning models, while normalizing legacy `thinking` configs for backward compatibility
+- A per-request `reasoning_effort` kwarg (the regular, non-bootstrap lead-agent build passes it even when `None`) is popped from `kwargs` and layered like `model_overrides`: a non-`None` value replaces the profile's, and the thinking transforms applied afterwards (`when_thinking_enabled`, `when_thinking_disabled`, the `extra_body.thinking` disable path) still decide the final value. Never let a key reach the constructor through both `kwargs` and the profile settings — Python raises `got multiple values for keyword argument` and the lead agent cannot be built for that model. Codex checks the requested level itself. Pinned by `tests/test_model_factory.py` and `tests/test_lead_agent_model_resolution.py`
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables
 - Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)

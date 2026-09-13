@@ -287,6 +287,45 @@ def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
     assert result["model"] is not None
 
 
+@pytest.mark.parametrize(
+    ("runtime_options", "expected_effort"),
+    [
+        pytest.param({}, "high", id="request-leaves-effort-unset"),
+        pytest.param({"reasoning_effort": "low"}, "low", id="request-chooses-effort"),
+    ],
+)
+def test_internal_make_lead_agent_builds_model_whose_profile_sets_reasoning_effort(monkeypatch, runtime_options, expected_effort):
+    """The regular lead-agent build forwards ``reasoning_effort`` even when it is
+    None, so the real factory must merge it with a profile-level value instead of
+    handing the constructor the keyword twice (which raised ``TypeError``)."""
+    model = ModelConfig(
+        name="effort-model",
+        display_name="effort-model",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="effort-model",
+        api_key="test-key",
+        reasoning_effort="high",
+        supports_thinking=False,
+        supports_reasoning_effort=True,
+        supports_vision=False,
+    )
+    app_config = _make_app_config([model])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module._make_lead_agent(
+        {"configurable": {"model_name": "effort-model", **runtime_options}},
+        app_config=app_config,
+    )
+
+    assert result["model"].reasoning_effort == expected_effort
+
+
 @pytest.mark.parametrize("is_bootstrap", [False, True])
 def test_internal_make_lead_agent_selects_and_normalizes_delta_state(monkeypatch, is_bootstrap):
     app_config = _make_app_config([_make_model("delta-model", supports_thinking=False)])
