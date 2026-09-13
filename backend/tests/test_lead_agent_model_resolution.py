@@ -156,6 +156,17 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
     monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", _load_skills)
     monkeypatch.setattr(lead_agent_module, "build_middlewares", _build_middlewares)
     monkeypatch.setattr(lead_agent_module, "apply_prompt_template", _apply_prompt_template)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_subagent_release_policy",
+        lambda _app_config, *, enabled, max_concurrent, max_total, user_id=None, allowed_subagents=None: (
+            captured.update(
+                release_policy_user_id=user_id,
+                release_policy_allowed_subagents=allowed_subagents,
+            )
+            or {}
+        ),
+    )
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
     monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
@@ -180,7 +191,55 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
         "skills_user_id": "authenticated-user",
         "middleware_user_id": "authenticated-user",
         "prompt_user_id": "authenticated-user",
+        "release_policy_user_id": "authenticated-user",
+        "release_policy_allowed_subagents": None,
     }
+
+
+def test_subagent_release_policy_uses_user_scoped_catalog(monkeypatch):
+    """Descriptor policies must match the same user-scoped catalog task() sees."""
+    import deerflow.subagents as subagents_module
+    from deerflow.subagents.config import SubagentConfig
+
+    captured: dict[str, object] = {}
+
+    def _available_names(*, app_config=None, allowed_subagents=None, user_id=None, **_kwargs):
+        captured["names_user_id"] = user_id
+        captured["names_allowed_subagents"] = allowed_subagents
+        names = ["planner", "writer"]
+        if allowed_subagents is not None:
+            names = [name for name in names if name in allowed_subagents]
+        return names
+
+    def _config(name, *, app_config=None, user_id=None, **_kwargs):
+        captured.setdefault("config_lookups", []).append((name, user_id))
+        return SubagentConfig(
+            name=name,
+            description=f"User {name}",
+            system_prompt=f"You are the {name}.",
+            max_turns=12,
+            timeout_seconds=345,
+        )
+
+    monkeypatch.setattr(subagents_module, "get_available_subagent_names", _available_names)
+    monkeypatch.setattr(subagents_module, "get_subagent_config", _config)
+
+    policy = lead_agent_module._subagent_release_policy(
+        SimpleNamespace(),
+        enabled=True,
+        max_concurrent=2,
+        max_total=4,
+        user_id="user-1",
+        allowed_subagents=["writer"],
+    )
+
+    assert captured == {
+        "names_user_id": "user-1",
+        "names_allowed_subagents": ["writer"],
+        "config_lookups": [("writer", "user-1")],
+    }
+    assert policy["type_allowlist"] == ["writer"]
+    assert policy["runtime_limits"] == {"writer": {"max_turns": 12, "timeout_seconds": 345}}
 
 
 def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatch):

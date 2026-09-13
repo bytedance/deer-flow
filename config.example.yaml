@@ -1690,6 +1690,7 @@ subagent_runtime:
 #   #       - data-analysis
 #   #       - visualization
 #   #     model: inherit          # 'inherit' uses parent's model
+#   #     model_settings: {temperature: 0.2}  # Optional sampling/model overrides
 #   #     max_turns: 80
 #   #     timeout_seconds: 600
 #
