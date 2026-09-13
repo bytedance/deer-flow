@@ -397,6 +397,9 @@ class LocalSandbox(Sandbox):
                 result,
                 self._resolved_local_paths[mapping],
                 self._reverse_resolve_path,
+                # Agent-written content uses forward slashes even when realpath
+                # returns a native Windows backslash base.
+                separator_agnostic=True,
             )
 
         return result

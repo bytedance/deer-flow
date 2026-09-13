@@ -182,6 +182,24 @@ def test_local_sandbox_reverse_mask_routes_through_the_direct_helper(tmp_path: P
     assert calls == [(f"read {resolved}/SKILL.md", resolved)]
 
 
+@pytest.mark.parametrize("host_path", ["C:/Users/test/data/config.json", r"C:\Users\test\data\config.json"])
+def test_local_sandbox_reverse_mask_matches_windows_separator_spellings(monkeypatch, host_path: str) -> None:
+    """Match either Windows spelling independently of the test runner's OS."""
+    mapping = PathMapping(container_path="/mnt/data", local_path=r"C:\Users\test\data")
+    sandbox = LocalSandbox(id="local", path_mappings=[mapping])
+    sandbox._resolved_local_paths = {mapping: r"C:\Users\test\data"}
+    # Isolate matching from the host-dependent filesystem resolver.
+    matched_paths: list[str] = []
+
+    def reverse(path: str) -> str:
+        matched_paths.append(path)
+        return "/mnt/data/config.json"
+
+    monkeypatch.setattr(sandbox, "_reverse_resolve_path", reverse)
+    assert sandbox._reverse_resolve_paths_in_output(f"read {host_path}") == "read /mnt/data/config.json"
+    assert matched_paths == [host_path]
+
+
 def test_tools_mask_patterns_route_through_the_helper(tmp_path: Path) -> None:
     """Same wiring check for the other copy — and it must stay separator-agnostic."""
     host = tmp_path / "skills"

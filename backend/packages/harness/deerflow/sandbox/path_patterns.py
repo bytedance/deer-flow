@@ -16,8 +16,7 @@ segment boundary to the reverse patterns and missed the masking patterns, and
 #4053 had to add the same boundary to the other copy. This module holds the
 rule once so a third copy cannot silently disagree.
 
-The two sites are *not* identical, and the difference is deliberate — see
-``separator_agnostic``.
+Both sites accept Windows separator variants — see ``separator_agnostic``.
 """
 
 from __future__ import annotations
@@ -69,9 +68,9 @@ def build_output_mask_pattern(base: str, *, separator_agnostic: bool = False) ->
             path with ``/``. ``sandbox.tools`` needs this because it derives its
             bases from ``_path_variants`` (which yields Windows-style spellings)
             and matches them against output whose separators it does not
-            control. ``LocalSandbox`` does not: its bases come from filesystem
-            resolution on the running platform, and relaxing them would widen
-            what it masks.
+            control. ``LocalSandbox`` uses the equivalent direct scanner option:
+            filesystem resolution gives native backslashes on Windows, while
+            agent-written content deliberately uses forward slashes.
 
     Returns:
         A compiled pattern matching ``base`` at a segment boundary, plus an
