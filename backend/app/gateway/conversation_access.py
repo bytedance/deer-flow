@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from fastapi import HTTPException, Request
 
 from app.gateway.conversation_reader import read_visible_message_page
+from deerflow.constants import CONVERSATION_TOOL_USE
 from deerflow.utils.llm_text import strip_think_blocks
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -21,7 +22,6 @@ if TYPE_CHECKING:
     from deerflow.runtime.runs.worker import RunContext
 
 logger = logging.getLogger(__name__)
-CONVERSATION_TOOL_USE = "deerflow.tools.conversation:read_conversation"
 _MESSAGE_TEXT_LIMIT = 4000
 _PAGE_TEXT_LIMIT = 20000
 
@@ -109,6 +109,19 @@ def prepare_conversation_reader(
             return _json({"status": "invalid_request", "notice": "limit must be between 1 and 50"})
         if cursor is not None and (not isinstance(cursor, str) or not cursor.isascii() or not cursor.isdecimal() or len(cursor) > 19 or int(cursor) < 1):
             return _json({"status": "invalid_request", "notice": "cursor must be a positive sequence returned by this tool"})
+
+        parsed_text: dict[int, tuple[str, str]] = {}
+
+        def include_message(row: dict) -> bool:
+            parsed = _visible_text(row)
+            if parsed is None:
+                return False
+            role, text = parsed
+            # The scan accepts at most limit + 1 rows. One extra character
+            # preserves truncation detection without retaining oversized text.
+            parsed_text[row["seq"]] = (role, text[: _MESSAGE_TEXT_LIMIT + 1])
+            return True
+
         try:
             # Strict ownership deliberately excludes legacy shared/unowned rows.
             source = await thread_store.get(thread_id, user_id=user_id)
@@ -121,7 +134,7 @@ def prepare_conversation_reader(
                 user_id=user_id,
                 limit=limit,
                 before_seq=int(cursor) if cursor is not None else None,
-                message_filter=lambda row: _visible_text(row) is not None,
+                message_filter=include_message,
             )
             # Recheck ownership after storage yields (including deletion during
             # a read); a stale local event feed must not reopen a deleted source.
@@ -139,7 +152,7 @@ def prepare_conversation_reader(
             if not remaining:
                 has_more = True
                 break
-            role, text = _visible_text(row)
+            role, text = parsed_text[row["seq"]]
             bounded = text[: min(_MESSAGE_TEXT_LIMIT, remaining)]
             remaining -= len(bounded)
             messages.append({"seq": row["seq"], "message_id": str(row["content"].get("id") or "")[:128], "role": role, "text": bounded, "truncated": len(bounded) != len(text)})

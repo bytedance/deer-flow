@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,6 +12,44 @@ from fastapi import HTTPException
 from test_conversation_access import _put, _setup
 
 from app.gateway.conversation_access import _visible_text
+
+
+def test_visible_text_is_parsed_once_per_scan_and_refreshed_on_the_next_read(monkeypatch):
+    from app.gateway import conversation_access
+
+    calls = Counter()
+
+    def track_projection(row):
+        calls[row["seq"]] += 1
+        return _visible_text(row)
+
+    monkeypatch.setattr(conversation_access, "_visible_text", track_projection)
+
+    async def exercise():
+        prepare, events, threads, _, _ = _setup()
+        await threads.create("source", user_id="alice")
+        await _put(events, "oldest")
+        await _put(events, "<think>private</think>older")
+        newest = await _put(events, [{"type": "text", "text": "newest"}, {"type": "text", "text": "answer"}])
+        reader, _ = prepare(["source"])
+
+        page = json.loads(await reader(thread_id="source", limit=1))
+        assert page["messages"][0]["text"] == "newest\nanswer"
+        # Include the lookahead row, but do not repeat the returned row's work.
+        assert calls == {3: 1, 2: 1}
+
+        calls.clear()
+        newest["content"]["content"] = "updated answer"
+        refreshed = json.loads(await reader(thread_id="source", limit=1))
+        assert refreshed["messages"][0]["text"] == "updated answer"
+        assert calls == {3: 1, 2: 1}
+
+        calls.clear()
+        older = json.loads(await reader(thread_id="source", cursor=page["next_cursor"], limit=1))
+        assert older["messages"][0]["text"] == "older"
+        assert calls == {2: 1, 1: 1}
+
+    asyncio.run(exercise())
 
 
 def test_multipart_text_preserves_rendered_block_boundaries():
