@@ -401,7 +401,7 @@ def test_slash_activation_and_policy_compose_on_the_same_model_call(monkeypatch)
         editable=False,
     )
     activation_middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
-    monkeypatch.setattr(activation_middleware, "_resolve_activation", lambda _: _ActivationResolution(activation=activation))
+    monkeypatch.setattr(activation_middleware, "_resolve_activation", lambda _, activation_decisions=None: _ActivationResolution(activation=activation))
     policy_middleware = _middleware([skill])
     request = ModelRequestStub(
         [NamedTool("task"), NamedTool("read_file"), NamedTool("review_skill_package")],
