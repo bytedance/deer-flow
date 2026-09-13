@@ -826,6 +826,12 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 定时任务通过正常的 DeerFlow run 生命周期执行
 - 按每页 50 条浏览执行历史；历史页暂停自动刷新，可随时返回最新记录。 仅在读取成功后显示条数，加载中或失败不会误显示为零条。
 
+**通过 API 筛选执行历史**
+
+排查失败记录时，无需先下载所有成功记录。已认证且具有 `threads:read` 权限的客户端，可以针对自己的任务请求 `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0`。可选的 `status` 支持 `queued`、`launching`、`running`、`success`、`failed`、`skipped`、`interrupted`；这些是执行记录的状态，`completed` 等任务状态会被拒绝（422）。
+
+筛选先于分页执行。`limit`（1–200，默认 50）和 `offset`（非负整数，默认 0）作用于匹配记录，按创建时间、ID 依次降序排列。不传 `status` 时保留原有的混合历史数组，无匹配项返回 `[]`。此 API 不改变任务执行行为，workspace 历史界面仍展示未筛选的记录。
+
 当前 MVP 限制：
 
 - 暂时还没有可在对话中创建任务的 `schedule_task` 工具

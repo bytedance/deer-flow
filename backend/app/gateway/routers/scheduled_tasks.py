@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import typing
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -486,6 +487,7 @@ async def list_scheduled_task_runs(
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    status: typing.Literal["queued", "launching", "running", "success", "failed", "skipped", "interrupted"] | None = None,
 ):
     task_repo = get_scheduled_task_repo(request)
     run_repo = get_scheduled_task_run_repo(request)
@@ -495,7 +497,7 @@ async def list_scheduled_task_runs(
     task = await task_repo.get(task_id, user_id=str(user.id))
     if task is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
-    return await run_repo.list_by_task(task_id, limit=limit, offset=offset)
+    return await run_repo.list_by_task(task_id, limit=limit, offset=offset, status=status)
 
 
 @router.get("/threads/{thread_id}/scheduled-tasks")

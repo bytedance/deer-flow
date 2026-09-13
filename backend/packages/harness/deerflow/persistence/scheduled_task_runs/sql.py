@@ -224,17 +224,11 @@ class ScheduledTaskRunRepository:
             await session.refresh(row)
             return self._row_to_dict(row)
 
-    async def list_by_task(self, task_id: str, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        stmt = (
-            select(ScheduledTaskRunRow)
-            .where(ScheduledTaskRunRow.task_id == task_id)
-            .order_by(
-                ScheduledTaskRunRow.created_at.desc(),
-                ScheduledTaskRunRow.id.desc(),
-            )
-            .limit(limit)
-            .offset(offset)
-        )
+    async def list_by_task(self, task_id: str, *, limit: int = 50, offset: int = 0, status: str | None = None) -> list[dict[str, Any]]:
+        stmt = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id)
+        if status is not None:
+            stmt = stmt.where(ScheduledTaskRunRow.status == status)
+        stmt = stmt.order_by(ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc()).limit(limit).offset(offset)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]

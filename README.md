@@ -1603,6 +1603,12 @@ Current MVP capabilities:
 - Execute scheduled work through the normal DeerFlow run lifecycle
 - Browse execution history in pages of 50; older pages pause automatic refresh, with an explicit return to the latest runs. Counts appear only after a successful read; loading and failed reads are not reported as zero runs.
 
+**Filter execution history through the API**
+
+To inspect failures without downloading every successful occurrence, authenticated clients with `threads:read` can request `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0` for an owned task. The optional `status` accepts `queued`, `launching`, `running`, `success`, `failed`, `skipped`, or `interrupted`; these are occurrence statuses, so task statuses such as `completed` are invalid (422).
+
+Filtering happens before pagination. `limit` (1–200, default 50) and `offset` (nonnegative, default 0) apply to matching records, ordered by creation time then ID, both descending. Omitting `status` preserves the existing mixed-history array response; no matches return `[]`. The API does not change task execution, and the workspace history UI remains unfiltered.
+
 Current MVP limits:
 
 - No conversation-created `schedule_task` tool yet
