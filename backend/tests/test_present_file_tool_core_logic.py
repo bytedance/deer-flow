@@ -127,3 +127,42 @@ def test_present_files_rejects_paths_outside_outputs(tmp_path):
 
     assert "artifacts" not in result.update
     assert result.update["messages"][0].content == f"Error: Only files in /mnt/user-data/outputs can be presented: {leaked_path}"
+
+
+def test_present_files_rejects_nonexistent_file(tmp_path):
+    """Presenting a file that was never written must fail loudly.
+
+    Without an existence check the tool returns "Successfully presented files"
+    for a path that was never created (e.g. the agent's write step failed
+    earlier), and every downstream consumer then 404s on artifact fetch.
+    """
+    outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    missing_path = outputs_dir / "research_package.json"  # never written
+
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=_make_runtime(str(outputs_dir)),
+        filepaths=[str(missing_path)],
+        tool_call_id="tc-missing",
+    )
+
+    assert "artifacts" not in result.update
+    content = result.update["messages"][0].content
+    assert content.startswith("Error:")
+    assert "not found" in content.lower()
+
+
+def test_present_files_rejects_directory_path(tmp_path):
+    """A directory inside outputs cannot be presented as a file artifact."""
+    outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
+    sub_dir = outputs_dir / "subdir"
+    sub_dir.mkdir(parents=True)
+
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=_make_runtime(str(outputs_dir)),
+        filepaths=[str(sub_dir)],
+        tool_call_id="tc-dir",
+    )
+
+    assert "artifacts" not in result.update
+    assert result.update["messages"][0].content.startswith("Error:")
