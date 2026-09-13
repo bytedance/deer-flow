@@ -452,6 +452,10 @@ class RunManager:
     def _record_from_store(row: dict[str, Any]) -> RunRecord:
         """Build a read-only runtime record from a serialized store row.
 
+        The result is a detached ``store_only`` snapshot. Never register it in
+        ``_runs``: only the owning worker's task lifecycle updates and removes
+        local records, so a registered snapshot would never leave.
+
         NULL status/on_disconnect columns (e.g. from rows written before those
         columns were added) default to ``pending`` and ``cancel`` respectively.
         """
@@ -1616,16 +1620,18 @@ class RunManager:
                     return existing
 
             def reuse_idempotent_run(conflict: RunIdempotencyConflict) -> RunRecord:
+                # A locally held record for this key already returned above, so
+                # the conflicting row belongs to a peer or to a run this worker
+                # has cleaned up. Return a store-only handle without registering
+                # it: nothing here finalizes or cleans up that record, so a
+                # registered copy would keep its admission-time status, reject
+                # later admissions for the thread, and shadow the durable row
+                # for get(), cancel(), and orphan reconciliation.
                 existing = self._record_from_store(conflict.existing)
                 if existing.thread_id != thread_id or existing.user_id != user_id:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
-                current = self._runs.get(existing.run_id)
-                if current is None:
-                    self._runs[existing.run_id] = existing
-                    self._index_run_locked(existing)
-                    current = existing
-                current.idempotency_reused = True
-                return current
+                existing.idempotency_reused = True
+                return existing
 
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).

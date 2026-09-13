@@ -156,6 +156,95 @@ async def test_reject_blocks_reentrant_same_thread_locally():
 
 
 # ---------------------------------------------------------------------------
+# create_or_reject — cross-worker idempotent reuse
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_peer_idempotent_reuse_does_not_block_thread_after_owner_completes():
+    """A peer's reuse handle must not stay behind as a local inflight record.
+
+    The peer never runs the task, so nothing on it would finalize or clean up
+    a registered copy: that copy keeps its admission-time status and rejects
+    every later admission for the thread until the worker restarts.
+    """
+    store = MemoryRunStore()
+    owner = _make_manager(store=store, worker_id="worker-a")
+    peer = _make_manager(store=store, worker_id="worker-b")
+    first = await owner.create_or_reject("thread-1", idempotency_key="scheduled-task:occurrence-1")
+    await owner.set_status(first.run_id, RunStatus.running)
+
+    reused = await peer.create_or_reject("thread-1", idempotency_key="scheduled-task:occurrence-1")
+
+    assert reused.run_id == first.run_id
+    assert reused.store_only is True
+    assert reused.idempotency_reused is True
+
+    await owner.set_status(first.run_id, RunStatus.success)
+    await owner.cleanup(first.run_id, delay=0)
+
+    assert await peer.has_inflight("thread-1") is False
+    hydrated = await peer.get(first.run_id)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.success
+    retried = await peer.create_or_reject("thread-1", idempotency_key="scheduled-task:occurrence-1")
+    assert retried.run_id == first.run_id
+    assert retried.status == RunStatus.success
+    follow_up = await peer.create_or_reject("thread-1")
+    assert follow_up.run_id != first.run_id
+
+
+@pytest.mark.anyio
+async def test_peer_idempotent_reuse_does_not_shield_crashed_owner_from_reconciliation():
+    """Reconciliation skips locally live records, so a reuse handle must not look like one."""
+    store = MemoryRunStore()
+    owner = _make_manager(store=store, worker_id="worker-a")
+    peer = _make_manager(store=store, worker_id="worker-b")
+    first = await owner.create_or_reject("thread-1", idempotency_key="mcp-task:task-1:1:0")
+    await owner.set_status(first.run_id, RunStatus.running)
+    await peer.create_or_reject("thread-1", idempotency_key="mcp-task:task-1:1:0")
+
+    # The owner crashes: its lease lapses past the grace window without renewal.
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    assert await store.update_lease(first.run_id, owner_worker_id="worker-a", lease_expires_at=expired_lease)
+
+    recovered = await peer.reconcile_orphaned_inflight_runs(error="owner expired")
+
+    assert [record.run_id for record in recovered] == [first.run_id]
+    stored = await store.get(first.run_id)
+    assert stored is not None
+    assert stored["status"] == "error"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("heartbeat_enabled", "expected_outcome", "expected_cancel_action"),
+    [(False, CancelOutcome.not_active_locally, None), (True, CancelOutcome.requested, "interrupt")],
+)
+async def test_peer_cancel_of_reused_run_leaves_live_owner_status_to_the_owner(heartbeat_enabled, expected_outcome, expected_cancel_action):
+    """A reuse handle must not route the peer's cancel through the local-owner path.
+
+    That path would mark the owner's still-running row ``interrupted`` from a
+    worker that has no task to stop, releasing the thread while the owner runs.
+    """
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=heartbeat_enabled)
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(store=store, worker_id="worker-b", run_ownership_config=config)
+    first = await owner.create_or_reject("thread-1", idempotency_key="http-run:retry")
+    await owner.set_status(first.run_id, RunStatus.running)
+    await peer.create_or_reject("thread-1", idempotency_key="http-run:retry")
+
+    outcome = await peer.cancel(first.run_id)
+
+    assert outcome == expected_outcome
+    stored = await store.get(first.run_id)
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored.get("cancel_action") == expected_cancel_action
+
+
+# ---------------------------------------------------------------------------
 # create_or_reject — interrupt strategy
 # ---------------------------------------------------------------------------
 

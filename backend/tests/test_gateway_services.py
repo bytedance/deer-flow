@@ -2469,6 +2469,53 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
     assert context.get("langgraph_auth_user_id") is None
 
 
+@pytest.mark.asyncio
+async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_owner_completes(_stub_app_config):
+    """Two Gateway workers share one run store; a retry landing on the peer must not strand the thread."""
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    release_owner_run = asyncio.Event()
+
+    async def fake_run_agent(_bridge, run_manager, record, **_kwargs):
+        # Mirror run_agent's owner lifecycle: start, finish, release the local record.
+        await run_manager.try_start(record.run_id)
+        await release_owner_run.wait()
+        await run_manager.set_status(record.run_id, RunStatus.success)
+        await run_manager.cleanup(record.run_id, delay=0)
+
+    run_store = MemoryRunStore()
+    owner = RunManager(store=run_store, worker_id="worker-a")
+    peer = RunManager(store=run_store, worker_id="worker-b")
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    body = _run_create_request()
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        first = await start_run(body, "thread-peer-reuse", _make_start_run_request(owner, thread_store=thread_store), idempotency_key="http-run:retry")
+        reused = await start_run(body, "thread-peer-reuse", _make_start_run_request(peer, thread_store=thread_store), idempotency_key="http-run:retry")
+        assert reused.run_id == first.run_id
+        assert reused.status in (RunStatus.pending, RunStatus.running)
+
+        release_owner_run.set()
+        await asyncio.wait_for(first.task, timeout=1)
+        try:
+            follow_up = await start_run(_run_create_request("next turn"), "thread-peer-reuse", _make_start_run_request(peer, thread_store=thread_store))
+        except HTTPException as exc:
+            pytest.fail(f"peer rejected a new run after the owner finished: {exc.status_code} {exc.detail}")
+        await asyncio.wait_for(follow_up.task, timeout=1)
+
+    assert follow_up.run_id != first.run_id
+
+
 def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
