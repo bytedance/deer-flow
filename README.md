@@ -295,7 +295,9 @@ Backend processes automatically pick up `config.yaml` changes on the next config
 Gateway runs use the top-level `recursion_limit` in `config.yaml` when an API
 request does not provide one. The default is `100`; valid per-request values
 take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes
-apply to the next run without restarting the Gateway.
+apply to the next run without restarting the Gateway. This top-level setting
+applies to Gateway API runs; IM channel and embedded `DeerFlowClient` runs
+retain their own defaults and per-call override paths.
 The checkpoint storage settings `database.checkpoint_channel_mode` and
 `database.checkpoint_delta.snapshot_frequency` (default `10`) are exceptions:
 both are frozen when the process first builds an agent (including through

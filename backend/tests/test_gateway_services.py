@@ -762,12 +762,38 @@ def test_build_run_config_client_recursion_limit_overrides_configured_default(_s
 
 
 def test_build_run_config_rejects_invalid_recursion_limit(_stub_app_config):
-    """Non-positive / non-int / bool values fall back to the server default."""
-    from app.gateway.services import _DEFAULT_RECURSION_LIMIT, build_run_config
+    """Non-positive / non-int / bool values fall back to the configured default."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 
-    for bad in (0, -5, "1000", 3.5, True, None):
-        config = build_run_config("thread-1", {"recursion_limit": bad}, None)
-        assert config["recursion_limit"] == _DEFAULT_RECURSION_LIMIT, bad
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "recursion_limit": 700,
+            }
+        )
+    )
+
+    try:
+        for bad in (0, -5, "1000", 3.5, True, None):
+            config = build_run_config("thread-1", {"recursion_limit": bad}, None)
+            assert config["recursion_limit"] == 700, bad
+    finally:
+        reset_app_config()
+
+
+def test_build_run_config_logs_and_uses_fallback_when_app_config_unavailable(monkeypatch, caplog):
+    """A config-load failure falls back visibly instead of silently."""
+    from app.gateway import services
+
+    monkeypatch.setattr(services, "get_app_config", lambda: (_ for _ in ()).throw(RuntimeError("broken config")))
+    caplog.set_level(logging.WARNING, logger="app.gateway.services")
+
+    config = services.build_run_config("thread-1", {"recursion_limit": 0}, None)
+
+    assert config["recursion_limit"] == services._DEFAULT_RECURSION_LIMIT
+    assert any("failed to load app config; falling back to recursion_limit=100" in record.message for record in caplog.records)
 
 
 def test_build_run_config_invalid_client_recursion_limit_uses_configured_default(_stub_app_config):

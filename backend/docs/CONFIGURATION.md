@@ -35,6 +35,10 @@ configured default. `max_recursion_limit` (default `1000`) caps both sources to
 limit runaway LLM cost. Both settings are read per run, so changes apply to the
 next request without a Gateway restart.
 
+These settings apply to Gateway API runs. IM channel runs and embedded
+`DeerFlowClient` runs retain their own defaults and can be overridden through
+their channel/client-specific configuration or per-call options.
+
 ### Models
 
 Configure the LLM models available to the agent:

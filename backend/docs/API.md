@@ -275,7 +275,9 @@ or configured value to a server ceiling (`max_recursion_limit` in `config.yaml`,
 default `1000`) so a single run cannot execute unbounded graph steps (runaway
 LLM cost / DoS); invalid or non-positive request values fall back to the
 configured default. Both top-level fields are read per run, so edits apply to
-the next request without restarting the Gateway.
+the next request without restarting the Gateway. This top-level setting applies
+to Gateway API runs only; IM channel and embedded `DeerFlowClient` runs retain
+their own defaults and override paths.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model

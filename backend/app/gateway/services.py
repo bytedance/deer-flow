@@ -683,6 +683,11 @@ def _resolve_gateway_recursion_limits() -> tuple[int, int]:
             )
         return min(raw, max_limit), max_limit
     except Exception:
+        logger.warning(
+            "failed to load app config; falling back to recursion_limit=%d and max_recursion_limit=%d for Gateway runs",
+            _DEFAULT_RECURSION_LIMIT,
+            _DEFAULT_MAX_RECURSION_LIMIT,
+        )
         return _DEFAULT_RECURSION_LIMIT, _DEFAULT_MAX_RECURSION_LIMIT
 
 
