@@ -592,7 +592,7 @@ This section accumulates work toward the **2.1.0** milestone
   `background_tasks` projection for them, so `values` events for these runs now
   include `background_tasks`. `RunManager` now resolves an omitted owner from
   the request user the way the SQL store does, so every store records the same
-  owner.
+  owner. ([#5401])
 - **runtime:** Stop a cross-worker idempotent run reuse from permanently
   blocking the thread on the reusing worker. The reuse registered the hydrated
   store row as a local run record, but only the owning worker finalizes and
@@ -2784,3 +2784,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5353]: https://github.com/bytedance/deer-flow/pull/5353
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357
 [#5393]: https://github.com/bytedance/deer-flow/pull/5393
+[#5401]: https://github.com/bytedance/deer-flow/pull/5401

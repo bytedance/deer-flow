@@ -403,7 +403,7 @@
   同一 worker，就会比较两边的拥有者，把自己的 run 误判为其他用户的并抛错。同一不一致
   还让 HTTP run 被按拥有者过滤的历史读取漏掉，并跳过了 MCP `background_tasks` 投影，
   因此这类 run 的 `values` 事件现在会包含 `background_tasks`。`RunManager` 现在按
-  SQL 存储的方式用请求用户补全缺省的拥有者，各存储记录的拥有者保持一致。
+  SQL 存储的方式用请求用户补全缺省的拥有者，各存储记录的拥有者保持一致。([#5401])
 - **运行时：** 跨 worker 的幂等 run 复用不再让复用方 worker 永久阻塞该线程。此前复用会
   把从存储中读取的行注册为本地 run 记录，但只有拥有该 run 的 worker 才会结束并清理自己的
   记录，因此这份副本会一直停留在准入时的 `pending`/`running` 状态：该 worker 上此线程后续
@@ -2134,3 +2134,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5353]: https://github.com/bytedance/deer-flow/pull/5353
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357
 [#5393]: https://github.com/bytedance/deer-flow/pull/5393
+[#5401]: https://github.com/bytedance/deer-flow/pull/5401
