@@ -415,10 +415,6 @@ class ExtensionsConfig(BaseModel):
                 raise ValueError(f"MCP task server name must contain 1 to {MCP_TASK_SERVER_NAME_MAX_LENGTH} characters")
         return self
 
-    def to_file_dict(self) -> dict[str, Any]:
-        """Serialize in the public extensions_config.json shape."""
-        return self.model_dump(by_alias=True)
-
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path | None:
         """Resolve the extensions config file path.
@@ -507,6 +503,9 @@ class ExtensionsConfig(BaseModel):
 
         Returns:
             ExtensionsConfig: The loaded config, or empty config if file not found.
+            Its ``$VAR`` strings are already resolved, so it must never be
+            serialized back to disk; writers use
+            :func:`read_raw_extensions_config` instead.
         """
         resolved_path = cls.resolve_config_path(config_path)
         if resolved_path is None:
@@ -697,6 +696,47 @@ def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
                     temporary_path,
                     exc_info=True,
                 )
+
+
+def read_raw_extensions_config(path: Path) -> dict[str, Any]:
+    """Read the on-disk config object with ``$VAR`` placeholders left intact.
+
+    This is the only safe merge source for a read-modify-write.
+    ``ExtensionsConfig.from_file()`` resolves placeholders into live values and
+    unset variables into ``""``, so writing its model back would persist
+    secrets in plaintext and erase the references. Raises ``FileNotFoundError``
+    when *path* does not exist, and ``ValueError`` for a malformed document;
+    that message omits the path so API callers can surface it as-is.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw_data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Extensions configuration is not valid JSON: {e.msg} at line {e.lineno} column {e.colno}") from e
+    if not isinstance(raw_data, dict):
+        raise ValueError("Extensions configuration must be a JSON object")
+    return raw_data
+
+
+def validate_raw_extensions_config(raw_data: dict[str, Any]) -> ExtensionsConfig:
+    """Validate a raw write candidate exactly as the runtime will load it.
+
+    Resolution works on a copy, so *raw_data* keeps its placeholders and can be
+    written as-is once this returns.
+    """
+    return ExtensionsConfig.model_validate(ExtensionsConfig.resolve_env_variables(raw_data))
+
+
+def set_raw_skill_enabled(raw_data: dict[str, Any], skill_name: str, enabled: bool) -> None:
+    """Set one skill's enabled state in a raw config, leaving everything else as written."""
+    skills = raw_data.setdefault("skills", {})
+    if not isinstance(skills, dict):
+        raise ValueError("Extensions config `skills` must be a JSON object")
+    entry = skills.get(skill_name)
+    if isinstance(entry, dict):
+        entry["enabled"] = enabled
+    else:
+        skills[skill_name] = {"enabled": enabled}
 
 
 def get_extensions_config() -> ExtensionsConfig:

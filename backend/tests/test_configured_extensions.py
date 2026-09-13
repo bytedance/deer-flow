@@ -9,7 +9,14 @@ from langchain.agents.middleware import AgentMiddleware
 from pydantic import ValidationError
 
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
-from deerflow.config.extensions_config import ConfiguredMiddlewareSpec, ExtensionsConfig
+from deerflow.config.extensions_config import (
+    ConfiguredMiddlewareSpec,
+    ExtensionsConfig,
+    atomic_write_extensions_config,
+    read_raw_extensions_config,
+    set_raw_skill_enabled,
+    validate_raw_extensions_config,
+)
 
 
 class RecordingMiddleware(AgentMiddleware):
@@ -122,7 +129,7 @@ def test_kwargs_yaml_date_normalizes_to_iso_string():
     spec = ConfiguredMiddlewareSpec.model_validate({"class": "pkg:Mw", "kwargs": {"cutoff": date(2026, 1, 1)}})
 
     assert spec.kwargs == {"cutoff": "2026-01-01"}
-    json.dumps(ExtensionsConfig(middlewares=[spec]).to_file_dict())
+    assert json.loads(json.dumps(spec.kwargs)) == {"cutoff": "2026-01-01"}
 
 
 def test_kwargs_yaml_datetime_normalizes_to_iso_string():
@@ -141,21 +148,28 @@ def test_kwargs_reject_nan():
         ConfiguredMiddlewareSpec.model_validate({"class": "pkg:Mw", "kwargs": {"n": float("nan")}})
 
 
-def test_to_file_dict_round_trips_kwargs_entries():
-    config = ExtensionsConfig.model_validate(
-        {
-            "middlewares": [
-                "pkg:Plain",
-                {"class": "pkg:WithArgs", "kwargs": {"max_tool_calls": 5}},
-            ]
-        }
-    )
+def test_raw_file_round_trips_kwargs_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEERFLOW_TEST_MIDDLEWARE_TOKEN", "test-secret")
+    config_path = tmp_path / "extensions_config.json"
+    raw = {
+        "middlewares": [
+            "pkg:Plain",
+            {"class": "pkg:WithArgs", "kwargs": {"max_tool_calls": 5, "token": "$DEERFLOW_TEST_MIDDLEWARE_TOKEN"}},
+        ]
+    }
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
 
-    dumped = config.to_file_dict()
-    restored = ExtensionsConfig.model_validate(dumped)
+    candidate = read_raw_extensions_config(config_path)
+    set_raw_skill_enabled(candidate, "demo", False)
+    validate_raw_extensions_config(candidate)
+    atomic_write_extensions_config(config_path, candidate)
+    dumped = read_raw_extensions_config(config_path)
+    restored = ExtensionsConfig.from_file(config_path)
 
+    assert dumped["middlewares"] == raw["middlewares"]
+    assert dumped["skills"] == {"demo": {"enabled": False}}
     assert dumped["middlewares"][0] == "pkg:Plain"
     assert dumped["middlewares"][1]["class"] == "pkg:WithArgs"
-    assert dumped["middlewares"][1]["kwargs"] == {"max_tool_calls": 5}
+    assert dumped["middlewares"][1]["kwargs"] == {"max_tool_calls": 5, "token": "$DEERFLOW_TEST_MIDDLEWARE_TOKEN"}
     assert restored.middlewares[1].class_path == "pkg:WithArgs"
-    assert restored.middlewares[1].kwargs == {"max_tool_calls": 5}
+    assert restored.middlewares[1].kwargs == {"max_tool_calls": 5, "token": "test-secret"}

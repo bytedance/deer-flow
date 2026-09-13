@@ -1,5 +1,7 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+**Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted.
+
 **Durable batch acceptance**: `batch_task` normalizes optional per-item criteria
 before persistence (empty becomes null; 20 items × 500 neutralized characters),
 sharing `normalize_acceptance_criteria` with the executor and checker.

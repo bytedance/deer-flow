@@ -1,10 +1,30 @@
 ### Configuration System
 
+Custom Agent `AgentConfig.display_name` is an optional, whitespace-trimmed Unicode
+label of at most 100 Unicode code points. C0/C1 controls and bidirectional
+formatting controls (U+202A–U+202E, U+2066–U+2069) are rejected before trimming.
+Also reject soft hyphen, Arabic letter mark, U+200B, U+200E–U+200F,
+U+2028–U+2029, U+2060–U+2065 and U+FEFF. Labels consisting only of
+marks, separators or other invisible characters are invalid; ZWNJ/ZWJ remain
+supported inside ordinary text and emoji.
+It is stored in the existing config document by
+both agent stores; it never participates in paths, routing, or authorization.
+Gateway create/update/response models share its validation. It remains outside
+`MANAGED_AGENT_CONFIG_FIELDS` so `update_agent` preserves it. `setup_agent`
+explicitly carries forward the existing owner's display name when re-bootstrapping;
+the Gateway explicitly overrides it when supplied, including null to clear.
+Both stores use `parse_agent_config` to ignore only an invalid stored
+`display_name` on read, logging the agent identifier without the invalid value
+and without rewriting storage. Other config errors still
+raise, and API create/update validation remains strict.
+
 **Main Configuration** (`config.yaml`):
 
 Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** directory.
 
 **Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
+
+Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale.
 
@@ -69,3 +89,5 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `middlewares` - `AgentMiddleware` entries for lead and subagent runtime extension: class-path strings or `{class, kwargs}` objects. `kwargs` values must be JSON types; YAML dates and timestamps are coerced to ISO strings so they match JSON. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
 
 Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and skill state at runtime; their `extensions_config.json` writes use the shared atomic replacement helper, while `middlewares` remains an operator-controlled config-file extension point.
+
+Values beginning with `$` are resolved from the environment when the file is loaded, and an unset variable becomes `""`. Runtime writers (MCP router, skill toggle, `DeerFlowClient`) therefore read the raw file with `read_raw_extensions_config`, merge into it (`set_raw_skill_enabled` for skill state), check the candidate with `validate_raw_extensions_config`, and write that raw dict. They never serialize an `ExtensionsConfig` model back to disk: its resolved values would persist secrets in plaintext and erase the references. When the file does not exist yet, the Gateway skill toggle seeds only the cached skill states. `tests/test_extensions_config_raw_writes.py` and the placeholder tests in `tests/test_client.py` pin this.

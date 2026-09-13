@@ -6,7 +6,6 @@ import { useI18n } from "@/core/i18n/hooks";
 import {
   createScheduledTask,
   deleteScheduledTask,
-  fetchScheduledTaskRuns,
   fetchScheduledTasks,
   fetchThreadScheduledTasks,
   pauseScheduledTask,
@@ -30,16 +29,6 @@ export function useThreadScheduledTasks(threadId: string | null | undefined) {
     queryKey: ["scheduled-tasks", "thread", threadId],
     queryFn: () => fetchThreadScheduledTasks(threadId ?? ""),
     enabled: Boolean(threadId),
-  });
-}
-
-export function useScheduledTaskRuns(taskId: string | null | undefined) {
-  return useQuery({
-    queryKey: ["scheduled-tasks", "runs", taskId],
-    queryFn: () => fetchScheduledTaskRuns(taskId ?? ""),
-    enabled: Boolean(taskId),
-    refetchInterval: 15000,
-    refetchIntervalInBackground: false,
   });
 }
 

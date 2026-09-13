@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 42
+config_version: 43
 
 # ============================================================================
 # Logging
@@ -94,14 +94,16 @@ token_budget:
   hard_stop_threshold: 1.0      # Force stop at 100% of the budget
 
 # ============================================================================
-# Recursion Limit — Hard ceiling for a client-supplied run recursion_limit
+# Recursion Limits
 # ============================================================================
 # A run's recursion_limit caps the number of LangGraph super-steps (each is at
-# least one LLM call). The Gateway never trusts a client-supplied value
-# verbatim: any value above this ceiling is clamped down to it, preventing
-# runaway API cost / DoS. Invalid or non-positive client values fall back to
-# the server default of 100. Raise this only if you legitimately run very
-# deeply nested subagent graphs.
+# least one LLM call). Clients may override the default per request; invalid or
+# non-positive client values fall back to this configured default.
+recursion_limit: 100
+
+# The Gateway never trusts a configured or client-supplied value above this
+# ceiling, preventing runaway API cost / DoS. Raise it only if you legitimately
+# run very deeply nested subagent graphs.
 max_recursion_limit: 1000
 
 
@@ -1850,6 +1852,13 @@ title:
 # ============================================================================
 # Automatically summarize conversation history when token limits are approached
 # This helps maintain context in long conversations without exceeding model limits
+
+# Optional task notes and keyword recall of compacted messages. See docs/task-continuity.md.
+task_continuity:
+  enabled: false
+  max_batches: 32
+  max_records_per_batch: 256
+  max_record_chars: 16000
 
 summarization:
   enabled: true
