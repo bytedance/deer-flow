@@ -10,6 +10,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware, _await_off_thread
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
 
 _PATH = "/mnt/user-data/outputs/report.md"
 
@@ -169,6 +170,62 @@ def test_async_gate_cancellation_drains_sync_probe_before_unlocking(
             assert gate_lock.release_calls == 0
 
             task.cancel("second cancellation")
+            await asyncio.sleep(0)
+
+            assert not task.done()
+            assert gate_lock.acquired
+            assert gate_lock.release_calls == 0
+
+            allow_probe_finish.set()
+            with pytest.raises(asyncio.CancelledError) as exc_info:
+                await task
+
+            assert exc_info.value.args == ("first cancellation",)
+            assert not gate_lock.acquired
+            assert gate_lock.release_calls == 1
+            assert handler_calls == (1 if tool_name == "read_file" else 0)
+        finally:
+            allow_probe_finish.set()
+            if gate_lock.acquired:
+                gate_lock.release()
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("tool_name", ["read_file", "write_file"])
+def test_async_gate_cancellation_wins_over_sync_probe_authorization_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+) -> None:
+    async def scenario() -> None:
+        probe_started = threading.Event()
+        allow_probe_finish = threading.Event()
+        gate_lock = _TrackingLock()
+
+        def reader(_runtime: object, _path: str) -> str:
+            probe_started.set()
+            assert allow_probe_finish.wait(timeout=5), "test did not unblock failing gate probe"
+            raise SandboxAuthorizationError("probe denied")
+
+        middleware = ReadBeforeWriteMiddleware(content_reader=reader)
+        monkeypatch.setattr(middleware, "_lock_for", lambda _request, _path: gate_lock)
+        handler_calls = 0
+
+        async def handler(_request: ToolCallRequest) -> ToolMessage:
+            nonlocal handler_calls
+            handler_calls += 1
+            return ToolMessage(content="v1", tool_call_id=f"call-{tool_name}", name=tool_name)
+
+        task = asyncio.create_task(middleware.awrap_tool_call(_request(tool_name), handler))
+        try:
+            assert await asyncio.to_thread(probe_started.wait, 2), "failing gate probe did not start"
+            assert gate_lock.acquired
+
+            task.cancel("first cancellation")
             await asyncio.sleep(0)
 
             assert not task.done()
