@@ -9,7 +9,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 
-from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware, _await_off_thread
 
 _PATH = "/mnt/user-data/outputs/report.md"
 
@@ -191,5 +191,31 @@ def test_async_gate_cancellation_drains_sync_probe_before_unlocking(
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+
+    asyncio.run(scenario())
+
+
+def test_await_off_thread_preserves_first_cancel_when_worker_task_is_cancelled() -> None:
+    async def scenario() -> None:
+        worker_started = asyncio.Event()
+        worker_can_finish = asyncio.Event()
+
+        async def worker() -> None:
+            worker_started.set()
+            await worker_can_finish.wait()
+
+        worker_task = asyncio.create_task(worker())
+        waiter = asyncio.create_task(_await_off_thread(worker_task))
+        await worker_started.wait()
+
+        waiter.cancel("first cancellation")
+        await asyncio.sleep(0)
+        assert not waiter.done()
+
+        worker_task.cancel("inner cancellation")
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await waiter
+
+        assert exc_info.value.args == ("first cancellation",)
 
     asyncio.run(scenario())
