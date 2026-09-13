@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import copy
+import enum
 import html
 import json
 import logging
@@ -29,13 +30,28 @@ from .prompt import (
     load_prompt_messages,
 )
 from .storage import (
+    MemoryClearGenerationConflict,
     MemoryManifestRevisionConflict,
     MemoryStorage,
     create_empty_memory,
+    is_stale_clear_generation,
+    scope_clear_generation,
     utc_now_iso_z,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _CommitOutcome(enum.Enum):
+    """Internal result of ``_finalize_update``.
+
+    ``CONSUMED`` means a newer clear fenced the write: the conversation feed
+    must not be retried, but the caller must not report a persisted update.
+    """
+
+    PERSISTED = "persisted"
+    FAILED = "failed"
+    CONSUMED = "consumed"
 
 
 # Thread pool for offloading sync memory updates when called from an async
@@ -823,6 +839,30 @@ class MemoryUpdater:
         """Get the current memory data via the injected storage."""
         return self._storage.load(agent_name, user_id=user_id)
 
+    def peek_clear_generation(self, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        """Read the scope clear-generation fence without loading fact files."""
+        return self._storage.peek_clear_generation(agent_name, user_id=user_id)
+
+    def mark_feed_consumed(
+        self,
+        messages: list[Any],
+        *,
+        thread_id: str | None = None,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+        bypass_watermark: bool = False,
+    ) -> None:
+        """Advance the conversation watermark without claiming a persisted write.
+
+        Used when a newer clear makes a pending pre-clear snapshot obsolete so
+        the next extract does not restore those turns against the new generation.
+        """
+        self._mark_feed_consumed(
+            (thread_id, user_id, agent_name),
+            messages,
+            bypass_watermark=bypass_watermark,
+        )
+
     def reload_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Reload memory data via the injected storage."""
         return self._storage.reload(agent_name, user_id=user_id)
@@ -988,6 +1028,7 @@ class MemoryUpdater:
                         agent_name=agent_name,
                         user_id=user_id,
                         expected_manifest_revision=int(current.get("revision") or 0),
+                        bump_clear_generation="agent",
                     )
                     self._storage.clear_fact_metadata(
                         agent_name=agent_name,
@@ -1042,10 +1083,15 @@ class MemoryUpdater:
 
         Duplicate rejection is enforced here (not only by callers): the
         candidate's normalized content key is checked against the fresh
-        memory snapshot inside the revision-conflict retry loop of both
-        storage paths (apply_changes and legacy single-file save), so
-        concurrent creators cannot both store the same content. Raises
+        memory snapshot inside the conflict-retry loop of both storage
+        paths (apply_changes and legacy single-file save), so concurrent
+        creators cannot both store the same content. Raises
         ``ValueError("Duplicate fact")`` on a normalized-content match.
+
+        A concurrent clear is not a drop: this path upserts a brand-new
+        ``fact_id`` and cannot restore a wiped fact. Reload the scope fence
+        on every attempt and retry ``MemoryClearGenerationConflict`` the
+        same way as a manifest revision conflict.
         """
         if agent_name is None:
             raise ValueError("agent_name")
@@ -1068,11 +1114,14 @@ class MemoryUpdater:
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             for attempt in range(3):
                 memory_data = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
+                captured_clear_generation = scope_clear_generation(memory_data, agent_name)
                 # Duplicate rejection lives inside the conflict-retry loop so
                 # it is re-evaluated against the fresh snapshot after every
-                # revision conflict: two concurrent creators of the same
-                # content cannot both store it (the loser reloads, sees the
-                # winner's fact, and is rejected here).
+                # revision or clear-generation conflict: two concurrent
+                # creators of the same content cannot both store it (the
+                # loser reloads, sees the winner's fact, and is rejected
+                # here). A concurrent clear empties the snapshot; retrying
+                # with the new fence stores this brand-new fact_id.
                 _raise_if_duplicate_fact_content(memory_data, candidate_key)
                 updated_memory = dict(memory_data)
                 updated_memory["facts"], capacity_decision, shadow_decision = self._select_for_capacity(
@@ -1093,6 +1142,7 @@ class MemoryUpdater:
                         agent_name=agent_name,
                         user_id=user_id,
                         expected_manifest_revision=int(memory_data.get("revision") or 0),
+                        expected_clear_generation=captured_clear_generation,
                     )
                     self._record_capacity_decision(
                         capacity_decision,
@@ -1103,10 +1153,10 @@ class MemoryUpdater:
                     fresh_memory = self.reload_memory_data(agent_name, user_id=user_id)
                     stored = any(fact.get("id") == fact_id for fact in fresh_memory.get("facts", []))
                     return fresh_memory, (fact_id if stored else None)
-                except MemoryManifestRevisionConflict:
+                except (MemoryManifestRevisionConflict, MemoryClearGenerationConflict):
                     if attempt == 2:
                         raise
-                    logger.info("Retrying capped fact creation from a fresh snapshot after a revision conflict")
+                    logger.info("Retrying capped fact creation from a fresh snapshot after a revision or clear-generation conflict")
             raise AssertionError("bounded create retry did not return or raise")
         # Legacy single-file path: same duplicate-rejection contract as the
         # apply_changes path above. A revision-conflicted save (False) reloads
@@ -1198,6 +1248,7 @@ class MemoryUpdater:
                 agent_name=agent_name,
                 user_id=user_id,
                 expected_manifest_revision=int(global_memory.get("revision") or 0),
+                expected_clear_generation=scope_clear_generation(global_memory, agent_name),
                 allow_manifest_rebase=True,
             )
             return self.get_memory_data(agent_name, user_id=user_id)
@@ -1230,6 +1281,7 @@ class MemoryUpdater:
                 agent_name=agent_name,
                 user_id=user_id,
                 expected_manifest_revision=int(memory_data.get("revision") or 0),
+                expected_clear_generation=scope_clear_generation(memory_data, agent_name),
                 allow_manifest_rebase=True,
             )
             return self.get_memory_data(agent_name, user_id=user_id)
@@ -1378,7 +1430,8 @@ class MemoryUpdater:
         *,
         metrics: dict[str, Any] | None = None,
         signals: frozenset[str] = frozenset(),
-    ) -> bool:
+        expected_clear_generation: tuple[int, int] | None = None,
+    ) -> _CommitOutcome:
         """Parse the model response, apply updates, and persist memory."""
         update_data = _parse_memory_update_response(response_content)
         if metrics is not None:
@@ -1388,6 +1441,7 @@ class MemoryUpdater:
             # facts_passed_confidence / rejected_low_confidence are populated
             # inside _apply_updates at the real confidence-filter site, so the
             # metric tracks the actual filter rather than a re-derived copy here.
+        captured_clear_generation = expected_clear_generation if expected_clear_generation is not None else scope_clear_generation(current_memory, agent_name)
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             for attempt in range(3):
                 capacity_decisions: list[tuple[FactEvictionDecision, FactEvictionDecision | None]] = []
@@ -1395,7 +1449,9 @@ class MemoryUpdater:
                 # corrupt the cached snapshot. On a manifest conflict the
                 # complete extraction result is reapplied to a fresh document;
                 # its trim/consolidation/delete decisions are snapshot-wide and
-                # must never be replayed as disjoint point writes.
+                # must never be replayed as disjoint point writes. A newer clear
+                # generation is not a rebaseable conflict: retrying would restore
+                # facts the user just deleted.
                 updated_memory = self._apply_updates(
                     copy.deepcopy(current_memory),
                     update_data,
@@ -1427,6 +1483,7 @@ class MemoryUpdater:
                         agent_name=agent_name,
                         user_id=user_id,
                         expected_manifest_revision=int(current_memory.get("revision") or 0),
+                        expected_clear_generation=captured_clear_generation,
                     )
                     for decision, shadow_decision in capacity_decisions:
                         self._record_capacity_decision(
@@ -1435,7 +1492,14 @@ class MemoryUpdater:
                             agent_name=agent_name,
                             user_id=user_id,
                         )
-                    return True
+                    return _CommitOutcome.PERSISTED
+                except MemoryClearGenerationConflict:
+                    logger.info(
+                        "Dropping extracted memory update because a newer clear completed (user_id=%s agent_name=%s)",
+                        user_id,
+                        agent_name,
+                    )
+                    return _CommitOutcome.CONSUMED
                 except MemoryManifestRevisionConflict:
                     if attempt == 2:
                         raise
@@ -1470,7 +1534,7 @@ class MemoryUpdater:
                     agent_name=agent_name,
                     user_id=user_id,
                 )
-        return saved
+        return _CommitOutcome.PERSISTED if saved else _CommitOutcome.FAILED
 
     async def aupdate_memory(
         self,
@@ -1482,6 +1546,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -1500,6 +1565,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            expected_clear_generation=expected_clear_generation,
         )
 
     def _do_update_memory_sync(
@@ -1512,6 +1578,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
     ) -> bool:
         """Pure-sync memory update; bind ``trace_id`` into the request-trace
         ContextVar for the worker thread, then delegate to the impl.
@@ -1535,6 +1602,7 @@ class MemoryUpdater:
                     user_id=user_id,
                     trace_id=trace_id,
                     bypass_watermark=bypass_watermark,
+                    expected_clear_generation=expected_clear_generation,
                 )
         return self._do_update_memory_sync_impl(
             messages=messages,
@@ -1544,6 +1612,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            expected_clear_generation=expected_clear_generation,
         )
 
     def _watermark_get(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
@@ -1556,6 +1625,23 @@ class MemoryUpdater:
             return None
         self._watermarks.move_to_end(key)
         return self._watermarks[key]
+
+    def _mark_feed_consumed(
+        self,
+        watermark_key: tuple[str | None, str | None, str | None],
+        messages: list[Any],
+        *,
+        bypass_watermark: bool,
+    ) -> None:
+        """Advance the conversation watermark without claiming a persisted write.
+
+        Used when a newer clear drops extracted facts. The feed is consumed so
+        the next turn does not re-extract the same pre-clear messages against
+        the post-clear generation.
+        """
+        if bypass_watermark or not messages:
+            return
+        self._watermark_set(watermark_key, _message_identity(messages[-1]))
 
     def _watermark_set(
         self,
@@ -1607,6 +1693,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -1643,6 +1730,18 @@ class MemoryUpdater:
             if not feed_messages:
                 logger.debug("Memory update skipped: no new messages since watermark (thread=%s)", thread_id)
                 return True
+            if expected_clear_generation is not None:
+                current_generation = self.peek_clear_generation(agent_name, user_id=user_id)
+                if is_stale_clear_generation(expected_clear_generation, current_generation):
+                    logger.info(
+                        "Dropping memory extraction before LLM invocation because a newer clear completed (user_id=%s agent_name=%s expected=%s current=%s)",
+                        user_id,
+                        agent_name,
+                        expected_clear_generation,
+                        current_generation,
+                    )
+                    self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
+                    return False
             # Re-detect signals on the post-watermark feed so extraction hints
             # reference only turns the LLM will actually see. The admission-time
             # ``signals`` (detected on the full conversation in DeerMem) already
@@ -1706,7 +1805,7 @@ class MemoryUpdater:
                 started=started,
                 model_name=model_name,
             )
-            success = self._finalize_update(
+            outcome = self._finalize_update(
                 current_memory=current_memory,
                 response_content=response.content,
                 thread_id=thread_id,
@@ -1714,13 +1813,16 @@ class MemoryUpdater:
                 user_id=user_id,
                 metrics=metrics,
                 signals=frozenset(feed_signals),
+                expected_clear_generation=expected_clear_generation,
             )
-            if success and not bypass_watermark:
-                # Advance the watermark to the last message fed (the feed is a
-                # suffix, so this is messages[-1]). Skipped on the emergency
-                # path -- the subset's last message is older than the
-                # conversation's latest, so advancing from it would regress.
-                self._watermark_set(watermark_key, _message_identity(messages[-1]))
+            if outcome is _CommitOutcome.PERSISTED:
+                self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
+                success = True
+            elif outcome is _CommitOutcome.CONSUMED:
+                self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
+                success = False
+            else:
+                success = False
             return success
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
@@ -1786,6 +1888,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -1805,6 +1908,9 @@ class MemoryUpdater:
             signals: Signal classes detected in the conversation (correction /
                 reinforcement / preference / ...), used as extraction hints.
             user_id: If provided, scopes memory to a specific user.
+            expected_clear_generation: Fence token captured when the
+                conversation became pending work. A newer clear drops the
+                write. ``None`` falls back to the pre-LLM snapshot.
 
         Returns:
             True if the update persisted. False on any failure (no content,
@@ -1828,6 +1934,7 @@ class MemoryUpdater:
                     user_id=user_id,
                     trace_id=trace_id,
                     bypass_watermark=bypass_watermark,
+                    expected_clear_generation=expected_clear_generation,
                 )
                 return future.result()
             except Exception:
@@ -1842,6 +1949,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            expected_clear_generation=expected_clear_generation,
         )
 
     def _apply_updates(
