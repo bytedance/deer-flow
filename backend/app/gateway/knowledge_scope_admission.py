@@ -17,14 +17,14 @@ from deerflow.knowledge_scope import (
 RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER = "deerflow.community.ragflow.tools:knowledge_search_tool"
 
 
-def custom_agent_supports_knowledge_scope(
+def assistant_supports_knowledge_scope(
     *,
     assistant_id: str | None,
     app_config: Any,
     agent_config: Any | None,
 ) -> bool:
-    """Return whether this exact custom-agent/provider pairing is supported."""
-    if not assistant_id or assistant_id == "lead_agent" or agent_config is None:
+    """Return whether this exact assistant/provider pairing is supported."""
+    if not assistant_id:
         return False
     knowledge_base = getattr(app_config, "knowledge_base", None)
     if not getattr(knowledge_base, "enabled", False):
@@ -32,6 +32,12 @@ def custom_agent_supports_knowledge_scope(
     get_tool_config = getattr(app_config, "get_tool_config", None)
     tool = get_tool_config("knowledge_search") if callable(get_tool_config) else None
     if getattr(tool, "use", None) != RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER:
+        return False
+    # The main assistant has no custom-agent config row. Its knowledge tool is
+    # controlled solely by the app-level provider configuration.
+    if assistant_id == "lead_agent":
+        return True
+    if agent_config is None:
         return False
     tool_groups = getattr(agent_config, "tool_groups", None)
     return tool_groups is None or "knowledge" in tool_groups
@@ -100,7 +106,7 @@ def admit_message_knowledge_scope(
 
     canonical: dict[str, Any] | None = None
     if raw_scope is not None:
-        if not custom_agent_supports_knowledge_scope(
+        if not assistant_supports_knowledge_scope(
             assistant_id=assistant_id,
             app_config=app_config,
             agent_config=agent_config,

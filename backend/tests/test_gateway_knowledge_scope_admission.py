@@ -63,7 +63,6 @@ def test_admission_canonicalizes_custom_agent_human_message() -> None:
     ("assistant_id", "provider", "tool_groups"),
     [
         (None, "deerflow.community.ragflow.tools:knowledge_search_tool", None),
-        ("lead_agent", "deerflow.community.ragflow.tools:knowledge_search_tool", None),
         ("agent", "deerflow.community.lightrag.tools:knowledge_search_tool", None),
         ("agent", "deerflow.community.ragflow.tools:knowledge_search_tool", []),
         ("agent", "deerflow.community.ragflow.tools:knowledge_search_tool", ["web"]),
@@ -90,6 +89,24 @@ def test_scope_is_rejected_outside_supported_custom_agent(
         )
 
     assert exc_info.value.status_code == 422
+
+
+def test_admission_accepts_main_agent_with_configured_ragflow_provider() -> None:
+    graph_input = _input(
+        HumanMessage(
+            content="question",
+            additional_kwargs={KNOWLEDGE_SCOPE_KEY: {"version": 1, "mode": "all"}},
+        )
+    )
+
+    admitted = admit_message_knowledge_scope(
+        graph_input,
+        assistant_id="lead_agent",
+        app_config=_app_config(),
+        agent_config=None,
+    )
+
+    assert admitted == {"version": 1, "mode": "all"}
 
 
 def test_scope_on_non_human_or_multiple_humans_is_rejected() -> None:
