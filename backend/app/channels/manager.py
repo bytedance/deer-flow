@@ -1563,7 +1563,9 @@ class ChannelManager:
         policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
         if policy is None:
             return None
-        if not policy.is_interactive:
+        if policy.interaction_mode is not None:
+            run_context["run_interaction_mode"] = policy.interaction_mode
+        elif not policy.is_interactive:
             run_context["disable_clarification"] = True
         if policy.credentials_provider is not None:
             try:

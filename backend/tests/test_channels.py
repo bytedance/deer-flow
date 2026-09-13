@@ -57,6 +57,48 @@ def test_strip_leading_mentions_only_drops_flush_leading_mentions():
     assert not is_known_channel_command("@bot /goal")
 
 
+def test_channel_policy_explicit_interaction_mode_overrides_legacy_flag(tmp_path):
+    from app.channels.manager import ChannelManager
+    from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+    channel_name = "policy-explicit-interactive"
+    previous = CHANNEL_RUN_POLICY.get(channel_name)
+    CHANNEL_RUN_POLICY[channel_name] = ChannelRunPolicy(is_interactive=False, interaction_mode="interactive")
+    try:
+        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=tmp_path / "store.json"))
+        msg = InboundMessage(channel_name=channel_name, chat_id="chat", user_id="user", text="hello")
+        context: dict[str, object] = {}
+        asyncio.run(manager._apply_channel_policy(msg, context))
+        assert context["run_interaction_mode"] == "interactive"
+        assert "disable_clarification" not in context
+    finally:
+        if previous is None:
+            CHANNEL_RUN_POLICY.pop(channel_name, None)
+        else:
+            CHANNEL_RUN_POLICY[channel_name] = previous
+
+
+def test_channel_policy_legacy_noninteractive_remains_supported(tmp_path):
+    from app.channels.manager import ChannelManager
+    from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+    channel_name = "policy-legacy-noninteractive"
+    previous = CHANNEL_RUN_POLICY.get(channel_name)
+    CHANNEL_RUN_POLICY[channel_name] = ChannelRunPolicy(is_interactive=False)
+    try:
+        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=tmp_path / "store.json"))
+        msg = InboundMessage(channel_name=channel_name, chat_id="chat", user_id="user", text="hello")
+        context: dict[str, object] = {}
+        asyncio.run(manager._apply_channel_policy(msg, context))
+        assert context["disable_clarification"] is True
+        assert "run_interaction_mode" not in context
+    finally:
+        if previous is None:
+            CHANNEL_RUN_POLICY.pop(channel_name, None)
+        else:
+            CHANNEL_RUN_POLICY[channel_name] = previous
+
+
 def _make_channel_skill(tmp_path: Path, name: str, *, enabled: bool = True) -> Skill:
     skill_dir = tmp_path / name
     skill_dir.mkdir(parents=True, exist_ok=True)
