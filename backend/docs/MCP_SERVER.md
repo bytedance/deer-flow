@@ -199,6 +199,14 @@ backward compatibility. Disable it only when every resulting tool name remains
 unique across the enabled servers. Stdio tools continue to use DeerFlow's
 persistent per-thread session pool regardless of this setting.
 
+Session reuse also requires the same owning event loop. Parallel synchronous
+tool calls from the embedded client use separate loops and separate stdio
+sessions, so they can finish independently without cancelling a sibling's
+connection. They do not share server-side state. The synchronous wrapper closes
+its loop after each call; use the asynchronous path on a shared loop when
+session continuity is required. Explicit pool cleanup covers all loops for the
+selected server/thread scope.
+
 ## Server Timeouts
 
 Two independent settings bound stdio MCP servers and durable HTTP/SSE task

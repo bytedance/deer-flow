@@ -5,8 +5,9 @@ each tool call creates a new MCP session. For stateful servers like Playwright,
 this means browser state (opened pages, filled forms) is lost between calls.
 
 This module provides a session pool that maintains persistent MCP sessions,
-scoped by ``(server_name, scope_key)`` — typically scope_key is the thread_id —
-so that consecutive tool calls share the same session and server-side state.
+scoped by ``(server_name, scope_key, owning_loop)``. Consecutive calls on
+the same loop share server-side state; independent loops use separate sessions.
+The sync wrapper uses a fresh loop per call, so it does not preserve that state.
 Sessions are evicted in LRU order when the pool reaches capacity.
 
 Lifecycle model (owner task)
@@ -120,7 +121,7 @@ async def call_pooled_session_tool(
 
 
 class MCPSessionPool:
-    """Manages persistent MCP sessions scoped by ``(server_name, scope_key)``."""
+    """Manages persistent MCP sessions scoped by ``(server_name, scope_key, owning_loop)``."""
 
     MAX_SESSIONS = 256
     SESSION_CLOSE_TIMEOUT = 5.0  # seconds to wait when closing a session on a foreign loop
@@ -128,7 +129,7 @@ class MCPSessionPool:
     def __init__(self) -> None:
         # Each entry: (session, owning_loop, owner_task, close_event).
         self._entries: OrderedDict[
-            tuple[str, str],
+            tuple[str, str, asyncio.AbstractEventLoop],
             tuple[
                 ClientSession,
                 asyncio.AbstractEventLoop,
@@ -136,7 +137,7 @@ class MCPSessionPool:
                 asyncio.Event,
             ],
         ] = OrderedDict()
-        # In-flight creations, keyed by (server, scope). Lets concurrent callers
+        # In-flight creations, keyed by (server, scope, owning_loop). Lets concurrent callers
         # on the same loop share a single creation instead of each spawning a
         # duplicate session. Value: (loop, ready_future, owner_task, close_event).
         # The owner task promotes the record into ``_entries`` and resolves
@@ -144,7 +145,7 @@ class MCPSessionPool:
         # ``_run_session``), so ``ready`` resolving with a *result* always means
         # the session is registered — never merely handed to one caller.
         self._inflight: dict[
-            tuple[str, str],
+            tuple[str, str, asyncio.AbstractEventLoop],
             tuple[
                 asyncio.AbstractEventLoop,
                 asyncio.Future[ClientSession],
@@ -166,9 +167,19 @@ class MCPSessionPool:
     # Session owner task
     # ------------------------------------------------------------------
 
+    def _discard_owner(self, key: tuple[str, str, asyncio.AbstractEventLoop], owner: asyncio.Task[Any]) -> None:
+        """Retire only this owner, including after asyncio.run shuts its loop down."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and entry[2] is owner:
+                self._entries.pop(key)
+            inflight = self._inflight.get(key)
+            if inflight is not None and inflight[2] is owner:
+                self._inflight.pop(key)
+
     async def _run_session(
         self,
-        key: tuple[str, str],
+        key: tuple[str, str, asyncio.AbstractEventLoop],
         connection: dict[str, Any],
         ready: asyncio.Future[ClientSession],
         close_evt: asyncio.Event,
@@ -261,9 +272,8 @@ class MCPSessionPool:
     ) -> ClientSession:
         """Get or create a persistent MCP session.
 
-        If an existing session was created in a different (or closed) event
-        loop, it is evicted and replaced with a fresh one owned by a task on
-        the current loop.
+        Reuse sessions and in-flight creations only on the current loop.
+        Other live loops retain their own independent sessions.
 
         Args:
             server_name: MCP server name.
@@ -273,8 +283,8 @@ class MCPSessionPool:
         Returns:
             An initialized ``ClientSession``.
         """
-        key = (server_name, scope_key)
         current_loop = asyncio.get_running_loop()
+        key = (server_name, scope_key, current_loop)
 
         # Phase 1: inspect/mutate the registry under the thread lock (no awaits).
         # Decide one of three outcomes atomically: return an existing session,
@@ -292,34 +302,24 @@ class MCPSessionPool:
         task: asyncio.Task[Any] | None = None
         with self._lock:
             if key in self._entries:
-                session, loop, ent_task, ent_close = self._entries[key]
-                if loop is current_loop and not loop.is_closed():
+                session, _loop, ent_task, _ent_close = self._entries[key]
+                if not ent_task.done():
                     self._entries.move_to_end(key)
                     return session
-                # Session belongs to a different/closed event loop – evict it.
                 self._entries.pop(key)
-                evicted.append((loop, ent_task, ent_close, False, None))
 
             inflight = self._inflight.get(key)
-            if inflight is not None and inflight[0] is current_loop and not inflight[0].is_closed():
-                # Another caller on this loop is already creating the session;
-                # wait for the same result instead of building a duplicate.
+            if inflight is not None:
+                # Only callers on this same loop share the creation future.
                 join = inflight[1]
             else:
-                if inflight is not None:
-                    # Stale in-flight creation owned by a different/closed loop.
-                    # Drop the record and tear its owner down; because that owner
-                    # may be blocked inside initialize() (where close_evt cannot
-                    # wake it), it must be cancelled. We then create a fresh
-                    # session here.
-                    self._inflight.pop(key)
-                    evicted.append((inflight[0], inflight[2], inflight[3], True, inflight[1]))
                 # Become the creator: publish an in-flight record before any
                 # await so concurrent callers join us instead of racing.
                 ready = current_loop.create_future()
                 close_evt = asyncio.Event()
                 task = current_loop.create_task(self._run_session(key, connection, ready, close_evt))
                 self._inflight[key] = (current_loop, ready, task, close_evt)
+                task.add_done_callback(lambda owner: self._discard_owner(key, owner))
 
             # Evict LRU entries when at capacity.
             while len(self._entries) >= self.MAX_SESSIONS:
@@ -634,12 +634,13 @@ class MCPSessionPool:
         await self._close_owners(entries, inflight)
 
     async def close_session(self, server_name: str, scope_key: str) -> None:
-        """Close one exact server/scope session so a retry reconnects cleanly."""
-        key = (server_name, scope_key)
+        """Close every session for this server/scope across all owning loops."""
         with self._lock:
-            entry = self._entries.pop(key, None)
-            inflight = self._inflight.pop(key, None)
-        await self._close_owners([entry] if entry is not None else [], [inflight] if inflight is not None else [])
+            keys = [k for k in self._entries if k[:2] == (server_name, scope_key)]
+            entries = [self._entries.pop(k) for k in keys]
+            keys = [k for k in self._inflight if k[:2] == (server_name, scope_key)]
+            inflight = [self._inflight.pop(k) for k in keys]
+        await self._close_owners(entries, inflight)
 
     async def close_session_if_current(
         self,
@@ -648,12 +649,11 @@ class MCPSessionPool:
         session: ClientSession,
     ) -> bool:
         """Close *session* only if it is still the registered entry for the key."""
-        key = (server_name, scope_key)
         with self._lock:
-            entry = self._entries.get(key)
-            if entry is None or entry[0] is not session:
+            key = next((k for k, entry in self._entries.items() if k[:2] == (server_name, scope_key) and entry[0] is session), None)
+            if key is None:
                 return False
-            self._entries.pop(key)
+            entry = self._entries.pop(key)
         _session, loop, task, close_evt = entry
         await self._shutdown_entry(loop, task, close_evt)
         return True
