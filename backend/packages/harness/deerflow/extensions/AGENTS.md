@@ -284,8 +284,13 @@ scope-bound cursor over `(change_seq, run_id)`; a run that changes after it was 
 be replayed, but an unreturned run cannot be skipped. Legacy rows start at `change_seq=0`
 and sort by run id. A DB run store preserves positions across restarts, while memory only
 provides process-lifetime ordering. Per-run events retain the event store's thread-scoped
-`after_seq` semantics and are metadata-redacted; status comes from the authoritative run
-store. Empty pages mean caught up or not visible, never unsupported -- absence is represented
+`after_seq` semantics; metadata is secret-redacted, but event content is returned unchanged,
+and status comes from the authoritative run store. The production Gateway injects one
+app-scoped reader with `user_id=None`, deliberately granting trusted operator extensions
+global cross-user visibility because services have no request principal. A host embedding
+the harness may instead bind a reader to one user. This is not a sandbox boundary: services
+already retain `session_factory` and execute with Gateway privileges. Empty pages mean
+caught up or not visible, never unsupported -- absence is represented
 by `ExtensionRuntimeDeps.run_evidence_reader is None`, and protocol defaults raise
 `NotImplementedError`. Start failures are attributed and
 fail open. The runtime captures `app.state.extensions` once, registers cleanup before the

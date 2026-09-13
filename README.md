@@ -1098,7 +1098,9 @@ opaque resumable cursor, pages a known run's persisted events with `after_seq`, 
 authoritative run status separately from event evidence. A database-backed run store keeps
 the discovery cursor valid across Gateway restarts; the memory run store provides the same
 ordering only for the current process lifetime. Event metadata is secret-redacted at this
-boundary. Extensions still execute with Gateway privileges and retain the legacy
+boundary, but event content is returned unchanged. The production Gateway supplies an
+app-scoped, cross-user reader to trusted operator extensions; an embedded host may bind the
+same adapter to one user. Extensions still execute with Gateway privileges and retain the legacy
 `session_factory`, so the reader is an API-stability and least-accidental-privilege boundary,
 not a sandbox for untrusted Python packages. Extension HTTP
 routers are mounted after every host route; definite shadows and routes entering the

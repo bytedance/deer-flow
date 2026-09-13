@@ -239,7 +239,6 @@ class MemoryRunStore(RunStore):
                 if value is not None:
                     self._runs[run_id][key] = value
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
-            self._mark_changed(self._runs[run_id])
 
     async def list_pending(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()

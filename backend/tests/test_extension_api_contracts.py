@@ -146,9 +146,10 @@ def test_every_protocol_method_has_a_default_implementation(protocol):
             continue
         checked += 1
         body = inspect.getsource(member).split("\n", 1)[1]
-        assert "return" in body or "raise NotImplementedError" in body, (
-            f"{protocol.__name__}.{name} has no default implementation. Adding a contract method is only additive when it returns a default or explicitly reports unsupported; otherwise every already-released extension breaks on upgrade."
-        )
+        if protocol is RunEvidenceReader:
+            assert "raise NotImplementedError" in body
+        else:
+            assert "return" in body, f"{protocol.__name__}.{name} has no default implementation. Adding a contract method is only additive when it returns a default; otherwise every already-released extension breaks on upgrade."
     assert checked > 0, f"{protocol.__name__} declared no methods to check"
 
 

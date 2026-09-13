@@ -492,7 +492,6 @@ class RunRepository(RunStore):
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
         async with self._sf() as session:
-            values["change_seq"] = await self._next_change_seq(session)
             await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
             await session.commit()
 
@@ -806,6 +805,10 @@ class RunRepository(RunStore):
         }
 
         async with self._sf() as session:
+            # Keep the global clock -> run-row lock order used by every other
+            # mutator. One position covers this atomic set of changes; run_id
+            # provides deterministic ordering within the position.
+            change_seq = await self._next_change_seq(session)
             claimed: list[dict[str, Any]] = []
 
             if multitask_strategy in ("interrupt", "rollback"):
@@ -846,10 +849,10 @@ class RunRepository(RunStore):
                     row.error = "Cancelled by newer run"
                     row.owner_worker_id = owner_worker_id
                     row.updated_at = now
-                    row.change_seq = await self._next_change_seq(session)
+                    row.change_seq = change_seq
                     claimed.append(self._row_to_dict(row))
 
-            values["change_seq"] = await self._next_change_seq(session)
+            values["change_seq"] = change_seq
             session.add(RunRow(run_id=run_id, **values))
             try:
                 await session.commit()

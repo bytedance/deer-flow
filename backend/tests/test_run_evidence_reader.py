@@ -93,6 +93,21 @@ async def test_reader_hides_runs_outside_scope_and_rejects_cursor_from_another_s
 
 
 @pytest.mark.asyncio
+async def test_memory_progress_updates_do_not_advance_changed_run_cursor():
+    runs = MemoryRunStore()
+    reader = StoreRunEvidenceReader(runs, MemoryRunEventStore(), user_id="user-1")
+    await _put_run(runs, "run-a", "thread-a")
+    await runs.start_run("run-a")
+    before_progress = await reader.list_changed_runs(cursor=None, limit=10)
+
+    await runs.update_run_progress("run-a", total_tokens=10, last_ai_message="working")
+
+    after_progress = await reader.list_changed_runs(cursor=before_progress.next_cursor, limit=10)
+    assert after_progress.items == ()
+    assert after_progress.next_cursor == before_progress.next_cursor
+
+
+@pytest.mark.asyncio
 async def test_sql_changed_run_cursor_survives_repository_restart(tmp_path):
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
     from deerflow.persistence.run import RunRepository
@@ -120,6 +135,76 @@ async def test_sql_changed_run_cursor_survives_repository_restart(tmp_path):
         assert [item.run_id for item in page.items] == ["run-b"]
     finally:
         await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_sql_progress_updates_do_not_advance_changed_run_cursor(tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run import RunRepository
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'progress.db'}")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        repo = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
+        await repo.put("run-a", thread_id="thread-a", user_id="user-1")
+        await repo.start_run("run-a")
+        reader = StoreRunEvidenceReader(repo, MemoryRunEventStore(), user_id="user-1")
+        before_progress = await reader.list_changed_runs(cursor=None, limit=10)
+
+        await repo.update_run_progress("run-a", total_tokens=10, last_ai_message="working")
+
+        after_progress = await reader.list_changed_runs(cursor=before_progress.next_cursor, limit=10)
+        assert after_progress.items == ()
+        assert after_progress.next_cursor == before_progress.next_cursor
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_atomic_interrupt_allocates_before_run_lock_and_shares_position(tmp_path):
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run import RunRepository
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'atomic.db'}")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        repo = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
+        await repo.put(
+            "run-old",
+            thread_id="thread-a",
+            user_id="user-1",
+            status="running",
+            owner_worker_id="worker-1",
+        )
+        statements: list[str] = []
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def capture_statement(_connection, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(" ".join(statement.lower().split()))
+
+        new_run, claimed = await repo.create_thread_operation_atomic(
+            "run-new",
+            thread_id="thread-a",
+            user_id="user-1",
+            owner_worker_id="worker-1",
+            lease_expires_at=None,
+            multitask_strategy="interrupt",
+        )
+
+        assert [run["run_id"] for run in claimed] == ["run-old"]
+        assert claimed[0]["change_seq"] == new_run["change_seq"]
+        clock_update = next(index for index, statement in enumerate(statements) if statement.startswith("update run_change_clock"))
+        run_lock_query = next(index for index, statement in enumerate(statements) if statement.startswith("select runs."))
+        assert clock_update < run_lock_query
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

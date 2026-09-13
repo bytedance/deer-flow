@@ -487,9 +487,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         from deerflow.extensions.run_evidence import StoreRunEvidenceReader
 
+        # Gateway-lifetime services are trusted operator extensions without a
+        # request principal. None deliberately binds this app-scoped reader to
+        # global, cross-user visibility; event content is not secret-redacted.
         app.state.run_evidence_reader = StoreRunEvidenceReader(
             app.state.run_store,
             app.state.run_event_store,
+            user_id=None,
         )
 
         # Services are app-scoped. Capture this app's immutable extension set
