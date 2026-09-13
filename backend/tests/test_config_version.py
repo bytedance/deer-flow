@@ -12,6 +12,20 @@ import yaml
 from support.shell import find_script_bash
 
 from deerflow.config.app_config import AppConfig
+from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
+
+
+def test_knowledge_base_config_is_provider_agnostic() -> None:
+    assert set(KnowledgeBaseConfig.model_fields) == {"enabled", "scope_selection_enabled"}
+    config = KnowledgeBaseConfig.model_validate(
+        {
+            "enabled": True,
+            "scope_selection_enabled": True,
+            "base_url": "http://legacy-ragflow.test",
+            "api_key": "legacy-secret",
+        }
+    )
+    assert config.model_dump() == {"enabled": True, "scope_selection_enabled": True}
 
 # Only the upgrade-script test shells out; it needs Git Bash on Windows (the
 # WSL launcher and Store alias stubs cannot run the repo scripts).

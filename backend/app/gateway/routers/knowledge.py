@@ -10,10 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
-from app.gateway.knowledge_scope_admission import (
-    RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER,
-    custom_agent_supports_knowledge_scope,
-)
+from app.gateway.knowledge_scope_admission import custom_agent_supports_knowledge_scope
 from deerflow.community.ragflow.client import (
     RAGFlowAPIError,
     RAGFlowConnectionError,
@@ -67,7 +64,6 @@ async def _catalog_result[Result](operation: Awaitable[Result]) -> Result:
 
 def _scope_catalog(config: AppConfig, agent_name: str):
     knowledge_base = config.knowledge_base
-    tool = config.get_tool_config("knowledge_search")
     try:
         agent_config = load_agent_config(
             agent_name,
@@ -78,7 +74,6 @@ def _scope_catalog(config: AppConfig, agent_name: str):
     if (
         not knowledge_base.enabled
         or not knowledge_base.scope_selection_enabled
-        or getattr(tool, "use", None) != RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
         or not custom_agent_supports_knowledge_scope(
             assistant_id=agent_name,
             app_config=config,
