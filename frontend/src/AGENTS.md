@@ -23,7 +23,11 @@
    Storage events refresh from the server without echo-writing unchanged data;
    failed reads and writes retry with capped backoff and focus/online wakeups.
    Legacy unscoped settings are never automatically uploaded. Display settings
-   and thread model overrides remain local. InputBox marks automatic model/mode
+   and thread model overrides remain local. Shared local-only fields still merge
+   across tabs on storage changes/removal/clear, preserving account preferences.
+   Explicit InputBox selections pass only fields changed by the action, so a
+   mode/effort edit cannot upload an unrelated thread model override.
+   InputBox marks automatic model/mode
    resolution separately from user choices on both normal and Custom Agent chat
    pages; `resolveThreadContext` must neither
    enqueue account writes nor create a fallback thread override that masks a

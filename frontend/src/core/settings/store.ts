@@ -129,6 +129,23 @@ function mergeSettingsSection<K extends keyof LocalSettings>(
   };
 }
 
+function readSharedSettings(): LocalSettings {
+  const local = getLocalSettings();
+  if (!preferenceEdit) return local;
+  // Device-local fields still follow other tabs, including key removal and
+  // storage.clear(). The legacy key must never replace account preferences.
+  return {
+    ...local,
+    notification: baseSettings.notification,
+    context: {
+      ...local.context,
+      model_name: baseSettings.context.model_name,
+      mode: baseSettings.context.mode,
+      reasoning_effort: baseSettings.context.reasoning_effort,
+    },
+  };
+}
+
 function handleStorage(event: StorageEvent) {
   if (event.storageArea && event.storageArea !== localStorage) {
     return;
@@ -137,14 +154,14 @@ function handleStorage(event: StorageEvent) {
   ensureBaseSettingsLoaded();
 
   if (event.key === null) {
-    if (!preferenceEdit) baseSettings = getLocalSettings();
+    baseSettings = readSharedSettings();
     threadModelNames.clear();
     emitChange();
     return;
   }
 
   if (event.key === LOCAL_SETTINGS_KEY) {
-    if (!preferenceEdit) baseSettings = getLocalSettings();
+    baseSettings = readSharedSettings();
     emitChange();
     return;
   }

@@ -6,6 +6,7 @@ import { renderToString } from "react-dom/server";
 
 import {
   DEFAULT_LOCAL_SETTINGS,
+  getLocalSettings,
   LOCAL_SETTINGS_KEY,
 } from "@/core/settings/local";
 import {
@@ -57,6 +58,76 @@ afterEach(() => {
 });
 
 describe("authenticated workspace preferences", () => {
+  it.each(["write", "remove", "clear"] as const)(
+    "merges local-only settings on a cross-tab %s without changing account preferences",
+    async (operation) => {
+      const account = {
+        notification_enabled: false,
+        model_name: "account-model",
+        mode: "pro",
+        reasoning_effort: "high",
+      };
+      mocks.fetch.mockImplementation(async () => Response.json(account));
+      render(<Workspace />);
+      await screen.findByText("false:account-model:pro");
+      act(() => {
+        updateLocalSettings("projectsDisplayMode", "grouped");
+        updateLocalSettings("tokenUsage", {
+          headerTotal: false,
+          inlineMode: "off",
+        });
+      });
+      act(() => {
+        if (operation === "write") {
+          localStorage.setItem(
+            LOCAL_SETTINGS_KEY,
+            JSON.stringify({
+              projectsDisplayMode: "flat",
+              tokenUsage: { headerTotal: true, inlineMode: "per_turn" },
+              notification: { enabled: true },
+              context: {
+                model_name: "legacy-model",
+                mode: "flash",
+                reasoning_effort: "low",
+              },
+            }),
+          );
+        } else if (operation === "remove") {
+          localStorage.removeItem(LOCAL_SETTINGS_KEY);
+        } else {
+          localStorage.clear();
+        }
+        window.dispatchEvent(
+          new StorageEvent("storage", {
+            key: operation === "clear" ? null : LOCAL_SETTINGS_KEY,
+            storageArea: localStorage,
+          }),
+        );
+      });
+      expect(getBaseSettingsSnapshot()).toMatchObject({
+        projectsDisplayMode: "flat",
+        tokenUsage: { headerTotal: true, inlineMode: "per_turn" },
+        notification: { enabled: false },
+        context: {
+          model_name: "account-model",
+          mode: "pro",
+          reasoning_effort: "high",
+        },
+      });
+      // A later unrelated write must not restore the stale display setting.
+      act(() => updateLocalSettings("tokenUsage", { headerTotal: false }));
+      expect(getLocalSettings().projectsDisplayMode).toBe("flat");
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(
+        mocks.fetch.mock.calls.every(([, init]) => init.method === "GET"),
+      ).toBe(true);
+      expect(
+        sessionStorage.getItem("deerflow.preferences.alice.pending"),
+      ).toBeNull();
+    },
+  );
   it("hydrates server HTML from the correct account cache without mismatches", async () => {
     localStorage.setItem(
       LOCAL_SETTINGS_KEY,
