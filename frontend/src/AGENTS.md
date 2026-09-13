@@ -104,7 +104,10 @@ source turn's scope server-side. Expanding a selected dataset while it still
 uses all searchable files must not load its document catalog; switching that
 dataset to selected-files mode enables the paginated document query. History
 renders only saved plain-text labels/counts and never resolves the current
-catalog.
+catalog. Custom-agent streams send the stable agent name as both
+`assistant_id` and `context.agent_name`, so Gateway scope admission and runtime
+agent loading use the same identity. Default chat, sidecar, and agent-creation
+streams continue to use `lead_agent`.
 
 `/goal` and `/compact` are built-in composer commands, not skill activations. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. On a project-scoped new chat (`/workspace/chats/new?project=…`), the chat page's project pre-create runs before the goal PUT via the composer's `onPrepareThread` callback: the goal endpoint materializes a missing thread row itself, and an unassigned row would make the later idempotent thread create return it without assigning the project. Goal and compact requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight requests and stale responses cannot update the new thread's composer state. The chat pages render `GoalStatus` above the composer from `AgentThreadState.goal`, with local optimistic state until an incremental goal update or final state reload arrives. `/compact` calls `POST /api/threads/{thread_id}/compact` to summarize older active context while leaving the full visible chat history intact; it is skipped on new/empty threads and blocked server-side while a run is in flight. Thread rename uses the same serialized state-write route; the rename dialog stays open and surfaces the server error when an active run returns 409.
 

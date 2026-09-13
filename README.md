@@ -1052,6 +1052,10 @@ allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,
 `page_size`, thresholds, and output limits) must be configured on the
 `tools[].name: knowledge_search` entry; they are never read from
 `knowledge_base`.
+Custom-agent chat requests carry the selected agent name as both `assistant_id`
+and `context.agent_name`, so Gateway scope admission and runtime agent loading
+use the same identity. Default chat and sidecar requests continue to use
+`lead_agent` and do not submit a knowledge scope.
 When answering a pending clarification, an explicitly submitted current
 selector snapshot wins; clients that omit it inherit the prior turn's accepted
 scope. Edit-and-regenerate follows the same fallback, and the file catalog is
