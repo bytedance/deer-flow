@@ -25,6 +25,20 @@ preference hints for requests that should prefer a specific MCP server or tool.
 See [MCP Server Configuration](MCP_SERVER.md#routing-hints) for the schema,
 example, and soft-vs-hard routing boundary.
 
+### Recursion Limits
+
+Gateway runs use the top-level `recursion_limit` as their LangGraph super-step
+budget when the request does not include an explicit value. It defaults to
+`100`; raise it for deployments whose normal tasks need longer agent loops.
+Valid request values take precedence, while invalid values fall back to the
+configured default. `max_recursion_limit` (default `1000`) caps both sources to
+limit runaway LLM cost. Both settings are read per run, so changes apply to the
+next request without a Gateway restart.
+
+These settings apply to Gateway API runs. IM channel runs and embedded
+`DeerFlowClient` runs retain their own defaults and can be overridden through
+their channel/client-specific configuration or per-call options.
+
 ### Models
 
 Configure the LLM models available to the agent:
