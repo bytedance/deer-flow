@@ -345,6 +345,9 @@ class _IntegrationRunManager:
     async def cleanup(self, *_args, **_kwargs):
         return None
 
+    def schedule_cleanup(self, *_args, **_kwargs) -> None:
+        return None
+
 
 def _collect_ids(payload: object) -> set[str]:
     """All string ``id`` values anywhere in a serialized stream payload."""
