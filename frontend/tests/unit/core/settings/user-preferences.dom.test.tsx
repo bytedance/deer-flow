@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useSyncExternalStore } from "react";
+import { hydrateRoot, type Root } from "react-dom/client";
+import { renderToString } from "react-dom/server";
 
 import {
   DEFAULT_LOCAL_SETTINGS,
@@ -55,6 +57,42 @@ afterEach(() => {
 });
 
 describe("authenticated workspace preferences", () => {
+  it("hydrates server HTML from the correct account cache without mismatches", async () => {
+    localStorage.setItem(
+      LOCAL_SETTINGS_KEY,
+      JSON.stringify({ context: { model_name: "legacy-other-account" } }),
+    );
+    localStorage.setItem(
+      "deerflow.preferences.alice",
+      JSON.stringify({
+        notification_enabled: false,
+        model_name: "alice-cached",
+      }),
+    );
+    mocks.fetch.mockImplementation(
+      () => new Promise<Response>(() => undefined),
+    );
+    const container = document.createElement("div");
+    container.innerHTML = renderToString(<Workspace />);
+    expect(container.textContent).toBe("true:default:default");
+    document.body.appendChild(container);
+    const errors: unknown[] = [];
+    let root!: Root;
+    try {
+      await act(async () => {
+        root = hydrateRoot(container, <Workspace />, {
+          onRecoverableError: (error) => {
+            errors.push(error);
+          },
+        });
+      });
+      expect(container.textContent).toBe("false:alice-cached:default");
+      expect(errors).toEqual([]);
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
   it("does not upload automatic model fallback or mask a later server model", async () => {
     let finish!: (response: Response) => void;
     mocks.fetch.mockImplementation(
