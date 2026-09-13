@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -39,10 +41,24 @@ def _windows_python_shim_dir() -> str | None:
         shim_dir = tempfile.mkdtemp(prefix="dev-entrypoint-python-shim-")
         for name in ("python3", "python"):
             shim = Path(shim_dir) / name
-            shim.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n', encoding="utf-8")
+            # newline="\n": the default newline=None would write CRLF on
+            # Windows, gluing a stray \r onto the shim's last argument.
+            shim.write_text(
+                f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
+                encoding="utf-8",
+                newline="\n",
+            )
             shim.chmod(0o755)
         _PYTHON_SHIM_DIR = shim_dir
     return _PYTHON_SHIM_DIR
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _cleanup_python_shim_dir() -> Iterator[None]:
+    """Remove the session-scoped python shim directory after the module."""
+    yield
+    if _PYTHON_SHIM_DIR is not None:
+        shutil.rmtree(_PYTHON_SHIM_DIR, ignore_errors=True)
 
 
 def _run(
@@ -250,7 +266,8 @@ def _run_sync_block(tmp_path: Path, stub_uv: str) -> subprocess.CompletedProcess
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     uv_stub = bin_dir / "uv"
-    uv_stub.write_text(stub_uv, encoding="utf-8")
+    # newline="\n": keep the stub POSIX-sh clean on Windows (no stray \r).
+    uv_stub.write_text(stub_uv, encoding="utf-8", newline="\n")
     uv_stub.chmod(0o755)
 
     state_dir = tmp_path / "state"

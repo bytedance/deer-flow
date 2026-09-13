@@ -19,25 +19,46 @@ from pathlib import Path
 import pytest
 
 
-def find_script_bash() -> str | None:
-    """Return a bash able to run the repo's shell scripts, or ``None``."""
-    if os.name != "nt":
-        return shutil.which("bash")
-
+def _script_bash_candidates(git: str | None, program_files: str | None, path_bash: str | None) -> list[Path]:
+    """Build the ordered bash candidate list for Windows hosts."""
     candidates: list[Path] = []
-    git = shutil.which("git")
     if git is not None:
         # Git for Windows layout: <root>/cmd/git.exe (or <root>/bin/git.exe)
         # both resolve to <root>/bin/bash.exe two levels up from git's parent.
         candidates.append(Path(git).resolve().parent.parent / "bin" / "bash.exe")
-    program_files = os.environ.get("ProgramFiles")
     if program_files:
         candidates.append(Path(program_files) / "Git" / "bin" / "bash.exe")
-    bash = shutil.which("bash")
-    if bash is not None:
-        candidates.append(Path(bash))
+    if path_bash is not None:
+        candidates.append(Path(path_bash))
+    return candidates
 
-    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+
+def _script_sh_candidates(git: str | None, program_files: str | None) -> list[Path]:
+    """Build the ordered POSIX-sh candidate list for Windows hosts.
+
+    Git for Windows ships a real ``sh.exe`` at ``<root>/bin/sh.exe`` (and
+    ``<root>/usr/bin/sh.exe``); preferring it over bash lets ``#!/bin/sh``
+    scripts run under an actual sh, like the POSIX CI legs.
+    """
+    candidates: list[Path] = []
+    if git is not None:
+        git_root = Path(git).resolve().parent.parent
+        candidates.append(git_root / "bin" / "sh.exe")
+        candidates.append(git_root / "usr" / "bin" / "sh.exe")
+    if program_files:
+        program_files_git = Path(program_files) / "Git"
+        candidates.append(program_files_git / "bin" / "sh.exe")
+        candidates.append(program_files_git / "usr" / "bin" / "sh.exe")
+    return candidates
+
+
+def _first_runnable_shell(candidates: list[Path], system_root: Path) -> str | None:
+    """Return the first candidate that is a real shell, rejecting stub launchers.
+
+    The WSL launcher lives in System32/SysWOW64 and the Microsoft Store alias
+    stubs live under WindowsApps; neither is an MSYS2 shell that can run repo
+    scripts against Windows checkout paths.
+    """
     rejected_parents = (system_root / "System32", system_root / "SysWOW64")
     for candidate in candidates:
         try:
@@ -46,14 +67,26 @@ def find_script_bash() -> str | None:
             continue
         if not resolved.is_file():
             continue
-        # The WSL launcher lives in System32; the Store alias stubs live under
-        # WindowsApps. Neither is an MSYS2 bash that can run repo scripts.
         if any(parent in resolved.parents for parent in rejected_parents):
             continue
         if "WindowsApps" in resolved.parts:
             continue
         return str(resolved)
     return None
+
+
+def find_script_bash() -> str | None:
+    """Return a bash able to run the repo's shell scripts, or ``None``."""
+    if os.name != "nt":
+        return shutil.which("bash")
+
+    candidates = _script_bash_candidates(
+        git=shutil.which("git"),
+        program_files=os.environ.get("ProgramFiles"),
+        path_bash=shutil.which("bash"),
+    )
+    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    return _first_runnable_shell(candidates, system_root)
 
 
 def require_script_bash() -> str:
@@ -67,12 +100,18 @@ def require_script_bash() -> str:
 def find_posix_sh() -> str | None:
     """Return a shell able to run the repo's POSIX-sh scripts.
 
-    Plain ``sh`` on POSIX hosts; Git Bash on Windows, where no ``sh`` exists
-    on PATH outside an MSYS2 installation.
+    Plain ``sh`` on POSIX hosts. On Windows no ``sh`` exists on PATH outside
+    an MSYS2 installation, so prefer the real ``sh.exe`` shipped with Git for
+    Windows and fall back to Git Bash when it is absent.
     """
     if os.name != "nt":
         return shutil.which("sh")
-    return find_script_bash()
+    candidates = _script_sh_candidates(
+        git=shutil.which("git"),
+        program_files=os.environ.get("ProgramFiles"),
+    )
+    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    return _first_runnable_shell(candidates, system_root) or find_script_bash()
 
 
 def require_posix_sh() -> str:
