@@ -111,7 +111,7 @@ class TestDynamicContextMemoryStamping:
 
         from deerflow.agents.middlewares import dynamic_context_middleware as module
 
-        monkeypatch.setattr(module.DynamicContextMiddleware, "_build_full_reminder", lambda self, runtime=None: ("<system-reminder></system-reminder>", "some recalled memory"))
+        monkeypatch.setattr(module.DynamicContextMiddleware, "_build_full_reminder", lambda self, runtime=None, *, query=None: ("<system-reminder></system-reminder>", "some recalled memory"))
         middleware = module.DynamicContextMiddleware()
         result = middleware._inject({"messages": [HumanMessage(content="hello", id="u1")]})
         memory_messages = [m for m in result["messages"] if str(m.id or "").endswith("__memory")]

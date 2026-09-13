@@ -44,6 +44,7 @@ from .deermem.core.message_processing import (
 from .deermem.core.paths import DEFAULT_AGENT_BUCKET
 from .deermem.core.prompt import format_memory_for_injection, load_prompt, load_prompt_messages, warm_tiktoken_cache
 from .deermem.core.queue import MemoryUpdateQueue, QueueFull
+from .deermem.core.relevance import build_idf, order_facts_for_query, tokenize, warm_tokenizer
 from .deermem.core.storage import MemoryRevisionConflict, MemoryStorageCorruption, create_storage
 from .deermem.core.updater import MemoryUpdater, _coerce_source_confidence
 
@@ -300,6 +301,7 @@ class DeerMem(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Load memory and format it for injection (plain text, no wrap).
 
@@ -308,6 +310,11 @@ class DeerMem(MemoryManager):
         facts stay behind ``memory_search`` so they are not duplicated in the
         prompt and a later retrieval result.
 
+        When ``query`` is provided and ``retrieval_relevance_enabled`` is
+        true, facts are ranked against the query (lexical relevance combined
+        with confidence, then optional diversity) before the token-budget
+        selection. Without a query the legacy confidence ordering is kept.
+
         Format parameters come from DeerMem's own ``DeerMemConfig`` (set at
         construction from ``backend_config``). The ``enabled``/
         ``injection_enabled`` gate and the ``<memory>`` wrapping stay at the
@@ -315,12 +322,16 @@ class DeerMem(MemoryManager):
         """
         injection_agent = None if self.mode == "tool" else _resolve_agent_name(agent_name)
         memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=injection_agent, user_id=user_id))
+        relevance_enabled = self._config.retrieval_relevance_enabled and bool(query and query.strip())
         return format_memory_for_injection(
             memory_data,
             max_tokens=self._config.max_injection_tokens,
             use_tiktoken=(self._config.token_counting == "tiktoken"),
             guaranteed_categories=self._config.guaranteed_categories,
             guaranteed_token_budget=self._config.guaranteed_token_budget,
+            query=query if relevance_enabled else None,
+            relevance_weight=self._config.retrieval_relevance_weight if relevance_enabled else None,
+            diversity_weight=self._config.retrieval_diversity_weight if relevance_enabled else None,
         )
 
     def search(
@@ -336,18 +347,31 @@ class DeerMem(MemoryManager):
 
         Retrieval errors never make canonical memory unavailable: the existing
         case-insensitive substring path remains the last-resort fallback.
+
+        With ``retrieval_relevance_enabled``, the opt-in relevance-aware
+        strategy ranks every fact in scope (adapter-free, deterministic) and
+        may return related facts without a literal substring match.
         """
         if not query or not query.strip() or top_k <= 0:
             return []
         resolved_agent_name = _resolve_agent_name(agent_name)
-        indexed = self._fts5_search(query, top_k=top_k, user_id=user_id, agent_name=resolved_agent_name, category=category)
-        results = indexed or self._substring_search(
-            query,
-            top_k=top_k,
-            user_id=user_id,
-            agent_name=resolved_agent_name,
-            category=category,
-        )
+        if self._config.retrieval_relevance_enabled:
+            results = self._relevance_search(
+                query,
+                top_k=top_k,
+                user_id=user_id,
+                agent_name=resolved_agent_name,
+                category=category,
+            )
+        else:
+            indexed = self._fts5_search(query, top_k=top_k, user_id=user_id, agent_name=resolved_agent_name, category=category)
+            results = indexed or self._substring_search(
+                query,
+                top_k=top_k,
+                user_id=user_id,
+                agent_name=resolved_agent_name,
+                category=category,
+            )
         if results and (self._config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or self._config.fact_eviction_shadow_enabled):
             try:
                 self._storage.record_fact_accesses(
@@ -409,6 +433,38 @@ class DeerMem(MemoryManager):
         matched = [fact for fact in memory_data.get("facts", []) if isinstance(fact.get("content"), str) and query_lower in fact["content"].lower() and (category is None or fact.get("category") == category)]
         matched.sort(key=_coerce_source_confidence, reverse=True)
         return _compat_document({"facts": matched[:top_k]})["facts"]
+
+    def _relevance_search(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        user_id: str | None,
+        agent_name: str | None,
+        category: str | None,
+    ) -> list[dict[str, Any]]:
+        """Opt-in deterministic ranking over every fact in scope (issue #4495).
+
+        Candidates are NOT limited to literal substring matches: all facts in
+        the requested user/agent scope compete, ranked by lexical relevance
+        combined with confidence, then diversified. The category filter still
+        applies before the ``top_k`` slice. Caller-owned fact dicts are never
+        mutated.
+        """
+        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=agent_name, user_id=user_id))
+        facts = [fact for fact in memory_data.get("facts", []) if isinstance(fact.get("content"), str) and (category is None or fact.get("category") == category)]
+        if not facts:
+            return []
+        corpus_idf = build_idf([tokenize(fact["content"]) for fact in facts])
+        ranked = order_facts_for_query(
+            facts,
+            query,
+            relevance_weight=self._config.retrieval_relevance_weight,
+            diversity_weight=self._config.retrieval_diversity_weight,
+            idf=corpus_idf,
+            limit=top_k,
+        )
+        return _compat_document({"facts": ranked})["facts"]
 
     def _ensure_retrieval_scopes(self, scopes: list[dict[str, str | None]]) -> None:
         """Lazily rebuild every requested scope when warm-up was skipped."""
@@ -533,6 +589,8 @@ class DeerMem(MemoryManager):
         or warming was unnecessary); False if tiktoken is unavailable or the
         download failed.
         """
+        if self._config.retrieval_relevance_enabled:
+            warm_tokenizer()
         if self._config.token_counting == "char":
             logger.info("token_counting='char'; tiktoken not used, skipping warm-up")
             return True

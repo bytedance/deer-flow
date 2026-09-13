@@ -268,3 +268,34 @@ Keep these cross-component constraints in sync:
 - Eviction weights must total `1.0`.
 - `watermark_max_keys: 0` makes the conversation watermark cache unbounded.
 - A dropped watermark can re-extract one batch on the next turn.
+
+#### Relevance-aware retrieval (opt-in)
+
+The deterministic lexical strategy behind issue #4495 lives in
+`deermem/core/relevance.py` (token overlap + idf weights + confidence blend +
+greedy MMR diversity). It never touches the persisted memory format and never
+runs by default.
+
+- `retrieval_relevance_enabled: true` opts in. `memory_search` then ranks every
+  fact in scope (not only literal substring matches) and prompt injection ranks
+  facts against the current query before the token-budget selection.
+  This takes precedence over `retrieval_adapter`: search bypasses FTS5/custom
+  retrieval, while adapter indexing and warm-up remain configured.
+- Ranking reads at most 4096 characters and 128 tokens per query/fact. The
+  no-jieba fallback emits both Latin words and CJK bigrams, including mixed text.
+  `DeerMem.warm()` initializes optional jieba before serving requests, even
+  with character-based token counting. Invalid/missing confidence defaults to 0.
+- Search stops MMR after `top_k` picks. Injection diversifies guaranteed and
+  regular pools independently and lazily, stopping when each token budget is
+  exhausted; it never truncates candidates before the guaranteed partition.
+  MMR caches token sets and incrementally updates maximum similarity penalties.
+- `retrieval_relevance_weight` blends lexical relevance with confidence;
+  `retrieval_diversity_weight` demotes near-duplicate facts. Defaults preserve
+  legacy ordering. Relevance is distinct-query-token IDF coverage; repeated
+  content cannot replace missing terms or saturate a partial match.
+- The current-turn query flows from `DynamicContextMiddleware` (bounded,
+  user-message text) through the optional `query` keyword on
+  `MemoryManager.get_context` / `aget_context`. Shared signature inspection
+  omits `query` for old/uninspectable backends; backend errors never cause retries.
+- Ranking must be deterministic, network-free, and mutation-free: caller-owned
+  fact dicts are read-only inputs.

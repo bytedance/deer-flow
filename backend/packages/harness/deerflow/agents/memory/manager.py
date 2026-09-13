@@ -17,11 +17,13 @@ do not impede pluggability.
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import os
 import sys
 import threading
 from abc import abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar, Literal
@@ -42,6 +44,21 @@ _MANAGER_CLASS_ATTR = "MANAGER_CLASS"
 _memory_manager: MemoryManager | None = None
 _backends_cache: dict[str, type[MemoryManager]] | None = None
 _manager_lock = threading.Lock()
+
+
+def context_query_kwargs(get_context: Callable[..., str], query: str | None) -> dict[str, str | None]:
+    """Pass the optional hint only when a backend accepts that keyword.
+
+    Older plugins need no signature change. An uninspectable callable keeps
+    the old call contract; backend TypeErrors must never trigger a retry.
+    """
+    try:
+        parameters = inspect.signature(get_context).parameters.values()
+    except (TypeError, ValueError):
+        return {}
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD or (parameter.name == "query" and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)) for parameter in parameters):
+        return {"query": query}
+    return {}
 
 
 class MemoryCallbacks:
@@ -255,8 +272,14 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Return injection-ready memory text for the given bucket.
+
+        ``query`` is an optional current-turn query hint. Backends that
+        support query-aware ranking (DeerMem with
+        ``retrieval_relevance_enabled``) may rank injected facts against it;
+        other backends ignore it. ``None`` must preserve legacy behavior.
 
         Implementations load their memory and format it however they choose;
         the returned string is injected verbatim by call sites. Format
@@ -530,8 +553,9 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
-        return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id)
+        return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id, **context_query_kwargs(self.get_context, query))
 
     async def asearch(
         self,

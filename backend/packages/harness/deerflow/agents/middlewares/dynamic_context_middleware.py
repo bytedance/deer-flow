@@ -71,6 +71,11 @@ logger = logging.getLogger(__name__)
 # This cap ensures the request degrades gracefully instead of hanging.
 _INJECT_TIMEOUT_SECONDS = 5.0
 
+#: Hard bound on the current-turn query forwarded to the memory backend for
+#: query-aware fact ranking. Keeps ranking cost deterministic regardless of
+#: message length.
+_INJECTION_QUERY_MAX_CHARS = 1000
+
 _DATE_RE = re.compile(r"<current_date>([^<]+)</current_date>")
 _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # Authoritative injected date, carried in additional_kwargs of the date
@@ -317,6 +322,32 @@ class SubagentDateContextMiddleware(AgentMiddleware):
             return None
 
 
+def _derive_injection_query(message: object) -> str | None:
+    """Extract a bounded text query from the user message being injected on.
+
+    Handles plain-string content and multimodal content lists (joining the
+    text parts). Returns ``None`` when no text is present so callers keep
+    the legacy query-less memory path.
+    """
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                part = item["text"].strip()
+                if part:
+                    parts.append(part)
+        text = " ".join(parts)
+    else:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    return text[:_INJECTION_QUERY_MAX_CHARS]
+
+
 class DynamicContextMiddleware(AgentMiddleware):
     """Inject memory and current date as a SystemMessage <system-reminder>.
 
@@ -354,13 +385,17 @@ class DynamicContextMiddleware(AgentMiddleware):
         """Declare the injected date's effective timezone for assembly identity."""
         return {"current_date_timezone": _effective_date_timezone_name()}
 
-    def _build_full_reminder(self, runtime: Runtime | None = None) -> tuple[str, str | None]:
+    def _build_full_reminder(self, runtime: Runtime | None = None, *, query: str | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
 
         Framework-owned data (date) is separated from user-owned data (memory)
         so the downstream SystemMessage carries only framework authority and
         memory stays at role:user — preventing untrusted content from gaining
         system privilege (OWASP LLM01).
+
+        ``query`` is the optional current-turn text forwarded to the memory
+        backend for query-aware fact ranking (issue #4495); ``None`` keeps the
+        legacy confidence-only ordering.
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
@@ -370,6 +405,7 @@ class DynamicContextMiddleware(AgentMiddleware):
                 self._agent_name,
                 app_config=self._app_config,
                 user_id=resolve_runtime_user_id(runtime),
+                query=query,
             )
             if injection_enabled
             else ""
@@ -495,7 +531,7 @@ class DynamicContextMiddleware(AgentMiddleware):
             target_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
             if target_idx is None:
                 return None
-            date_reminder, memory_block = self._build_full_reminder(runtime)
+            date_reminder, memory_block = self._build_full_reminder(runtime, query=_derive_injection_query(messages[target_idx]))
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into last HumanMessage id=%r",
                 memory_block is not None,
