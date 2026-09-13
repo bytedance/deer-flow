@@ -29,6 +29,7 @@ def clean_env(monkeypatch):
 def test_resolve_prefers_gemini(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
     assert (
         img._resolve_provider("IMAGE_GENERATION_PROVIDER", "gemini", True) == "gemini"
     )
@@ -41,6 +42,21 @@ def test_resolve_falls_back_to_minimax(monkeypatch):
     )
 
 
+def test_resolve_falls_back_to_openai_after_minimax(monkeypatch):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    assert (
+        img._resolve_provider("IMAGE_GENERATION_PROVIDER", "gemini", False) == "minimax"
+    )
+
+
+def test_resolve_falls_back_to_openai(monkeypatch):
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    assert (
+        img._resolve_provider("IMAGE_GENERATION_PROVIDER", "gemini", False) == "openai"
+    )
+
+
 def test_resolve_override_wins(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "MiniMax")
@@ -50,7 +66,7 @@ def test_resolve_override_wins(monkeypatch):
 
 
 def test_resolve_errors_when_none(monkeypatch):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="IMAGE_GENERATION_API_KEY"):
         img._resolve_provider("IMAGE_GENERATION_PROVIDER", "gemini", False)
 
 
@@ -344,10 +360,11 @@ def test_openai_dall_e_rejects_non_png_output(monkeypatch, tmp_path, extension):
         )
 
 
-def test_openai_dall_e_3_rejects_reference_images(monkeypatch, tmp_path):
+@pytest.mark.parametrize("model", ["dall-e-2", "dall-e-3"])
+def test_openai_dall_e_rejects_reference_images(monkeypatch, tmp_path, model):
     monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
     monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
-    monkeypatch.setenv("IMAGE_GENERATION_MODEL", "dall-e-3")
+    monkeypatch.setenv("IMAGE_GENERATION_MODEL", model)
     monkeypatch.setattr(
         img.requests,
         "post",
@@ -358,7 +375,7 @@ def test_openai_dall_e_3_rejects_reference_images(monkeypatch, tmp_path):
     reference = tmp_path / "reference.png"
     reference.write_bytes(b"png")
 
-    with pytest.raises(ValueError, match="does not support reference-image editing"):
+    with pytest.raises(ValueError, match="reference-image editing is not supported"):
         img.generate_image(
             str(prompt_file), [str(reference)], str(tmp_path / "image.png"), "1:1"
         )

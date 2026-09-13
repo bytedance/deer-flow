@@ -183,9 +183,10 @@ This approach significantly improves generation quality by providing the model w
 This skill auto-selects the provider by environment variables (no CLI change):
 
 - `GEMINI_API_KEY` set → use Gemini (default, unchanged).
-- Only `MINIMAX_API_KEY` set → use MiniMax (`/v1/image_generation`, model `image-01`).
-- Set `IMAGE_GENERATION_PROVIDER=openai` to use an OpenAI-compatible Images API.
+- Otherwise, `MINIMAX_API_KEY` set → use MiniMax (`/v1/image_generation`, model `image-01`).
+- Otherwise, `IMAGE_GENERATION_API_KEY` set → use an OpenAI-compatible Images API.
 - Force one explicitly with `IMAGE_GENERATION_PROVIDER=gemini|minimax|openai`.
+  `openai-compatible` is also accepted as an alias for `openai`.
 
 OpenAI-compatible settings:
 
@@ -202,7 +203,8 @@ URL. Aspect ratios map to `1024x1024`, `1536x1024`, or `1024x1536` unless
 `.jpg`/`.jpeg` uses `jpeg`, `.webp` uses `webp`, and all other extensions use `png`.
 When `dall-e-2` or `dall-e-3` is configured instead, the request uses the model's
 supported dimensions and `response_format=b64_json`; DALL-E output files must use a
-`.png` extension. `dall-e-3` does not support reference-image editing.
+`.png` extension. Reference-image editing with DALL-E models is not supported by this
+skill; use the default GPT Image model for edits.
 
 MiniMax optional overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.com`),
 `MINIMAX_IMAGE_MODEL` (default `image-01`). Reference images are sent as the MiniMax

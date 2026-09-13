@@ -35,7 +35,7 @@ def _resolve_provider(
 
     1. Explicit <SKILL>_PROVIDER override wins.
     2. Otherwise prefer the existing provider when its credentials are present.
-    3. Otherwise fall back to MiniMax when MINIMAX_API_KEY is set.
+    3. Otherwise fall back to MiniMax, then the OpenAI-compatible provider.
     """
     override = os.getenv(override_env)
     if override:
@@ -44,9 +44,12 @@ def _resolve_provider(
         return existing_provider
     if os.getenv("MINIMAX_API_KEY"):
         return "minimax"
+    if os.getenv("IMAGE_GENERATION_API_KEY"):
+        return "openai"
     raise ValueError(
         f"No credentials found. Set GEMINI_API_KEY for {existing_provider}, "
-        f"or MINIMAX_API_KEY for minimax (optionally force with {override_env})."
+        "MINIMAX_API_KEY for minimax, or IMAGE_GENERATION_API_KEY for openai "
+        f"(optionally force with {override_env})."
     )
 
 
@@ -286,8 +289,10 @@ def _generate_image_openai(
     is_dall_e = model in {"dall-e-2", "dall-e-3"}
     if is_dall_e and os.path.splitext(output_file)[1].lower() != ".png":
         raise ValueError("DALL-E output files must use a .png extension")
-    if model == "dall-e-3" and reference_images:
-        raise ValueError("dall-e-3 does not support reference-image editing")
+    if is_dall_e and reference_images:
+        raise ValueError(
+            f"{model} reference-image editing is not supported by this skill"
+        )
     fields = {
         "model": model,
         "prompt": prompt,
@@ -351,7 +356,8 @@ def generate_image(
             prompt, reference_images, output_file, aspect_ratio
         )
     raise ValueError(
-        f"Unknown image provider: {provider!r} (use 'gemini', 'minimax', or 'openai')"
+        f"Unknown image provider: {provider!r} "
+        "(use 'gemini', 'minimax', 'openai', or 'openai-compatible')"
     )
 
 
