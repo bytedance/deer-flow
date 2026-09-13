@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..config import DeerMemConfig
+from .storage import is_stale_clear_generation
 
 if TYPE_CHECKING:
     from .updater import MemoryUpdater
@@ -68,6 +69,15 @@ class ConversationContext:
     # so a flush cannot drop a pending normal update's un-extracted tail. See
     # ``_enqueue_locked``'s match-key + backpressure handling.
     bypass_watermark: bool = False
+    # Scope clear-generation captured when this conversation became pending
+    # work. Commit must use this token, not a later snapshot: a clear that
+    # lands during debounce would otherwise look current and restore facts.
+    # Same-key merges keep the earlier value unless a newer clear is already
+    # visible; then the queue consumes the pre-clear snapshot and starts a
+    # fresh fence. An incoming peek older than the queued context is refused
+    # so that snapshot cannot inherit the newer fence. A missing token and
+    # emergency (bypass) snapshots are never refreshed.
+    clear_generation: tuple[int, int] | None = None
 
 
 class MemoryUpdateQueue:
@@ -117,6 +127,22 @@ class MemoryUpdateQueue:
                 reinforcement / preference / ...), used as extraction hints. Any
                 signal is admitted under backpressure.
         """
+        # Peek before the queue lock: every conversation turn enqueues here, and
+        # the file-backed peek is uncached manifest I/O. Holding ``_lock`` across
+        # that read would serialize all memory admits behind disk. A token that
+        # misses a clear landing afterwards is still dropped by the pre-LLM and
+        # commit-time checks.
+        try:
+            captured_clear_generation = self._capture_clear_generation(agent_name, user_id)
+        except Exception:
+            logger.warning(
+                "Skipping memory enqueue because the clear generation could not be read; messages will be re-fed on the next turn (thread=%s user_id=%s agent_name=%s)",
+                thread_id,
+                user_id,
+                agent_name,
+                exc_info=True,
+            )
+            return
         with self._lock:
             self._enqueue_locked(
                 thread_id=thread_id,
@@ -126,6 +152,7 @@ class MemoryUpdateQueue:
                 trace_id=trace_id,
                 signals=frozenset(signals) if signals else frozenset(),
                 bypass_watermark=False,
+                captured_clear_generation=captured_clear_generation,
             )
             self._reset_timer()
 
@@ -141,6 +168,17 @@ class MemoryUpdateQueue:
         signals: frozenset[str] | None = None,
     ) -> None:
         """Add a conversation and start processing immediately in the background."""
+        try:
+            captured_clear_generation = self._capture_clear_generation(agent_name, user_id)
+        except Exception:
+            logger.error(
+                "Dropping memory emergency flush because the clear generation could not be read; messages cannot be re-fed (thread=%s user_id=%s agent_name=%s)",
+                thread_id,
+                user_id,
+                agent_name,
+                exc_info=True,
+            )
+            return
         with self._lock:
             self._enqueue_locked(
                 thread_id=thread_id,
@@ -150,6 +188,7 @@ class MemoryUpdateQueue:
                 trace_id=trace_id,
                 signals=frozenset(signals) if signals else frozenset(),
                 bypass_watermark=True,
+                captured_clear_generation=captured_clear_generation,
             )
             self._schedule_timer(0)
 
@@ -165,6 +204,7 @@ class MemoryUpdateQueue:
         trace_id: str | None,
         signals: frozenset[str],
         bypass_watermark: bool = False,
+        captured_clear_generation: tuple[int, int],
     ) -> ConversationContext:
         key = queue_key(thread_id, user_id, agent_name)
         # Emergency (bypass) and normal updates coexist: the match key includes
@@ -178,17 +218,48 @@ class MemoryUpdateQueue:
             None,
         )
         # Backpressure: once depth reaches the cap, reject NEW non-signal normal
-        # items. Same-key updates merge (do not grow depth); signal-bearing items
-        # and emergency (bypass) flushes are always admitted. Signals capture
-        # important memories, and the emergency path captures messages about to
-        # be removed by summarization -- neither can be re-fed next turn, so
-        # shedding them under load would lose data rather than merely defer it.
+        # items. Same-key updates in the same normal/emergency mode reuse one
+        # slot (do not grow depth); signal-bearing items and emergency (bypass)
+        # flushes are always admitted. Signals capture important memories, and
+        # the emergency path captures messages about to be removed by
+        # summarization -- neither can be re-fed next turn, so shedding them
+        # under load would lose data rather than merely defer it.
         max_depth = self._config.queue_max_depth
         if max_depth > 0 and not bypass_watermark and not signals and existing is None and len(self._items) >= max_depth:
             raise QueueFull(f"memory update queue is full (depth {len(self._items)} >= {max_depth}); non-signal update for thread {thread_id} rejected")
 
         # Merge by signal union: a signal seen on any update for this key stays.
         merged_signals = signals | (existing.signals if existing is not None else frozenset())
+        # First enqueue binds the pre-lock peek. A later same-key merge keeps
+        # that token when the generation is unchanged, missing, or this is an
+        # emergency snapshot. Re-reading after a clear and blindly refreshing
+        # would restore pre-clear facts; a visible newer clear instead consumes
+        # the pre-clear snapshot and starts a fresh fence so post-clear turns
+        # are extracted on this flush. A late add whose peek is older than the
+        # queued context must not replace messages: that would inherit the
+        # newer fence and restore the pre-clear snapshot.
+        if existing is None:
+            enqueued_clear_generation = captured_clear_generation
+        elif existing.clear_generation is not None and is_stale_clear_generation(captured_clear_generation, existing.clear_generation):
+            incoming = ConversationContext(
+                thread_id=thread_id,
+                messages=messages,
+                agent_name=agent_name,
+                user_id=user_id,
+                trace_id=trace_id,
+                signals=signals,
+                bypass_watermark=bypass_watermark,
+                clear_generation=captured_clear_generation,
+            )
+            if not self._consume_pre_clear_feed(incoming):
+                existing.clear_generation = captured_clear_generation
+            return existing
+        elif existing.bypass_watermark or existing.clear_generation is None:
+            enqueued_clear_generation = existing.clear_generation
+        elif is_stale_clear_generation(existing.clear_generation, captured_clear_generation) and self._consume_pre_clear_feed(existing):
+            enqueued_clear_generation = captured_clear_generation
+        else:
+            enqueued_clear_generation = existing.clear_generation
         context = ConversationContext(
             thread_id=thread_id,
             messages=messages,
@@ -197,11 +268,53 @@ class MemoryUpdateQueue:
             trace_id=trace_id,
             signals=merged_signals,
             bypass_watermark=bypass_watermark,
+            clear_generation=enqueued_clear_generation,
         )
         if existing is not None:
             self._items = [c for c in self._items if not (queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark)]
         self._items.append(context)
         return context
+
+    def _capture_clear_generation(self, agent_name: str | None, user_id: str | None) -> tuple[int, int]:
+        """Read the current scope fence without loading fact files.
+
+        Callers must invoke this before acquiring ``self._lock``. A missing
+        updater hook uses the initial generation for compatibility; a broken
+        hook or invalid result raises so the caller can fail closed with the
+        correct normal-versus-emergency diagnostic.
+        """
+        peek = getattr(self._updater, "peek_clear_generation", None)
+        if not callable(peek):
+            return (0, 0)
+        value = peek(agent_name, user_id=user_id)
+        if not isinstance(value, tuple) or len(value) != 2:
+            raise ValueError(f"invalid clear generation: {value!r}")
+        user_gen, agent_gen = value
+        if isinstance(user_gen, bool) or isinstance(agent_gen, bool) or not isinstance(user_gen, int) or not isinstance(agent_gen, int) or user_gen < 0 or agent_gen < 0:
+            raise ValueError(f"invalid clear generation: {value!r}")
+        return user_gen, agent_gen
+
+    def _consume_pre_clear_feed(self, existing: ConversationContext) -> bool:
+        """Mark the stale job's snapshot consumed so it cannot restore after a clear.
+
+        Returns False when the updater cannot advance the watermark. The caller
+        must then keep the earlier fence rather than refresh the token.
+        """
+        mark = getattr(self._updater, "mark_feed_consumed", None)
+        if not callable(mark):
+            return False
+        try:
+            mark(
+                existing.messages,
+                thread_id=existing.thread_id,
+                user_id=existing.user_id,
+                agent_name=existing.agent_name,
+                bypass_watermark=existing.bypass_watermark,
+            )
+        except Exception:
+            logger.warning("Failed to consume the pre-clear snapshot after a newer clear; keeping the stale fence", exc_info=True)
+            return False
+        return True
 
     def _reset_timer(self) -> None:
         """Reset the debounce timer."""
@@ -254,12 +367,13 @@ class MemoryUpdateQueue:
         logger.info("Processing %d queued memory updates", len(contexts_to_process))
 
         succeeded = 0
+        consumed = 0
         failed = 0
         try:
             for context in contexts_to_process:
                 try:
                     logger.info("Updating memory for thread %s (trace_id=%s)", context.thread_id, context.trace_id)
-                    success = self._updater.update_memory(
+                    result = self._updater.update_memory(
                         messages=context.messages,
                         thread_id=context.thread_id,
                         agent_name=context.agent_name,
@@ -267,10 +381,14 @@ class MemoryUpdateQueue:
                         user_id=context.user_id,
                         trace_id=context.trace_id,
                         bypass_watermark=context.bypass_watermark,
+                        expected_clear_generation=context.clear_generation,
                     )
-                    if success:
+                    if result is True:
                         succeeded += 1
                         logger.info("Memory updated successfully for thread %s (trace_id=%s)", context.thread_id, context.trace_id)
+                    elif result is None:
+                        consumed += 1
+                        logger.info("Memory update consumed after newer clear for thread %s (trace_id=%s)", context.thread_id, context.trace_id)
                     else:
                         failed += 1
                         logger.warning("Memory update skipped/failed for thread %s (trace_id=%s)", context.thread_id, context.trace_id)
@@ -289,8 +407,8 @@ class MemoryUpdateQueue:
             # (every extraction persisted): per-item ``update_memory`` failures are
             # swallowed above, so without this an operator debugging missing
             # memories would see only the happy-path "Processing N" line.
-            if succeeded or failed:
-                logger.info("Memory update batch done: %d succeeded, %d failed", succeeded, failed)
+            if succeeded or consumed or failed:
+                logger.info("Memory update batch done: %d succeeded, %d consumed, %d failed", succeeded, consumed, failed)
             with self._lock:
                 self._processing = False
                 self._processing_thread = None
@@ -410,10 +528,12 @@ class MemoryUpdateQueue:
         """Drop pending contexts for a scope without processing them.
 
         Matches ``(agent_name, user_id)`` against items still sitting in
-        ``_items``. Contexts already pulled out by an in-flight
+        ``_items``. Dropped snapshots still advance the conversation watermark
+        so a later turn cannot restore those pre-clear messages against a
+        newer generation. Contexts already pulled out by an in-flight
         :meth:`_process_queue` worker are deliberately left alone -- interrupting
-        mid-LLM-call belongs to a durable outbox, not this in-memory debounce
-        queue.
+        mid-LLM-call belongs to the durable clear-generation fence, not this
+        in-memory debounce queue.
 
         Args:
             agent_name: Canonical agent bucket to cancel. Ignored when
@@ -438,11 +558,16 @@ class MemoryUpdateQueue:
                     return True
                 return context.user_id != user_id
 
+            dropped = [context for context in self._items if not _keep(context)]
             self._items = [context for context in self._items if _keep(context)]
             removed = before - len(self._items)
             if removed and not self._items and self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+            # Consume under the lock so a concurrent add cannot re-feed the
+            # dropped snapshot before the watermark advances.
+            for context in dropped:
+                self._consume_pre_clear_feed(context)
             return removed
 
     def clear(self) -> None:

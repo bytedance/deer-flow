@@ -22,6 +22,7 @@ directly and catch ``NotImplementedError`` for unsupported backends -- no more
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import threading
@@ -255,10 +256,11 @@ class DeerMem(MemoryManager):
         if prepared is None:
             return
         filtered, signals = prepared
-        # Defense-in-depth: the emergency path always admits under backpressure
-        # (see _enqueue_locked), so QueueFull is not expected here -- but the
-        # emergency flush is invoked from summarization_hook, so a propagated
-        # exception would break summarization. Catch + log to be safe.
+        # Once generation capture succeeds, the emergency path always admits
+        # under queue-depth backpressure (see _enqueue_locked), so QueueFull is
+        # not expected here -- but the emergency flush is invoked from
+        # summarization_hook, so a propagated exception would break
+        # summarization. Catch + log to be safe.
         try:
             self._queue.add_nowait(
                 thread_id=thread_id,
@@ -269,6 +271,25 @@ class DeerMem(MemoryManager):
             )
         except QueueFull as e:
             logger.warning("Memory emergency flush rejected under backpressure (thread=%s): %s", thread_id, e)
+
+    async def aadd(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        """Enqueue without blocking the caller's event loop on storage I/O."""
+        await asyncio.to_thread(
+            self.add,
+            thread_id,
+            messages,
+            agent_name=agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+        )
 
     def _prepare_update(
         self,
