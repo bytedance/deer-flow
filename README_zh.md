@@ -808,7 +808,7 @@ client.clear_goal("thread-1")
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
 
-## 项目成员归属（Project Membership）
+## 项目成员归属 (Project Membership)
 
 会话在创建时（选择了某个 project）或之后通过移动菜单加入一个 project。Run
 永远不会修改成员归属：提交消息不能给会话指派或重新指派 project。将会话移出
