@@ -582,6 +582,17 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **runtime:** Stop a cross-worker idempotent run reuse from permanently
+  blocking the thread on the reusing worker. The reuse registered the hydrated
+  store row as a local run record, but only the owning worker finalizes and
+  cleans up its records, so the copy kept its admission-time `pending`/`running`
+  status forever: every later `reject` admission for that thread on the worker
+  returned 409 until a restart, its run reads kept reporting the stale status,
+  and orphan reconciliation skipped the run if the owner crashed. A cancel sent
+  to that worker also took the local-owner path and marked the owner's
+  still-running row `interrupted`. The reusing worker now returns a detached
+  store-only handle instead, so cancel follows the non-owner contract.
+  ([#5393])
 - **skills:** Stop writing resolved secrets into `extensions_config.json` when a
   skill is toggled. The Gateway skill toggle and `DeerFlowClient.update_skill`
   loaded the file through `ExtensionsConfig.from_file()`, which replaces every
@@ -2761,3 +2772,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
 [#5353]: https://github.com/bytedance/deer-flow/pull/5353
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357
+[#5393]: https://github.com/bytedance/deer-flow/pull/5393

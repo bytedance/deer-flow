@@ -831,6 +831,32 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_peer_idempotent_reuse_releases_thread_after_owner_completes(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        owner = RunManager(store=repo, worker_id="worker-a")
+        peer = RunManager(store=repo, worker_id="worker-b")
+        first = await owner.create_or_reject("thread-T", user_id="user-1", idempotency_key="mcp-task:task-1:1:0")
+        await peer.create_or_reject("thread-T", user_id="user-1", idempotency_key="mcp-task:task-1:1:0")
+
+        await owner.set_status(first.run_id, RunStatus.success)
+        await owner.cleanup(first.run_id, delay=0)
+
+        # Keyed retries resolve through the terminal row's idempotency conflict,
+        # on the peer and on the owner after its local record is cleaned up.
+        # They run before the follow-up: a key retry does not win over a
+        # different run already active on the same worker.
+        for manager in (peer, owner):
+            retried = await manager.create_or_reject("thread-T", user_id="user-1", idempotency_key="mcp-task:task-1:1:0")
+            assert retried.run_id == first.run_id
+            assert retried.store_only is True
+            assert retried.idempotency_reused is True
+            assert retried.status == RunStatus.success
+        follow_up = await peer.create_or_reject("thread-T", user_id="user-1")
+
+        assert follow_up.run_id != first.run_id
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_checkpoint_write_reservation_blocks_interrupt_run_on_sql_store(self, tmp_path):
         """An interrupt-strategy run cannot displace a durable checkpoint writer."""
         repo = await _make_repo(tmp_path)
