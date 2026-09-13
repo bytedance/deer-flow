@@ -773,9 +773,9 @@ def build_run_config(
     load the matching ``agents/<name>/SOUL.md`` and per-agent config —
     without it the agent silently runs as the default lead agent.
 
-    This mirrors the channel manager's ``_resolve_run_params`` logic so that
-    the LangGraph Platform-compatible HTTP API and the IM channel path behave
-    identically.
+    This mirrors the channel manager's ``_resolve_run_params`` logic except for
+    the recursion default: Gateway API runs use the configured top-level
+    ``recursion_limit``, while IM channel runs retain their own default.
     """
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
     # only). Independent of subagent depth: a `task()` dispatch runs the whole
