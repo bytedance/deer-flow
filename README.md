@@ -1194,6 +1194,14 @@ Web UI chat links percent-encode custom thread identifiers before placing them i
 └── lark-cli/lark-doc/SKILL.md      ← managed, read-only
 ```
 
+The built-in `image-generation` skill supports Gemini, MiniMax, and
+OpenAI-compatible Images APIs. Select the latter with
+`IMAGE_GENERATION_PROVIDER=openai`, then configure
+`IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
+`IMAGE_GENERATION_MODEL`. For a containerized sandbox, expose these variables
+through `sandbox.environment`; sandbox commands intentionally do not inherit
+API keys from the Gateway process.
+
 #### Exporting Custom Skills
 
 Administrators can export their own custom skills from **Settings → Skills → Custom → Export**. Review the file list and declared environment requirements, then choose **Download .skill**. The archive contains the currently saved skill, including supporting files and empty directories; disabled skills can also be exported. If the skill changes after preview, refresh the file list before downloading. Import the archive on another DeerFlow instance with **Install .skill**; existing-name conflicts and normal installation security checks still apply.

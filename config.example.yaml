@@ -1499,6 +1499,12 @@ sandbox:
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
+#   #   # Required when using the OpenAI-compatible image-generation provider:
+#   #   IMAGE_GENERATION_PROVIDER: $IMAGE_GENERATION_PROVIDER
+#   #   IMAGE_GENERATION_API_KEY: $IMAGE_GENERATION_API_KEY
+#   #   IMAGE_GENERATION_BASE_URL: $IMAGE_GENERATION_BASE_URL
+#   #   IMAGE_GENERATION_MODEL: $IMAGE_GENERATION_MODEL
+#   #   IMAGE_GENERATION_SIZE: $IMAGE_GENERATION_SIZE  # Optional fixed-size override
 #
 #   # Optional: Cross-instance container ownership (issue #4206).
 #   #
