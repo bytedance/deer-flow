@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import suppress
+from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
-from unittest.mock import MagicMock
 
 from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
 
