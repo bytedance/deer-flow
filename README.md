@@ -291,6 +291,13 @@ single-label cluster hosts, and Docker/Podman internal hostnames do not inherit
 honor environment proxy settings.
 
 Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
+
+Gateway runs use the top-level `recursion_limit` in `config.yaml` when an API
+request does not provide one. The default is `100`; valid per-request values
+take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes
+apply to the next run without restarting the Gateway. This top-level setting
+applies to Gateway API runs; IM channel and embedded `DeerFlowClient` runs
+retain their own defaults and per-call override paths.
 The checkpoint storage settings `database.checkpoint_channel_mode` and
 `database.checkpoint_delta.snapshot_frequency` (default `10`) are exceptions:
 both are frozen when the process first builds an agent (including through
@@ -1187,6 +1194,14 @@ Web UI chat links percent-encode custom thread identifiers before placing them i
 └── lark-cli/lark-doc/SKILL.md      ← managed, read-only
 ```
 
+The built-in `image-generation` skill supports Gemini, MiniMax, and
+OpenAI-compatible Images APIs. Select the latter with
+`IMAGE_GENERATION_PROVIDER=openai`, then configure
+`IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
+`IMAGE_GENERATION_MODEL`. For a containerized sandbox, expose these variables
+through `sandbox.environment`; sandbox commands intentionally do not inherit
+API keys from the Gateway process.
+
 #### Exporting Custom Skills
 
 Administrators can export their own custom skills from **Settings → Skills → Custom → Export**. Review the file list and declared environment requirements, then choose **Download .skill**. The archive contains the currently saved skill, including supporting files and empty directories; disabled skills can also be exported. If the skill changes after preview, refresh the file list before downloading. Import the archive on another DeerFlow instance with **Install .skill**; existing-name conflicts and normal installation security checks still apply.
@@ -1637,6 +1652,13 @@ The response contains normalized `cron`, `timezone`, the effective UTC `start_at
 ## Terminal Workbench (TUI)
 
 `deerflow` is a terminal-native workbench for people who live in the shell. It runs **embedded** over `DeerFlowClient` — no Gateway, frontend, nginx, or Docker required — while honoring the same `config.yaml`, checkpointer, skills, memory, MCP, and sandbox settings as the rest of DeerFlow.
+
+Parallel synchronous stdio MCP calls use independent sessions on their own event
+loops. They do not cancel each other's connections, but they do not share
+server-side state; session reuse requires the same loop. See the
+[MCP session notes](backend/docs/MCP_SERVER.md) for details.
+Manually managed event loops must drain pending session owners before closing;
+the normal `asyncio.run()` path does this automatically.
 
 ![DeerFlow TUI](docs/tui/tui-preview.svg)
 

@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 42
+config_version: 43
 
 # ============================================================================
 # Logging
@@ -94,14 +94,16 @@ token_budget:
   hard_stop_threshold: 1.0      # Force stop at 100% of the budget
 
 # ============================================================================
-# Recursion Limit — Hard ceiling for a client-supplied run recursion_limit
+# Recursion Limits
 # ============================================================================
 # A run's recursion_limit caps the number of LangGraph super-steps (each is at
-# least one LLM call). The Gateway never trusts a client-supplied value
-# verbatim: any value above this ceiling is clamped down to it, preventing
-# runaway API cost / DoS. Invalid or non-positive client values fall back to
-# the server default of 100. Raise this only if you legitimately run very
-# deeply nested subagent graphs.
+# least one LLM call). Clients may override the default per request; invalid or
+# non-positive client values fall back to this configured default.
+recursion_limit: 100
+
+# The Gateway never trusts a configured or client-supplied value above this
+# ceiling, preventing runaway API cost / DoS. Raise it only if you legitimately
+# run very deeply nested subagent graphs.
 max_recursion_limit: 1000
 
 
@@ -866,12 +868,13 @@ tools:
   #   contents_max_characters: 1000
   #   # api_key: $EXA_API_KEY
 
-  # Web search tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # Web search tool (uses Firecrawl. Cloud requires FIRECRAWL_API_KEY; self-host may need no key.)
   # - name: web_search
   #   group: web
   #   use: deerflow.community.firecrawl.tools:web_search_tool
   #   max_results: 5
   #   # api_key: $FIRECRAWL_API_KEY
+  #   # base_url: http://<host>:3002  # optional: self-hosted Firecrawl; no cloud API key needed
 
   # Web search tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # GroundRoute is a meta search layer: one API in front of six engines (Serper,
@@ -1057,11 +1060,12 @@ tools:
   #   # Timeout for navigating to the page (in seconds). Set to positive value to enable, -1 to disable
   #   navigation_timeout: 30
 
-  # Web fetch tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # Web fetch tool (uses Firecrawl. Cloud requires FIRECRAWL_API_KEY; self-host may need no key.)
   # - name: web_fetch
   #   group: web
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
+  #   # base_url: http://<host>:3002  # optional: self-hosted Firecrawl; no cloud API key needed
 
   # Web fetch tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # Fetches a page's extracted text via GroundRoute mode=page.
@@ -1193,6 +1197,13 @@ tool_search:
 #
 # `exempt_tools` prevents persist→read→persist infinite loops for read tools.
 # `tool_overrides` allows per-tool threshold customization.
+#
+# The same middleware also elides the `content` argument of successful
+# write_file calls from model-bound requests once the same path was read or
+# modified again later (issue #5328): the file on disk is then the source of
+# truth, and the read-before-write gate forces a read_file before the next
+# modification anyway, so the historical copy only costs context. Stored
+# history, receipts, and the run journal keep the original arguments.
 
 tool_output:
   enabled: true
@@ -1211,6 +1222,18 @@ tool_output:
   # tool_overrides:
   #   web_search: 8000
   #   bash: 20000
+  # Replace a successful write_file call's `content` with a short placeholder
+  # pointing at read_file once a later successful read_file / write_file /
+  # str_replace of the same path exists. Only the model-bound request changes.
+  elide_superseded_writes: true
+  # Only elide content at least this many characters long (a character count,
+  # not tokens: CJK text costs ~3-4x more per character than ASCII). 0 elides
+  # every non-empty content.
+  superseded_write_min_chars: 2000
+  # The newest N successful write_file calls (across all paths) always stay
+  # visible, even when superseded, so the model can still say what it just
+  # wrote without a read. 0 keeps none.
+  keep_recent_writes: 1
 
 # ============================================================================
 # Suggestions Configuration
@@ -1476,6 +1499,12 @@ sandbox:
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
+#   #   # Required when using the OpenAI-compatible image-generation provider:
+#   #   IMAGE_GENERATION_PROVIDER: $IMAGE_GENERATION_PROVIDER
+#   #   IMAGE_GENERATION_API_KEY: $IMAGE_GENERATION_API_KEY
+#   #   IMAGE_GENERATION_BASE_URL: $IMAGE_GENERATION_BASE_URL
+#   #   IMAGE_GENERATION_MODEL: $IMAGE_GENERATION_MODEL
+#   #   IMAGE_GENERATION_SIZE: $IMAGE_GENERATION_SIZE  # Optional fixed-size override
 #
 #   # Optional: Cross-instance container ownership (issue #4206).
 #   #

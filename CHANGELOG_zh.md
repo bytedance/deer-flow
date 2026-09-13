@@ -397,6 +397,13 @@
 
 ### 修复
 
+- **运行时：** 跨 worker 的幂等 run 复用不再让复用方 worker 永久阻塞该线程。此前复用会
+  把从存储中读取的行注册为本地 run 记录，但只有拥有该 run 的 worker 才会结束并清理自己的
+  记录，因此这份副本会一直停留在准入时的 `pending`/`running` 状态：该 worker 上此线程后续
+  所有 `reject` 准入都返回 409，直到重启；读取该 run 时持续返回过期状态；若拥有方崩溃，
+  孤儿回收也会跳过这个 run。发往该 worker 的取消请求还会走本地拥有方路径，把拥有方仍在
+  运行的行标记为 `interrupted`。现在复用方 worker 返回不注册到本地的 store-only 句柄，
+  取消请求也按非拥有方的约定处理。([#5393])
 - **Skills：** 切换 skill 启用状态时不再把解析后的密钥写入 `extensions_config.json`。
   此前 Gateway 的 skill 开关与 `DeerFlowClient.update_skill` 通过
   `ExtensionsConfig.from_file()` 读取配置（该方法会把所有 `$VAR` 值替换为环境变量的
@@ -2119,3 +2126,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
 [#5353]: https://github.com/bytedance/deer-flow/pull/5353
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357
+[#5393]: https://github.com/bytedance/deer-flow/pull/5393
