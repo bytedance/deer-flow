@@ -258,7 +258,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
                 model_settings_from_config.get("extra_body"),
                 {"thinking": {"type": "disabled"}},
             )
-            model_settings_from_config["reasoning_effort"] = "minimal"
+            model_settings_from_config["reasoning_effort"] = "low"
         elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
             model_settings_from_config["extra_body"] = _deep_merge_dicts(
@@ -271,6 +271,27 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not model_config.supports_reasoning_effort:
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
+
+    # For DeepSeek vendor models: map "minimal" reasoning_effort to "low".
+    # The DeepSeek API does not accept "minimal" (the frontend's flash-mode
+    # shorthand); its valid reasoning_effort levels are low / medium / high.
+    #
+    # Detection uses three signals because the model class alone is
+    # insufficient — DeepSeek is commonly accessed via ChatOpenAI pointed at
+    # a deepseek endpoint.  api_base catches direct and proxied endpoints;
+    # the model name is the reliable fallback when the endpoint is a generic
+    # proxy or relay that does not mention "deepseek" in its URL.
+    _endpoint = model_settings_from_config.get("api_base") or ""
+    _is_deepseek = (
+        any(cls.__name__ == "ChatDeepSeek" for cls in model_class.__mro__)
+        or "deepseek" in _endpoint.lower()
+        or "deepseek" in (model_config.model or "").lower()
+    )
+    if _is_deepseek:
+        if (effort := kwargs.get("reasoning_effort")) and effort == "minimal":
+            kwargs["reasoning_effort"] = "low"
+        if (effort := model_settings_from_config.get("reasoning_effort")) and effort == "minimal":
+            model_settings_from_config["reasoning_effort"] = "low"
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
     # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.
