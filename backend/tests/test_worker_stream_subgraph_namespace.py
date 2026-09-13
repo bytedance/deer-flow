@@ -365,7 +365,7 @@ def _collect_ids(payload: object) -> set[str]:
     return ids
 
 
-def _build_delegating_parent_graph(executor_module, monkeypatch, *, child_emits_error_fallback: bool = False):
+def _build_delegating_parent_graph(executor_module, monkeypatch, *, child_emits_error_fallback: bool = False, emit_task_running: bool = False):
     """Real parent graph whose node delegates a scripted child through the
     real ``SubagentExecutor`` and emits ``task_*`` custom events the way the
     production task tool does (root-graph ``get_stream_writer``).
@@ -374,6 +374,10 @@ def _build_delegating_parent_graph(executor_module, monkeypatch, *, child_emits_
     message carrying the ``deerflow_error_fallback`` marker (not as its final
     message, so the delegation itself still completes) — the shape whose leak
     would mark the *parent* run as errored (#4399).
+
+    With ``emit_task_running`` the delegate also emits one ``task_running``
+    event per captured child step, carrying the message dict the way the
+    production task tool does.
     """
     from langgraph.config import get_stream_writer
     from langgraph.graph import END, START, MessagesState, StateGraph
@@ -457,6 +461,9 @@ def _build_delegating_parent_graph(executor_module, monkeypatch, *, child_emits_
                     pytest.fail("delegated subagent did not complete")
                 await asyncio.sleep(0.001)
             assert result.status.value == "completed", f"delegation failed: {result.error}"
+            if emit_task_running:
+                for index, message in enumerate(result.ai_messages or [], start=1):
+                    writer({"type": "task_running", "task_id": task_id, "message": message, "message_index": index})
         finally:
             executor_module.cleanup_background_task(task_id)
         writer({"type": "task_completed", "task_id": task_id})
@@ -469,10 +476,10 @@ def _build_delegating_parent_graph(executor_module, monkeypatch, *, child_emits_
     return parent_builder.compile()
 
 
-async def _run_delegation_through_worker(executor_module, monkeypatch, *, stream_subgraphs: bool, child_emits_error_fallback: bool = False) -> tuple[RunRecord, _RecordingStreamBridge]:
+async def _run_delegation_through_worker(executor_module, monkeypatch, *, stream_subgraphs: bool, child_emits_error_fallback: bool = False, emit_task_running: bool = False) -> tuple[RunRecord, _RecordingStreamBridge]:
     from langgraph.checkpoint.memory import InMemorySaver
 
-    parent_graph = _build_delegating_parent_graph(executor_module, monkeypatch, child_emits_error_fallback=child_emits_error_fallback)
+    parent_graph = _build_delegating_parent_graph(executor_module, monkeypatch, child_emits_error_fallback=child_emits_error_fallback, emit_task_running=emit_task_running)
     bridge = _RecordingStreamBridge()
     record = RunRecord(
         run_id=f"run-ns-int-{int(stream_subgraphs)}",
@@ -547,6 +554,26 @@ class TestWorkerSubgraphStreamIntegration:
         # namespaced, where the root-only fallback detector must ignore it.
         namespaced_payloads = [payload for event, payload in bridge.published if event.startswith(("values|", "messages|"))]
         assert any("child-fallback-sentinel" in _collect_ids(payload) for payload in namespaced_payloads)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stream_subgraphs", [True, False])
+    async def test_delegated_error_fallback_in_task_running_event_does_not_mark_the_parent_run_as_error(self, real_executor_module, monkeypatch, stream_subgraphs):
+        record, bridge = await _run_delegation_through_worker(
+            real_executor_module,
+            monkeypatch,
+            stream_subgraphs=stream_subgraphs,
+            child_emits_error_fallback=True,
+            emit_task_running=True,
+        )
+
+        # task_running is a root-level custom frame, but the message it carries is
+        # the subagent's; its fallback marker must not decide the parent run's status.
+        assert record.status == RunStatus.success, "delegated error fallback in a task_running event leaked into the parent run status"
+        assert not [payload for event, payload in bridge.published if event == "error"]
+
+        # Non-vacuous: the marked child message really rode a root custom frame.
+        task_running = [payload for event, payload in bridge.published if event == "custom" and isinstance(payload, dict) and payload.get("type") == "task_running"]
+        assert any("child-fallback-sentinel" in _collect_ids(payload) for payload in task_running)
 
     @pytest.mark.asyncio
     async def test_without_stream_subgraphs_delegated_frames_stay_out_while_task_events_remain(self, real_executor_module, monkeypatch):
