@@ -7,23 +7,16 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from shutil import which
 
 import pytest
+from support.shell import find_script_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "docker.sh"
-BASH_CANDIDATES = [
-    Path(r"C:\Program Files\Git\bin\bash.exe"),
-    Path(which("bash")) if which("bash") else None,
-]
-BASH_EXECUTABLE = next(
-    (str(path) for path in BASH_CANDIDATES if path is not None and path.exists() and "WindowsApps" not in str(path)),
-    None,
-)
+BASH_EXECUTABLE = find_script_bash()
 
 if BASH_EXECUTABLE is None:
-    pytestmark = pytest.mark.skip(reason="bash is required for docker.sh detection tests")
+    pytestmark = pytest.mark.skip(reason="Git Bash is required for docker.sh detection tests")
 
 
 def _detect_mode_with_config(config_content: str) -> str:
