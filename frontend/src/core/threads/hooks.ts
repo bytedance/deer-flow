@@ -81,6 +81,13 @@ import {
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
+  /**
+   * Assistant identity sent to the Gateway for run admission and execution.
+   * Default-chat and sidecar callers use the lead agent; custom-agent pages
+   * pass their stable agent name so server-side capability checks see the same
+   * assistant that the runtime loads from the request context.
+   */
+  assistantId?: string;
   context: LocalSettings["context"];
   isMock?: boolean;
   onSend?: (threadId: string) => void;
@@ -1666,6 +1673,7 @@ function isThreadMissingError(error: unknown): boolean {
 export function useThreadStream({
   threadId,
   displayThreadId,
+  assistantId = "lead_agent",
   context,
   isMock,
   onSend,
@@ -1788,7 +1796,7 @@ export function useThreadStream({
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
-    assistantId: "lead_agent",
+    assistantId,
     threadId: onStreamThreadId,
     reconnectOnMount: true,
     fetchStateHistory: { limit: 1 },
