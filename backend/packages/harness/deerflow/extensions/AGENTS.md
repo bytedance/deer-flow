@@ -277,7 +277,17 @@ supplies none.
 
 Gateway services start in registration order after the persistence engine and session
 factory are ready. Each receives the same `ExtensionRuntimeDeps` snapshot containing the
-app store, projected host policy, and session factory. Start failures are attributed and
+app store, projected host policy, session factory, and optional read-only
+`RunEvidenceReader`. The Gateway constructs the configured run and event stores before
+services so the reader is usable from `start()`. Changed-run discovery uses an opaque,
+scope-bound cursor over `(change_seq, run_id)`; a run that changes after it was returned may
+be replayed, but an unreturned run cannot be skipped. Legacy rows start at `change_seq=0`
+and sort by run id. A DB run store preserves positions across restarts, while memory only
+provides process-lifetime ordering. Per-run events retain the event store's thread-scoped
+`after_seq` semantics and are metadata-redacted; status comes from the authoritative run
+store. Empty pages mean caught up or not visible, never unsupported -- absence is represented
+by `ExtensionRuntimeDeps.run_evidence_reader is None`, and protocol defaults raise
+`NotImplementedError`. Start failures are attributed and
 fail open. The runtime captures `app.state.extensions` once, registers cleanup before the
 start batch, and stops the attempted service prefix in reverse order after run/subagent
 drain but before store, checkpointer, and engine teardown. Each stop has an independent

@@ -151,6 +151,17 @@ checkpoint-write admission boundary must repeat the complete audit after
 admission; a pre-admission exact hit can be superseded by a later event just as
 a pre-admission miss can become an exact hit.
 
+**Extension changed-run discovery** (`runtime/runs/store/` and
+`extensions/run_evidence.py`) orders public run-record changes by the
+backend-owned `(change_seq, run_id)` key rather than timestamps or per-thread
+event sequence numbers. The singleton SQL clock allocates positions in the same
+transaction as each public record mutation; memory uses a process-local counter.
+Rows from before the migration retain `change_seq=0` and page deterministically
+by run id. Because a later mutation only moves a row forward, concurrent paging
+may replay a run but cannot move an unseen run behind the committed cursor.
+Lease heartbeats do not advance this public position. The extension-facing
+cursor is versioned, opaque, and bound to the reader's fixed user scope.
+
 Gateway `POST /api/threads/{id}/history` uses that lookup to migrate legacy AI
 messages. An exhaustive miss preserves the human-boundary fallback; an
 incomplete lookup removes unproven synthesized IDs. Its metadata-only

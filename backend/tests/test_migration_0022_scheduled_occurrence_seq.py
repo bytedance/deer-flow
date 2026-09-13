@@ -83,8 +83,8 @@ async def _schema(engine):
         )
 
 
-async def test_occurrence_revision_is_single_head():
-    assert _get_head_revision() == REVISION
+async def test_occurrence_revision_precedes_changed_run_discovery():
+    assert _get_head_revision() == "0023_run_change_seq"
 
 
 async def test_upgrade_preserves_legacy_rows_and_allocates_from_one(migration_database):

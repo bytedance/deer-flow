@@ -21,6 +21,7 @@ from deerflow.runtime.runs.store.base import (
 class MemoryRunStore(RunStore):
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
+        self._change_seq = 0
         # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
         # used as an ordered set), maintained in lockstep with ``_runs`` so
         # per-thread queries avoid O(total in-memory runs) full scans. Mirrors
@@ -38,6 +39,10 @@ class MemoryRunStore(RunStore):
             bucket.pop(run_id, None)
             if not bucket:
                 self._runs_by_thread.pop(thread_id, None)
+
+    def _mark_changed(self, run: dict[str, Any]) -> None:
+        self._change_seq += 1
+        run["change_seq"] = self._change_seq
 
     async def put(
         self,
@@ -84,6 +89,7 @@ class MemoryRunStore(RunStore):
             "cancel_action": existing.get("cancel_action") if existing else None,
             "cancel_requested_at": existing.get("cancel_requested_at") if existing else None,
         }
+        self._mark_changed(self._runs[run_id])
         self._index_run(run_id, thread_id)
 
     async def get(self, run_id, *, user_id=None):
@@ -93,6 +99,19 @@ class MemoryRunStore(RunStore):
         if user_id is not None and run.get("user_id") != user_id:
             return None
         return run
+
+    async def list_changed(
+        self,
+        *,
+        after_change_seq: int,
+        after_run_id: str,
+        user_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        cursor = (after_change_seq, after_run_id)
+        results = [run for run in self._runs.values() if run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id) and (int(run.get("change_seq") or 0), run["run_id"]) > cursor]
+        results.sort(key=lambda run: (int(run.get("change_seq") or 0), run["run_id"]))
+        return results[:limit]
 
     async def list_by_thread(
         self,
@@ -173,6 +192,7 @@ class MemoryRunStore(RunStore):
         if stop_reason is not None:
             run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
         return True
 
     async def start_run(self, run_id) -> bool:
@@ -181,12 +201,14 @@ class MemoryRunStore(RunStore):
             return False
         run["status"] = "running"
         run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
         return True
 
     async def update_model_name(self, run_id, model_name):
         if run_id in self._runs:
             self._runs[run_id]["model_name"] = model_name
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+            self._mark_changed(self._runs[run_id])
 
     async def delete(self, run_id, *, user_id=None):
         run = self._runs.pop(run_id, None)
@@ -208,6 +230,7 @@ class MemoryRunStore(RunStore):
             if value is not None:
                 run[key] = value
         run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
         return True
 
     async def update_run_progress(self, run_id, **kwargs):
@@ -216,6 +239,7 @@ class MemoryRunStore(RunStore):
                 if value is not None:
                     self._runs[run_id][key] = value
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
+            self._mark_changed(self._runs[run_id])
 
     async def list_pending(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()
@@ -320,6 +344,7 @@ class MemoryRunStore(RunStore):
             run["cancel_action"] = action
             run["cancel_requested_at"] = datetime.now(UTC).isoformat()
         run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
         return run["cancel_action"]
 
     async def finalize_if_not_cancelled(
@@ -346,6 +371,7 @@ class MemoryRunStore(RunStore):
         if stop_reason is not None:
             run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
         return StatusFinalization(finalized=True)
 
     async def claim_for_takeover(
@@ -371,6 +397,7 @@ class MemoryRunStore(RunStore):
         if stop_reason is not None:
             run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
         return True
 
     async def list_inflight_with_expired_lease(
@@ -493,6 +520,7 @@ class MemoryRunStore(RunStore):
                 r["error"] = "Cancelled by newer run"
                 r["owner_worker_id"] = owner_worker_id
                 r["updated_at"] = now
+                self._mark_changed(r)
                 claimed.append(r)
 
         new_row = {
@@ -516,5 +544,6 @@ class MemoryRunStore(RunStore):
             "updated_at": now,
         }
         self._runs[run_id] = new_row
+        self._mark_changed(new_row)
         self._index_run(run_id, thread_id)
         return new_row, claimed
