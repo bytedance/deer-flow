@@ -84,6 +84,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
   - [Embedded Python Client](#embedded-python-client)
+  - [Conversation Sharing](#conversation-sharing)
   - [Scheduled Tasks](#scheduled-tasks)
   - [Terminal Workbench (TUI)](#terminal-workbench-tui)
   - [Documentation](#documentation)
@@ -1584,6 +1585,20 @@ startup if the project schema is missing. Follow the
 [offline database recovery procedure](docs/database-forward-revision-recovery.md)
 before starting this build against that database.
 
+## Conversation Sharing
+
+The current implementation provides **backend API groundwork only** for
+revocable, read-only conversation snapshots. It is disabled by default,
+requires a SQL database, and does not yet include the Share dialog or the
+public `/share/{token}` frontend page. The returned `share_url` reserves that
+future page path; API clients can resolve the token today through
+`GET /api/shares/{share_token}`.
+
+Operators enable it with `conversation_sharing.enabled` in `config.yaml`.
+Multi-replica deployments must give every replica the same
+`SHARE_TOKEN_PEPPER`; see the
+[Gateway API documentation](backend/docs/API.md#conversation-sharing-4548)
+for the current create, list, revoke, and resolve contracts.
 ## Scheduled Tasks
 
 DeerFlow now includes a first-class scheduled-task MVP in the workspace.

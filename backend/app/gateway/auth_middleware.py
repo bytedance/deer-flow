@@ -43,6 +43,21 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/api/webhooks/",
 )
 
+# Prefixes public only for safe (read-only) methods, as ``(methods, prefix)``
+# pairs. The exemption is keyed on the method, not on which route happens to
+# be mounted today: any verb outside the set stays behind the 401 gate even
+# under the same prefix, so a future route added under the prefix cannot
+# silently become anonymous (#5078 review P3).
+_PUBLIC_SAFE_METHOD_PATH_PREFIXES: tuple[tuple[frozenset[str], str], ...] = (
+    # Public read-only conversation shares (#4548): the high-entropy bearer
+    # token in the path is the credential, verified inside the route against
+    # the dedicated share record. The exemption covers exactly the mounted
+    # GET surface — FastAPI does not serve implicit HEAD here, and owner-side
+    # create/list/revoke live under the authenticated
+    # /api/threads/{thread_id}/shares routes and are never exempt.
+    (frozenset({"GET"}), "/api/shares/"),
+)
+
 # Exact auth paths that are public (login/register/status check).
 # /api/v1/auth/me, /api/v1/auth/change-password etc. are NOT public.
 _PUBLIC_EXACT_PATHS: frozenset[str] = frozenset(
@@ -57,11 +72,14 @@ _PUBLIC_EXACT_PATHS: frozenset[str] = frozenset(
 )
 
 
-def _is_public(path: str) -> bool:
+def _is_public(path: str, method: str = "GET") -> bool:
     stripped = path.rstrip("/")
     if stripped in _PUBLIC_EXACT_PATHS:
         return True
-    return any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES)
+    if any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES):
+        return True
+    normalized = method.upper()
+    return any(normalized in methods and path.startswith(prefix) for methods, prefix in _PUBLIC_SAFE_METHOD_PATH_PREFIXES)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -88,7 +106,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if _is_public(get_request_route_path(request)):
+        if _is_public(get_request_route_path(request), request.method):
             return await call_next(request)
 
         internal_user = None

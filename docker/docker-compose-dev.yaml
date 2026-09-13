@@ -232,6 +232,12 @@ services:
       - DEER_FLOW_STREAM_BRIDGE_REDIS_URL=${DEER_FLOW_STREAM_BRIDGE_REDIS_URL:-redis://redis:6379/0}
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
+      # Same compose-internal default as the production stack: the dev
+      # gateway port is deliberately unpublished and fronted by nginx, so
+      # per-IP limiters (login, share resolution) must key on nginx's
+      # X-Real-IP — without this, every anonymous visitor shares one bucket
+      # once BIND_HOST exposes the stack to multiple clients.
+      - AUTH_TRUSTED_PROXIES=${AUTH_TRUSTED_PROXIES:-172.16.0.0/12,192.168.0.0/16}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal

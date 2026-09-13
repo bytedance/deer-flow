@@ -195,6 +195,52 @@ def _merge_missing(target: dict, source: dict) -> None:
             _merge_missing(target[key], value)
 
 
+def test_conversation_sharing_bumped_config_version():
+    """Sharing must advance past the already-released v37 PAT schema."""
+    example = _load_repo_example()
+    assert example.get("config_version", 0) > 37
+    assert example["conversation_sharing"]["enabled"] is False
+
+
+def test_config_upgrade_from_v37_adds_conversation_sharing_preserving_user_values(tmp_path, caplog):
+    """A v37 user config is warned and upgraded with sharing defaults."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example = _load_repo_example()
+    user = {"config_version": 37, "models": {"fake": True}}
+    config_path = tmp_path / "config.yaml"
+    (tmp_path / "config.example.yaml").write_text(
+        (repo_root / "config.example.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    config_path.write_text(yaml.safe_dump(user), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.config.app_config"):
+        AppConfig._check_config_version(dict(user), config_path)
+    assert "outdated" in caplog.text
+    assert "(version 37)" in caplog.text
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    assert upgraded["conversation_sharing"]["enabled"] is False
+    assert upgraded["conversation_sharing"]["default_expiry_days"] == 30
+    # Existing user keys untouched.
+    assert upgraded["models"]["fake"] is True
+    assert upgraded["config_version"] == example["config_version"]
+    assert upgraded["config_version"] > 37
+
+
 def test_security_fail_closed_bumped_config_version():
     """The example must ship security_fail_closed under a version > 26 so v26 configs upgrade."""
     example = _load_repo_example()

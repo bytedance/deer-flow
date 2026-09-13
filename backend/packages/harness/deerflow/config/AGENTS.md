@@ -78,6 +78,7 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `subagents.enabled` - Master switch for subagent delegation
 - `subagent_runtime` - Startup-only shared process admission (`max_running`, bounded async wait queue, queue/reject policy, and queue timeout) for ordinary and durable-batch native subagents
 - `subagent_batches` - Startup-only explicit durable batch scheduler limits (disabled by default), including separate total, live, and running dimensions plus leases/retries/result bounds
+- `conversation_sharing` - Off-by-default backend/API snapshot sharing (`enabled`, `default_expiry_days`, `allow_no_expiry`); SQL persistence is required, while `SHARE_TOKEN_PEPPER` stays in the environment or a 0600 local secret file rather than YAML
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, shutdown_flush_timeout_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens, staleness_review_enabled, staleness_age_days, staleness_min_candidates, staleness_max_removals_per_cycle, staleness_protected_categories, staleness_max_lifetime_multiplier, staleness_max_extension_days)
 
 **`extensions_config.json`**:
@@ -89,3 +90,7 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and skill state at runtime; their `extensions_config.json` writes use the shared atomic replacement helper, while `middlewares` remains an operator-controlled config-file extension point.
 
 Values beginning with `$` are resolved from the environment when the file is loaded, and an unset variable becomes `""`. Runtime writers (MCP router, skill toggle, `DeerFlowClient`) therefore read the raw file with `read_raw_extensions_config`, merge into it (`set_raw_skill_enabled` for skill state), check the candidate with `validate_raw_extensions_config`, and write that raw dict. They never serialize an `ExtensionsConfig` model back to disk: its resolved values would persist secrets in plaintext and erase the references. When the file does not exist yet, the Gateway skill toggle seeds only the cached skill states. `tests/test_extensions_config_raw_writes.py` and the placeholder tests in `tests/test_client.py` pin this.
+
+`conversation_sharing` fields are read at request time and are not in the
+startup-only registry. The pepper is process-wide cached state rather than an
+`AppConfig` field; changing `SHARE_TOKEN_PEPPER` requires a Gateway restart.

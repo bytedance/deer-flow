@@ -148,6 +148,46 @@ def test_redact_text_masks_env_assignments_and_bearer_tokens():
     assert "normal=value" in redacted
 
 
+def test_redact_text_masks_conversation_share_tokens_in_request_paths():
+    token = "dfs_A9z-_0123456789abcdefghijklmnopqrstuv"
+    text = f"GET /api/shares/{token} HTTP/1.1 200\nreferer=https://host/share/{token}"
+
+    redacted = support_bundle.redact_text(text)
+
+    assert token not in redacted
+    assert "GET /api/shares/dfs_*** HTTP/1.1 200" in redacted
+    assert "referer=https://host/share/dfs_***" in redacted
+
+
+@pytest.mark.parametrize("token", [f"dfs_{'A' * 43}", f"%64%66%73%5F{'A' * 43}"])
+def test_redact_text_masks_full_share_token_without_left_boundary(token: str):
+    redacted = support_bundle.redact_text(f"trace=x{token}")
+
+    assert token not in redacted
+    assert redacted == "trace=xdfs_***"
+
+
+@pytest.mark.parametrize(
+    "encoded_token",
+    [
+        "d%66s_A9z-_0123456789abcdefghijklmnopqrstuv",
+        "dfs%5FA9z-_0123456789abcdefghijklmnopqrstuv",
+    ],
+)
+def test_redact_text_masks_percent_encoded_conversation_share_tokens(encoded_token):
+    redacted = support_bundle.redact_text(f"GET /redirect?next=/share/{encoded_token} HTTP/1.1")
+
+    assert encoded_token not in redacted
+    assert "dfs_***" in redacted
+
+
+def test_share_token_redaction_pattern_matches_application_logging():
+    """The standalone script cannot import harness at runtime; pin its copy."""
+    from deerflow.redaction import SHARE_TOKEN_PATTERN
+
+    assert support_bundle.SHARE_TOKEN_RE.pattern == SHARE_TOKEN_PATTERN.pattern
+
+
 def test_redact_text_masks_home_directory_paths():
     text = "\n".join(
         [
@@ -685,6 +725,50 @@ def test_thread_summary_lists_files_without_file_contents(tmp_path):
     assert "name,value" not in all_text
     assert "sk-live-secret" not in all_text
     assert "report-sk-<redacted>.txt" in all_text
+
+
+def test_support_bundle_final_writers_redact_share_tokens_from_archive_and_sidecars(tmp_path):
+    token = "dfs_A9z-_0123456789abcdefghijklmnopqrstuv"
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    output_path = tmp_path / "support.zip"
+
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        thread_id=token,
+        include_doctor=False,
+    )
+
+    with zipfile.ZipFile(output_path) as zf:
+        archive_text = "\n".join(zf.read(name).decode("utf-8") for name in zf.namelist())
+    sidecar_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            support_bundle._issue_summary_sidecar_path(output_path),
+            support_bundle._issue_draft_sidecar_path(output_path),
+        )
+    )
+
+    assert token not in archive_text
+    assert token not in sidecar_text
+    assert "dfs_***" in _zip_text(output_path, "thread-summary.json")
+
+
+def test_support_bundle_final_json_writer_redacts_share_tokens_in_mapping_keys(tmp_path):
+    first = "dfs_A9z-_0123456789abcdefghijklmnopqrstuv"
+    second = "dfs_B8y-_0123456789abcdefghijklmnopqrstuv"
+    output_path = tmp_path / "writer.zip"
+
+    with zipfile.ZipFile(output_path, mode="w") as zf:
+        support_bundle._write_json(zf, "payload", {"nested": {first: "first", second: "second"}})
+
+    rendered = _zip_text(output_path, "payload.json")
+    payload = json.loads(rendered)
+
+    assert first not in rendered
+    assert second not in rendered
+    assert sorted(payload["nested"].values()) == ["first", "second"]
 
 
 def test_missing_thread_summary_does_not_leak_absolute_checked_paths(tmp_path):

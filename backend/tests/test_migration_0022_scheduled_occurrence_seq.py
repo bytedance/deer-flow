@@ -84,7 +84,10 @@ async def _schema(engine):
 
 
 async def test_occurrence_revision_is_single_head():
-    assert _get_head_revision() == REVISION
+    # The conversation-shares series (0024/0025) chains after this revision
+    # per the second-to-land rule, so the merged tree's single head is the
+    # shares quota revision. The pin still fails on any branching.
+    assert _get_head_revision() == "0025_conversation_share_quotas"
 
 
 async def test_upgrade_preserves_legacy_rows_and_allocates_from_one(migration_database):

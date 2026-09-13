@@ -41,6 +41,13 @@ _HOST_PUBLIC_PATH_PREFIXES = (
     "/api/v1/auth/oauth/",
     "/api/v1/auth/callback/",
     "/api/webhooks/",
+    # Mirrors AuthMiddleware._PUBLIC_PATH_PREFIXES *plus* the prefixes of
+    # AuthMiddleware._PUBLIC_SAFE_METHOD_PATH_PREFIXES (pinned by
+    # test_extension_public_paths_track_auth_middleware_public_paths):
+    # public read-only conversation shares (#4548). The host reserves the
+    # whole namespace for every method — extension routes may not mount
+    # under the anonymous share-token surface at all, even read-only ones.
+    "/api/shares/",
 )
 _HOST_PUBLIC_EXACT_PATHS = frozenset(
     {
