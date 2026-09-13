@@ -49,6 +49,28 @@ describe("knowledge scope snapshots", () => {
     });
   });
 
+  test("strips catalog metadata from displayed document snapshots", () => {
+    const catalogDocument = {
+      id: "doc-1",
+      name: "Leave.pdf",
+      selectable: true,
+    };
+    const snapshot = buildKnowledgeScopeSnapshot({
+      mode: "selected",
+      datasets: [
+        {
+          id: "dataset-1",
+          name: "Policies",
+          documents: { mode: "selected", items: [catalogDocument] },
+        },
+      ],
+    });
+
+    expect(snapshot.display?.datasets[0]?.documents).toEqual([
+      { id: "doc-1", name: "Leave.pdf" },
+    ]);
+  });
+
   test("rejects an empty selected document filter", () => {
     expect(() =>
       buildKnowledgeScopeSnapshot({

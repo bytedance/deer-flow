@@ -160,7 +160,11 @@ export function buildKnowledgeScopeSnapshot(
             Boolean(document.name.trim()) &&
             codePointLength(document.name) <= MAX_NAME_LENGTH,
         )
-        .slice(0, remaining);
+        .slice(0, remaining)
+        // Catalog entries also carry provider metadata such as `selectable`.
+        // The message contract intentionally exposes only the stable display
+        // fields, so do not leak the catalog object into the wire snapshot.
+        .map(({ id, name }) => ({ id, name }));
       if (documents.length > 0) {
         entry.documents = documents;
         displayedDocuments += documents.length;
