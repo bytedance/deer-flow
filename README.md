@@ -596,6 +596,11 @@ channels:
     enabled: true
     bot_id: $WECOM_BOT_ID
     bot_secret: $WECOM_BOT_SECRET
+    # Optional: extra host suffixes inbound media downloads may come from, in
+    # addition to the built-in qq.com family and WeCom's official COS media
+    # host (ww-aibot-img-1258476243.<region>.myqcloud.com); add one here if
+    # WeCom rotates to a new COS account or media goes through a proxy
+    allowed_media_hosts: []
 
   slack:
     enabled: true
@@ -625,6 +630,9 @@ channels:
     max_outbound_image_bytes: 20971520
     max_inbound_file_bytes: 52428800
     max_outbound_file_bytes: 52428800
+    # Inbound media downloads stream with the caps above and are restricted to
+    # these host suffixes (plus *.qq.com and the cdn_base_url host by default)
+    allowed_media_hosts: []
 
     # Optional: per-channel / per-user session settings
     session:
