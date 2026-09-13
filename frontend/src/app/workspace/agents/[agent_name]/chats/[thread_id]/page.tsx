@@ -39,13 +39,15 @@ import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { useAgent } from "@/core/agents";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
-import { useBrowserControlEnabled } from "@/core/features";
+import {
+  useBrowserControlEnabled,
+  useKnowledgeBaseEnabled,
+} from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   ALL_KNOWLEDGE_SCOPE,
   buildKnowledgeScopeSnapshot,
   KNOWLEDGE_SCOPE_KEY,
-  useKnowledgeBaseEnabled,
   type KnowledgeScopeSelection,
 } from "@/core/knowledge";
 import {

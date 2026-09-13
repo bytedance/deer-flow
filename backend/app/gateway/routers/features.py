@@ -13,13 +13,12 @@ from pydantic import BaseModel, Field
 from app.gateway.browser_capability import browser_capability
 from app.gateway.conversation_access import conversation_references_enabled
 from app.gateway.deps import get_config
+from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
 from deerflow.config.app_config import AppConfig
 from deerflow.subagents.capacity import configured_subagent_max_running
 
 router = APIRouter(prefix="/api", tags=["features"])
-
-_RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER = "deerflow.community.ragflow.tools:knowledge_search_tool"
 
 
 class AgentsApiFeature(BaseModel):
@@ -121,4 +120,4 @@ def _knowledge_scope_selection_enabled(config: AppConfig) -> bool:
     if not settings.enabled or not settings.scope_selection_enabled:
         return False
     tool = config.get_tool_config("knowledge_search")
-    return tool is not None and tool.use == _RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
+    return tool is not None and tool.use == RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER

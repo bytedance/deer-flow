@@ -186,8 +186,9 @@ def execution_scope(value: object) -> dict[str, Any]:
 def strip_message_knowledge_scope(message: Any) -> Any:
     """Copy a LangChain message without its knowledge-scope snapshot."""
     additional_kwargs = getattr(message, "additional_kwargs", None)
-    if not isinstance(additional_kwargs, dict) or KNOWLEDGE_SCOPE_KEY not in additional_kwargs:
+    if not isinstance(additional_kwargs, dict) or not ({KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY} & additional_kwargs.keys()):
         return message
     cleaned = dict(additional_kwargs)
     cleaned.pop(KNOWLEDGE_SCOPE_KEY, None)
+    cleaned.pop(KNOWLEDGE_SCOPE_RUNTIME_KEY, None)
     return message.model_copy(update={"additional_kwargs": cleaned})
