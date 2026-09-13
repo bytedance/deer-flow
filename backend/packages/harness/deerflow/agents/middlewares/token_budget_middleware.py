@@ -15,6 +15,14 @@ Warning injection uses the deferred pattern:
   - wrap_model_call injects it as a HumanMessage at the next model call.
 This preserves AIMessage(tool_calls) → ToolMessage pairing.
 
+Run scope:
+  Usage and warning state are keyed by ``run_id`` and survive ``after_agent``.
+  A single Gateway run may re-enter the graph for hidden goal continuations,
+  and those continuations share one budget; a later user run gets a new
+  ``run_id`` and a fresh budget. Only the per-message ``seen`` map is dropped
+  (``before_agent`` rebuilds it). Invocations without ``run_id`` in the
+  context still clear all of their state in ``after_agent``.
+
 Stop-reason surfacing (#3875 Phase 2):
   The hard stop does NOT raise — it strips tool_calls so the agent loop
   terminates naturally and produces a final answer. To let the caller (e.g.
@@ -149,7 +157,16 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
     def after_agent(self, state: AgentState, runtime: Runtime) -> None:
         if not self._config.enabled:
             return
-        self._clear_run_state(self._get_run_id(runtime))
+        run_id = self._get_run_id(runtime)
+        ctx = getattr(runtime, "context", None)
+        if isinstance(ctx, dict) and "run_id" in ctx:
+            # A Gateway run re-enters the graph for hidden goal continuations
+            # under the same run_id, and they share this run's budget. Keep the
+            # usage and warning state; before_agent rebuilds the seen map.
+            with self._lock:
+                self._seen_messages.pop(run_id, None)
+            return
+        self._clear_run_state(run_id)
 
     @override
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> None:

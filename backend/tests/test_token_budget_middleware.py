@@ -1,6 +1,10 @@
 from unittest.mock import MagicMock
 
+from langchain.agents import create_agent
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import tool as as_tool
+from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 from deerflow.config.token_budget_config import TokenBudgetConfig
@@ -196,3 +200,55 @@ class TestIndependentDimensions:
 
         assert result is not None
         assert "output token" in result["messages"][0].content
+
+
+class _ToolCallingFakeModel(FakeMessagesListChatModel):
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        return self
+
+
+class TestTokenBudgetAgentGraph:
+    def test_goal_continuation_shares_the_run_budget(self):
+        """A hidden goal continuation re-enters the graph under the same run_id; it must not get a fresh budget."""
+        executed: list[str] = []
+
+        @as_tool
+        def bash(command: str) -> str:
+            """Run a fake shell command."""
+            executed.append(command)
+            return "ok"
+
+        def call(command: str, tokens: int = 4000) -> AIMessage:
+            return AIMessage(
+                content="",
+                id=f"ai-{command}",
+                tool_calls=[{"name": "bash", "id": f"call-{command}", "args": {"command": command}}],
+                usage_metadata={"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens},
+            )
+
+        model = _ToolCallingFakeModel(
+            responses=[
+                call("a"),
+                call("b"),
+                AIMessage(content="first answer", id="ai-answer-1", usage_metadata={"input_tokens": 1000, "output_tokens": 0, "total_tokens": 1000}),
+                call("c"),
+                call("d"),
+                AIMessage(content="second answer", id="ai-answer-2", usage_metadata={"input_tokens": 1000, "output_tokens": 0, "total_tokens": 1000}),
+            ]
+        )
+        mw = TokenBudgetMiddleware(TokenBudgetConfig(enabled=True, max_tokens=10_000))
+        graph = create_agent(model=model, tools=[bash], middleware=[mw], checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "goal-thread"}}
+
+        # User turn: 9k of 10k.
+        graph.invoke({"messages": [HumanMessage("research")]}, config=config, context={"thread_id": "goal-thread", "run_id": "run-1"})
+        assert executed == ["a", "b"]
+
+        # Goal continuation in the same run: the next 4k call crosses the cap.
+        result = graph.invoke({"messages": [HumanMessage("keep going")]}, config=config, context={"thread_id": "goal-thread", "run_id": "run-1"})
+        assert executed == ["a", "b"]
+        assert "TOKEN BUDGET EXCEEDED" in result["messages"][-1].content
+
+        # A later user run still starts with a fresh budget.
+        graph.invoke({"messages": [HumanMessage("next question")]}, config=config, context={"thread_id": "goal-thread", "run_id": "run-2"})
+        assert executed == ["a", "b", "d"]
