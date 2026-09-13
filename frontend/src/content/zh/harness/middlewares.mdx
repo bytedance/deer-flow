@@ -240,12 +240,15 @@ class MyMiddleware(AgentMiddleware[AgentState]):
 
 生命周期钩子可以返回状态更新字典，LangChain 会将其合并到 Agent 状态中；仅观察时返回 `None`。
 
-对于运维配置的部署，请通过导入路径注册零参数构造的类：
+对于运维配置的部署，请通过导入路径注册类。字符串条目使用零参数构造；`{class, kwargs}` 会把 `kwargs` 传给构造函数。`kwargs` 的值必须是 JSON 类型（对象、数组、字符串、数字、布尔或 null）；YAML 日期和时间戳会转成 ISO 字符串，与 JSON 保持一致：
 
 ```yaml
 extensions:
   middlewares:
     - my_company.deerflow_middlewares:MyMiddleware
+    - class: my_company.deerflow_middlewares:MyMiddleware
+      kwargs:
+        max_tool_calls: 5
 ```
 
 配置的中间件会在内置中间件及可选的循环/token 保护之后加载。对于主 Agent 链，它位于终态响应、模型长度、安全和澄清尾部之前；子 Agent 链没有终态响应、模型长度或澄清阶段，因此配置中间件之后会继续执行可选的安全防护、`DurableContextMiddleware`、可选的 `SummarizationMiddleware`，随后是 `SubagentDateContextMiddleware` 和 `SystemMessageCoalescingMiddleware`。中间件路径会执行 Python 代码，因此应视为可信配置。嵌入式调用方也可以使用 `DeerFlowClient(middlewares=[...])`；它构建完整的主 Agent 链，并将中间件放在其终态响应、模型长度、安全和澄清尾部之前。`create_deerflow_agent(extra_middleware=[...])` 则构建较小的按功能组装的主 Agent 链；未锚定的额外中间件会紧接在 `ClarificationMiddleware` 之前放置（锚定中间件遵循其 `@Next`/`@Prev` 位置）。两个 API 均不会将中间件转发给子 Agent。

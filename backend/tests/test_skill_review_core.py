@@ -16,6 +16,14 @@ from deerflow.skills.review.renderer import build_static_report, render_report_m
 CONTRACTS_DIR = Path(__file__).resolve().parents[2] / "contracts" / "skill_review"
 
 
+def test_video_generation_runtime_credentials_pass_skill_review():
+    skill_dir = Path(__file__).resolve().parents[2] / "skills" / "public" / "video-generation"
+    facts = analyze_skill_package(LocalDirectoryReader(skill_dir).read())
+
+    assert facts["summary"]["blockers"] == 0
+    assert facts["summary"]["errors"] == 0, facts["findings"]
+
+
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")

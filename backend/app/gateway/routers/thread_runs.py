@@ -42,7 +42,7 @@ from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import abuild_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
@@ -1038,7 +1038,7 @@ async def wait_run(
     # thread head may be a later run, so do not claim it as this run's result.
     if completed and not reused:
         try:
-            accessor, config = build_checkpoint_state_accessor(
+            accessor, config = await abuild_checkpoint_state_accessor(
                 request,
                 thread_id=thread_id,
                 assistant_id=body.assistant_id,

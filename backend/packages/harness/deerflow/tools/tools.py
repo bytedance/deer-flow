@@ -1,4 +1,5 @@
 import logging
+import threading
 
 from langchain.tools import BaseTool
 
@@ -49,10 +50,22 @@ def _is_host_bash_tool(tool: object) -> bool:
     return False
 
 
+_sync_invocable_tool_lock = threading.Lock()
+
+
 def _ensure_sync_invocable_tool(tool: BaseTool) -> BaseTool:
-    """Attach a sync wrapper to async-only tools used by sync agent callers."""
-    if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
-        tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
+    """Attach a sync wrapper to async-only tools used by sync agent callers.
+
+    The wrapped objects are process-wide singletons (BUILTIN_TOOLS /
+    SUBAGENT_TOOLS / MCP cache entries) and tool assembly may now run on
+    worker threads concurrently; double-checked locking makes the in-place
+    ``tool.func`` wrap explicitly single-shot instead of incidental.
+    """
+    if getattr(tool, "func", None) is not None or getattr(tool, "coroutine", None) is None:
+        return tool
+    with _sync_invocable_tool_lock:
+        if getattr(tool, "func", None) is None:
+            tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
     return tool
 
 

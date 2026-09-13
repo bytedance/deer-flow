@@ -824,6 +824,7 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 当某次执行处于 `queued`、`launching` 或 `running` 时冻结任务定义，避免持久化的执行意外换用新的 prompt、thread 或调度；将任务切换为暂停或删除任务会取消已在等待的执行，而 `launching`/`running` 执行结束后才能重试这些变更；显式手动触发在调度已暂停时仍可等待并执行，且不会自动恢复调度
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
+- 按每页 50 条浏览执行历史；历史页暂停自动刷新，可随时返回最新记录。 仅在读取成功后显示条数，加载中或失败不会误显示为零条。
 
 当前 MVP 限制：
 
@@ -836,6 +837,18 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 定时任务运行会读取 `config.yaml` 中的 `scheduler.recursion_limit`（默认 `1000`，与 Web UI 的交互式预算一致）。超过 `max_recursion_limit` 的值会被截断。该字段在 dispatch 时读取，因此下一次定时运行即可生效，无需重启 Gateway。
 
 后台调度器默认是单实例。多 Pod 部署时，请设置 `scheduler.multi_instance: true`，并使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`；启动和周期性恢复会保留仍由对端持有的运行，把过期的 launch claim 原子退回队列，只接管过期的 run lease，并隔离过期的 launch 写入。`max_concurrent_runs` 是跨 Pod 共享的全局上限，只计入 `launching` / `running` 的执行；等待中的 `queued` 行不占用该配额。没有这些配置时，请只在一个 Gateway Pod 上启用调度器。这些 scheduler 字段只在启动时生效；修改后需要一起重启所有 Gateway Pod。
+
+### 通过 API 预览 cron 执行时间
+
+已认证且具有 `threads:read` 权限的客户端，可在创建任务前调用 `POST /api/scheduled-tasks/preview-cron`：
+
+```json
+{"cron":"0 9 * * 1-5","timezone":"Asia/Shanghai","count":3,"start_at":"2026-09-12T00:00:00Z"}
+```
+
+响应包含规范化的 `cron`、`timezone`、生效的 UTC `start_at`，以及 `occurrences` 列表中的 UTC `run_at` 和带偏移量的 `local_time`。此例的首次执行时间为 `2026-09-14T01:00:00Z` / `2026-09-14T09:00:00+08:00`。
+
+`count` 为 1–10 的整数，默认 5。`start_at` 必须带时区，省略时只读取一次服务器当前时间。cron 沿用调度器的五字段语法，最长 256 字符；时区名称最长 128 字符。输入无效或无法计算所需未来时间时返回 422。预览沿用实际调度器的夏令时语义，不创建任务、thread 或 run，也不预留执行资源。此能力目前通过 API 提供，workspace 表单尚未展示这些时间。
 
 ### 升级说明
 

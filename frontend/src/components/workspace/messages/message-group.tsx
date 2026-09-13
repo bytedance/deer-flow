@@ -48,6 +48,7 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
+import { ToolCallDetails } from "./tool-call-details";
 
 interface MessageGroupProps {
   className?: string;
@@ -264,6 +265,7 @@ function MessageGroupComponent({
         isLast={options?.isLast}
         isLoading={isLoading}
         deferBrowserPreview={deferBrowserPreviews}
+        showDetails={showTokenDebugSummaries}
         tokenDebugStep={
           debugStep && !debugStep.sharedAttribution ? debugStep : undefined
         }
@@ -571,6 +573,26 @@ function browserToolLabel(
   }
 }
 
+// Shared routing for result conversion and specialized rendering.
+function getToolCallKind(name: string) {
+  if (name.startsWith("browser_")) return "browser";
+  switch (name) {
+    case "web_search":
+    case "image_search":
+    case "web_fetch":
+    case "ls":
+    case "read_file":
+    case "write_file":
+    case "str_replace":
+    case "bash":
+    case "ask_clarification":
+    case "write_todos":
+      return name;
+    default:
+      return "generic";
+  }
+}
+
 function ToolCall({
   id,
   messageId,
@@ -581,6 +603,8 @@ function ToolCall({
   isLoading = false,
   deferBrowserPreview = false,
   tokenDebugStep,
+  showDetails = false,
+  resultMessage,
   browserView,
   threadId,
 }: {
@@ -593,10 +617,13 @@ function ToolCall({
   isLoading?: boolean;
   deferBrowserPreview?: boolean;
   tokenDebugStep?: TokenDebugStep;
+  showDetails?: boolean;
+  resultMessage?: Extract<Message, { type: "tool" }>;
   browserView?: BrowserViewMeta;
   threadId?: string;
 }) {
   const { t } = useI18n();
+  const kind = getToolCallKind(name);
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
   const browserViewPanel = useMaybeBrowserView();
@@ -610,7 +637,7 @@ function ToolCall({
       fallback
     );
   const writeFilePath =
-    (name === "write_file" || name === "str_replace") &&
+    (kind === "write_file" || kind === "str_replace") &&
     typeof args.path === "string"
       ? args.path
       : undefined;
@@ -644,7 +671,7 @@ function ToolCall({
     return () => window.clearTimeout(timeout);
   }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
 
-  if (name.startsWith("browser_")) {
+  if (kind === "browser") {
     const shot = browserView?.screenshot;
     const previewUrl =
       shot && threadId ? resolveArtifactURL(shot, threadId) : undefined;
@@ -691,7 +718,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "web_search") {
+  } else if (kind === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchOnWebFor(args.query);
@@ -715,7 +742,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "image_search") {
+  } else if (kind === "image_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedImages;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchForRelatedImagesFor(args.query);
@@ -763,7 +790,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "web_fetch") {
+  } else if (kind === "web_fetch") {
     const url = (args as { url: string })?.url;
     let title = url;
     if (typeof result === "string") {
@@ -792,7 +819,7 @@ function ToolCall({
         </ChainOfThoughtSearchResult>
       </ChainOfThoughtStep>
     );
-  } else if (name === "ls") {
+  } else if (kind === "ls") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -812,7 +839,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "read_file") {
+  } else if (kind === "read_file") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -832,7 +859,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "write_file" || name === "str_replace") {
+  } else if (kind === "write_file" || kind === "str_replace") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -860,7 +887,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "bash") {
+  } else if (kind === "bash") {
     const description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -889,7 +916,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "ask_clarification") {
+  } else if (kind === "ask_clarification") {
     return (
       <ChainOfThoughtStep
         key={id}
@@ -897,7 +924,7 @@ function ToolCall({
         icon={MessageCircleQuestionMarkIcon}
       ></ChainOfThoughtStep>
     );
-  } else if (name === "write_todos") {
+  } else if (kind === "write_todos") {
     return (
       <ChainOfThoughtStep
         key={id}
@@ -913,7 +940,16 @@ function ToolCall({
         key={id}
         label={resolveLabel(description ?? t.toolCalls.useTool(name))}
         icon={WrenchIcon}
-      ></ChainOfThoughtStep>
+      >
+        {showDetails && (
+          <ToolCallDetails
+            name={name}
+            callId={id}
+            args={args}
+            resultMessage={resultMessage}
+          />
+        )}
+      </ChainOfThoughtStep>
     );
   }
 }
@@ -932,6 +968,7 @@ interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
   result?: string;
+  resultMessage?: Extract<Message, { type: "tool" }>;
   browserView?: BrowserViewMeta;
 }
 
@@ -950,6 +987,7 @@ interface BrowserViewMeta {
 function indexToolCallData(messages: Message[]) {
   const toolCallResults = new Map<string, string>();
   const browserViews = new Map<string, BrowserViewMeta>();
+  const resultMessages = new Map<string, Extract<Message, { type: "tool" }>>();
 
   for (const message of messages) {
     if (message.type !== "tool" || !message.tool_call_id) {
@@ -957,10 +995,13 @@ function indexToolCallData(messages: Message[]) {
     }
 
     const toolCallId = message.tool_call_id;
+    if (!resultMessages.has(toolCallId))
+      resultMessages.set(toolCallId, message);
     if (!toolCallResults.has(toolCallId)) {
       const result = extractTextFromMessage(message);
       if (result) {
         toolCallResults.set(toolCallId, result);
+        resultMessages.set(toolCallId, message);
       }
     }
 
@@ -976,12 +1017,13 @@ function indexToolCallData(messages: Message[]) {
     }
   }
 
-  return { browserViews, toolCallResults };
+  return { browserViews, toolCallResults, resultMessages };
 }
 
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
-  const { browserViews, toolCallResults } = indexToolCallData(messages);
+  const { browserViews, toolCallResults, resultMessages } =
+    indexToolCallData(messages);
   for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
       // Reasoning precedes the answer text it produced, so it is pushed first:
@@ -1020,7 +1062,9 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         const toolCallId = tool_call.id;
         if (toolCallId) {
           const toolCallResult = toolCallResults.get(toolCallId);
-          if (toolCallResult) {
+          step.resultMessage = resultMessages.get(toolCallId);
+          // Generic details preserve received text; specialized tools retain their parsing.
+          if (toolCallResult && getToolCallKind(tool_call.name) !== "generic") {
             try {
               const json = JSON.parse(toolCallResult);
               step.result = json;

@@ -6,12 +6,17 @@ import asyncio
 import base64
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock
 
+import pytest
+
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
+
+_POSIX_MODE_BITS_REASON = "Windows chmod only toggles the read-only bit, so the 0o600 mode asserted here is never observable"
 
 
 def _run(coro):
@@ -1478,6 +1483,8 @@ def test_qrcode_login_binds_and_persists_auth_state(monkeypatch, tmp_path: Path)
         assert auth_state["status"] == "confirmed"
         assert auth_state["bot_token"] == "bound-token"
         assert auth_state["ilink_bot_id"] == "bot-99"
+        if os.name == "nt":
+            pytest.skip(_POSIX_MODE_BITS_REASON)
         assert ((state_dir / "wechat-auth.json").stat().st_mode & 0o777) == 0o600
 
     _run(go())
@@ -1506,10 +1513,14 @@ def test_save_auth_state_tightens_preexisting_loose_file(tmp_path: Path):
     )
     channel._save_auth_state(status="confirmed", bot_token="bound-token", ilink_bot_id="bot-1")
 
-    assert (auth_path.stat().st_mode & 0o777) == 0o600
     assert json.loads(auth_path.read_text(encoding="utf-8"))["bot_token"] == "bound-token"
     # Atomic write leaves no temp-file residue behind.
     assert list(state_dir.glob("*.tmp")) == []
+    # Keep the platform-independent half running on Windows; only the mode-bit
+    # half of the "owner-only inode" contract is unobservable there.
+    if os.name == "nt":
+        pytest.skip(_POSIX_MODE_BITS_REASON)
+    assert (auth_path.stat().st_mode & 0o777) == 0o600
 
 
 def test_save_auth_state_chmod_failure_is_logged_not_warned(tmp_path: Path, caplog):

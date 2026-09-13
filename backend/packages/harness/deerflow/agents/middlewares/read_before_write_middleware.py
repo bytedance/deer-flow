@@ -40,7 +40,6 @@ import logging
 import posixpath
 import threading
 import weakref
-from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from typing import Any, override
 
@@ -50,7 +49,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.tool_call_args import rewrite_messages_tool_call_args
+from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results, rewrite_messages_tool_call_args
 from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result, stamp_exception_meta
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
@@ -114,6 +113,45 @@ def _normalize_mark_path(path: str) -> str:
 
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+async def _await_off_thread(task: asyncio.Task[Any]) -> Any:
+    """Drain an already-dispatched worker operation before propagating cancellation."""
+    first_cancel: asyncio.CancelledError | None = None
+    while True:
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                if first_cancel is not None:
+                    raise first_cancel
+                raise
+            if first_cancel is None:
+                first_cancel = exc
+            if not task.done():
+                continue
+        except BaseException:
+            if first_cancel is None:
+                raise
+        else:
+            if first_cancel is None:
+                return result
+
+        if first_cancel is not None:
+            if task.done() and not task.cancelled():
+                task.exception()
+            raise first_cancel
+
+
+async def _acquire_gate_lock(lock: threading.Lock) -> None:
+    """Acquire off-loop safely; threading.Lock permits cross-thread release."""
+    acquire_task = asyncio.create_task(asyncio.to_thread(lock.acquire))
+    try:
+        await _await_off_thread(acquire_task)
+    except asyncio.CancelledError:
+        if acquire_task.done() and not acquire_task.cancelled() and acquire_task.exception() is None:
+            lock.release()
+        raise
 
 
 class ReadBeforeWriteMiddleware(AgentMiddleware):
@@ -181,13 +219,11 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
                 return await handler(request)
             try:
                 async with sandbox_authorization_scope_async(request.runtime):
-                    # threading.Lock may be released from a different thread than the
-                    # acquiring one, so acquiring in a worker thread and releasing on
-                    # the event-loop thread is safe.
                     lock = self._lock_for(request, path)
-                    await asyncio.to_thread(lock.acquire)
+                    await _acquire_gate_lock(lock)
                     try:
-                        blocked = await asyncio.to_thread(self._check_write_gate, request)
+                        check_task = asyncio.create_task(asyncio.to_thread(self._check_write_gate, request))
+                        blocked = await _await_off_thread(check_task)
                         if blocked is not None:
                             return normalize_tool_result(blocked)
                         return await handler(request)
@@ -202,10 +238,11 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             try:
                 async with sandbox_authorization_scope_async(request.runtime):
                     lock = self._lock_for(request, path)
-                    await asyncio.to_thread(lock.acquire)
+                    await _acquire_gate_lock(lock)
                     try:
                         result = await handler(request)
-                        await asyncio.to_thread(self._attach_read_mark, request, result)
+                        mark_task = asyncio.create_task(asyncio.to_thread(self._attach_read_mark, request, result))
+                        await _await_off_thread(mark_task)
                         return result
                     finally:
                         lock.release()
@@ -402,30 +439,12 @@ def elide_blocked_write_payloads(messages: list[Any], *, min_chars: int) -> list
 def _blocked_call_occurrences(messages: list[Any]) -> set[tuple[int, str]]:
     """Return ``(id(ai_message), call_id)`` for every call occurrence answered by a gate-blocked result.
 
-    Tool-call ids may repeat across assistant turns, so a history-wide id set
-    would also hit an earlier (or later) *successful* call with the same id and
-    mislabel it as blocked. Results are paired with call occurrences the way
-    ``DanglingToolCallMiddleware`` does: ToolMessages queue per id in history
-    order and each AIMessage call consumes the next one for its id.
+    Pairing is per occurrence (``tool_call_args.pair_tool_call_results``):
+    tool-call ids may repeat across assistant turns, so a history-wide id set
+    would also hit an earlier (or later) *successful* call with the same id
+    and mislabel it as blocked.
     """
-    results_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
-    for message in messages:
-        if isinstance(message, ToolMessage) and isinstance(message.tool_call_id, str) and message.tool_call_id:
-            results_by_id[message.tool_call_id].append(message)
-
-    blocked: set[tuple[int, str]] = set()
-    for message in messages:
-        if not isinstance(message, AIMessage):
-            continue
-        for tool_call in message.tool_calls or ():
-            call_id = tool_call.get("id") if isinstance(tool_call, dict) else None
-            if not isinstance(call_id, str) or not call_id:
-                continue
-            queue = results_by_id.get(call_id)
-            result = queue.popleft() if queue else None
-            if result is not None and isinstance((result.additional_kwargs or {}).get(WRITE_BLOCK_KEY), dict):
-                blocked.add((id(message), call_id))
-    return blocked
+    return {(id(occurrence.message), occurrence.call_id) for occurrence in pair_tool_call_results(messages) if occurrence.result is not None and isinstance((occurrence.result.additional_kwargs or {}).get(WRITE_BLOCK_KEY), dict)}
 
 
 def _elide_args(args: dict[str, Any], tool_name: str, min_chars: int) -> dict[str, Any] | None:

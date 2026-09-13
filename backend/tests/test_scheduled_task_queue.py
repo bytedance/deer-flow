@@ -154,6 +154,94 @@ async def test_queued_run_survives_single_instance_restart_sweep(tmp_path):
         await close_engine()
 
 
+async def test_queued_once_task_survives_startup_and_is_drained_on_next_poll(tmp_path):
+    """A newer queued occurrence survives recovery of an already-stuck parent.
+
+    The old success models a completion that committed before its parent update.
+    A real manual dispatch then leaves newer work queued after a transient
+    same-thread conflict. Startup must not let the old success finalize the
+    parent through the newer active row; the ordinary queue drain owns launch.
+    """
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        await task_repo.create(
+            task_id="task-queued-once",
+            user_id="user-1",
+            thread_id="thread-queued-once",
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title="Queued once task",
+            prompt="Resume queued work",
+            schedule_type="once",
+            schedule_spec={"run_at": now.isoformat()},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_repo.update(
+            "task-queued-once",
+            user_id="user-1",
+            updates={"status": "running"},
+        )
+        await run_repo.create(
+            run_record_id="task-run-old-success",
+            task_id="task-queued-once",
+            thread_id="thread-queued-once",
+            scheduled_for=now - timedelta(minutes=1),
+            trigger="scheduled",
+            status="success",
+        )
+        task = await task_repo.get("task-queued-once", user_id="user-1")
+        assert task is not None
+        launched = []
+
+        async def launch_run(**kwargs):
+            launched.append(kwargs)
+            if len(launched) == 1:
+                raise ConflictError("Thread thread-queued-once already has an active run")
+            return {"run_id": "run-after-restart", "thread_id": kwargs["thread_id"]}
+
+        first_service = _make_service(task_repo, run_repo, launch_run)
+        queued = await first_service.dispatch_task(task, now=now, trigger="manual")
+        assert queued["outcome"] == "queued"
+        rows = await run_repo.list_by_task("task-queued-once")
+        assert [row["status"] for row in rows] == ["queued", "success"]
+
+        service = _make_service(task_repo, run_repo, launch_run)
+
+        async def parked_run_loop():
+            await service._stop.wait()
+
+        service._run_loop = parked_run_loop
+        await service.start()
+        try:
+            task = await task_repo.get_internal("task-queued-once")
+            rows = await run_repo.list_by_task("task-queued-once")
+            assert task is not None
+            assert task["status"] == "running"
+            assert rows[0]["status"] == "queued"
+
+            await service.run_once(now=now + timedelta(seconds=1))
+
+            task = await task_repo.get_internal("task-queued-once")
+            rows = await run_repo.list_by_task("task-queued-once")
+            assert task is not None
+            assert task["status"] == "running"
+            assert task["last_run_id"] == "run-after-restart"
+            assert rows[0]["status"] == "running"
+            assert rows[0]["run_id"] == "run-after-restart"
+            assert rows[1]["status"] == "success"
+            assert len(launched) == 2
+        finally:
+            await service.stop()
+    finally:
+        await close_engine()
+
+
 async def test_only_one_worker_can_claim_a_queued_run(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:

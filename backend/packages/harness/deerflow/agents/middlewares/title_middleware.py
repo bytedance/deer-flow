@@ -3,7 +3,9 @@
 import logging
 import re
 from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NotRequired, override
+from unicodedata import category
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -27,6 +29,7 @@ class TitleMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
     title: NotRequired[str | None]
+    uploaded_files: NotRequired[list[dict] | None]
 
 
 class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
@@ -122,6 +125,55 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             user_msg_content = self._message_content(user_message)
         return self._normalize_content(user_msg_content)
 
+    @staticmethod
+    def _clean_attachment_filename(filename: object) -> str | None:
+        """Return a safe, readable upload filename for use as a thread title."""
+        if not isinstance(filename, str) or not filename or Path(filename).name != filename:
+            return None
+
+        # File names enter the title as display text, never as a URL. Preserve
+        # readable Unicode and punctuation while preventing control characters
+        # from changing the thread-list layout.
+        cleaned = "".join(" " if category(char).startswith("C") else char for char in filename)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned or None
+
+    def _attachment_only_title(self, state: TitleMiddlewareState) -> str | None:
+        """Return a local title for a first turn containing attachments only."""
+        if self._get_title_user_message(state).strip():
+            return None
+
+        files = state.get("uploaded_files")
+        if not isinstance(files, list):
+            return None
+
+        filenames = []
+        seen_attachment_ids: set[str] = set()
+        for file in files:
+            if not isinstance(file, Mapping):
+                continue
+            filename = file.get("filename")
+            if not isinstance(filename, str):
+                continue
+            cleaned = self._clean_attachment_filename(filename)
+            if cleaned is None:
+                continue
+            # UploadsMiddleware builds the path from a verified basename.
+            # Deduplicate that stable attachment identity before display-name
+            # cleanup: distinct names can intentionally normalize alike.
+            attachment_id = file.get("path")
+            if not isinstance(attachment_id, str) or not attachment_id:
+                attachment_id = filename
+            if attachment_id in seen_attachment_ids:
+                continue
+            seen_attachment_ids.add(attachment_id)
+            filenames.append(cleaned)
+        if len(filenames) == 1:
+            return self._truncate_attachment_filename(filenames[0])
+        if len(filenames) > 1:
+            return self._attachment_count_title(len(filenames))
+        return None
+
     def _should_generate_title(self, state: TitleMiddlewareState, *, allow_partial_exchange: bool = False) -> bool:
         """Check if we should generate a title for this thread."""
         config = self._get_title_config()
@@ -196,6 +248,36 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             return user_msg[:body].rstrip() + ellipsis
         return user_msg
 
+    def _truncate_attachment_filename(self, filename: str) -> str:
+        """Truncate a file-name title while retaining its extension when possible."""
+        config = self._get_title_config()
+        max_chars = config.max_chars
+        if len(filename) <= max_chars:
+            return filename
+
+        ellipsis = "..."
+        extension = Path(filename).suffix.lstrip(".")
+        remaining = max_chars - len(ellipsis) - len(extension)
+        if extension and remaining > 0:
+            return filename[:remaining].rstrip() + ellipsis + extension
+        return self._truncate_title(filename)
+
+    def _attachment_count_title(self, count: int) -> str:
+        """Return a bounded, readable title for multiple validated uploads."""
+        config = self._get_title_config()
+        for title in (f"{count} files uploaded", f"{count} files"):
+            if len(title) <= config.max_chars:
+                return title
+        return self._truncate_title(str(count))
+
+    def _truncate_title(self, title: str) -> str:
+        """Bound a local attachment title without overriding title.max_chars."""
+        max_chars = self._get_title_config().max_chars
+        if len(title) <= max_chars:
+            return title
+        ellipsis = "..."
+        return title[: max_chars - len(ellipsis)].rstrip() + ellipsis
+
     def _get_runnable_config(self) -> dict[str, Any]:
         """Inherit the parent RunnableConfig and add middleware tag.
 
@@ -220,6 +302,10 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         if not self._should_generate_title(state, allow_partial_exchange=allow_partial_exchange):
             return None
 
+        attachment_title = self._attachment_only_title(state)
+        if attachment_title is not None:
+            return {"title": attachment_title}
+
         user_msg = self._get_title_user_message(state)
         return {"title": self._fallback_title(user_msg)}
 
@@ -232,6 +318,10 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         """Generate a configured LLM title asynchronously and fall back locally."""
         if not self._should_generate_title(state):
             return None
+
+        attachment_title = self._attachment_only_title(state)
+        if attachment_title is not None:
+            return {"title": attachment_title}
 
         user_msg = self._get_title_user_message(state)
         # An attachment-only first turn has no user-authored text. Do not let a
