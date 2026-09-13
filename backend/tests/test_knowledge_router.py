@@ -124,6 +124,36 @@ def test_retrieval_catalog_enforces_allowlist_and_normalizes_pages(
     assert [call.kwargs["dataset_id"] for call in ragflow.list_datasets.await_args_list] == ["dataset-1", "dataset-2"]
 
 
+def test_retrieval_catalog_accepts_main_assistant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_scope_catalog(monkeypatch)
+    ragflow = SimpleNamespace(
+        list_datasets=AsyncMock(
+            return_value=[
+                {
+                    "id": "dataset-1",
+                    "name": "Policies",
+                    "embedding_model": "embed-a",
+                    "chunk_count": 3,
+                }
+            ]
+        )
+    )
+    config = _config(scope_selection_enabled=True, datasets=["dataset-1"])
+
+    with TestClient(_app(monkeypatch, ragflow, config=config)) as client:
+        response = client.get(
+            "/api/knowledge/retrieval-catalog/datasets",
+            params={"agent_name": "lead_agent"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["items"] == [
+        {"id": "dataset-1", "name": "Policies", "selectable": True}
+    ]
+
+
 def test_retrieval_catalog_documents_reject_outside_allowlist_without_provider_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -393,12 +393,13 @@ For models with `supports_vision: true`:
 tenant-shared knowledge bases and retrieving compact cited chunks; RAGFlow is
 the source of truth, with no DeerFlow ORM mirror. `knowledge_base.enabled`
 gates the tool group. Gateway exposes only the authenticated, read-only
-`/api/knowledge/retrieval-catalog` routes needed by custom-agent chat scope
-selection; dataset and document management remains in RAGFlow. Keep API keys
-out of model schemas, logs, tool errors, and HTTP errors. Gateway admits
-custom-chat scope and harness enforces it. Revalidate selected dataset/document
-membership against live RAGFlow with at most four concurrent requests per stage
-before retrieval; see the subsystem guides for the remaining boundaries.
+`/api/knowledge/retrieval-catalog` routes needed by main and custom-agent chat
+scope selection; dataset and document management remains in RAGFlow. Keep API
+keys out of model schemas, logs, tool errors, and HTTP errors. Gateway admits
+main/custom-chat scope and harness enforces it. Revalidate selected
+dataset/document membership against live RAGFlow with at most four concurrent
+requests per stage before retrieval; see the subsystem guides for the remaining
+boundaries.
 
 ## Code Style
 

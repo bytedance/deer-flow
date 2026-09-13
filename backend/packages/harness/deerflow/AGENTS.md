@@ -57,8 +57,8 @@ defaults are read only from the provider's `tools[]` entry; there is no fallback
 to the generic `knowledge_base` block. Retrieval output is bounded at both the individual
 chunk and full-response levels, and every error path must redact the configured
 tenant API key before logging or returning model-visible text.
-The shared client also exposes read-only document listing for Gateway's
-custom-agent retrieval catalog. Dataset/document creation, upload, parsing,
+The shared client also exposes read-only document listing for Gateway's main
+and custom-agent retrieval catalog. Dataset/document creation, upload, parsing,
 and deletion remain outside DeerFlow and are performed directly in RAGFlow.
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)

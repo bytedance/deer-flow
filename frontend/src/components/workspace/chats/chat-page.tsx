@@ -18,6 +18,7 @@ import {
   InputBox,
   type InputBoxSubmitOptions,
 } from "@/components/workspace/input-box";
+import { KnowledgeScopeSelector } from "@/components/workspace/knowledge-scope-selector";
 import {
   MessageList,
   MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
@@ -38,8 +39,17 @@ import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { Welcome } from "@/components/workspace/welcome";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
-import { useBrowserControlEnabled } from "@/core/features";
+import {
+  useBrowserControlEnabled,
+  useKnowledgeBaseEnabled,
+} from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  ALL_KNOWLEDGE_SCOPE,
+  buildKnowledgeScopeSnapshot,
+  KNOWLEDGE_SCOPE_KEY,
+  type KnowledgeScopeSelection,
+} from "@/core/knowledge";
 import {
   buildHumanInputResponseText,
   hasOpenHumanInputRequest,
@@ -126,6 +136,41 @@ export default function ChatPage() {
   }, [isNewThread]);
 
   const { showNotification } = useNotification();
+  const { scopeSelectionEnabled } = useKnowledgeBaseEnabled();
+  const selectorVisible =
+    scopeSelectionEnabled && env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true";
+  const [knowledgeScope, setKnowledgeScope] =
+    useState<KnowledgeScopeSelection | null>(null);
+  const previousConversationRef = useRef({ threadId, isNewThread });
+
+  useEffect(() => {
+    setKnowledgeScope((current) => {
+      if (!selectorVisible) return null;
+      return current ?? ALL_KNOWLEDGE_SCOPE;
+    });
+  }, [selectorVisible]);
+
+  useEffect(() => {
+    const previous = previousConversationRef.current;
+    if (
+      previous.threadId !== threadId ||
+      previous.isNewThread !== isNewThread
+    ) {
+      const isNewThreadRouteReplacement = previous.isNewThread && !isNewThread;
+      if (!isNewThreadRouteReplacement) {
+        setKnowledgeScope(selectorVisible ? ALL_KNOWLEDGE_SCOPE : null);
+      }
+    }
+    previousConversationRef.current = { threadId, isNewThread };
+  }, [isNewThread, selectorVisible, threadId]);
+
+  const currentKnowledgeScopeSnapshot = useMemo(
+    () =>
+      selectorVisible && knowledgeScope
+        ? buildKnowledgeScopeSnapshot(knowledgeScope)
+        : null,
+    [knowledgeScope, selectorVisible],
+  );
 
   const {
     thread,
@@ -256,13 +301,27 @@ export default function ChatPage() {
       if (submissionEpochRef.current !== submissionEpoch) {
         throw new Error("thread-submission-stale");
       }
-      const sendPromise = sendMessage(threadId, message, undefined, options);
+      const scopedOptions = currentKnowledgeScopeSnapshot
+        ? {
+            ...options,
+            additionalKwargs: {
+              ...options?.additionalKwargs,
+              [KNOWLEDGE_SCOPE_KEY]: currentKnowledgeScopeSnapshot,
+            },
+          }
+        : options;
+      const sendPromise = sendMessage(
+        threadId,
+        message,
+        undefined,
+        scopedOptions,
+      );
       if (message.files.length > 0) {
         return sendPromise;
       }
       void sendPromise;
     },
-    [sendMessage, threadId, ensureProjectThread],
+    [currentKnowledgeScopeSnapshot, sendMessage, threadId, ensureProjectThread],
   );
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
@@ -278,6 +337,9 @@ export default function ChatPage() {
           additionalKwargs: {
             hide_from_ui: true,
             human_input_response: response,
+            ...(currentKnowledgeScopeSnapshot
+              ? { [KNOWLEDGE_SCOPE_KEY]: currentKnowledgeScopeSnapshot }
+              : {}),
           },
           onSent: () => {
             sent = true;
@@ -286,7 +348,7 @@ export default function ChatPage() {
       );
       return sent;
     },
-    [sendMessage, threadId],
+    [currentKnowledgeScopeSnapshot, sendMessage, threadId],
   );
   const handleStop = useCallback(async () => {
     await thread.stop();
@@ -298,8 +360,15 @@ export default function ChatPage() {
   );
   const handleEditAndRegenerate = useCallback(
     (messageId: string, replacementText: string) =>
-      editAndRegenerateMessage(threadId, messageId, replacementText),
-    [editAndRegenerateMessage, threadId],
+      editAndRegenerateMessage(
+        threadId,
+        messageId,
+        replacementText,
+        currentKnowledgeScopeSnapshot
+          ? { [KNOWLEDGE_SCOPE_KEY]: currentKnowledgeScopeSnapshot }
+          : undefined,
+      ),
+    [currentKnowledgeScopeSnapshot, editAndRegenerateMessage, threadId],
   );
   const handleBranchTurn = useCallback(
     async (messageId: string, messageIds: string[]) => {
@@ -526,6 +595,16 @@ export default function ChatPage() {
                       isWelcomeMode={isWelcomeMode}
                       threadId={threadId}
                       draftThreadId={isNewThread ? "new" : threadId}
+                      knowledgeScopeControl={
+                        selectorVisible && knowledgeScope ? (
+                          <KnowledgeScopeSelector
+                            agentName="lead_agent"
+                            disabled={thread.isLoading || isUploading}
+                            selection={knowledgeScope}
+                            onChange={setKnowledgeScope}
+                          />
+                        ) : undefined
+                      }
                       autoFocus={isWelcomeMode}
                       status={
                         thread.error

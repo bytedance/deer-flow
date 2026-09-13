@@ -1,4 +1,4 @@
-"""Authenticated, read-only RAGFlow catalog for custom-agent chat scope."""
+"""Authenticated, read-only RAGFlow catalog for chat retrieval scope."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
-from app.gateway.knowledge_scope_admission import custom_agent_supports_knowledge_scope
+from app.gateway.knowledge_scope_admission import assistant_supports_knowledge_scope
 from deerflow.community.ragflow.client import (
     RAGFlowAPIError,
     RAGFlowConnectionError,
@@ -35,7 +35,7 @@ _DatasetId = Annotated[
     str,
     Path(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9_-]+$"),
 ]
-_SCOPE_UNAVAILABLE_DETAIL = "Knowledge scope selection is unavailable for this custom agent."
+_SCOPE_UNAVAILABLE_DETAIL = "Knowledge scope selection is unavailable for this assistant."
 
 
 async def _catalog_result[Result](operation: Awaitable[Result]) -> Result:
@@ -64,17 +64,19 @@ async def _catalog_result[Result](operation: Awaitable[Result]) -> Result:
 
 def _scope_catalog(config: AppConfig, agent_name: str):
     knowledge_base = config.knowledge_base
-    try:
-        agent_config = load_agent_config(
-            agent_name,
-            user_id=get_effective_user_id(),
-        )
-    except (FileNotFoundError, ValueError):
-        raise HTTPException(status_code=404, detail="Custom agent not found.") from None
+    agent_config = None
+    if agent_name != "lead_agent":
+        try:
+            agent_config = load_agent_config(
+                agent_name,
+                user_id=get_effective_user_id(),
+            )
+        except (FileNotFoundError, ValueError):
+            raise HTTPException(status_code=404, detail="Custom agent not found.") from None
     if (
         not knowledge_base.enabled
         or not knowledge_base.scope_selection_enabled
-        or not custom_agent_supports_knowledge_scope(
+        or not assistant_supports_knowledge_scope(
             assistant_id=agent_name,
             app_config=config,
             agent_config=agent_config,

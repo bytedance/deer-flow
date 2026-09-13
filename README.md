@@ -1034,18 +1034,19 @@ embedding models do not cause a provider error. Dataset IDs and API keys are
 never exposed to the model. The optional `list_knowledge_bases` tool returns
 names only.
 
-Custom-agent chats can optionally expose a page-local, icon-only **Knowledge**
-selector beside the mode control. Its persistent highlight indicates that
-knowledge retrieval is active; the neutral state means retrieval is off. Set
-`knowledge_base.scope_selection_enabled: true` in
-`config.yaml` while using the built-in RAGFlow `knowledge_search` provider to
-allow all permitted datasets, selected datasets/files, or no retrieval for a
-turn. The choice resets to all when the page is refreshed or another
-conversation is opened; each sent human message keeps an immutable scope
-snapshot for replay and history. Ordinary chats never show or submit this
-selector. The Gateway validates every snapshot, intersects it with the
-operator's dataset allowlist, propagates the execution-only scope to native and
-durable subagents, and removes it from model inputs and external traces.
+Main and custom-agent chats can optionally expose a page-local, icon-only
+**Knowledge** selector beside the mode control. Its persistent highlight
+indicates that knowledge retrieval is active; the neutral state means retrieval
+is off. Set `knowledge_base.scope_selection_enabled: true` in `config.yaml`
+while using the built-in RAGFlow `knowledge_search` provider to allow all
+permitted datasets, selected datasets/files, or no retrieval for a turn. The
+same config flag controls both chat types; when disabled, neither composer
+shows the selector or submits a scope. The choice resets to all when the page
+is refreshed or another conversation is opened; each sent human message keeps
+an immutable scope snapshot for replay and history. The Gateway validates
+every snapshot, intersects it with the operator's dataset allowlist, propagates
+the execution-only scope to native and durable subagents, and removes it from
+model inputs and external traces.
 The `knowledge_base` block is provider-neutral and only controls whether the
 knowledge capability and selector are enabled. RAGFlow connection, dataset
 allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,
@@ -1054,8 +1055,8 @@ allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,
 `knowledge_base`.
 Custom-agent chat requests carry the selected agent name as both `assistant_id`
 and `context.agent_name`, so Gateway scope admission and runtime agent loading
-use the same identity. Default chat and sidecar requests continue to use
-`lead_agent` and do not submit a knowledge scope.
+use the same identity. Main chat requests use `lead_agent`; both identities are
+admitted only when the shared configuration enables the RAGFlow provider.
 When answering a pending clarification, an explicitly submitted current
 selector snapshot wins; clients that omit it inherit the prior turn's accepted
 scope. Edit-and-regenerate follows the same fallback, and the file catalog is
