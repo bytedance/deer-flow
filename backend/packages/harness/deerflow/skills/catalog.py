@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -21,18 +22,90 @@ from deerflow.skills.types import Skill
 logger = logging.getLogger(__name__)
 
 MAX_RESULTS = 5
+MAX_QUERY_CHARS = 256
+MAX_QUERY_TERMS = 16
+
+_NAME_SEPARATOR_RE = re.compile(r"[-_./]+")
+_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_WHITESPACE_RE = re.compile(r"\s+")
+_IGNORED_SINGLE_ASCII_TERMS = frozenset({"a", "i"})
 
 
-def _compile_catalog_regex(pattern: str) -> re.Pattern[str]:
-    """Compile ``pattern`` case-insensitively, falling back to literal match.
+def _normalize_search_text(value: str) -> str:
+    """Return Unicode-normalized, separator-aware text for matching."""
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    normalized = _NAME_SEPARATOR_RE.sub(" ", normalized)
+    return _WHITESPACE_RE.sub(" ", normalized).strip()
 
-    Search queries come from the model, so an invalid regex (e.g. an unbalanced
-    paren) must degrade to a literal substring match rather than raise.
+
+def _query_terms(query: str) -> tuple[str, ...]:
+    """Extract a bounded set of unique literal intent terms.
+
+    The English article/pronoun ``a``/``I`` are discarded because they would
+    otherwise match almost every catalog entry. Other single-character terms
+    stay meaningful for skills such as C++ or R.
     """
-    try:
-        return re.compile(pattern, re.IGNORECASE)
-    except re.error:
-        return re.compile(re.escape(pattern), re.IGNORECASE)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in _TOKEN_RE.findall(_normalize_search_text(query[:MAX_QUERY_CHARS])):
+        if term in _IGNORED_SINGLE_ASCII_TERMS:
+            continue
+        if term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+        if len(terms) == MAX_QUERY_TERMS:
+            break
+    return tuple(terms)
+
+
+def _contains_term(text: str, term: str) -> bool:
+    if len(term) == 1 and term.isascii():
+        return term in _TOKEN_RE.findall(text)
+    return term in text
+
+
+def _intent_score(skill: Skill, *, normalized_query: str, terms: tuple[str, ...]) -> tuple[int, int, int, int, int] | None:
+    """Score one skill by intent coverage without external retrieval state."""
+    normalized_name = _normalize_search_text(skill.name)
+    normalized_description = _normalize_search_text(skill.description or "")
+    name_matches = tuple(_contains_term(normalized_name, term) for term in terms)
+    description_matches = tuple(_contains_term(normalized_description, term) for term in terms)
+    name_hits = sum(name_matches)
+    matched_terms = sum(name_match or description_match for name_match, description_match in zip(name_matches, description_matches, strict=True))
+    if not matched_terms:
+        return None
+
+    return (
+        int(normalized_name == normalized_query),
+        matched_terms,
+        int(normalized_query in normalized_name),
+        name_hits,
+        int(normalized_query in normalized_description),
+    )
+
+
+def _rank_by_intent(skills: list[Skill], query: str, *, include_unmatched: bool = False) -> list[Skill]:
+    normalized_query = _normalize_search_text(query)
+    terms = _query_terms(query)
+    if not normalized_query or not terms:
+        return skills[:MAX_RESULTS] if include_unmatched else []
+
+    scored: list[tuple[tuple[int, int, int, int, int], Skill]] = []
+    unmatched: list[Skill] = []
+    for skill in skills:
+        score = _intent_score(skill, normalized_query=normalized_query, terms=terms)
+        if score is None:
+            unmatched.append(skill)
+        else:
+            scored.append((score, skill))
+
+    # Python's sort is stable, so equal-score skills retain catalog order.
+    scored.sort(key=lambda item: item[0], reverse=True)
+    ranked = [skill for _, skill in scored]
+    if include_unmatched:
+        ranked.extend(unmatched)
+    return ranked[:MAX_RESULTS]
 
 
 # NOTE: frozen=True without slots=True keeps __dict__, which is what lets the
@@ -46,7 +119,7 @@ class SkillCatalog:
 
     - ``"select:data-analysis,deep-research"`` — exact match by name.
     - ``"+podcast gen"`` — require *podcast* in the name, rank by *gen*.
-    - ``"chart visualization"`` — regex match on name + description.
+    - ``"chart visualization"`` — multi-term intent match on name + description.
     """
 
     skills: tuple[Skill, ...]
@@ -61,7 +134,7 @@ class SkillCatalog:
 
         Returns at most ``MAX_RESULTS`` skills, ranked by relevance.
         """
-        query = query.strip()
+        query = query[:MAX_QUERY_CHARS].strip()
         if not query:
             return []
 
@@ -75,28 +148,13 @@ class SkillCatalog:
             parts = query[1:].split(None, 1)
             if not parts:
                 return []  # bare "+" with no required token
-            required = parts[0].lower()
-            candidates = [s for s in self.skills if required in s.name.lower()]
+            required = _normalize_search_text(parts[0])
+            if not _TOKEN_RE.search(required):
+                return []
+            candidates = [s for s in self.skills if required in _normalize_search_text(s.name)]
             if len(parts) > 1:
-                pattern = _compile_catalog_regex(parts[1])
-                candidates.sort(
-                    key=lambda s: _catalog_regex_score(pattern, s),
-                    reverse=True,
-                )
+                return _rank_by_intent(candidates, parts[1], include_unmatched=True)
             return candidates[:MAX_RESULTS]
 
-        # ── Free-text regex search ─────────────────────────────────────
-        regex = _compile_catalog_regex(query)
-        scored: list[tuple[int, Skill]] = []
-        for s in self.skills:
-            searchable = f"{s.name} {s.description or ''}"
-            if regex.search(searchable):
-                # Name match scores higher than description-only match.
-                scored.append((2 if regex.search(s.name) else 1, s))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [s for _, s in scored][:MAX_RESULTS]
-
-
-def _catalog_regex_score(pattern: re.Pattern[str], s: Skill) -> int:
-    """Count regex hits across name + description for ranking."""
-    return len(pattern.findall(f"{s.name} {s.description or ''}"))
+        # ── Free-text intent search ────────────────────────────────────
+        return _rank_by_intent(list(self.skills), query)
