@@ -159,11 +159,13 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
     monkeypatch.setattr(
         lead_agent_module,
         "_subagent_release_policy",
-        lambda _app_config, *, enabled, max_concurrent, max_total, user_id=None, allowed_subagents=None: captured.update(
-            release_policy_user_id=user_id,
-            release_policy_allowed_subagents=allowed_subagents,
-        )
-        or {},
+        lambda _app_config, *, enabled, max_concurrent, max_total, user_id=None, allowed_subagents=None: (
+            captured.update(
+                release_policy_user_id=user_id,
+                release_policy_allowed_subagents=allowed_subagents,
+            )
+            or {}
+        ),
     )
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
