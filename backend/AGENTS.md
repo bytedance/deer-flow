@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-DeerFlow is a LangGraph-based AI super agent system with a full-stack architecture. The backend provides a "super agent" with sandbox execution, persistent memory, subagent delegation, and extensible tool integration - all operating in per-thread isolated environments.
+DeerFlow is a full-stack LangGraph-based AI super agent. Its backend provides sandbox execution, persistent memory, subagent delegation, and extensible tools in per-thread isolated environments.
 
 **Architecture**:
 - **Gateway API** (port 8001): REST API plus embedded LangGraph-compatible agent runtime
