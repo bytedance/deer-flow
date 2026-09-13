@@ -10,6 +10,20 @@ from pathlib import Path
 import yaml
 
 from deerflow.config.app_config import AppConfig
+from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
+
+
+def test_knowledge_base_config_is_provider_agnostic() -> None:
+    assert set(KnowledgeBaseConfig.model_fields) == {"enabled", "scope_selection_enabled"}
+    config = KnowledgeBaseConfig.model_validate(
+        {
+            "enabled": True,
+            "scope_selection_enabled": True,
+            "base_url": "http://legacy-ragflow.test",
+            "api_key": "legacy-secret",
+        }
+    )
+    assert config.model_dump() == {"enabled": True, "scope_selection_enabled": True}
 
 
 def _make_config_files(tmpdir: Path, user_config: dict, example_config: dict) -> Path:
@@ -175,6 +189,106 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     assert upgraded["verification"]["receipts_render_mode"] == "delegation_only"
     assert upgraded["verification"]["judge_enabled"] is False
     assert upgraded["verification"]["judge_model_name"] is None
+
+
+def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
+    """The v42 migration keeps provider settings on the RAGFlow tool entry."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
+    assert expected_version >= 42
+
+    config_path = tmp_path / "config.yaml"
+    legacy = {
+        "config_version": 41,
+        "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        "knowledge_base": {
+            "enabled": True,
+            "scope_selection_enabled": True,
+            "base_url": "http://legacy-ragflow:9380",
+            "api_key": "$LEGACY_RAGFLOW_API_KEY",
+            "page_size": 12,
+        },
+        "tools": [
+            {
+                "name": "knowledge_search",
+                "group": "knowledge",
+                "use": "deerflow.community.ragflow.tools:knowledge_search_tool",
+                # Explicit tool values win over the legacy global value.
+                "api_key": "$CURRENT_RAGFLOW_API_KEY",
+            }
+        ],
+    }
+    config_path.write_text(yaml.dump(legacy), encoding="utf-8")
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version, result.stdout + result.stderr
+    assert upgraded["knowledge_base"] == {
+        "enabled": True,
+        "scope_selection_enabled": True,
+    }
+    tool = upgraded["tools"][0]
+    assert tool["base_url"] == "http://legacy-ragflow:9380"
+    assert tool["page_size"] == 12
+    assert tool["api_key"] == "$CURRENT_RAGFLOW_API_KEY"
+
+
+def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_path):
+    """Tools-only legacy configs must not be disabled by the new capability gate."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
+    assert expected_version >= 42
+
+    config_path = tmp_path / "config.yaml"
+    legacy = {
+        "config_version": 41,
+        "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        # This was the documented enablement path before knowledge_base existed.
+        "tools": [
+            {
+                "name": "knowledge_search",
+                "group": "knowledge",
+                "use": "deerflow.community.ragflow.tools:knowledge_search_tool",
+                "base_url": "http://legacy-ragflow:9380",
+                "api_key": "$RAGFLOW_API_KEY",
+            }
+        ],
+    }
+    config_path.write_text(yaml.dump(legacy), encoding="utf-8")
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "knowledge_base.enabled set to true" in result.stdout
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+    assert upgraded["knowledge_base"] == {
+        "enabled": True,
+        "scope_selection_enabled": False,
+    }
+    assert upgraded["tools"][0]["base_url"] == "http://legacy-ragflow:9380"
 
 
 def _load_repo_example() -> dict:

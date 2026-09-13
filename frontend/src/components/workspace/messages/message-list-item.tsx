@@ -66,6 +66,7 @@ import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
 import { Tooltip } from "../tooltip";
 
+import { KnowledgeScopeSummary } from "./knowledge-scope-summary";
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
 
@@ -567,6 +568,11 @@ function MessageContent_({
             <HumanMessageText content={contentToDisplay} />
           </AIElementMessageContent>
         ) : null}
+        <KnowledgeScopeSummary
+          additionalKwargs={
+            message.additional_kwargs as Record<string, unknown> | undefined
+          }
+        />
       </div>
     );
   }

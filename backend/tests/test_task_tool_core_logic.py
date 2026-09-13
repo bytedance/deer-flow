@@ -3263,3 +3263,21 @@ def test_task_tool_forwards_no_criteria_by_default(monkeypatch):
 
     assert executor_kwargs["acceptance_criteria"] is None
     assert "<acceptance_criteria>" not in delegated_prompt
+
+
+def test_task_tool_forwards_execution_only_knowledge_scope(monkeypatch):
+    runtime = _make_runtime()
+    runtime.context["__knowledge_scope_execution"] = {
+        "version": 1,
+        "mode": "selected",
+        "dataset_ids": ["dataset-1"],
+        "display": {"datasets": [{"id": "dataset-1", "name": "Private label"}]},
+    }
+
+    executor_kwargs, _ = _capture_executor_call(monkeypatch, runtime=runtime)
+
+    assert executor_kwargs["knowledge_scope"] == {
+        "version": 1,
+        "mode": "selected",
+        "dataset_ids": ["dataset-1"],
+    }

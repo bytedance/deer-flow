@@ -19,7 +19,7 @@ from typing import Any
 
 from deerflow_extension_api import PROVENANCE_KEYS
 from fastapi import HTTPException, Request
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
@@ -32,6 +32,7 @@ from app.gateway.internal_auth import (
     get_internal_user,
     get_trusted_internal_owner_user_id,
 )
+from app.gateway.knowledge_scope_admission import admit_message_knowledge_scope
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
@@ -40,8 +41,10 @@ from deerflow.agents.middlewares.input_sanitization_middleware import frame_untr
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
+from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -122,6 +125,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+            KNOWLEDGE_SCOPE_RUNTIME_KEY,
             TOOL_RECEIPT_KEY,
             TOOL_RECEIPT_LEDGER_KEY,
             TOOL_TRANSFORMS_KEY,
@@ -355,8 +359,9 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     validation errors are the right shape for clients to retry against.
 
     ``original_user_content``, dynamic-context reminder markers, the
-    transient view-image context marker, tool receipts, and delegated receipt
-    metadata/verdicts are server-owned. External callers cannot supply them;
+    transient view-image context marker, the execution-only knowledge-scope
+    marker, tool receipts, and delegated receipt metadata/verdicts are
+    server-owned. External callers cannot supply them;
     trusted internal channel calls may preserve metadata they added before
     invoking this boundary. The same applies to the ``delegations`` channel:
     a caller-supplied ledger entry's ``receipt_verdict`` is a forgery and is
@@ -391,6 +396,25 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
             if cleaned != delegations:
                 result = {**result, "delegations": cleaned}
     return result
+
+
+def _canonical_run_record_input(
+    raw_input: dict[str, Any] | None,
+    graph_input: object,
+) -> dict[str, Any] | None:
+    """Persist the same normalized messages that cross run admission.
+
+    The run record is a client-visible audit surface. Keeping the original raw
+    message there would preserve a non-canonical scope even though the graph
+    receives the validated form.
+    """
+    if not isinstance(graph_input, dict):
+        return raw_input
+    canonical = dict(raw_input or {})
+    messages = graph_input.get("messages")
+    if isinstance(messages, list):
+        canonical["messages"] = [message.model_dump(mode="json") if isinstance(message, BaseMessage) else message for message in messages]
+    return canonical
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -440,6 +464,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "channel_user_id",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
+            KNOWLEDGE_SCOPE_KEY,
+            KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
@@ -494,7 +520,7 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
     for section in ("context", "configurable"):
         value = config.get(section)
         if isinstance(value, dict):
-            for key in _INTERNAL_ONLY_CONTEXT_KEYS:
+            for key in _INTERNAL_ONLY_CONTEXT_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
                 value.pop(key, None)
 
 
@@ -1317,6 +1343,137 @@ async def ensure_checkpoint_history_seeded(
     logger.info("Seeded %d checkpoint-history events for thread %s", len(events), thread_id)
 
 
+def _message_identifier(message: Any) -> str | None:
+    if isinstance(message, BaseMessage):
+        return str(message.id) if message.id else None
+    if isinstance(message, Mapping):
+        value = message.get("id")
+        return str(value) if value else None
+    return None
+
+
+def _message_additional_kwargs(message: Any) -> Mapping[str, Any]:
+    if isinstance(message, BaseMessage):
+        return message.additional_kwargs
+    if isinstance(message, Mapping):
+        value = message.get("additional_kwargs")
+        return value if isinstance(value, Mapping) else {}
+    return {}
+
+
+def _is_human_message(message: Any) -> bool:
+    if isinstance(message, HumanMessage):
+        return True
+    if not isinstance(message, Mapping):
+        return False
+    return message.get("type") == "human" or message.get("role") in {"human", "user"}
+
+
+async def _recover_run_knowledge_scope(
+    request: Request,
+    *,
+    thread_id: str,
+    target_message_id: str | None,
+) -> object | None:
+    """Resolve one replay/resume scope from the authoritative latest checkpoint."""
+    accessor, config = await build_thread_checkpoint_state_accessor(
+        request,
+        thread_id=thread_id,
+    )
+    try:
+        snapshot = await accessor.aget(config)
+    except Exception as exc:
+        logger.exception("Failed to recover knowledge scope for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to recover knowledge scope") from exc
+    values = getattr(snapshot, "values", None)
+    messages = values.get("messages") if isinstance(values, Mapping) else None
+    if not isinstance(messages, list):
+        messages = []
+
+    source: Any | None = None
+    if target_message_id:
+        target_index = next(
+            (index for index, message in enumerate(messages) if _message_identifier(message) == target_message_id),
+            None,
+        )
+        if target_index is not None:
+            source = next(
+                (message for message in reversed(messages[:target_index]) if _is_human_message(message)),
+                None,
+            )
+        else:
+            # Interrupted assistant output may never reach a checkpoint. Its
+            # source is still the terminal HumanMessage of the latest state.
+            source = next(
+                (message for message in reversed(messages) if _is_human_message(message)),
+                None,
+            )
+        if source is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Could not recover the source HumanMessage knowledge_scope",
+            )
+    else:
+        source = next(
+            (message for message in reversed(messages) if _is_human_message(message)),
+            None,
+        )
+    if source is None:
+        return None
+    additional_kwargs = _message_additional_kwargs(source)
+    return additional_kwargs.get(KNOWLEDGE_SCOPE_KEY)
+
+
+def _current_human_message(graph_input: object) -> HumanMessage | None:
+    if not isinstance(graph_input, Mapping):
+        return None
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list):
+        return None
+    return next(
+        (message for message in reversed(messages) if isinstance(message, HumanMessage)),
+        None,
+    )
+
+
+async def _load_scope_agent_config(
+    *,
+    assistant_id: str | None,
+    user_id: str | None,
+) -> Any | None:
+    if not assistant_id or assistant_id == _DEFAULT_ASSISTANT_ID:
+        return None
+    normalized = assistant_id.strip().lower().replace("_", "-")
+    try:
+        return await asyncio.to_thread(
+            load_agent_config,
+            normalized,
+            user_id=user_id,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="knowledge_scope assistant configuration could not be resolved",
+        ) from exc
+
+
+async def _validate_scope_thread_binding(
+    run_ctx: RunContext,
+    *,
+    thread_id: str,
+    assistant_id: str | None,
+) -> None:
+    existing = await run_ctx.thread_store.get(thread_id)
+    if not isinstance(existing, Mapping):
+        return
+    bound = existing.get("assistant_id")
+    if isinstance(bound, str) and bound and assistant_id and bound != assistant_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Thread assistant does not match knowledge_scope assistant",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Run lifecycle
 # ---------------------------------------------------------------------------
@@ -1451,6 +1608,53 @@ async def start_run(
         config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
+        replay_kind = run_metadata.get("replay_kind")
+        target_message_id = run_metadata.get("regenerate_from_message_id")
+        scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
+        candidate_has_scope = any(isinstance(message, BaseMessage) and KNOWLEDGE_SCOPE_KEY in message.additional_kwargs for message in scope_graph_input.get("messages", []))
+        current_human_message = _current_human_message(graph_input)
+        current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
+        replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
+        is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
+        # Clarification and edit-replay messages may intentionally replace the
+        # source scope. If either client omits its current selector snapshot,
+        # inherit the source turn's authoritative scope instead of widening the
+        # run to every operator-approved dataset. Other replay paths always use
+        # server recovery regardless of client input.
+        is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
+        recovery_scope = (
+            await _recover_run_knowledge_scope(
+                request,
+                thread_id=thread_id,
+                target_message_id=(target_message_id if isinstance(target_message_id, str) else None),
+            )
+            if is_scope_recovery
+            else None
+        )
+        agent_config = (
+            await _load_scope_agent_config(
+                assistant_id=body.assistant_id,
+                user_id=owner_user_id or (str(user.id) if user is not None else None),
+            )
+            if candidate_has_scope or recovery_scope is not None
+            else None
+        )
+        admitted_knowledge_scope = admit_message_knowledge_scope(
+            scope_graph_input,
+            assistant_id=body.assistant_id,
+            app_config=run_ctx.app_config or get_app_config(),
+            agent_config=agent_config,
+            recovery_scope=recovery_scope,
+            recovery=is_scope_recovery,
+        )
+        if admitted_knowledge_scope is not None:
+            await _validate_scope_thread_binding(
+                run_ctx,
+                thread_id=thread_id,
+                assistant_id=body.assistant_id,
+            )
+        run_record_input = _canonical_run_record_input(body.input, graph_input)
+
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
         # The ``context`` field is a custom extension for the langgraph-compat layer
         # that carries agent configuration (model_name, thinking_enabled, etc.).
@@ -1544,6 +1748,7 @@ async def start_run(
                 stream_subgraphs=body.stream_subgraphs,
                 interrupt_before=body.interrupt_before,
                 interrupt_after=body.interrupt_after,
+                knowledge_scope=admitted_knowledge_scope,
             )
 
         try:
@@ -1570,7 +1775,7 @@ async def start_run(
                     # written to runs.kwargs_json and echoed by the run API, so a
                     # request-scoped secret (#3861) must not ride along. The live
                     # config built above keeps the secrets for the actual run.
-                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
+                    kwargs={"input": run_record_input, "config": redact_config_secrets(body.config)},
                     multitask_strategy=body.multitask_strategy,
                     model_name=model_name,
                     user_id=owner_user_id,

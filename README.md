@@ -1025,6 +1025,48 @@ Tools follow the same philosophy. DeerFlow comes with a core toolset — web sea
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
 
+### Private Knowledge Retrieval (RAGFlow)
+
+DeerFlow can optionally connect to a tenant-scoped RAGFlow deployment. The
+`knowledge_search` Agent tool resolves the configured dataset scope, groups
+datasets by embedding model, and retrieves those groups in parallel so mixed
+embedding models do not cause a provider error. Dataset IDs and API keys are
+never exposed to the model. The optional `list_knowledge_bases` tool returns
+names only.
+
+Main and custom-agent chats can optionally expose a page-local, icon-only
+**Knowledge** selector beside the mode control. Its persistent highlight
+indicates that knowledge retrieval is active; the neutral state means retrieval
+is off. Set `knowledge_base.scope_selection_enabled: true` in `config.yaml`
+while using the built-in RAGFlow `knowledge_search` provider to allow all
+permitted datasets, selected datasets/files, or no retrieval for a turn. The
+same config flag controls both chat types; when disabled, neither composer
+shows the selector or submits a scope. The choice resets to all when the page
+is refreshed or another conversation is opened; each sent human message keeps
+an immutable scope snapshot for replay and history. The Gateway validates
+every snapshot, intersects it with the operator's dataset allowlist, propagates
+the execution-only scope to native and durable subagents, and removes it from
+model inputs and external traces. Client-supplied internal runtime controls
+and credentials are also stripped from run context before execution or
+checkpoint persistence.
+The `knowledge_base` block is provider-neutral and only controls whether the
+knowledge capability and selector are enabled. RAGFlow connection, dataset
+allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,
+`page_size`, thresholds, and output limits) must be configured on the
+`tools[].name: knowledge_search` entry; they are never read from
+`knowledge_base`.
+Custom-agent chat requests carry the selected agent name as both `assistant_id`
+and `context.agent_name`, so Gateway scope admission and runtime agent loading
+use the same identity. Main chat requests use `lead_agent`; both identities are
+admitted only when the shared configuration enables the RAGFlow provider.
+When answering a pending clarification, an explicitly submitted current
+selector snapshot wins; clients that omit it inherit the prior turn's accepted
+scope. Edit-and-regenerate follows the same fallback, and the file catalog is
+loaded only after a dataset is switched from all files to selected files.
+This release does not add an independent Knowledge item to the workspace
+sidebar or a DeerFlow knowledge-management page; create, upload, parse, and
+delete datasets and documents directly in RAGFlow.
+
 Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. Every HTTP route that starts or enables a future Agent run requires `runs:create`: this includes the stateless `POST /api/runs/stream` and `POST /api/runs/wait` endpoints plus scheduled-task create, update, resume, and manual-trigger mutations. Scheduled-task mutations retain their existing `threads:write` requirement, and the stateless routes separately enforce ownership when the optional thread ID is supplied in the request body. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. Model access follows the same provider: the Gateway `models` list is filtered per principal, `model:use` is enforced on model detail requests and again when the runtime resolves the agent's model, and a denied default model falls back to the first remaining candidate that also passes `model:use`. The built-in RBAC provider supports per-role `tools`, `routes`, `models`, `skills`, and `sandbox` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
 
 Advanced deployments can also extend the agent runtime itself by declaring `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. Each entry is a `module.path:ClassName` string (zero-argument constructor) or an object `{class, kwargs}` whose `kwargs` are passed to the constructor. `kwargs` values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON. DeerFlow loads the same configured list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, broken modules, and constructor errors fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Separate lead-only/subagent-only middleware lists are not supported yet.

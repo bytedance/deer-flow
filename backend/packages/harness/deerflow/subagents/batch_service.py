@@ -237,6 +237,7 @@ class SubagentBatchService:
                 channel_user_id=spec.get("channel_user_id"),
                 is_internal=spec.get("is_internal") is True,
                 authz_attributes=spec.get("authz_attributes"),
+                knowledge_scope=spec.get("knowledge_scope"),
                 execution_capacity=self._execution_capacity,
                 acceptance_criteria=item.get("acceptance_criteria"),
             )

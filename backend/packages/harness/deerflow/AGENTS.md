@@ -46,6 +46,21 @@ artifact. New automatic capture entry points must reuse the shared progress
 encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
 drift.
 
+### RAGFlow Knowledge Retrieval (`community/ragflow/`)
+
+The optional `knowledge` tool group exposes only `list_knowledge_bases` and
+`knowledge_search`. Both call RAGFlow directly through the async `httpx` client;
+they never persist dataset metadata, expose dataset UUIDs to the model, or
+provide write operations. `knowledge_base.enabled=false` removes the whole
+group during tool assembly. RAGFlow connection, dataset allowlist, and retrieval
+defaults are read only from the provider's `tools[]` entry; there is no fallback
+to the generic `knowledge_base` block. Retrieval output is bounded at both the individual
+chunk and full-response levels, and every error path must redact the configured
+tenant API key before logging or returning model-visible text.
+The shared client also exposes read-only document listing for Gateway's main
+and custom-agent retrieval catalog. Dataset/document creation, upload, parsing,
+and deletion remain outside DeerFlow and are performed directly in RAGFlow.
+
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
 `DeerFlowClient` provides in-process access without HTTP or a FastAPI dependency. It shares Gateway's `deerflow` modules, config files, data directories, and response schemas for compatible consumers.

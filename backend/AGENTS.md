@@ -387,6 +387,23 @@ For models with `supports_vision: true`:
 - `view_image_tool` added to agent's toolset
 - Images are converted to base64 and appended to the model request as a hidden message carrying both a reserved ID prefix and a server-owned metadata marker; Gateway strips that marker from untrusted input, and the middleware requires both identifiers to recognize its own message. The middleware injects inside `wrap_model_call`, so the payload never enters graph state: checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive. It also sweeps its own message out of every request before rebuilding it, so a payload stranded in an older checkpoint by an interrupted run stops being resent
 
+### RAGFlow Knowledge Retrieval
+
+`deerflow.community.ragflow` provides opt-in, read-only Agent tools for listing
+tenant-shared knowledge bases and retrieving compact cited chunks; RAGFlow is
+the source of truth, with no DeerFlow ORM mirror. `knowledge_base.enabled`
+gates the tool group. Gateway exposes only the authenticated, read-only
+`/api/knowledge/retrieval-catalog` routes needed by main and custom-agent chat
+scope selection; dataset and document management remains in RAGFlow. Keep API
+keys out of model schemas, logs, tool errors, and HTTP errors. Gateway admits
+main/custom-chat scope and harness enforces it. Revalidate selected
+dataset/document membership against live RAGFlow with at most four concurrent
+requests per stage before retrieval. Run-context scrubbing must remove both
+server-owned scope metadata and every internal-only runtime key (including
+`github_token`, `disable_clarification`, and `non_interactive`) from untrusted
+`context` and `configurable` sections; see the subsystem guides for the
+remaining boundaries.
+
 ## Code Style
 
 - Uses `ruff` for linting and formatting

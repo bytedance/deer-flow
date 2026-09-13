@@ -293,6 +293,7 @@ export function InputBox({
   draftThreadId = threadId,
   draftAgentName,
   defaultModelName,
+  knowledgeScopeControl,
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
@@ -330,6 +331,8 @@ export function InputBox({
    * (issue #4336). ``null`` / undefined = no agent default → use models[0].
    */
   defaultModelName?: string | null;
+  /** Optional custom-agent-only control rendered directly after mode. */
+  knowledgeScopeControl?: React.ReactNode;
   initialValue?: string;
   onContextChange?: (
     context: Omit<
@@ -2575,6 +2578,7 @@ export function InputBox({
                 </DropdownMenuGroup>
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
+            {knowledgeScopeControl}
             {supportReasoningEffort && context.mode !== "flash" && (
               <PromptInputActionMenu>
                 <PromptInputActionMenuTrigger

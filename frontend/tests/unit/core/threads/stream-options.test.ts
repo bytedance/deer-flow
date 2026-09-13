@@ -1,6 +1,6 @@
 import { afterEach, expect, test, rs } from "@rstest/core";
 
-async function captureThreadStreamOptions() {
+async function captureThreadStreamOptions(assistantId?: string) {
   let capturedOptions: Record<string, unknown> | undefined;
 
   rs.resetModules();
@@ -70,6 +70,7 @@ async function captureThreadStreamOptions() {
       context: {
         mode: "flash",
       },
+      assistantId,
       isMock: true,
     } as never);
     return null;
@@ -96,4 +97,10 @@ test("does not subscribe to unsupported LangGraph events mode", async () => {
   expect(options).not.toHaveProperty("onLangChainEvent");
   expect(options).toHaveProperty("onUpdateEvent");
   expect(options).toHaveProperty("onCustomEvent");
+});
+
+test("forwards the custom-agent assistant identity to the stream", async () => {
+  const options = await captureThreadStreamOptions("researcher");
+
+  expect(options).toHaveProperty("assistantId", "researcher");
 });

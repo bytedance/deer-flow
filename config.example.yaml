@@ -716,6 +716,18 @@ models:
   #   pool_timeout: 30.0
 
 # ============================================================================
+# Knowledge Capability
+# ============================================================================
+# Optional knowledge capability. The feature is disabled by default. Provider
+# connection and retrieval settings belong to the matching entry in `tools:`
+# below (for example, the RAGFlow `knowledge_search` tool), not here.
+knowledge_base:
+  enabled: false
+  # Custom-agent chat only. Keeps the selector hidden unless the effective
+  # knowledge_search provider is the bundled RAGFlow tool.
+  scope_selection_enabled: false
+
+# ============================================================================
 # Tool Groups Configuration
 # ============================================================================
 # Define groups of tools for organization and access control
@@ -757,6 +769,9 @@ tools:
   #   top_k: 256
   #   max_chars_per_chunk: 800
   #   max_total_chars: 8000
+  # - name: list_knowledge_bases
+  #   group: knowledge
+  #   use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
 
   # LightRAG knowledge retrieval (read-only). Alternative provider for the same
   # knowledge_search tool; uncomment this entry instead of the RAGFlow one —

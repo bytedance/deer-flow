@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.browser_capability import browser_capability
 from app.gateway.deps import get_config
+from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
 from deerflow.config.app_config import AppConfig
 from deerflow.subagents.capacity import configured_subagent_max_running
 
@@ -45,6 +46,15 @@ class SubagentBatchesFeature(BaseModel):
     max_running: int = Field(..., description="Native subagent execution slots in this Gateway process")
 
 
+class KnowledgeBaseFeature(BaseModel):
+    """Availability of RAGFlow retrieval scope selection in chat."""
+
+    scope_selection_enabled: bool = Field(
+        ...,
+        description="Whether chat may select a per-message RAGFlow retrieval scope",
+    )
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -52,6 +62,7 @@ class FeaturesResponse(BaseModel):
     browser_control: BrowserControlFeature
     mcp_tasks: McpTasksFeature
     subagent_batches: SubagentBatchesFeature
+    knowledge_base: KnowledgeBaseFeature
 
 
 @router.get(
@@ -80,4 +91,16 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             worker_running=subagent_batch_worker_running,
             max_running=configured_subagent_max_running(),
         ),
+        knowledge_base=KnowledgeBaseFeature(
+            scope_selection_enabled=_knowledge_scope_selection_enabled(config),
+        ),
     )
+
+
+def _knowledge_scope_selection_enabled(config: AppConfig) -> bool:
+    """Fail closed unless the effective knowledge_search entry is RAGFlow."""
+    settings = config.knowledge_base
+    if not settings.enabled or not settings.scope_selection_enabled:
+        return False
+    tool = config.get_tool_config("knowledge_search")
+    return tool is not None and tool.use == RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER

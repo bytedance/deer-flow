@@ -74,6 +74,65 @@ print()
 # Each migration targets a specific version upgrade.
 # 'replacements': list of (old_string, new_string) applied to the raw YAML text.
 #   This handles value changes that a dict merge cannot catch.
+# 'data_transform': callable applied to the parsed config after text migrations.
+
+RAGFLOW_PROVIDER_KEYS = (
+    'base_url',
+    'api_key',
+    'timeout',
+    'page_size',
+    'similarity_threshold',
+    'vector_similarity_weight',
+    'top_k',
+    'max_chars_per_chunk',
+    'max_total_chars',
+)
+
+
+def migrate_knowledge_provider_settings(data):
+    # Move legacy RAGFlow settings to the provider tool and remove them from the generic block.
+    knowledge_base = data.get('knowledge_base')
+    tools = data.get('tools')
+    target = None
+    if isinstance(tools, list):
+        target = next(
+            (
+                tool
+                for tool in tools
+                if isinstance(tool, dict)
+                and tool.get('name') == 'knowledge_search'
+                and tool.get('use') == 'deerflow.community.ragflow.tools:knowledge_search_tool'
+            ),
+            None,
+        )
+
+    changes = []
+    # Before v42, a tools-only knowledge configuration was valid and enabled by
+    # the presence of the provider tool itself. Preserve that behavior when the
+    # v42 merge would otherwise add the example's ``enabled: false`` gate.
+    if not isinstance(knowledge_base, dict):
+        if target is not None and any(key in target for key in RAGFLOW_PROVIDER_KEYS):
+            data['knowledge_base'] = {'enabled': True}
+            changes.append('knowledge_base.enabled set to true (preserved tools.knowledge_search configuration)')
+        return changes
+
+    if 'enabled' not in knowledge_base and target is not None and any(key in target for key in RAGFLOW_PROVIDER_KEYS):
+        knowledge_base['enabled'] = True
+        changes.append('knowledge_base.enabled set to true (preserved tools.knowledge_search configuration)')
+
+    for key in RAGFLOW_PROVIDER_KEYS:
+        if key not in knowledge_base:
+            continue
+        if target is None:
+            changes.append(f'knowledge_base.{key} removed (no RAGFlow knowledge_search tool configured)')
+        elif key in target:
+            changes.append(f'knowledge_base.{key} removed (tools.knowledge_search.{key} preserved)')
+        else:
+            target[key] = knowledge_base[key]
+            changes.append(f'knowledge_base.{key} -> tools.knowledge_search.{key}')
+        del knowledge_base[key]
+    return changes
+
 
 MIGRATIONS = {
     1: {
@@ -85,11 +144,10 @@ MIGRATIONS = {
             ('src.tools.', 'deerflow.tools.'),
         ],
     },
-    # Future migrations go here:
-    # 2: {
-    #     'description': '...',
-    #     'replacements': [('old', 'new')],
-    # },
+    42: {
+        'description': 'Move provider-specific RAGFlow settings from knowledge_base to the knowledge_search tool',
+        'data_transform': migrate_knowledge_provider_settings,
+    },
 }
 
 # Apply migrations in order for versions (user_version, example_version]
@@ -106,6 +164,13 @@ for version in range(user_version + 1, example_version + 1):
 
 # Re-parse after text migrations
 user = yaml.safe_load(raw_text) or {}
+
+# Apply structured migrations to the parsed config.
+for version in range(user_version + 1, example_version + 1):
+    migration = MIGRATIONS.get(version)
+    transform = migration.get('data_transform') if migration else None
+    if transform:
+        migrated.extend(transform(user))
 
 if migrated:
     print(f'Applied {len(migrated)} migration(s):')

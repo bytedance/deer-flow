@@ -86,7 +86,33 @@ Composer drafts are tab-scoped browser state. `core/threads/composer-draft.ts` s
 
 Auth UI note: the login page's "keep me signed in" option submits only `remember_me` to the Gateway and may persist only the email address through `core/auth/remember-login.ts`. Passwords and tokens must never be stored in frontend storage; the `HttpOnly access_token` and readable `csrf_token` cookies remain Gateway-owned.
 
+Main and custom-agent chats may receive the page-local knowledge-scope
+capability from `/api/features -> knowledge_base.scope_selection_enabled`.
+`ChatPage` and `AgentChatPage` pass `KnowledgeScopeSelector` into the optional
+`InputBox` slot immediately after the mode selector. The trigger is icon-only:
+a persistent highlight means retrieval is active (`all` or `selected`), while
+its neutral state means retrieval is disabled; its accessible label and tooltip
+retain the human-readable scope summary. The shared feature flag controls both
+pages, and static demo pages must not create selector state, load the retrieval
+catalog, or attach a scope.
+Applied selection lives only in component memory, resets to `all` on refresh or
+a real conversation/agent switch, and survives only the first-send route
+replacement from the temporary new-thread URL. Every send and edit-regenerate
+builds an immutable canonical snapshot (bounded `display` labels included) in
+the human message; ordinary regenerate/resume use the server-recovered source
+snapshot, while an edit-regenerate that omits the current snapshot inherits the
+source turn's scope server-side. Expanding a selected dataset while it still
+uses all searchable files must not load its document catalog; switching that
+dataset to selected-files mode enables the paginated document query. History
+renders only saved plain-text labels/counts and never resolves the current
+catalog. Custom-agent streams send the stable agent name as both `assistant_id`
+and `context.agent_name`, so Gateway scope admission and runtime agent loading
+use the same identity. Main chat streams use `lead_agent`; both are admitted by
+the same provider/configuration gate. Sidecar and agent-creation streams
+continue to use `lead_agent` without a selector.
+
 `/goal` and `/compact` are built-in composer commands, not skill activations. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. On a project-scoped new chat (`/workspace/chats/new?project=…`), the chat page's project pre-create runs before the goal PUT via the composer's `onPrepareThread` callback: the goal endpoint materializes a missing thread row itself, and an unassigned row would make the later idempotent thread create return it without assigning the project. Goal and compact requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight requests and stale responses cannot update the new thread's composer state. The chat pages render `GoalStatus` above the composer from `AgentThreadState.goal`, with local optimistic state until an incremental goal update or final state reload arrives. `/compact` calls `POST /api/threads/{thread_id}/compact` to summarize older active context while leaving the full visible chat history intact; it is skipped on new/empty threads and blocked server-side while a run is in flight. Thread rename uses the same serialized state-write route; the rename dialog stays open and surfaces the server error when an active run returns 409.
+
 
 The `/` skill list stays reachable after a skill is selected: typing `/` in the editable text beside the chip reopens it, and picking an entry swaps the chip rather than adding a second one, because the wire format carries exactly one leading `/skill`. That list offers skills only while a chip is selected — a builtin command owns the whole composer line, so `/goal` behind a selected skill would submit as chat text instead of running the command. The trigger itself is unchanged: a slash only opens the list at the start of the input (`getLeadingSlashSkillQuery`), pinned by `tests/e2e/chat.spec.ts`.
 

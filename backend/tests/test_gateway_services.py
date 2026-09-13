@@ -259,6 +259,47 @@ def test_normalize_input_preserves_additional_kwargs_and_id():
     assert msg.additional_kwargs == {"files": files, "custom": "keep-me"}
 
 
+def test_canonical_run_record_input_uses_admitted_message_snapshot():
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.services import _canonical_run_record_input
+
+    raw = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "Search",
+                "additional_kwargs": {
+                    "knowledge_scope": {
+                        "version": 1,
+                        "mode": "selected",
+                        "dataset_ids": [" dataset-1 ", "dataset-1"],
+                    }
+                },
+            }
+        ]
+    }
+    admitted = {
+        "messages": [
+            HumanMessage(
+                content="Search",
+                additional_kwargs={
+                    "knowledge_scope": {
+                        "version": 1,
+                        "mode": "selected",
+                        "dataset_ids": ["dataset-1"],
+                    }
+                },
+            )
+        ]
+    }
+
+    stored = _canonical_run_record_input(raw, admitted)
+
+    assert stored is not None
+    assert stored["messages"][0]["additional_kwargs"]["knowledge_scope"]["dataset_ids"] == ["dataset-1"]
+
+
 @pytest.mark.parametrize(
     "forged_original",
     ["spoofed audit text", [{"type": "text", "text": "spoofed audit text"}]],
@@ -289,6 +330,7 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
     """External callers cannot mark their own messages as server-injected context."""
     from app.gateway.services import normalize_input
     from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+    from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
 
     result = normalize_input(
         {
@@ -301,6 +343,8 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
                         "hide_from_ui": True,
                         _DYNAMIC_CONTEXT_REMINDER_KEY: True,
                         _REMINDER_DATE_KEY: "2099-01-01, Thursday",
+                        KNOWLEDGE_SCOPE_KEY: {"version": 1, "mode": "all"},
+                        KNOWLEDGE_SCOPE_RUNTIME_KEY: {"version": 1, "mode": "disabled"},
                         "custom": "keep-me",
                     },
                 }
@@ -309,7 +353,11 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
     )
 
     assert result["messages"][0].id == "known-checkpoint-id__memory"
-    assert result["messages"][0].additional_kwargs == {"hide_from_ui": True, "custom": "keep-me"}
+    assert result["messages"][0].additional_kwargs == {
+        "hide_from_ui": True,
+        KNOWLEDGE_SCOPE_KEY: {"version": 1, "mode": "all"},
+        "custom": "keep-me",
+    }
 
 
 def test_normalize_input_strips_external_view_image_context_marker():
@@ -1957,6 +2005,216 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
         await record.task
 
     return captured["graph_input"]
+
+
+@pytest.mark.parametrize(
+    ("include_current_scope", "expected_scope", "recovery_calls"),
+    [
+        (
+            True,
+            {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": ["dataset-current"],
+            },
+            0,
+        ),
+        (False, {"version": 1, "mode": "disabled"}, 1),
+    ],
+    ids=["current-selection-wins", "omitted-selection-recovers"],
+)
+@pytest.mark.asyncio
+async def test_clarification_reply_scope_uses_current_selection_or_recovers_when_omitted(
+    _stub_app_config,
+    include_current_scope,
+    expected_scope,
+    recovery_calls,
+):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True, "scope_selection_enabled": True},
+                "tools": [
+                    {
+                        "name": "knowledge_search",
+                        "group": "knowledge",
+                        "use": "deerflow.community.ragflow.tools:knowledge_search_tool",
+                    }
+                ],
+            }
+        )
+    )
+    response_metadata = {
+        "version": 1,
+        "kind": "human_input_response",
+        "source": "ask_clarification",
+        "request_id": "clarification:call-scope",
+        "response_kind": "text",
+        "value": "Use the current dataset",
+    }
+    additional_kwargs = {
+        "hide_from_ui": True,
+        "human_input_response": response_metadata,
+    }
+    if include_current_scope:
+        additional_kwargs["knowledge_scope"] = {
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": ["dataset-current"],
+        }
+
+    body = RunCreateRequest(
+        assistant_id="researcher",
+        input={
+            "messages": [
+                {
+                    "type": "human",
+                    "content": "Use the current dataset",
+                    "additional_kwargs": additional_kwargs,
+                }
+            ]
+        },
+    )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured: dict[str, object] = {}
+    recover_scope = AsyncMock(return_value={"version": 1, "mode": "disabled"})
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["graph_input"] = kwargs["graph_input"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services._recover_run_knowledge_scope", new=recover_scope),
+        patch(
+            "app.gateway.services._load_scope_agent_config",
+            new=AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"])),
+        ),
+    ):
+        record = await start_run(body, "thread-clarification-scope", request)
+        await record.task
+
+    graph_input = captured["graph_input"]
+    assert isinstance(graph_input, dict)
+    message = graph_input["messages"][0]
+    assert message.additional_kwargs["knowledge_scope"] == expected_scope
+    assert recover_scope.await_count == recovery_calls
+
+
+@pytest.mark.parametrize(
+    ("include_current_scope", "expected_scope", "recovery_calls"),
+    [
+        (
+            True,
+            {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": ["dataset-current"],
+            },
+            0,
+        ),
+        (
+            False,
+            {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": ["dataset-source"],
+            },
+            1,
+        ),
+    ],
+    ids=["current-selection-wins", "omitted-selection-recovers"],
+)
+@pytest.mark.asyncio
+async def test_edit_replay_scope_uses_current_selection_or_recovers_when_omitted(
+    _stub_app_config,
+    include_current_scope,
+    expected_scope,
+    recovery_calls,
+):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True, "scope_selection_enabled": True},
+                "tools": [
+                    {
+                        "name": "knowledge_search",
+                        "group": "knowledge",
+                        "use": "deerflow.community.ragflow.tools:knowledge_search_tool",
+                    }
+                ],
+            }
+        )
+    )
+    additional_kwargs = {}
+    if include_current_scope:
+        additional_kwargs["knowledge_scope"] = {
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": ["dataset-current"],
+        }
+    body = RunCreateRequest(
+        assistant_id="researcher",
+        input={
+            "messages": [
+                {
+                    "type": "human",
+                    "content": "Edited question",
+                    "additional_kwargs": additional_kwargs,
+                }
+            ]
+        },
+        metadata={
+            "replay_kind": "edit",
+            "regenerate_from_message_id": "assistant-source",
+        },
+    )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    captured: dict[str, object] = {}
+    recover_scope = AsyncMock(
+        return_value={
+            "version": 1,
+            "mode": "selected",
+            "dataset_ids": ["dataset-source"],
+        }
+    )
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["graph_input"] = kwargs["graph_input"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services._recover_run_knowledge_scope", new=recover_scope),
+        patch(
+            "app.gateway.services._load_scope_agent_config",
+            new=AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"])),
+        ),
+    ):
+        record = await start_run(body, "thread-edit-scope", request)
+        await record.task
+
+    graph_input = captured["graph_input"]
+    assert isinstance(graph_input, dict)
+    message = graph_input["messages"][0]
+    assert message.additional_kwargs["knowledge_scope"] == expected_scope
+    assert recover_scope.await_count == recovery_calls
 
 
 def _make_start_run_persistence_context():
