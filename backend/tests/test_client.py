@@ -1135,7 +1135,7 @@ class TestEnsureAgent:
             name = "test"
 
             def filter_resources(self, principal, resource_type, candidates):
-                return [name for name in candidates if name == "safe_tool"]
+                return [name for name in candidates if name in {"safe_tool", "history_read"}]
 
             def authorize(self, request):
                 # Phase 3: model:use is now checked during assembly; allow it so
@@ -1152,6 +1152,9 @@ class TestEnsureAgent:
             provider=AuthorizationProviderConfig(use="unused:Provider"),
         )
         mock_app_config.skills.deferred_discovery = True
+        from deerflow.config.task_continuity_config import TaskContinuityConfig
+
+        mock_app_config.task_continuity = TaskContinuityConfig(enabled=True)
         client._app_config = mock_app_config
 
         safe_tool = StructuredTool.from_function(lambda: "safe", name="safe_tool", description="safe")
@@ -1172,7 +1175,7 @@ class TestEnsureAgent:
         ):
             client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})
 
-        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool"]
+        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool", "history_read"]
         assert mock_build_middlewares.call_args.kwargs["authorization_provider"] is provider
 
     def test_authorization_cache_key_uses_complete_principal(self, client, mock_app_config):

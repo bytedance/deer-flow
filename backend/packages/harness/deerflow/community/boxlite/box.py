@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
+from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -306,12 +307,16 @@ class BoxliteBox(Sandbox):
         types = ("f", "d") if include_dirs else ("f",)
         type_expr = " -o ".join(f"-type {t}" for t in types)
         hard_limit = max(max_results * 4, max_results + 50)
-        r = self._sh(f"find {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null | head -{hard_limit}")
+        # -H follows a symlinked search root, as list_dir does.
+        search = f"find -H {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null"
+        r = self._sh(remote_search_command(search, resolved, limit=hard_limit))
+        # A missing root or a failed find must not read as "no files matched" (#5376).
+        output = parse_remote_search_output(r.stdout, resolved, tool="find")
 
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in (r.stdout or "").splitlines():
+        for entry in output.splitlines():
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
@@ -352,13 +357,15 @@ class BoxliteBox(Sandbox):
             flags.append("-i")
         flags.append("-F" if literal else "-E")
         total_cap = max(max_results * 4, max_results + 50)
-        cmd = "grep " + " ".join(flags) + f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null | head -{total_cap}"
-        r = self._sh(cmd)
+        search = "grep " + " ".join(flags) + f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
+        r = self._sh(remote_search_command(search, resolved, limit=total_cap))
+        # A missing root, a missing grep or an unreadable tree must not read as "no matches" (#5376).
+        output = parse_remote_search_output(r.stdout, resolved, tool="grep")
 
         include = glob.split("/")[-1] if glob else None
         matches: list[GrepMatch] = []
         truncated = False
-        for raw in (r.stdout or "").splitlines():
+        for raw in output.splitlines():
             try:
                 file_path, line_no_str, line_text = raw.split(":", 2)
             except ValueError:

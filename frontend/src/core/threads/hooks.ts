@@ -34,6 +34,7 @@ import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
+import { uuid } from "../utils/uuid";
 
 import {
   branchThreadFromTurn,
@@ -161,16 +162,24 @@ export function buildThreadSubmitMessages({
   additionalKwargs,
   additionalInputMessages = [],
   filesForSubmit = [],
+  humanMessageId,
 }: {
   text: string;
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   filesForSubmit?: FileInMessage[];
+  /**
+   * Client-generated id for the visible human message. The optimistic display
+   * copy and the actual submit share it, so the server echo (`<id>__user`)
+   * confirms the exact message the user already sees.
+   */
+  humanMessageId?: string;
 }): Message[] {
   return [
     ...additionalInputMessages,
     {
       type: "human",
+      ...(humanMessageId ? { id: humanMessageId } : {}),
       content: [
         {
           type: "text",
@@ -190,6 +199,31 @@ export function buildThreadSubmitMessages({
 const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_RUN_MESSAGES: RunMessage[] = [];
 const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
+const EMPTY_MESSAGE_IDENTITIES_SET: ReadonlySet<string> = new Set<string>();
+/**
+ * The turn this client submitted, recorded at dispatch time. The visible human
+ * input gets one client-generated identity shared by the optimistic display
+ * copy and the submitted message, so the turn anchor is a *known* identity
+ * instead of a guess derived from the pre-submit baseline. `humanIdentity` is
+ * the normalized identity (`message:<id>`) of that human, or null when the
+ * turn has no visible human (hidden human-input reply, regenerate replay) —
+ * such turns must never borrow an older visible human as their anchor.
+ */
+export type LocalTurnAnchor = {
+  threadId: string;
+  humanIdentity: string | null;
+  baselineIdentities: ReadonlySet<string>;
+  /** Canonical REST-history identities already loaded when this turn began. */
+  preSubmitHistoryIdentities: ReadonlySet<string>;
+  /** Transient-bridge identities already established before this turn began. */
+  preSubmitBridgeIdentities: ReadonlySet<string>;
+  /**
+   * Highest authoritative feed position known before submit. Older pages that
+   * arrive later may still be confirmed as pre-submit history through this
+   * boundary; messages from later external turns may not.
+   */
+  preSubmitMaxSeq?: number;
+};
 
 function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
@@ -206,6 +240,58 @@ const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
   "SummarizationMiddleware.before_model",
   "DeerFlowSummarizationMiddleware.before_model",
 ]);
+
+function maxMessageSeq(messages: Message[]): number | undefined {
+  let maxSeq: number | undefined;
+  for (const message of messages) {
+    const seq = trustedMessageSeq(message);
+    if (seq !== undefined && (maxSeq === undefined || seq > maxSeq)) {
+      maxSeq = seq;
+    }
+  }
+  return maxSeq;
+}
+
+function getConfirmedPreSubmitHistoryIdentities(
+  visibleHistory: Message[],
+  localTurnAnchor: LocalTurnAnchor | null,
+): Set<string> {
+  if (localTurnAnchor === null) {
+    return new Set();
+  }
+  const confirmed = new Set([
+    ...localTurnAnchor.preSubmitHistoryIdentities,
+    ...localTurnAnchor.preSubmitBridgeIdentities,
+  ]);
+  const maxSeq = localTurnAnchor.preSubmitMaxSeq;
+  if (maxSeq === undefined) {
+    return confirmed;
+  }
+  for (const message of visibleHistory) {
+    const identity = messageIdentity(message);
+    const seq = trustedMessageSeq(message);
+    if (identity !== undefined && seq !== undefined && seq <= maxSeq) {
+      confirmed.add(identity);
+    }
+  }
+  return confirmed;
+}
+
+function findMessageRunIdByIdentity(
+  messages: Message[],
+  identity: string,
+): string | undefined {
+  for (const message of messages) {
+    if (messageIdentity(message) !== identity) {
+      continue;
+    }
+    const runId = getMessageRunId(message);
+    if (runId) {
+      return runId;
+    }
+  }
+  return undefined;
+}
 
 function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
   const lastIndexByIdentity = new Map<string, number>();
@@ -457,30 +543,132 @@ export function reconcileThreadHistoryRows(
 export { mergeMessages };
 
 /**
+ * Collect live run ids that were not part of the pre-submit checkpoint.
+ * An empty result is safe because restoreLocalTurnMessageOrder independently
+ * anchors the current turn from the pending human's run_id when interrupt/stop
+ * has already flushed the live steps into canonical history.
+ */
+export function getCurrentTurnRunIds(
+  messages: Message[],
+  baselineMessageIdentities: ReadonlySet<string> | null,
+  confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+): Set<string> {
+  const runIds = new Set<string>();
+  if (baselineMessageIdentities === null) {
+    return runIds;
+  }
+
+  for (const message of messages) {
+    if (
+      (message.type !== "ai" && message.type !== "tool") ||
+      isHiddenFromUIMessage(message)
+    ) {
+      continue;
+    }
+    const identity = messageIdentity(message);
+    const runId = getMessageRunId(message);
+    if (
+      runId &&
+      (!identity ||
+        (!baselineMessageIdentities.has(identity) &&
+          !confirmedHistoryIdentities.has(identity)))
+    ) {
+      runIds.add(runId);
+    }
+  }
+  return runIds;
+}
+
+/**
  * Keep messages from a locally submitted turn behind that turn's user input.
  * LangGraph `messages-tuple` events can publish the first AI/tool steps before
  * canonical history contains the user message. Those steps are not part of the
  * pre-submit baseline, so move only that visible pending segment behind the
- * first new human message without disturbing established history or hidden
- * checkpoint controls. The caller keeps the baseline after stream completion
- * because the SDK may retain its transient event order until the next submit.
+ * latest new human message. Conversely, a baseline or history-confirmed message
+ * from an established turn can be woven after that human before a live
+ * checkpoint tail; move those established messages back before the input. The
+ * caller keeps the baseline after stream completion because the SDK may retain
+ * its transient event order until the next submit.
  */
 export function restoreLocalTurnMessageOrder(
   messages: Message[],
   baselineMessageIdentities: ReadonlySet<string>,
+  confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+  currentTurnRunIds: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+  anchorHumanIdentity?: string | null,
+  canonicalHistoryIdentities: ReadonlySet<string> = confirmedHistoryIdentities,
 ): Message[] {
-  const pendingHumanIndex = messages.findIndex((message) => {
-    const identity = messageIdentity(message);
-    return (
-      message.type === "human" &&
-      !isHiddenFromUIMessage(message) &&
-      identity !== undefined &&
-      !baselineMessageIdentities.has(identity)
-    );
-  });
-  if (pendingHumanIndex <= 0) {
+  // When the caller recorded the exact human identity this turn submitted
+  // (LocalTurnAnchor), only that message may anchor the repair. `null` means
+  // the turn has no visible human at all (hidden human-input reply,
+  // regenerate replay): no human may be borrowed from history. An identity
+  // that has not reached the render snapshot yet means the display is a frame
+  // behind — keep the established order instead of re-anchoring on an older
+  // history-only human (absence from the checkpoint baseline is not proof
+  // that a message belongs to this turn).
+  if (anchorHumanIdentity === null) {
     return messages;
   }
+  let pendingHumanIndex = -1;
+  if (anchorHumanIdentity !== undefined) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!;
+      if (
+        message.type === "human" &&
+        !isHiddenFromUIMessage(message) &&
+        messageIdentity(message) === anchorHumanIdentity
+      ) {
+        pendingHumanIndex = index;
+        break;
+      }
+    }
+  } else {
+    // Compat path for callers without a local-turn anchor. Context compaction
+    // can omit an older human from the checkpoint while the REST history page
+    // still supplies it, so anchor on the LATEST visible human that is not in
+    // the baseline; an old history-only turn then cannot claim the current
+    // stream. A freshly submitted human may not have a server id yet, and
+    // identity-less messages are necessarily absent from the baseline.
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!;
+      const identity = messageIdentity(message);
+      if (
+        message.type === "human" &&
+        !isHiddenFromUIMessage(message) &&
+        (identity === undefined || !baselineMessageIdentities.has(identity))
+      ) {
+        pendingHumanIndex = index;
+        break;
+      }
+    }
+  }
+  if (pendingHumanIndex < 0) {
+    return messages;
+  }
+
+  // The fixed confirmed set decides which suffix messages may move back across
+  // this turn's human. The wider canonical set has a different job in the
+  // prefix: a REST-history message is not speculative current-turn output just
+  // because the latest-page window advanced after submit.
+  const isConfirmedHistoryMessage = (identity: string | undefined) =>
+    identity !== undefined && confirmedHistoryIdentities.has(identity);
+  const isCanonicalHistoryMessage = (identity: string | undefined) =>
+    identity !== undefined && canonicalHistoryIdentities.has(identity);
+  // Steps of the CURRENT run must never be treated as displaced history: after
+  // an interrupt/stop the current turn's already-executed steps are persisted
+  // into canonical history, but they still belong AFTER the new human input.
+  // The pending human message itself carries the current run_id, so it is the
+  // most reliable anchor even when the live checkpoint no longer holds the
+  // current turn's steps (stop/interrupt can flush them to history).
+  const effectiveCurrentTurnRunIds = new Set(currentTurnRunIds);
+  const pendingHumanRunId = getMessageRunId(messages[pendingHumanIndex]!);
+  if (pendingHumanRunId) {
+    effectiveCurrentTurnRunIds.add(pendingHumanRunId);
+  }
+  const isCurrentTurnStep = (message: Message) => {
+    const runId = getMessageRunId(message);
+    return runId !== undefined && effectiveCurrentTurnRunIds.has(runId);
+  };
 
   const stablePrefix: Message[] = [];
   const earlyPendingSteps: Message[] = [];
@@ -490,22 +678,43 @@ export function restoreLocalTurnMessageOrder(
       (message.type === "ai" || message.type === "tool") &&
       !isHiddenFromUIMessage(message) &&
       identity !== undefined &&
-      !baselineMessageIdentities.has(identity);
+      !baselineMessageIdentities.has(identity) &&
+      ((!isCanonicalHistoryMessage(identity) &&
+        !isConfirmedHistoryMessage(identity)) ||
+        isCurrentTurnStep(message));
     if (isVisiblePendingStep) {
       earlyPendingSteps.push(message);
     } else {
       stablePrefix.push(message);
     }
   }
-  if (earlyPendingSteps.length === 0) {
+  const displacedMessages: Message[] = [];
+  const stableSuffix: Message[] = [];
+  for (const message of messages.slice(pendingHumanIndex + 1)) {
+    const identity = messageIdentity(message);
+    const wasPresentBeforeSubmit =
+      identity !== undefined && baselineMessageIdentities.has(identity);
+    const wasConfirmedInPreviousHistory =
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message) &&
+      isConfirmedHistoryMessage(identity) &&
+      !isCurrentTurnStep(message);
+    if (wasPresentBeforeSubmit || wasConfirmedInPreviousHistory) {
+      displacedMessages.push(message);
+    } else {
+      stableSuffix.push(message);
+    }
+  }
+  if (earlyPendingSteps.length === 0 && displacedMessages.length === 0) {
     return messages;
   }
 
   return [
     ...stablePrefix,
+    ...displacedMessages,
     messages[pendingHumanIndex]!,
     ...earlyPendingSteps,
-    ...messages.slice(pendingHumanIndex + 1),
+    ...stableSuffix,
   ];
 }
 
@@ -1695,7 +1904,7 @@ export function useThreadStream({
         transientHistoryThreadIdRef.current = null;
         summarizedRef.current = new Set<string>();
         pendingUsageBaselineMessageIdsRef.current = new Set();
-        localTurnOrderBaselineIdentitiesRef.current = null;
+        localTurnAnchorRef.current = null;
         tasksRef.current = {};
         setTasks({});
         invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
@@ -1809,7 +2018,17 @@ export function useThreadStream({
     () => (threadId ? history : []),
     [history, threadId],
   );
-  const humanMessageCount = persistedMessages.filter(
+  // Render-facing coalesced snapshot. Optimistic-input confirmation and the
+  // turn anchor observe THIS snapshot — the same frames the user sees — so a
+  // human echo landing in the per-chunk SDK array one coalesce interval early
+  // can no longer withdraw the local input before the snapshot shows it.
+  // Refs, summarization capture, and token-usage tracking keep consuming the
+  // per-chunk `persistedMessages` array above, unchanged.
+  const renderMessages = useCoalescedStreamMessages(
+    persistedMessages,
+    thread.isLoading,
+  );
+  const humanMessageCount = renderMessages.filter(
     (m) => m.type === "human",
   ).length;
   const latestMessageCountsRef = useRef({ humanMessageCount });
@@ -1820,7 +2039,7 @@ export function useThreadStream({
   // the settled frame. The next local submit replaces it and a thread switch or
   // replay gap clears it. An empty set is meaningful for a new thread and must
   // not be confused with a reconnect that has no local turn anchor.
-  const localTurnOrderBaselineIdentitiesRef = useRef<Set<string> | null>(null);
+  const localTurnAnchorRef = useRef<LocalTurnAnchor | null>(null);
   // Current-stream lifecycle bridge for messages removed from the checkpoint
   // tail before the canonical run-event page refetch observes the journal
   // flush. It is never appended into useThreadHistory's persisted pages.
@@ -1869,7 +2088,7 @@ export function useThreadStream({
     };
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
-    localTurnOrderBaselineIdentitiesRef.current = null;
+    localTurnAnchorRef.current = null;
     pendingPreparedReplayRef.current = null;
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
@@ -1919,9 +2138,11 @@ export function useThreadStream({
 
   // Clear optimistic when server messages arrive.
   // For messages with a human optimistic message, wait until the server's
-  // human message has arrived to avoid clearing before canonical history (or
-  // replay-gap recovery) reports the input after individual messages-tuple
-  // events for AI messages.
+  // human message has arrived in the RENDER SNAPSHOT — identity match first,
+  // human-count growth of the rendered frames as fallback for runtime-re-keyed
+  // first turns — never in the unthrottled per-chunk array, which would
+  // withdraw the local input one coalesce interval before the user can see
+  // its confirmed copy.
   const optimisticMessageCount = optimisticMessages.length;
   const hasHumanOptimistic = optimisticMessages.some((m) => m.type === "human");
   useEffect(() => {
@@ -1938,12 +2159,12 @@ export function useThreadStream({
   useEffect(() => {
     if (
       optimisticMessageCount > 0 &&
-      areOptimisticMessagesConfirmed(optimisticMessages, persistedMessages)
+      areOptimisticMessagesConfirmed(optimisticMessages, renderMessages)
     ) {
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
     }
-  }, [optimisticMessageCount, optimisticMessages, persistedMessages]);
+  }, [optimisticMessageCount, optimisticMessages, renderMessages]);
 
   const sendMessage = useCallback(
     async (
@@ -1971,9 +2192,33 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      localTurnOrderBaselineIdentitiesRef.current = new Set(
-        pendingUsageBaselineMessageIdsRef.current,
-      );
+      // One client-generated id for this turn's human input: the optimistic
+      // display copy and the submitted message share it, so the render
+      // snapshot confirms the exact identity it already shows instead of the
+      // ordering repair guessing from the baseline (a compaction-trimmed
+      // checkpoint must never promote an older history-only human into this
+      // turn's anchor).
+      const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
+      const humanMessageId = `local-human-${uuid()}`;
+      localTurnAnchorRef.current = {
+        threadId,
+        humanIdentity: hideFromUI ? null : `message:${humanMessageId}`,
+        baselineIdentities: new Set(pendingUsageBaselineMessageIdsRef.current),
+        preSubmitHistoryIdentities: new Set(
+          visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+        ),
+        preSubmitBridgeIdentities: new Set(
+          transientHistoryThreadIdRef.current === threadId
+            ? transientHistoryBridgeRef.current
+                .map(messageIdentity)
+                .filter(isNonEmptyString)
+            : EMPTY_MESSAGE_IDENTITIES,
+        ),
+        preSubmitMaxSeq: maxMessageSeq([
+          ...visibleHistory,
+          ...persistedMessages,
+        ]),
+      };
 
       // Build optimistic files list with uploading status
       const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
@@ -1984,7 +2229,6 @@ export function useThreadStream({
         }),
       );
 
-      const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
       const optimisticAdditionalKwargs = {
         ...options?.additionalKwargs,
         ...(optimisticFiles.length > 0 ? { files: optimisticFiles } : {}),
@@ -1994,7 +2238,7 @@ export function useThreadStream({
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
-          id: `opt-human-${Date.now()}`,
+          id: humanMessageId,
           content: text ? [{ type: "text", text }] : "",
           additional_kwargs: optimisticAdditionalKwargs,
         });
@@ -2101,6 +2345,7 @@ export function useThreadStream({
               additionalKwargs: options?.additionalKwargs,
               additionalInputMessages: options?.additionalInputMessages,
               filesForSubmit,
+              humanMessageId,
             }),
           },
           {
@@ -2140,7 +2385,7 @@ export function useThreadStream({
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
         setIsUploading(false);
-        localTurnOrderBaselineIdentitiesRef.current = null;
+        localTurnAnchorRef.current = null;
         throw error;
       } finally {
         sendInFlightRef.current = false;
@@ -2153,6 +2398,7 @@ export function useThreadStream({
       queryClient,
       humanMessageCount,
       persistedMessages,
+      visibleHistory,
     ],
   );
 
@@ -2178,9 +2424,27 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      localTurnOrderBaselineIdentitiesRef.current = new Set(
-        pendingUsageBaselineMessageIdsRef.current,
-      );
+      localTurnAnchorRef.current = {
+        threadId,
+        // Replay turns submit no new visible human; an edit replay adopts the
+        // prepare response's replacement identity once it lands below.
+        humanIdentity: null,
+        baselineIdentities: new Set(pendingUsageBaselineMessageIdsRef.current),
+        preSubmitHistoryIdentities: new Set(
+          visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+        ),
+        preSubmitBridgeIdentities: new Set(
+          transientHistoryThreadIdRef.current === threadId
+            ? transientHistoryBridgeRef.current
+                .map(messageIdentity)
+                .filter(isNonEmptyString)
+            : EMPTY_MESSAGE_IDENTITIES,
+        ),
+        preSubmitMaxSeq: maxMessageSeq([
+          ...visibleHistory,
+          ...persistedMessages,
+        ]),
+      };
       setLiveMessagesThreadId(threadId);
       listeners.current.onSend?.(threadId);
       let preparedSupersededRunId: string | null = null;
@@ -2199,6 +2463,15 @@ export function useThreadStream({
           typeof prepared.replacement_human_message_id === "string"
             ? prepared.replacement_human_message_id
             : undefined;
+        const replayAnchor = localTurnAnchorRef.current;
+        if (replayAnchor?.threadId === threadId && replacementHumanMessageId) {
+          // The edit replay reuses the server-prepared replacement identity;
+          // supersede semantics stay with the prepare response.
+          localTurnAnchorRef.current = {
+            ...replayAnchor,
+            humanIdentity: `message:${replacementHumanMessageId}`,
+          };
+        }
         const pendingReplay: PendingPreparedReplayMask = {
           kind: replacementHumanMessageId ? "edit" : "regenerate",
           targetRunId: prepared.target_run_id,
@@ -2267,7 +2540,7 @@ export function useThreadStream({
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
-        localTurnOrderBaselineIdentitiesRef.current = null;
+        localTurnAnchorRef.current = null;
         if (preparedSupersededRunId) {
           const supersededRunId = preparedSupersededRunId;
           pendingPreparedReplayRef.current = null;
@@ -2284,7 +2557,14 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [context, humanMessageCount, persistedMessages, queryClient, thread],
+    [
+      context,
+      humanMessageCount,
+      persistedMessages,
+      queryClient,
+      thread,
+      visibleHistory,
+    ],
   );
 
   const regenerateMessage = useCallback(
@@ -2369,14 +2649,6 @@ export function useThreadStream({
     messagesRef.current = persistedMessages;
   }
 
-  // Render-facing coalesced snapshot. Refs, counters and usage tracking keep
-  // consuming the per-chunk array above so lifecycle semantics (optimistic
-  // clearing, summarization capture, token-usage baselines) are unchanged.
-  const renderMessages = useCoalescedStreamMessages(
-    persistedMessages,
-    thread.isLoading,
-  );
-
   const rawVisibleOptimisticMessages = getVisibleOptimisticMessages(
     optimisticThreadId === currentViewThreadId ? optimisticMessages : [],
     prevHumanMsgCountRef.current,
@@ -2433,10 +2705,58 @@ export function useThreadStream({
       renderMessages,
       visibleOptimisticMessages,
     );
-    const localTurnOrderBaseline = localTurnOrderBaselineIdentitiesRef.current;
-    return localTurnOrderBaseline === null
+    const localTurnAnchor =
+      localTurnAnchorRef.current?.threadId === threadId
+        ? localTurnAnchorRef.current
+        : null;
+    const canonicalHistoryIdentities = new Set(
+      visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+    );
+    // Only established history known to predate this local submit may be moved
+    // across its human anchor. The fixed identity snapshots cover messages
+    // already loaded from REST and pre-existing transient-bridge rescue; the
+    // authoritative seq boundary also admits older pages that finish loading
+    // after submit. Post-submit rescue and later external turns stay outside.
+    const confirmedHistoryIdentities = getConfirmedPreSubmitHistoryIdentities(
+      visibleHistory,
+      localTurnAnchor,
+    );
+    // The current turn's run(s): visible ai/tool steps that appear in the live
+    // checkpoint but are neither part of the pre-submit baseline nor already
+    // canonical REST history. These are output from the in-flight submit and
+    // must never be moved before their human.
+    const currentTurnRunIds = getCurrentTurnRunIds(
+      renderMessages,
+      localTurnAnchor ? localTurnAnchor.baselineIdentities : null,
+      canonicalHistoryIdentities,
+    );
+    if (localTurnAnchor?.humanIdentity) {
+      // The surviving merged copy of the submitted human can be the run_id-less
+      // optimistic one; recover the run from any rendered or canonical copy so
+      // an interrupt-flushed current-run step is still recognised as ours.
+      const anchorRunId =
+        findMessageRunIdByIdentity(
+          renderMessages,
+          localTurnAnchor.humanIdentity,
+        ) ??
+        findMessageRunIdByIdentity(
+          effectiveHistory,
+          localTurnAnchor.humanIdentity,
+        );
+      if (anchorRunId) {
+        currentTurnRunIds.add(anchorRunId);
+      }
+    }
+    return localTurnAnchor === null
       ? restoreReconnectedTurnMessageOrder(merged)
-      : restoreLocalTurnMessageOrder(merged, localTurnOrderBaseline);
+      : restoreLocalTurnMessageOrder(
+          merged,
+          localTurnAnchor.baselineIdentities,
+          confirmedHistoryIdentities,
+          currentTurnRunIds,
+          localTurnAnchor.humanIdentity,
+          canonicalHistoryIdentities,
+        );
   }, [
     previouslyRenderedOrder,
     renderMessages,
@@ -2446,10 +2766,27 @@ export function useThreadStream({
     visibleOptimisticMessages,
   ]);
   useEffect(() => {
-    const visibleMergedMessages = mergedMessages.filter(
-      (message) =>
-        !isHiddenFromUIMessage(message) && !message.id?.startsWith("opt-"),
+    // The committed render ledger excludes hidden control copies and the
+    // still-unconfirmed optimistic ones (keyed by identity, since the local
+    // input now shares its id with the submit instead of an `opt-` prefix):
+    // a failed send must never pin a message the server never saw.
+    const pendingOptimisticIdentities = new Set(
+      (optimisticThreadId === currentViewThreadId
+        ? optimisticMessages
+        : EMPTY_MESSAGES
+      )
+        .map(messageIdentity)
+        .filter(isNonEmptyString),
     );
+    const visibleMergedMessages = mergedMessages.filter((message) => {
+      if (isHiddenFromUIMessage(message)) {
+        return false;
+      }
+      const identity = messageIdentity(message);
+      return (
+        identity === undefined || !pendingOptimisticIdentities.has(identity)
+      );
+    });
     const previousLedger =
       thread.isLoading &&
       renderedMessageSnapshotRef.current.threadId === threadId
@@ -2467,7 +2804,15 @@ export function useThreadStream({
         .map(messageIdentity)
         .filter(isNonEmptyString),
     };
-  }, [mergedMessages, pendingSupersededMessageIds, thread.isLoading, threadId]);
+  }, [
+    mergedMessages,
+    optimisticMessages,
+    optimisticThreadId,
+    currentViewThreadId,
+    pendingSupersededMessageIds,
+    thread.isLoading,
+    threadId,
+  ]);
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
         persistedMessages,
