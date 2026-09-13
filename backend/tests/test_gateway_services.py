@@ -2592,6 +2592,8 @@ async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_
     from langgraph.store.memory import InMemoryStore
 
     from app.gateway.services import start_run
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.persistence.run import RunRepository
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
     from deerflow.runtime import RunManager, RunStatus
     from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -2605,19 +2607,18 @@ async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_
         await run_manager.set_status(record.run_id, RunStatus.success)
         await run_manager.cleanup(record.run_id, delay=0)
 
-    if run_store_backend == "sql":
-        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
-        from deerflow.persistence.run import RunRepository
-
-        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}", sqlite_dir=str(tmp_path))
-        run_store = RunRepository(get_session_factory())
-    else:
-        run_store = MemoryRunStore()
-    owner = RunManager(store=run_store, worker_id="worker-a")
-    peer = RunManager(store=run_store, worker_id="worker-b")
     thread_store = MemoryThreadMetaStore(InMemoryStore())
     body = _run_create_request()
     try:
+        # init_engine() assigns the module-global engine before bootstrapping
+        # the schema, so a partial setup failure must still reach close_engine().
+        if run_store_backend == "sql":
+            await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}", sqlite_dir=str(tmp_path))
+            run_store = RunRepository(get_session_factory())
+        else:
+            run_store = MemoryRunStore()
+        owner = RunManager(store=run_store, worker_id="worker-a")
+        peer = RunManager(store=run_store, worker_id="worker-b")
         with (
             patch("app.gateway.services.resolve_agent_factory", return_value=object()),
             patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
