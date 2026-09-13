@@ -107,11 +107,11 @@ def _download(url: str, output_file: str) -> None:
 def _generate_video_minimax(
     prompt: str, reference_images: list[str], output_file: str
 ) -> str:
-    api_key = os.getenv("MINIMAX_API_KEY")
-    if not api_key:
+    minimax_api_key = os.getenv("MINIMAX_API_KEY")
+    if not minimax_api_key:
         return "MINIMAX_API_KEY is not set"
     host = _minimax_host()
-    auth = f"Bearer {api_key}"
+    auth = f"Bearer {minimax_api_key}"
     body = {"model": os.getenv("MINIMAX_VIDEO_MODEL", "MiniMax-Hailuo-2.3"), "prompt": prompt}
     if reference_images:
         body["first_frame_image"] = _to_data_url(reference_images[0])
@@ -132,10 +132,10 @@ def _generate_video_minimax(
 
 
 def download(url: str, output_file: str) -> None:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_api_key:
         raise ValueError("GEMINI_API_KEY is not set")
-    response = requests.get(url, headers={"x-goog-api-key": api_key}, timeout=300)
+    response = requests.get(url, headers={"x-goog-api-key": gemini_api_key}, timeout=300)
     response.raise_for_status()
     _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:
@@ -159,12 +159,12 @@ def _generate_video_gemini(
         )
     if reference_payload:
         request_json["instances"][0]["referenceImages"] = reference_payload
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_api_key:
         return "GEMINI_API_KEY is not set"
     response = requests.post(
         "https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning",
-        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+        headers={"x-goog-api-key": gemini_api_key, "Content-Type": "application/json"},
         json=request_json,
         timeout=60,
     )
@@ -174,7 +174,7 @@ def _generate_video_gemini(
     while True:
         response = requests.get(
             f"https://generativelanguage.googleapis.com/v1beta/{operation_name}",
-            headers={"x-goog-api-key": api_key},
+            headers={"x-goog-api-key": gemini_api_key},
             timeout=30,
         )
         response.raise_for_status()

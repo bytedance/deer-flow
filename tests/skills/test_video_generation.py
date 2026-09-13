@@ -48,14 +48,17 @@ def test_minimax_full_flow(monkeypatch, tmp_path):
     def fake_post(url, headers=None, json=None, **kw):
         posts["url"] = url
         posts["json"] = json
+        assert headers["Authorization"] == "Bearer m"
         return FakeResp({"task_id": "T1", "base_resp": {"status_code": 0}})
 
     def fake_get(url, headers=None, params=None, **kw):
         if url.endswith("/v1/query/video_generation"):
+            assert headers["Authorization"] == "Bearer m"
             assert params["task_id"] == "T1"
             return FakeResp({"status": "Success", "file_id": "F1",
                              "base_resp": {"status_code": 0}})
         if url.endswith("/v1/files/retrieve"):
+            assert headers["Authorization"] == "Bearer m"
             assert params["file_id"] == "F1"
             return FakeResp({"file": {"download_url": "https://dl/v.mp4"},
                              "base_resp": {"status_code": 0}})
@@ -166,6 +169,7 @@ def test_gemini_download_writes_nested_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "g")
 
     def fake_get(url, headers=None, **kw):
+        assert headers["x-goog-api-key"] == "g"
         return FakeResp(content=b"VIDEO")
 
     monkeypatch.setattr(vid.requests, "get", fake_get)
@@ -194,9 +198,11 @@ def test_gemini_forwards_aspect_ratio_to_predict_request(monkeypatch, tmp_path):
     def fake_post(url, headers=None, json=None, **kw):
         captured["url"] = url
         captured["json"] = json
+        assert headers["x-goog-api-key"] == "g"
         return FakeResp(json_data={"name": "operations/op"})
 
     def fake_get(url, headers=None, **kw):
+        assert headers["x-goog-api-key"] == "g"
         return FakeResp(
             json_data={
                 "done": True,
