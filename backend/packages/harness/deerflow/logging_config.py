@@ -28,11 +28,13 @@ _TRACE_FILTER_NAME = "deerflow_trace_context_filter"
 # tool endpoints) is blanked too, not just the path and query. ``rest`` is
 # optional so an authority-only URL (``scheme://user:pass@host`` — no path)
 # is still rewritten; a bare credential-free origin passes through as-is.
-# ``rest`` stops at quote characters: URLs wrapped in surrounding prose or a
-# format's own quoting (urllib3's ``Incremented Retry for (url='…')``) keep
-# their closing punctuation instead of having it swallowed into ``rest``
-# (mirroring the quote exclusion in the request-line pattern below).
-_URL_REDACT_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s@]*@)?(?P<host>[^/?#\s]+)(?P<rest>[/?#][^\s'\"]*)?")
+# ``rest`` treats a quote as a closing mark only at a boundary — followed by
+# whitespace, a closing parenthesis, or end of string — so URLs wrapped in
+# surrounding prose or a format's own quoting (urllib3's
+# ``Incremented Retry for (url='…')``) keep their closing punctuation, while
+# a quote EMBEDDED in the URL (``/path'quoted'?token=…``) is consumed and
+# everything after it stays redacted.
+_URL_REDACT_RE = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<userinfo>[^/?#\s@]*@)?(?P<host>[^/?#\s]+)(?P<rest>[/?#](?:[^\s'\"]|['\"](?!$|\s|\)))*)?")
 
 # urllib3's per-request DEBUG line (connectionpool.py:545 on urllib3 2.7.0)
 # splits the URL across the format string:
@@ -55,15 +57,18 @@ _URLLIB3_REQUEST_LINE_RE = re.compile(r'(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?
 # - ``Incremented Retry for (url='%s'): %r`` — util/retry.py:545, DEBUG via
 #   the ``urllib3.util.retry`` logger; the target is origin-form on the
 #   request path and absolute on the redirect path (poolmanager resolves the
-#   Location before retrying). Absolute targets are left for the generic
-#   absolute-URL pass — ``rest`` stops at the closing quote — while
-#   origin-form targets collapse to ``/<redacted>``.
+#   Location before retrying). The url capture applies the same boundary
+#   idea as ``rest``, narrowed to this format's fixed ``')`` closer: an
+#   embedded quote is consumed, the closing quote is the one directly
+#   followed by ``)``. Absolute targets are left for the generic absolute-
+#   URL pass — its ``rest`` stops at the closing quote — while origin-form
+#   targets collapse to ``/<redacted>``.
 # - ``Retrying (%r) after connection broken by '%r': %s`` —
 #   connectionpool.py:869, **WARNING**, so it passes the Gateway's INFO root
 #   without DEBUG being enabled; the greedy prefix groups pin the split to
 #   the final ``': `` so an error repr containing quotes cannot shift it.
 _URLLIB3_RETRY_TARGET_RE = re.compile(r"^Retry: (?P<target>/\S+)$")
-_URLLIB3_INCREMENT_RETRY_RE = re.compile(r"Incremented Retry for \(url='(?P<url>[^']*)'\)")
+_URLLIB3_INCREMENT_RETRY_RE = re.compile(r"Incremented Retry for \(url='(?P<url>(?:[^']|'(?!\)))*)'\)")
 _URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection broken by .*'): (?P<target>/\S+)$")
 
 # urllib3's ``Redirecting %s -> %s`` (poolmanager.py:500 at INFO,
@@ -71,8 +76,13 @@ _URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection b
 # slot: connectionpool passes the origin-form request target, and the Location
 # header may itself be a relative reference (RFC 9110 allows it). The generic
 # absolute-URL pass only sees scheme-bearing halves, so origin-form slots
-# collapse to ``/<redacted>`` here; absolute halves are left for that pass.
-_URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"(?P<pre>^Redirecting |(?<=-> ))(?P<target>/[^\s]*)")
+# collapse to ``/<redacted>`` here; absolute slots are left for that pass.
+# The pattern is anchored to the WHOLE message — urllib3's record is exactly
+# this line — because an ``-> /path`` arrow is not urllib3-owned shape:
+# non-URL logs render it too (sandbox mount mappings log
+# ``sandbox.mounts entry <host_path> -> <container_path>``), and a substring
+# match rewrote the container path in that actionable error (CI round 11).
+_URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S+) -> (?P<t2>\S+)$")
 
 # The two scheme-bearing patterns start with a character class, so re.sub
 # retries the match at every position of a long token — a letter run with no
@@ -182,7 +192,12 @@ class UrlRedactionFilter(logging.Filter):
             return match.group("head") + ": /<redacted>"
 
         def _redact_redirecting_origin(match: re.Match[str]) -> str:
-            return match.group("pre") + "/<redacted>"
+            # Origin-form slots collapse; absolute slots stay for the generic
+            # absolute-URL pass (which runs after this one).
+            def _slot(target: str) -> str:
+                return "/<redacted>" if target.startswith("/") else target
+
+            return "Redirecting " + _slot(match.group("t1")) + " -> " + _slot(match.group("t2"))
 
         # The urllib3 shape passes run before the absolute-URL pass: their
         # rewrites either leave scheme-bearing text for that pass to handle

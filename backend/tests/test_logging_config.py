@@ -563,3 +563,93 @@ def test_url_redaction_filter_scheme_start_skips_non_letter_run_head() -> None:
     # text is left as-is by the scheme passes (no URL rewrite, no signal
     # loss; the record itself is not a valid URL shape).
     assert digits_only.getMessage() == "fetch 123://host.example/private/x?token=QuerySecret"
+
+
+def test_url_redaction_filter_embedded_quotes_stay_inside_rest() -> None:
+    """Boundary rule for the rest quote-stop (round-10 residual): a quote is
+    a closing mark only when whitespace, ``)``, or end of string follows —
+    the shapes that actually close a quoted URL (urllib3's
+    ``Incremented Retry for (url='…')`` scaffolding, surrounding prose). A
+    quote EMBEDDED in the URL itself (``/path'quoted'?token=…``) must be
+    consumed so the whole path+query stays redacted; the earlier
+    quote-stop-at-any-quote behavior kept the suffix after the quote
+    verbatim."""
+    from deerflow.logging_config import UrlRedactionFilter
+
+    filt = UrlRedactionFilter()
+
+    # The review repro, through the real httpx record shape: httpx.URL keeps
+    # an apostrophe raw, so the embedded quote is present verbatim in the
+    # rendered message. rest must consume it — the credential-bearing suffix
+    # does not survive. (The httpx format quotes "version status reason"
+    # together.)
+    embedded = _httpx_record("https://host.example/path'quoted'?token=QuerySecret")
+    assert filt.filter(embedded) is True
+    assert embedded.getMessage() == 'HTTP Request: GET https://host.example/<redacted> "HTTP/1.1 200 OK"'
+    assert "quoted" not in embedded.getMessage()
+    assert "token=" not in embedded.getMessage()
+
+    # A raw embedded DOUBLE quote (httpx.URL would percent-encode %22, so
+    # this rides a plain string arg — MCP/extension riders may log
+    # pre-rendered URLs).
+    embedded_double = logging.LogRecord(
+        "httpx",
+        logging.INFO,
+        __file__,
+        1,
+        _HTTPX_REQUEST_FORMAT,
+        ("GET", 'https://host.example/pa"th?token=QuerySecret', "HTTP/1.1", 200, "OK"),
+        None,
+    )
+    assert filt.filter(embedded_double) is True
+    assert embedded_double.getMessage() == 'HTTP Request: GET https://host.example/<redacted> "HTTP/1.1 200 OK"'
+    assert "token=" not in embedded_double.getMessage()
+
+    # Boundary quotes still close rest: prose quoting keeps its punctuation.
+    prose_double = logging.LogRecord("some.lib", logging.INFO, __file__, 1, "see %s in the docs", ('"https://host.example/private/x?tok=1"',), None)
+    assert filt.filter(prose_double) is True
+    assert prose_double.getMessage() == 'see "https://host.example/<redacted>" in the docs'
+    prose_single = logging.LogRecord("some.lib", logging.INFO, __file__, 1, "see %s please", ("'https://host.example/private/x?tok=1'",), None)
+    assert filt.filter(prose_single) is True
+    assert prose_single.getMessage() == "see 'https://host.example/<redacted>' please"
+
+    # The increment line's url capture applies the same rule with its fixed
+    # ``')`` closer: an embedded quote inside the target no longer truncates
+    # the capture, so the whole origin-form target collapses.
+    increment = logging.LogRecord(
+        "urllib3.util.retry",
+        logging.DEBUG,
+        __file__,
+        1,
+        "Incremented Retry for (url='%s'): %r",
+        ("/a'b?tok=QuerySecret", "Retry(total=1)"),
+        None,
+    )
+    assert filt.filter(increment) is True
+    assert increment.getMessage() == "Incremented Retry for (url='/<redacted>'): 'Retry(total=1)'"
+    assert "tok=" not in increment.getMessage()
+
+
+def test_url_redaction_filter_leaves_arrow_paths_in_other_logs_alone() -> None:
+    """The Redirecting origin pass is anchored to the WHOLE ``Redirecting
+    <t> -> <t>`` message because an ``-> /path`` arrow is not urllib3-owned
+    shape: the sandbox provider's actionable mount error renders
+    ``sandbox.mounts entry <host_path> -> <container_path>`` and a substring
+    match rewrote the container path to ``/<redacted>``, breaking the error's
+    instructions (backend-unit-tests shard 3 on CI, round 11)."""
+    from deerflow.logging_config import UrlRedactionFilter
+
+    filt = UrlRedactionFilter()
+    sandbox_error = (
+        "sandbox.mounts entry /srv/deer-flow/knowledge -> /mnt/knowledge ignored: host_path "
+        "/srv/deer-flow/knowledge does not exist from the perspective of the gateway process. "
+        "In Docker deployments (make up / docker-compose), this path must also be bind-mounted "
+        "into the gateway container — add a matching volume entry under services.gateway.volumes "
+        "in docker/docker-compose.yaml (and use the in-container path here), or run in local mode "
+        "(make dev) where the gateway sees the host filesystem directly."
+    )
+    record = logging.LogRecord("deerflow.sandbox.local.local_sandbox_provider", logging.ERROR, "provider.py", 1, "%s", (sandbox_error,), None)
+    assert filt.filter(record) is True
+    assert record.getMessage() == sandbox_error  # byte-for-byte passthrough
+    assert "/mnt/knowledge" in record.getMessage()
+    assert "<redacted>" not in record.getMessage()
