@@ -51,5 +51,7 @@ RUN pnpm config set store-dir ${PNPM_STORE_PATH}
 RUN if [ -n "${NPM_REGISTRY}" ]; then pnpm config set registry "${NPM_REGISTRY}"; fi
 WORKDIR /app
 COPY --from=builder /app/frontend ./frontend
+# Run as the unprivileged `node` user (uid/gid 1000) shipped with the image.
+USER node
 EXPOSE 3000
 CMD ["sh", "-c", "cd /app/frontend && pnpm start"]
