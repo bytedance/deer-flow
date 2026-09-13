@@ -739,6 +739,95 @@ class LocalSandbox(Sandbox):
         except subprocess.TimeoutExpired:
             logger.warning("Process group for pid %s did not exit after SIGKILL", process.pid)
 
+    @staticmethod
+    def _terminate_process_tree_windows(process: subprocess.Popen) -> None:
+        """Kill the command's whole process tree on Windows, then reap it.
+
+        Uses ``taskkill /F /T`` to send a forced tree-kill signal.  Falls back
+        to killing just the direct child if ``taskkill`` is unavailable or the
+        process already exited.
+        """
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception:
+            try:
+                process.kill()
+            except OSError:
+                logger.debug("Process %s already exited before fallback kill", process.pid)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            logger.warning("Process tree for pid %s did not exit after taskkill", process.pid)
+
+    @staticmethod
+    def _run_windows_command(
+        args: list[str],
+        timeout: float,
+        env: dict[str, str] | None = None,
+    ) -> tuple[str, str, int, bool]:
+        """Run a command on Windows with bounded pipe capture and process-tree kill.
+
+        Mirrors :meth:`_run_posix_command` but uses ``taskkill /F /T`` for
+        process-tree termination instead of POSIX ``killpg``.  ``stdin`` is
+        taken from ``NUL`` so commands that read stdin get immediate EOF, and
+        ``start_new_session`` puts the command in its own process group so a
+        genuinely blocking foreground command can be killed in full (children
+        included) when it times out.
+
+        Returns ``(stdout, stderr, returncode, timed_out)``.
+        """
+        timed_out = False
+        stdout_read_fd, stdout_write_fd = os.pipe()
+        stderr_read_fd, stderr_write_fd = os.pipe()
+        try:
+            process = subprocess.Popen(
+                args,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_write_fd,
+                stderr=stderr_write_fd,
+                start_new_session=True,
+                env=env,
+            )
+        except Exception:
+            for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            raise
+        finally:
+            for fd in (stdout_write_fd, stderr_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+        stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
+        stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
+
+        try:
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                LocalSandbox._terminate_process_tree_windows(process)
+            returncode = process.returncode if process.returncode is not None else 0
+        finally:
+            join_timeout = 10 if timed_out else _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
+            for thread in (stdout_thread, stderr_thread):
+                thread.join(timeout=join_timeout)
+                if thread.is_alive():
+                    logger.debug("Subprocess output drain thread still active after command returned")
+
+        stdout = stdout_capture.read()
+        stderr = stderr_capture.read()
+        return stdout, stderr, returncode, timed_out
+
     def list_dir(self, path: str, max_depth=2) -> list[str]:
         resolved_path = self._resolve_path(path)
         entries = list_dir(resolved_path, max_depth)
