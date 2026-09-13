@@ -168,7 +168,136 @@ The first `RunManager.list_by_thread()` hydration page uses a 100-row floor or
 the number of required IDs, whichever is larger; missing exact runs use targeted
 `get()` calls.
 
-**Terminal run cleanup explicitly breaks graph-scoped references while preserving the existing `RunRecord` grace period.** Every `agent.astream()` iterator is closed in `_stream_once`, including abort/exception/early-break paths. A close failure after an abort is warning-only and cannot replace the user-requested `interrupted` outcome; normal-completion close failures still surface, and an in-flight stream exception remains authoritative over a secondary close failure. Journal construction and cancellable preflight work (including MCP task projection and the prior-finalization wait) live inside the worker's guarded body, so cancellation before agent startup still terminalizes the run and closes its stream. `run_agent()` wraps the complete terminal-finalization sequence in an outer teardown guard, so cancellation or failure from any terminal-stage await cannot skip `RunJournal.close()`, removal of the journal, `__pregel_runtime`, and internal runtime-context values from every runnable config, or release of local graph/payload references. That guard schedules bridge cleanup, run-record cleanup, and cyclic GC even when interruption happens before the terminal stream marker or terminal publication itself fails, so neither a cancelled observer nor a delivery-backend outage can strand process-local run state. A non-`Exception` `BaseException` caught while awaiting the completion hook or task-stop notification (including host-task cancellation) is deferred through the ordinary remaining finalization, with the first interruption preserved and every caught host-task `CancelledError` balanced by calling `Task.uncancel()` until the current task’s cumulative cancellation count is clear. Task-stop fan-out runs in one child task and every host wait uses `shield`, so repeated cancellation of the worker cannot cancel that fan-out or skip later observers; the worker keeps awaiting the same child task. A rogue observer that raises its own `CancelledError` remains contained by the extension dispatcher and distinguishable from host cancellation. This guarantee applies only to cancellation caught during those hook stages: clearing the finalizing barrier and publishing END remain direct awaits, so another cancellation in the subsequent critical tail retains forceful-termination semantics instead of creating an unbounded shield. If that tail completes without another interruption, the first deferred interruption is re-raised after END; a barrier-clear failure prevents END publication, while an END failure is raised after the barrier is clear. `RunJournal.flush()` clears its `_pending_progress_task` after awaiting or cancelling it; ordinary `close()` detaches the event store/progress reporter and clears callback bookkeeping only after that flush succeeds, preserving the buffer for retry on a transient store failure. A fenced worker instead calls `close(flush=False)`, which cancels pending journal work and detaches without initiating another event-store write after lease ownership is lost; its final detach runs even if a second cancellation interrupts pending-task shutdown. `RunManager.cleanup(run_id)` retains the process-local `RunRecord`, completed task, and request payload for its default 300-second local join/status window before releasing them. Durable history remains in `RunStore`; `StreamBridge` data keeps its separate 60-second late-subscriber window, and both cleanup coroutines run in a fresh empty `contextvars.Context`. A contextless full cyclic-GC pass, coalesced to at most once every 10 seconds and dispatched through the default executor, bounds the lifetime of unreachable LangGraph callback/loop cycles without synchronously walking the heap in the event-loop timer; passes taking at least 100 ms are logged at INFO because CPython GC may still impose interpreter-level pauses.
+**Terminal run eviction (`RunManager.schedule_terminal_eviction`, #5009).**
+`run_agent` schedules one delayed eviction after finalization, including when
+publishing the stream END marker fails. Memory-only managers retain terminal
+records so history is not lost. Store-backed managers keep one strongly
+referenced task per run; after the grace period it reads the stored row first,
+skips redundant writes when the matching terminal completion snapshot is already
+durable, and repairs through a single owner-fenced completion CAS. For active
+rows, built-in stores also require no cancellation action to have won. If a
+cancellation action is already durable but its terminal status write failed, a
+separate CAS requires the same owner, exact action, and matching outcome
+(`interrupt` -> `interrupted`; `rollback` -> `error`) before writing the full
+snapshot. The rollback CAS may advance the durable, owner-matched
+`interrupted` intermediate to `error` if that second status write was lost. If
+the durable cancellation request itself failed, the same transition is allowed
+only through the owner-fenced, cancellation-empty path plus the local rollback
+proof. Generic status/completion APIs treat `interrupted` as terminal and can
+never advance it; only these fenced rollback paths may perform
+`interrupted` -> `error`. Cancellation responses are treated as potentially ambiguous commits:
+the manager re-reads and adopts the first durable action, and if neither the
+write nor that authority read can be confirmed it defers local cancellation
+instead of guessing (especially never executing a destructive rollback). The
+heartbeat applies any action that did commit. If it arrives after a terminal
+result was staged, `run_agent` observes it inside the finalization path without
+injecting `CancelledError` into `finally`, then runs the cancellation/rollback
+before the terminal CAS. If the worker has already returned, the supervisor
+fences that stale local result and stops renewing so recovery cannot be pinned
+forever.
+Running rollback keeps the durable row active until checkpoint restoration is
+finished; no-event-store and edit-replay paths stage their terminal result in
+memory and terminalize only through the final convergence gate. This preserves
+the cross-worker admission fence so a peer cannot write a new checkpoint
+lineage that the old worker then rewinds. In heartbeat mode every rollback
+checkpoint mutation additionally runs inside
+`RunStore.checkpoint_mutation_fence()`: built-in stores serialize that scope
+with lease takeover and interrupt/rollback admission, and renew the active
+owner's lease before releasing it. The SQL store holds a `FOR UPDATE` lock on
+the active run row across the checkpoint await, so a contender cannot
+terminalize the row until the rollback has committed or unwound; after the
+lock releases, its lease predicate is re-evaluated against the renewed
+deadline. A heartbeat renewal selected before fence entry may block behind
+that row lock past its old deadline; its timeout or rejection is ignored while
+the fence is active or after fence release advances the locally confirmed
+deadline. A process-local authority check is only defense in depth and must
+never replace this durable fence. Third-party stores without the optional
+capability fail closed and skip rollback when heartbeat ownership is enabled.
+Losing ownership revokes checkpoint rollback authority as well as RunStore
+write authority. Shutdown establishes
+the durable first-writer cancel action before signalling a live worker, never
+injects a second cancellation into cleanup, and lets pending rollback pass the
+normal startup barrier without deleting pre-existing thread state.
+
+A completion CAS surfaces a
+durable cancellation only while the expected worker still owns a live active
+row or an owner/action-consistent terminal row; takeover rows may retain the
+historical action but must never make the stale worker execute it. A row
+already at the same terminal status may be completed only when its owner and
+durable error/stop identity still match; lease takeover clears the old owner so
+the stale worker cannot enter that path. Third-party stores without the optional
+capability retain general legacy repair only in single-worker mode. With
+heartbeat ownership, missing/active rows fail closed and release renewal for
+peer recovery; an already-terminal same-status row may use the legacy snapshot
+write only after its owner, cancel, error, and stop identity are verified,
+because terminal rows are ineligible for takeover. Operators sharing a store
+across workers should still implement the fenced capabilities. The completion snapshot includes
+`stop_reason`, so a successful
+completion write cannot hide a failed terminal-status write and allow eviction
+of the only copy of a cap/loop reason. Worker completion and eviction share the
+same convergence gate, so neither path can fall back to an ownerless write for
+an existing terminal row. A missing row is rebuilt with an atomic
+insert-if-absent full snapshot; a concurrent row always wins and is never
+overwritten. Existing terminal rows with a peer/conflicting identity are
+read-only and authoritative, so the stale local record can be evicted instead
+of retrying forever. In heartbeat mode, recognizing such a winning terminal row
+also fences local post-run metadata/title/lifecycle side effects through
+`ownership_lost`; this authority check uses owner/recovery metadata even when
+every completion field happens to match. An incomplete locally-owned
+same-status snapshot can still be finished without changing the chosen terminal
+outcome. Before title synchronization, thread-status updates, or
+`on_run_completed`, the worker always performs a read-only terminal-authority
+check, even when no run event store/journal exists or preflight ended before
+completion accounting began; uncertain or peer-owned rows suppress those
+post-run side effects. A transient gate read may reuse a same-status,
+process-local proof from a successful terminal write because terminal rows are
+ineligible for takeover; the proof is cleared on every local status change or
+ownership fence. Without that proof, read failure remains fail-closed so a peer
+outcome cannot leak through to local callbacks.
+Only a verified terminal row permits removal from `_runs` and `_runs_by_thread`.
+An active, incomplete, unreadable, or unsuccessfully repaired row retains the
+local record, emits a retry-attempt debug record, and retries with capped
+exponential backoff plus clipped jitter. The third consecutive failed
+convergence attempt is promoted to a one-time warning for that supervisor;
+later retries return to debug logging and remain unbounded for data safety. The
+`finalizing` barrier applies to every terminal status, including `timeout` and
+`interrupted`, while that record's worker task is still live. A stranded flag
+cannot block later same-thread runs after the worker has exited; admission
+treats the record as inactive and re-arms its persistence-gated eviction if the
+worker missed normal scheduling. The eviction checks likewise ignore the dead
+barrier, and the final prune rechecks both worker liveness and the captured
+local status after all store I/O. A late
+rollback fence failure is deferred until the worker clears
+`finalizing`, attempts to publish END, and schedules both terminal eviction and
+stream cleanup; lost durable authority still suppresses authority-gated durable
+finalization, metadata/title updates, and the completion callback. Shutdown
+fences new eviction schedules and boundedly cancels existing timers with a small
+dedicated budget before draining workers, then reissues cancellation for any
+task still unwinding while retaining its strong reference.
+While a terminal result lacks confirmed durable authority, that supervised
+eviction task continues to own lease renewal after the worker task returns; the
+five-minute retention delay therefore cannot let an active durable row expire
+and be rewritten as an orphan before its convergence retry. Renewal stops when
+the record is confirmed or evicted, the supervisor ends, ownership is fenced,
+or shutdown cancels it. Lease renewal writes are monotonic: a heartbeat chosen
+before a checkpoint mutation fence cannot overwrite the newer deadline written
+when that fence releases.
+
+Idempotent conflict hydration is always a one-shot, store-only response. It is
+never inserted into `RunManager`'s execution indexes, including when the
+durable row is active: this process has no worker, heartbeat, or eviction task
+for that peer-owned snapshot, and indexing it would both stale the local view
+and let cancellation present the peer's owner id to fenced store methods.
+Subsequent reads, cancellation, and orphan reconciliation therefore consult the
+durable store. Delayed stream-bridge cleanup tasks are strongly
+referenced by the worker module until completion, and their exceptions are
+explicitly observed and logged; never replace that supervisor with a bare
+`asyncio.create_task()`.
+**Terminal teardown explicitly breaks graph-scoped references while preserving grace periods.** Every `agent.astream()` iterator is closed in `_stream_once`, including abort/exception/early-break paths. A close failure after an abort is warning-only and cannot replace the user-requested `interrupted` outcome; normal-completion close failures still surface, and an in-flight stream exception remains authoritative over a secondary close failure. Journal construction and cancellable preflight work (including MCP task projection and the prior-finalization wait) live inside the worker's guarded body, so cancellation before agent startup still terminalizes the run and closes its stream. `run_agent()` wraps the complete terminal-finalization sequence in an outer teardown guard, so cancellation or failure from any terminal-stage await cannot skip `RunJournal.close()`, removal of the journal, `__pregel_runtime`, and internal runtime-context values from every runnable config, release of local graph/payload references, or scheduling of persistence-gated terminal eviction. That guard also schedules bridge cleanup and cyclic GC even when interruption happens before the terminal stream marker or terminal publication itself fails, so neither a cancelled observer nor a delivery-backend outage can strand process-local run state. A non-`Exception` `BaseException` caught while awaiting the completion hook or task-stop notification (including host-task cancellation) is deferred through the ordinary remaining finalization, with the first interruption preserved and every caught host-task `CancelledError` balanced by calling `Task.uncancel()` until the current task's cumulative cancellation count is clear. Task-stop fan-out runs in one child task and every host wait uses `shield`, so repeated cancellation of the worker cannot cancel that fan-out or skip later observers; the worker keeps awaiting the same child task. A rogue observer that raises its own `CancelledError` remains contained by the extension dispatcher and distinguishable from host cancellation. This guarantee applies only to cancellation caught during those hook stages: clearing the finalizing barrier and publishing END remain direct awaits, so another cancellation in the subsequent critical tail retains forceful-termination semantics instead of creating an unbounded shield. If that tail completes without another interruption, the first deferred interruption is re-raised after END; a barrier-clear failure prevents END publication, while an END failure is raised after the barrier is clear. `RunJournal.flush()` clears its `_pending_progress_task` after awaiting or cancelling it; ordinary `close()` detaches the event store/progress reporter and clears callback bookkeeping only after that flush succeeds, preserving the buffer for retry on a transient store failure. A fenced worker instead calls `close(flush=False)`, which cancels pending journal work and detaches without initiating another event-store write after lease ownership is lost; its final detach runs even if a second cancellation interrupts pending-task shutdown. `RunManager.schedule_terminal_eviction(run_id)` preserves the default 300-second process-local join/status window and releases the `RunRecord`, completed task, and request payload only after terminal durability is confirmed. Durable history remains in `RunStore`; `StreamBridge` data keeps its separate 60-second late-subscriber window, and bridge cleanup runs in a fresh empty `contextvars.Context`. A contextless full cyclic-GC pass, coalesced to at most once every 10 seconds and dispatched through the default executor, bounds the lifetime of unreachable LangGraph callback/loop cycles without synchronously walking the heap in the event-loop timer; passes taking at least 100 ms are logged at INFO because CPython GC may still impose interpreter-level pauses.
+
+The terminal eviction supervisor is also created in a fresh empty
+`contextvars.Context`, so its five-minute durability grace period cannot retain
+request-scoped values.
 
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types

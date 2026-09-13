@@ -342,7 +342,7 @@ class _IntegrationRunManager:
     async def set_finalizing(self, *_args, **_kwargs):
         return None
 
-    async def cleanup(self, *_args, **_kwargs):
+    def schedule_terminal_eviction(self, _run_id, **_kwargs):
         return None
 
 

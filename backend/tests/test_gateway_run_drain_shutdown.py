@@ -411,7 +411,11 @@ async def test_shutdown_surfaces_failed_interrupted_persist(caplog):
     from deerflow.runtime.runs.store.memory import MemoryRunStore
 
     class _FailingStore(MemoryRunStore):
-        async def update_status(self, *args, **kwargs):
+        async def finalize_completion_if_owned_and_not_cancelled(
+            self,
+            *args,
+            **kwargs,
+        ):
             raise RuntimeError("store unavailable")
 
     rm = RunManager(store=_FailingStore())
@@ -435,3 +439,35 @@ async def test_shutdown_surfaces_failed_interrupted_persist(caplog):
             record.task.cancel()
             with suppress(asyncio.CancelledError):
                 await record.task
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_live_terminal_finalizer_without_cancelling_it():
+    """A staged terminal worker may still be using checkpointer/store resources."""
+    rm = RunManager()
+    record = await rm.create("t-terminal-finalizer")
+    record.status = RunStatus.success
+    started = asyncio.Event()
+    release = asyncio.Event()
+    was_cancelled = False
+
+    async def terminal_finalizer() -> None:
+        nonlocal was_cancelled
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            was_cancelled = True
+            raise
+
+    record.task = asyncio.create_task(terminal_finalizer())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    shutdown = asyncio.create_task(rm.shutdown(timeout=5))
+    await asyncio.sleep(0)
+    assert shutdown.done() is False
+
+    release.set()
+    await asyncio.wait_for(shutdown, timeout=1)
+    assert was_cancelled is False
+    assert record.task.done()
+    assert record.status == RunStatus.success

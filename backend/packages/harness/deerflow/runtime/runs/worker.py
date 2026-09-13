@@ -238,6 +238,30 @@ def _checkpoint_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
 
+# The event loop keeps only weak references to tasks. Retain delayed
+# post-terminal work until completion so a GC pass cannot destroy a sleeping
+# stream-cleanup task before it releases bridge state (#4930 / #5011).
+_BACKGROUND_TERMINAL_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _background_terminal_task_done(task: asyncio.Task[Any]) -> None:
+    """Release a supervised terminal task and observe any failure."""
+    _BACKGROUND_TERMINAL_TASKS.discard(task)
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception as exc:
+        logger.warning("Background terminal task %s failed: %s", task.get_name(), exc, exc_info=True)
+
+
+def _spawn_background_terminal_task(coro: Coroutine[Any, Any, Any], *, name: str | None = None) -> asyncio.Task[Any]:
+    """Schedule contextless post-terminal work with a strong reference until it settles."""
+    task = asyncio.create_task(coro, name=name, context=Context())
+    _BACKGROUND_TERMINAL_TASKS.add(task)
+    task.add_done_callback(_background_terminal_task_done)
+    return task
+
 
 def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build the bounded model-state projection without trusting display names."""
@@ -781,7 +805,11 @@ async def run_agent(
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
-    terminal_status_kwargs = {"persist": False} if event_store is not None else {}
+    # Journal-backed completion and edit-replay rollback both perform work
+    # after the agent outcome is known. Keep the durable row active until
+    # that work finishes so another worker cannot admit checkpoint writes
+    # that this finalizer subsequently rewinds.
+    terminal_status_kwargs = {"persist": False} if event_store is not None or _is_edit_replay_run(record) else {}
 
     run_id = record.run_id
     thread_id = record.thread_id
@@ -799,6 +827,7 @@ async def run_agent(
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
     task_store: ExtensionData | None = None
     task_info: TaskInfo | None = None
+    deferred_terminalization_error: Exception | None = None
     deferred_finalization_interrupt: BaseException | None = None
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
@@ -807,6 +836,7 @@ async def run_agent(
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
+    finalized_cancel_action: str | None = None
     # Message ids checkpointed *before* this run started. The stream loop uses
     # this set to mask out ``deerflow_error_fallback`` markers that belong to
     # earlier runs on the same thread — without it, one stale fallback in
@@ -844,37 +874,56 @@ async def run_agent(
         *,
         restore_checkpoint: bool = True,
     ) -> None:
-        nonlocal checkpoint_rollback_completed
+        nonlocal checkpoint_rollback_completed, finalized_cancel_action
+        if finalized_cancel_action == action:
+            return
         await run_manager.set_finalizing(run_id, True)
         if action == "rollback":
-            await run_manager.set_status(
-                run_id,
-                RunStatus.error,
-                error="Rolled back by user",
-                **terminal_status_kwargs,
-            )
             if not restore_checkpoint:
+                if not record.ownership_lost:
+                    await run_manager.set_status(
+                        run_id,
+                        RunStatus.error,
+                        error="Rolled back by user",
+                        persist=False,
+                    )
+                finalized_cancel_action = action
                 return
-            try:
-                checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
-                    accessor=accessor,
-                    checkpointer=checkpointer,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    rollback_point=rollback_point,
-                    snapshot_capture_failed=snapshot_capture_failed,
-                )
-                logger.info(
-                    "Run %s rolled back to pre-run checkpoint %s",
+            async with run_manager.fence_checkpoint_mutation(run_id) as rollback_authorized:
+                if not rollback_authorized:
+                    logger.warning(
+                        "Run %s skipped rollback without durable checkpoint mutation authority",
+                        run_id,
+                    )
+                    finalized_cancel_action = action
+                    return
+                await run_manager.set_status(
                     run_id,
-                    pre_run_checkpoint_id,
+                    RunStatus.error,
+                    error="Rolled back by user",
+                    persist=False,
                 )
-            except Exception:
-                logger.warning(
-                    "Run %s cancellation rollback failed",
-                    run_id,
-                    exc_info=True,
-                )
+                try:
+                    checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
+                        accessor=accessor,
+                        checkpointer=checkpointer,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        rollback_point=rollback_point,
+                        snapshot_capture_failed=snapshot_capture_failed,
+                        authority_check=lambda: not record.ownership_lost,
+                    )
+                    logger.info(
+                        "Run %s rolled back to pre-run checkpoint %s",
+                        run_id,
+                        pre_run_checkpoint_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Run %s cancellation rollback failed",
+                        run_id,
+                        exc_info=True,
+                    )
         else:
             await run_manager.set_status(
                 run_id,
@@ -882,6 +931,7 @@ async def run_agent(
                 **terminal_status_kwargs,
             )
             logger.info("Run %s was cancelled", run_id)
+        finalized_cancel_action = action
 
     try:
         normalized_stream_modes = normalize_stream_modes(stream_modes)
@@ -1404,14 +1454,22 @@ async def run_agent(
                     await run_manager.set_finalizing(run_id, True)
                 try:
                     if not checkpoint_rollback_completed:
-                        checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
-                            accessor=accessor,
-                            checkpointer=checkpointer,
-                            thread_id=thread_id,
-                            run_id=run_id,
-                            rollback_point=rollback_point,
-                            snapshot_capture_failed=snapshot_capture_failed,
-                        )
+                        async with run_manager.fence_checkpoint_mutation(run_id) as rollback_authorized:
+                            if rollback_authorized:
+                                checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
+                                    accessor=accessor,
+                                    checkpointer=checkpointer,
+                                    thread_id=thread_id,
+                                    run_id=run_id,
+                                    rollback_point=rollback_point,
+                                    snapshot_capture_failed=snapshot_capture_failed,
+                                    authority_check=lambda: not record.ownership_lost,
+                                )
+                            else:
+                                logger.warning(
+                                    "Run %s skipped edit replay rollback without durable checkpoint mutation authority",
+                                    run_id,
+                                )
                     if checkpoint_rollback_completed:
                         await _publish_restored_checkpoint_values(
                             bridge=bridge,
@@ -1506,6 +1564,32 @@ async def run_agent(
                 except Exception:
                     logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
+            # A durable cancel can win after the Agent stream staged success/error
+            # but while journal/receipt/duration finalization is still running.
+            # Do not cancel this task in that phase: a CancelledError injected into
+            # ``finally`` would strand the finalizing barrier and skip END/eviction.
+            # Convert the late action here; the owner-fenced terminal CAS below is
+            # the second line of defence if the request lands after this check.
+            if not record.ownership_lost and record.abort_event.is_set():
+                expected_cancel_status = {
+                    "interrupt": RunStatus.interrupted,
+                    "rollback": RunStatus.error,
+                }.get(record.abort_action)
+                if expected_cancel_status is not None and finalized_cancel_action != record.abort_action:
+                    try:
+                        await _finish_cancellation(record.abort_action)
+                    except Exception as exc:
+                        # A late rollback can lose its durable checkpoint fence.
+                        # Keep unwinding so finalizing, END, eviction, and stream
+                        # cleanup cannot be stranded. Absent a later cleanup
+                        # failure, re-raise this error after cleanup.
+                        deferred_terminalization_error = exc
+                        logger.warning(
+                            "Failed to finish late cancellation for run %s; completing terminal cleanup",
+                            run_id,
+                            exc_info=True,
+                        )
+
             if not record.ownership_lost and event_store is not None:
                 try:
                     # Even after bounded receipt retries are exhausted, persist the
@@ -1535,7 +1619,23 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
-            if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+            post_run_side_effects_allowed = False
+            if not record.ownership_lost:
+                try:
+                    # Completion persistence is journal-dependent, but authority
+                    # verification is not. Without this unconditional gate, a
+                    # no-event-store or preflight-failure run could execute title,
+                    # thread metadata, and lifecycle hooks before delayed eviction
+                    # notices that a peer owns the terminal row.
+                    post_run_side_effects_allowed = await run_manager.verify_terminal_authority(run_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to verify terminal authority for run %s; skipping local post-run side effects",
+                        run_id,
+                        exc_info=True,
+                    )
+
+            if started and post_run_side_effects_allowed and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
                 try:
                     await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                     if not await run_manager.has_later_started_run(thread_id, run_id):
@@ -1544,7 +1644,7 @@ async def run_agent(
                     logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
             # Sync title from checkpoint to threads_meta.display_name
-            if started and not record.ownership_lost and checkpointer is not None and thread_store is not None:
+            if started and post_run_side_effects_allowed and not record.ownership_lost and checkpointer is not None and thread_store is not None:
                 try:
                     ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
                     ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
@@ -1557,14 +1657,14 @@ async def run_agent(
                     logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
 
             # Update threads_meta status based on run outcome
-            if started and not record.ownership_lost and thread_store is not None:
+            if started and post_run_side_effects_allowed and not record.ownership_lost and thread_store is not None:
                 try:
                     final_status = "idle" if record.status == RunStatus.success else record.status.value
                     await thread_store.update_status(thread_id, final_status)
                 except Exception:
                     logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
-            if not record.ownership_lost and ctx.on_run_completed is not None:
+            if post_run_side_effects_allowed and not record.ownership_lost and ctx.on_run_completed is not None:
                 try:
                     await ctx.on_run_completed(record)
                 except Exception:
@@ -1626,6 +1726,8 @@ async def run_agent(
 
             if deferred_finalization_interrupt is not None:
                 raise deferred_finalization_interrupt
+            if deferred_terminalization_error is not None:
+                raise deferred_terminalization_error
         finally:
             try:
                 if journal is not None:
@@ -1674,12 +1776,14 @@ async def run_agent(
 
                 # Durable finalization and terminal publication may depend on
                 # external backends, but local housekeeping must always run.
-                _create_contextless_task(bridge.cleanup(run_id, delay=60))
-                # Preserve the existing five-minute grace period for local
-                # join/status paths, then release the terminal record, completed
-                # task, and request payload. Durable run history remains available
-                # through RunStore.
-                _create_contextless_task(run_manager.cleanup(run_id))
+                _spawn_background_terminal_task(
+                    bridge.cleanup(run_id, delay=60),
+                    name=f"run-stream-cleanup-{run_id}",
+                )
+                # Preserve the five-minute local join/status grace period, but
+                # release the record only after its terminal snapshot is durable.
+                # Scheduling is independent of stream publication availability.
+                run_manager.schedule_terminal_eviction(run_id)
                 _schedule_terminal_cycle_collection()
 
                 if lease_cleanup_interrupt is not None:
@@ -2236,6 +2340,7 @@ async def _rollback_to_pre_run_checkpoint(
     run_id: str,
     rollback_point: RollbackPoint | None,
     snapshot_capture_failed: bool,
+    authority_check: Callable[[], bool] | None = None,
 ) -> bool:
     """Restore the complete pre-run state and report whether it completed.
 
@@ -2246,6 +2351,17 @@ async def _rollback_to_pre_run_checkpoint(
     use a state-only mutation graph whose synthetic ``rollback_restore`` node
     finishes immediately and schedules no agent work.
     """
+
+    def still_authorized() -> bool:
+        return authority_check is None or authority_check()
+
+    if not still_authorized():
+        logger.warning(
+            "Run %s rollback skipped after execution authority was lost",
+            run_id,
+        )
+        return False
+
     if checkpointer is None:
         logger.info("Run %s rollback requested but no checkpointer is configured", run_id)
         return False
@@ -2255,6 +2371,12 @@ async def _rollback_to_pre_run_checkpoint(
         return False
 
     if rollback_point is None:
+        if not still_authorized():
+            logger.warning(
+                "Run %s rollback reset skipped after execution authority was lost",
+                run_id,
+            )
+            return False
         await _call_checkpointer_method(checkpointer, "adelete_thread", "delete_thread", thread_id)
         logger.info("Run %s rollback reset thread %s to empty state", run_id, thread_id)
         return True
@@ -2296,6 +2418,12 @@ async def _rollback_to_pre_run_checkpoint(
         restore_config = rollback_point.config
         replacement_values = {"messages": Overwrite(list(rollback_point.messages))}
 
+    if not still_authorized():
+        logger.warning(
+            "Run %s rollback restore skipped after execution authority was lost",
+            run_id,
+        )
+        return False
     restored_config = await mutation_accessor.aupdate(
         restore_config,
         replacement_values,
@@ -2324,6 +2452,12 @@ async def _rollback_to_pre_run_checkpoint(
         writes_by_task.setdefault(str(task_id), []).append((channel, value))
 
     for task_id, writes in writes_by_task.items():
+        if not still_authorized():
+            logger.warning(
+                "Run %s rollback pending-write restore stopped after execution authority was lost",
+                run_id,
+            )
+            return False
         await _call_checkpointer_method(
             checkpointer,
             "aput_writes",
