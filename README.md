@@ -1046,7 +1046,9 @@ is refreshed or another conversation is opened; each sent human message keeps
 an immutable scope snapshot for replay and history. The Gateway validates
 every snapshot, intersects it with the operator's dataset allowlist, propagates
 the execution-only scope to native and durable subagents, and removes it from
-model inputs and external traces.
+model inputs and external traces. Client-supplied internal runtime controls
+and credentials are also stripped from run context before execution or
+checkpoint persistence.
 The `knowledge_base` block is provider-neutral and only controls whether the
 knowledge capability and selector are enabled. RAGFlow connection, dataset
 allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,

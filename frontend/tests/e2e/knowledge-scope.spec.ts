@@ -56,7 +56,8 @@ test.describe("custom-agent knowledge scope", () => {
     const trigger = page.getByTestId("knowledge-scope-trigger");
     await expect(trigger).toHaveText("");
     await expect(trigger).toHaveAttribute("aria-pressed", "true");
-    await expect(trigger).toHaveClass(/bg-primary\/10/);
+    await expect(trigger).toHaveClass(/text-foreground/);
+    await expect(trigger).not.toHaveClass(/bg-primary\/10/);
 
     await trigger.click();
     await page.getByLabel("Off").check();
@@ -74,7 +75,8 @@ test.describe("custom-agent knowledge scope", () => {
     await expect(page.getByLabel("Parsing.pdf")).toBeDisabled();
     await page.getByRole("button", { name: "Apply" }).click();
     await expect(trigger).toHaveAttribute("aria-pressed", "true");
-    await expect(trigger).toHaveClass(/bg-primary\/10/);
+    await expect(trigger).toHaveClass(/text-foreground/);
+    await expect(trigger).not.toHaveClass(/bg-primary\/10/);
 
     await page
       .getByPlaceholder(/how can i assist you/i)

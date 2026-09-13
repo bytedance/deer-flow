@@ -398,8 +398,11 @@ scope selection; dataset and document management remains in RAGFlow. Keep API
 keys out of model schemas, logs, tool errors, and HTTP errors. Gateway admits
 main/custom-chat scope and harness enforces it. Revalidate selected
 dataset/document membership against live RAGFlow with at most four concurrent
-requests per stage before retrieval; see the subsystem guides for the remaining
-boundaries.
+requests per stage before retrieval. Run-context scrubbing must remove both
+server-owned scope metadata and every internal-only runtime key (including
+`github_token`, `disable_clarification`, and `non_interactive`) from untrusted
+`context` and `configurable` sections; see the subsystem guides for the
+remaining boundaries.
 
 ## Code Style
 

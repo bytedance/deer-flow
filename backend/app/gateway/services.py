@@ -520,7 +520,7 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
     for section in ("context", "configurable"):
         value = config.get(section)
         if isinstance(value, dict):
-            for key in _CONTEXT_INTERNAL_CALLER_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
+            for key in _INTERNAL_ONLY_CONTEXT_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
                 value.pop(key, None)
 
 
