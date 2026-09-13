@@ -11,7 +11,6 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
 
-
 _PATH = "/mnt/user-data/outputs/report.md"
 
 
