@@ -12,7 +12,13 @@ from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage
 
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text, message_to_text, restore_original_human_message
+from deerflow.utils.messages import (
+    ORIGINAL_USER_CONTENT_KEY,
+    is_real_user_message,
+    message_content_to_text,
+    message_to_text,
+    restore_original_human_message,
+)
 
 # ---------- message_to_text: content shapes ----------
 
@@ -131,3 +137,70 @@ def test_restore_original_human_message_without_original_metadata_is_unchanged()
     message = HumanMessage(content="already UI-facing", additional_kwargs={"source": "user"})
 
     assert restore_original_human_message(message) is message
+
+
+# ---------- is_real_user_message ----------
+
+
+def _human_input_response(*, response_kind: str = "text", value: str = "staging") -> dict[str, object]:
+    response: dict[str, object] = {
+        "version": 1,
+        "kind": "human_input_response",
+        "source": "ask_clarification",
+        "request_id": "clarification:call-abc",
+        "response_kind": response_kind,
+        "value": value,
+    }
+    if response_kind == "option":
+        response["option_id"] = "yes"
+    return response
+
+
+def test_is_real_user_message_accepts_visible_human_message():
+    assert is_real_user_message(HumanMessage(content="hello")) is True
+
+
+def test_is_real_user_message_rejects_hidden_framework_message():
+    message = HumanMessage(content="internal", additional_kwargs={"hide_from_ui": True})
+
+    assert is_real_user_message(message) is False
+
+
+def test_is_real_user_message_accepts_hidden_text_input_response():
+    message = HumanMessage(
+        content="staging",
+        additional_kwargs={"hide_from_ui": True, "human_input_response": _human_input_response()},
+    )
+
+    assert is_real_user_message(message) is True
+
+
+def test_is_real_user_message_accepts_hidden_option_input_response():
+    message = HumanMessage(
+        content="yes",
+        additional_kwargs={"hide_from_ui": True, "human_input_response": _human_input_response(response_kind="option")},
+    )
+
+    assert is_real_user_message(message) is True
+
+
+def test_is_real_user_message_rejects_malformed_hidden_input_response():
+    message = HumanMessage(
+        content="staging",
+        additional_kwargs={
+            "hide_from_ui": True,
+            "human_input_response": {"version": 1, "kind": "human_input_response"},
+        },
+    )
+
+    assert is_real_user_message(message) is False
+
+
+def test_is_real_user_message_rejects_summary_even_with_input_response():
+    message = HumanMessage(
+        content="summary answer",
+        name="summary",
+        additional_kwargs={"hide_from_ui": True, "human_input_response": _human_input_response()},
+    )
+
+    assert is_real_user_message(message) is False

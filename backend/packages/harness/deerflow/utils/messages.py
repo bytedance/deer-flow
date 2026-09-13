@@ -6,6 +6,8 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from deerflow.agents.human_input import read_human_input_response
+
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 SUMMARY_MESSAGE_NAME = "summary"
 
@@ -167,6 +169,6 @@ def is_real_user_message(message: object) -> bool:
         return False
     if message.name == SUMMARY_MESSAGE_NAME:
         return False
-    if message.additional_kwargs.get("hide_from_ui"):
+    if message.additional_kwargs.get("hide_from_ui") and read_human_input_response(message.additional_kwargs) is None:
         return False
     return True
