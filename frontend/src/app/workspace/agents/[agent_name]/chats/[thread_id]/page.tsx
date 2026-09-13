@@ -170,6 +170,7 @@ export default function AgentChatPage() {
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
+    assistantId: agent_name,
     context: { ...settings.context, agent_name: agent_name },
     isMock,
     onSend: () => {

@@ -83,6 +83,7 @@ test.describe("custom-agent knowledge scope", () => {
     await expect.poll(() => streamBody).toBeDefined();
 
     expect(streamBody).toMatchObject({
+      assistant_id: "researcher",
       input: {
         messages: [
           {
