@@ -7,6 +7,8 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
+import subprocess
 import threading
 import time
 from collections import OrderedDict
@@ -3586,11 +3588,16 @@ def test_sync_outputs_to_host_skips_oversize_files(monkeypatch, tmp_path):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _search_stdout(raw: str, *, status: int = 0) -> str:
+    """Stdout of ``remote_search_command``: the results, then the search's status marker."""
+    return f"{raw}\n__DF_SEARCH_STATUS__:{status}\n"
+
+
 def test_grep_scoped_glob_excludes_unrelated_directory_matches():
     """Regression: grep(glob="src/*.js") must not leak matches from sibling
     directories that merely share the file extension."""
     raw_stdout = "/home/user/workspace/other_dir/unrelated.js:1:console.log('needle in other_dir');\n/home/user/workspace/src/app.js:1:console.log('needle in src');\n"
-    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=raw_stdout, stderr="", exit_code=0)]))
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
     matches, truncated = sb.grep("/mnt/user-data/workspace", "needle", glob="src/*.js")
@@ -3606,7 +3613,7 @@ def test_grep_plain_glob_matches_files_in_any_directory():
     keep matching files at any depth, same as before the directory-scoping
     fix."""
     raw_stdout = "/home/user/workspace/other_dir/deep/mod.py:1:needle in a deeply nested file\n/home/user/workspace/src/app.py:1:needle in a python file too\n"
-    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=raw_stdout, stderr="", exit_code=0)]))
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
     matches, truncated = sb.grep("/mnt/user-data/workspace", "needle", glob="*.py")
@@ -3624,7 +3631,7 @@ def test_grep_scoped_glob_still_passes_coarse_include_flag():
     optimization (it narrows what grep has to search) even though it can't
     express directory scoping by itself -- the real scoping enforcement
     happens in the post-filter, not by dropping ``--include``."""
-    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="", exit_code=0)]))
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout("", status=1), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
     sb.grep("/mnt/user-data/workspace", "needle", glob="src/*.js")
@@ -3636,7 +3643,7 @@ def test_grep_without_glob_is_unaffected():
     """No regression: omitting ``glob`` entirely must return every match
     with no path-based post-filtering."""
     raw_stdout = "/home/user/workspace/anywhere/file.txt:3:needle here\n"
-    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=raw_stdout, stderr="", exit_code=0)]))
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
     matches, truncated = sb.grep("/mnt/user-data/workspace", "needle")
@@ -3648,7 +3655,7 @@ def test_grep_without_glob_is_unaffected():
 def test_grep_single_file_path_with_matching_glob():
     """A basename glob must also apply when the search root is one file."""
     raw_stdout = "/home/user/uploads/report.md:2:needle here\n"
-    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=raw_stdout, stderr="", exit_code=0)]))
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
     matches, truncated = sb.grep("/mnt/user-data/uploads/report.md", "needle", glob="*.md")
@@ -5253,7 +5260,7 @@ def test_list_dir_uses_find_H_to_dereference_start_point():
 
 
 def test_glob_preserves_trailing_space_in_filename():
-    listing = SimpleNamespace(stdout="/home/user/notes.txt \n", stderr="", exit_code=0)
+    listing = SimpleNamespace(stdout=_search_stdout("/home/user/notes.txt \n"), stderr="", exit_code=0)
     client = FakeClient(commands=FakeCommandsAPI([listing]))
     sb = _make_sandbox(client)
 
@@ -5330,3 +5337,80 @@ def test_append_decodes_bytes_preimage():
     sb.write_file("/mnt/user-data/outputs/report.txt", " world", append=True)
 
     assert files.write_calls == [("/home/user/outputs/report.txt", "hello world")]
+
+
+# ── Remote grep/glob failure contract against a real POSIX sh (#5376) ─────────
+
+_RS_POSIX = pytest.mark.skipif(
+    os.name == "nt" or any(shutil.which(tool) is None for tool in ("sh", "head", "grep", "find")),
+    reason="POSIX sh, head, grep and find required",
+)
+
+
+def _rs_env(tmp_path, failing: str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    if failing is not None:
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir()
+        fake = bin_dir / failing
+        fake.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+class _RsShellCommands:
+    """``client.commands`` that runs each command string in a real local ``sh``."""
+
+    def __init__(self, env: dict[str, str]) -> None:
+        self.calls: list[str] = []
+        self._env = env
+
+    def run(self, cmd: str, envs: dict[str, str] | None = None, **kwargs) -> SimpleNamespace:
+        self.calls.append(cmd)
+        # ``sh -c`` (not ``-lc``) keeps a login profile from overriding the fake PATH.
+        proc = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True, env=self._env, check=False)
+        return SimpleNamespace(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
+
+
+def _rs_sandbox(tmp_path, failing: str | None = None):
+    return _make_sandbox(FakeClient(commands=_RsShellCommands(_rs_env(tmp_path, failing))))
+
+
+def _rs_search(sb, op: str, root: str):
+    return sb.grep(root, "needle") if op == "grep" else sb.glob(root, "**/*.py")
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("op", ["grep", "glob"])
+def test_remote_search_missing_root_raises_file_not_found(tmp_path, op):
+    with pytest.raises(FileNotFoundError):
+        _rs_search(_rs_sandbox(tmp_path), op, str(tmp_path / "missing"))
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "binary"), [("grep", "grep"), ("glob", "find")])
+def test_remote_search_missing_binary_raises_instead_of_no_matches(tmp_path, op, binary):
+    with pytest.raises(OSError, match="exited with code 127"):
+        _rs_search(_rs_sandbox(tmp_path, failing=binary), op, str(tmp_path))
+
+
+@_RS_POSIX
+def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("def needle():\n", encoding="utf-8")
+    sb = _rs_sandbox(tmp_path)
+
+    matches, _ = sb.grep(str(tmp_path), "needle")
+    assert [(os.path.basename(m.path), m.line_number) for m in matches] == [("app.py", 1)]
+    assert sb.grep(str(tmp_path), "zzz_nothing") == ([], False)
+    found, _ = sb.glob(str(tmp_path), "**/*.py")
+    assert [os.path.basename(path) for path in found] == ["app.py"]
+    assert sb.glob(str(tmp_path), "*.md") == ([], False)
+
+
+@pytest.mark.parametrize("op", ["grep", "glob"])
+def test_remote_search_raises_when_the_client_call_fails(op):
+    sb = _make_sandbox(FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE])))
+    with pytest.raises(OSError):
+        _rs_search(sb, op, "/mnt/user-data/workspace")

@@ -278,6 +278,37 @@ def test_app_config_loads_extension_middlewares_from_extensions_config(tmp_path,
     assert config.extensions.middlewares == ["pkg.from_file:FileMiddleware"]
 
 
+def test_app_config_loads_middleware_kwargs_from_config_yaml(tmp_path, monkeypatch):
+    from deerflow.config.extensions_config import ConfiguredMiddlewareSpec
+
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg.from_file:FileMiddleware"]}),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(
+        config_path,
+        {
+            "extensions": {
+                "middlewares": [
+                    "pkg.from_yaml:PlainMiddleware",
+                    {"class": "pkg.from_yaml:KwargsMiddleware", "kwargs": {"max_tool_calls": 4}},
+                ],
+            }
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.extensions.middlewares[0] == "pkg.from_yaml:PlainMiddleware"
+    spec = config.extensions.middlewares[1]
+    assert isinstance(spec, ConfiguredMiddlewareSpec)
+    assert spec.class_path == "pkg.from_yaml:KwargsMiddleware"
+    assert spec.kwargs == {"max_tool_calls": 4}
+
+
 def test_app_config_defaults_empty_database_to_sqlite(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"
