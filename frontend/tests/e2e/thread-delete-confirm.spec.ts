@@ -66,7 +66,7 @@ test("confirmation waits for deletion, prevents dismissal, and permits retry aft
     await route.fulfill({
       status: 403,
       contentType: "application/json",
-      body: JSON.stringify({ detail: "Unavailable" }),
+      body: JSON.stringify({ detail: "Permission denied" }),
     });
   });
   await page.goto(`/workspace/chats/${CHAT}`);
@@ -92,12 +92,21 @@ test("confirmation waits for deletion, prevents dismissal, and permits retry aft
   await expect(dialog).toBeVisible();
   expect(attempts).toBe(1);
   releaseDelete();
-  await expect(
-    page.getByText("Failed to delete chat. Please try again.", { exact: true }),
-  ).toBeVisible();
+  await expect.soft(page.getByText(/Permission denied/)).toBeVisible();
   await expect(dialog).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Cancel", exact: true }),
+  ).toBeFocused();
+  await page.screenshot({
+    path: testInfo.outputPath("delete-error.png"),
+    animations: "disabled",
+  });
   await expect(page).toHaveURL(new RegExp(CHAT));
-  await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+  await page.keyboard.press("Tab");
+  await expect(
+    dialog.getByRole("button", { name: "Delete", exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
   await expect(dialog).toBeHidden();
   await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
   await expect(
@@ -158,9 +167,7 @@ for (const active of [true, false]) {
     await expect(dialog).toBeVisible();
     releaseCleanup();
     await expect(
-      page.getByText("Failed to delete chat. Please try again.", {
-        exact: true,
-      }),
+      page.getByText("Cleanup failed", { exact: true }),
     ).toBeVisible();
     // onSettled refetches the list, which no longer contains this thread.
     await expect(
@@ -170,6 +177,9 @@ for (const active of [true, false]) {
     ).toHaveCount(0);
     await expect(dialog).toBeVisible();
     await expect(dialog).toContainText(TITLE);
+    await expect(
+      dialog.getByRole("button", { name: "Cancel", exact: true }),
+    ).toBeFocused();
     await dialog.getByRole("button", { name: "Delete", exact: true }).click();
     await expect(dialog).toBeHidden();
     await expect.poll(() => cleanupAttempts).toBe(2);

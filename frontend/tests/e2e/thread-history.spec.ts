@@ -735,7 +735,7 @@ test.describe("Thread history", () => {
     // Remote deletion succeeded, but local cleanup failed. Keep the dialog
     // and streamed content until the user retries the remaining cleanup.
     await expect(
-      page.getByText("Failed to delete chat. Please try again.", {
+      page.getByText("Local cleanup failed", {
         exact: true,
       }),
     ).toBeVisible();

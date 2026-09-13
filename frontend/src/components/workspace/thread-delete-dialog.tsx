@@ -5,6 +5,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useRef,
   useState,
   type ReactNode,
@@ -50,13 +51,21 @@ export function ThreadDeleteDialogProvider({
   const pathname = usePathname();
   const { thread_id: threadIdFromPath, agent_name: agentNameFromPath } =
     useParams<{ thread_id: string; agent_name?: string }>();
-  const { mutateAsync: deleteThread, isPending: isDeleting } =
-    useDeleteThread();
+  const {
+    mutateAsync: deleteThread,
+    isPending: isDeleting,
+    isError: deleteFailed,
+  } = useDeleteThread();
   // A partial deletion can remove the row on a list refresh. Keep its snapshot
   // and the retry dialog in this stable host, outside the virtualized lists.
   const [target, setTarget] = useState<DeleteTarget | null>(null);
   const deleteInFlight = useRef(false);
   const deleteCancelRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    // Wait for React to re-enable the button before restoring focus.
+    if (target && deleteFailed && !isDeleting) deleteCancelRef.current?.focus();
+  }, [target, deleteFailed, isDeleting]);
 
   const handleDelete = useCallback(async () => {
     if (!target || deleteInFlight.current) return;
@@ -89,8 +98,13 @@ export function ThreadDeleteDialogProvider({
           : undefined,
       });
       setTarget(null);
-    } catch {
-      toast.error(t.chats.deleteFailed);
+    } catch (error) {
+      console.error("Failed to delete chat:", error);
+      toast.error(
+        error instanceof Error && error.message
+          ? error.message
+          : t.chats.deleteFailed,
+      );
     } finally {
       deleteInFlight.current = false;
     }
