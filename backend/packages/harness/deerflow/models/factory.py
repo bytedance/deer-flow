@@ -258,7 +258,13 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
                 model_settings_from_config.get("extra_body"),
                 {"thinking": {"type": "disabled"}},
             )
-            model_settings_from_config["reasoning_effort"] = "minimal"
+            # Flash / no-thinking mode: pick the lowest reasoning effort that is
+            # portable across OpenAI-compatible providers. "minimal" is OpenAI-only
+            # (GPT-5 family) and is rejected by others — e.g. DeepSeek accepts only
+            # low/medium/high/max/xhigh, so "minimal" raised HTTP 400 in flash mode
+            # (issue #4514). "low" is the most restrained value in the common
+            # cross-provider set and matches the ReasoningEffort surface (low/medium/high).
+            model_settings_from_config["reasoning_effort"] = "low"
         elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
             model_settings_from_config["extra_body"] = _deep_merge_dicts(
