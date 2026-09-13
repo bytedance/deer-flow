@@ -125,6 +125,11 @@ the standalone server from `frontend/` with `node --env-file=.env
 
 To reach a dev server on anything other than localhost — a LAN address, or a proxied hostname — list the host in `DEER_FLOW_DEV_ALLOWED_ORIGINS` (comma-separated; a full URL is reduced to its host). It feeds Next's `allowedDevOrigins`, which gates `/_next/*`, fonts, and HMR. Without it those requests get a 403 and the page renders server-side but never hydrates, so nothing on it — including the login form — responds. Development only; production builds ignore it.
 
+One-time schedule input uses `validZonedLocalToUtcIso` to reject wall times that
+do not round-trip in the selected timezone. Invalid input emits an empty spec and
+localized inline feedback; both create and edit must block submission. Keep this
+UI validation separate from the API payload and preserve valid DST-fold inputs.
+
 ## Resources
 
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
