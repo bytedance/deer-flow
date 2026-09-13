@@ -164,6 +164,7 @@ fi
 
 PYTHONPATH=. exec uv run --no-sync uvicorn app.gateway.app:app \
     --host 0.0.0.0 --port 8001 \
+    --no-proxy-headers \
     --reload \
     --reload-include='*.yaml' \
     --reload-include='.env' \

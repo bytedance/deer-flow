@@ -65,7 +65,7 @@ def main() -> int:
         print("[replay-gw] test-only seed router mounted at /api/test-only/seed-runs", flush=True)
 
     print(f"[replay-gw] config={cfg} fixture={args.fixture} cors={args.cors} port={args.port}", flush=True)
-    uvicorn.run(target, host="127.0.0.1", port=args.port, log_level="warning")
+    uvicorn.run(target, host="127.0.0.1", port=args.port, log_level="warning", proxy_headers=False)
     return 0
 
 

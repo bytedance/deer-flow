@@ -83,7 +83,7 @@ spec:
           workingDir: /app
           command: ["sh", "-c"]
           args:
-            - cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1
+            - cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --no-proxy-headers
           env:
             - name: CI
               value: "true"
