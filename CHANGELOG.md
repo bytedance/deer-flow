@@ -1431,6 +1431,20 @@ This section accumulates work toward the **2.1.0** milestone
   and the conversation block in the memory-update prompt - and neutralize
   prompt-injection tags in `web_capture` tool results. ([#4028], [#4119], [#4137],
   [#4157], [#4162], [#4099], [#4060], [#4097], [#4128])
+- **prompt-injection:** Close two input-sanitization bypasses. `hide_from_ui` and
+  a human `name="summary"` tell `is_genuine_user_message` that the framework
+  authored a message, which skips sanitization entirely. Untrusted run input and
+  thread-state writes carrying either marker are now marked server-side and
+  sanitized regardless, so a caller can no longer land a raw `<system-reminder>`
+  outside the user-input boundary markers that the lead-agent prompt declares
+  trusted framework data. The markers themselves are preserved, so messages that
+  use `hide_from_ui` only to stay out of the transcript — quoted conversation
+  context, sidecar context, the agent save command, HumanInputCard replies — keep
+  doing that, and trusted internal launchers are unaffected. Sanitization also
+  covers every genuine user message instead of only the newest: the
+  transformation is request-scoped, so a last-turn-only scan neutralized a
+  payload for exactly one model call and then replayed it verbatim from the next
+  turn on. ([#5375])
 - **secrets:** Scrub inherited secret environment variables (`MYSQL_PWD`,
   `REDISCLI_AUTH`, abbreviated `*_PASS`, and Postgres `PGPASSFILE`) from the
   skill environment; request-scoped secrets are bound for both slash-activated
@@ -2747,3 +2761,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
 [#5353]: https://github.com/bytedance/deer-flow/pull/5353
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357
+[#5375]: https://github.com/bytedance/deer-flow/pull/5375
