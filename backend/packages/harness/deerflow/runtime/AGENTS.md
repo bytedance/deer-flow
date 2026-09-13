@@ -273,3 +273,10 @@ PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_production.py \
 PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py \
   /tmp/production-bench.jsonl
 ```
+# Referenced conversation capability
+
+`RunContext.conversation_reader` is a host-provided per-run callback. The worker
+rejects caller-supplied `__conversation_reader` values in both context carriers,
+installs only the host value, and releases it during terminal cleanup. The
+callback is not checkpoint state and must never be recovered from an earlier
+run or serialized into run kwargs.

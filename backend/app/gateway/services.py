@@ -14,12 +14,13 @@ import re
 import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
 from deerflow_extension_api import PROVENANCE_KEYS
 from fastapi import HTTPException, Request
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
@@ -1492,6 +1493,39 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
+        conversation_references = list(getattr(body, "conversation_references", None) or [])
+        if conversation_references:
+            from app.gateway.conversation_access import prepare_conversation_reader
+
+            prepared = prepare_conversation_reader(
+                conversation_references,
+                request=request,
+                user_id=owner_user_id or (str(user.id) if user is not None else None),
+                run_context=run_ctx,
+                run_manager=run_mgr,
+                app_config=get_app_config(),
+            )
+            reader, source_ids = prepared
+            run_ctx = replace(run_ctx, conversation_reader=reader)
+            if isinstance(graph_input, dict):
+                reference_messages = graph_input.get("messages")
+                if reference_messages is None:
+                    reference_messages = []
+                if not isinstance(reference_messages, list):
+                    raise HTTPException(status_code=422, detail="input.messages must be a list")
+                # Reference IDs are user-selected data. Keep them out of the
+                # system prompt and grant no authority from this persisted hint.
+                graph_input = {
+                    **graph_input,
+                    "messages": [
+                        *reference_messages,
+                        HumanMessage(
+                            content="Read-only conversation references for this run: " + json.dumps(source_ids),
+                            additional_kwargs={"hide_from_ui": True},
+                        ),
+                    ],
+                }
+
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
                 _ensure_thread_metadata(
@@ -1594,7 +1628,7 @@ async def start_run(
                     # written to runs.kwargs_json and echoed by the run API, so a
                     # request-scoped secret (#3861) must not ride along. The live
                     # config built above keeps the secrets for the actual run.
-                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
+                    kwargs={"input": body.input, "config": redact_config_secrets(body.config), **({"conversation_references": conversation_references} if conversation_references else {})},
                     multitask_strategy=body.multitask_strategy,
                     model_name=model_name,
                     user_id=owner_user_id,
@@ -1603,7 +1637,7 @@ async def start_run(
 
                 if record.idempotency_reused:
                     stored = record.kwargs or {}
-                    if stored.get("input") != body.input or record.assistant_id != body.assistant_id:
+                    if stored.get("input") != body.input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
                             detail="Idempotency-Key already used with a different request",

@@ -736,6 +736,12 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
+  # Read explicitly referenced conversations (Gateway API only, opt-in).
+  # Each run must submit conversation_references; see backend/docs/API.md.
+  # - name: read_conversation
+  #   group: conversation
+  #   use: deerflow.tools.conversation:read_conversation
+
   # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
   # `datasets` is optional. Omit it to list every tenant-visible dataset at
   # search time; an explicit `datasets: []` is invalid. Empty datasets are
