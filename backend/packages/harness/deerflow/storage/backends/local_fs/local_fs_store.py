@@ -151,9 +151,15 @@ class LocalFsBlobStore(BlobStore):
 
         # Verify against the address. A content-addressed store that returns
         # the wrong bytes silently is indistinguishable from a corrupt
-        # checkpoint, so fail loudly instead.
-        if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.sha256:
-            raise BlobReadError(f"Blob {ref.sha256[:12]} content mismatch on read (got {len(data)} bytes, expected {ref.size}); the store may be corrupted")
+        # checkpoint, so fail loudly instead — naming WHICH check failed:
+        # a size delta points at truncation/partial writes, a digest mismatch
+        # at same-size corruption (bit rot), and conflating the two sends the
+        # debugger in the wrong direction ("got 1024 bytes, expected 1024").
+        if len(data) != ref.size:
+            raise BlobReadError(f"Blob {ref.sha256[:12]} size mismatch on read (got {len(data)} bytes, expected {ref.size}); the store may be truncated or corrupted")
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != ref.sha256:
+            raise BlobReadError(f"Blob {ref.sha256[:12]} content digest mismatch on read (content hashes to {digest[:12]}, ref names {ref.sha256[:12]}); the store may be corrupted")
         return data
 
     def exists(self, ref: BlobRef) -> bool:

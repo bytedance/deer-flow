@@ -56,6 +56,11 @@ backend name == `blob_storage.backend` value:
   destination already holds this content).
 - Fail fast on an unresolvable backend: `_resolve_store_class` raises rather than
   substituting a default, because blobs are persistent state.
+- Reject oversized puts early: `local_fs` enforces `_MAX_BLOB_BYTES` (64 MiB) per
+  put as a backend-level defense-in-depth limit — not part of the `BlobStore`
+  contract, so a different backend sets its own policy, and the
+  externalized-tool-results follow-up must stream or split payloads before
+  `put_bytes`.
 
 **Garbage collection is not this module's job.** A blob row may be referenced by
 several threads once identical content dedupes, so a sweep must establish

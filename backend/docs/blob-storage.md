@@ -33,6 +33,7 @@ Reads **verify the digest**. A content-addressed store that silently returns wro
 ```
 
 - Writes go to a unique temp file in the destination directory then `os.replace` — atomic within a volume, so a concurrent reader never sees a partial file and two instances racing the same blob converge on identical content.
+- Single-put size cap: `_MAX_BLOB_BYTES` (64 MiB) in `local_fs_store.py` rejects larger puts with `BlobWriteError`. This is a backend-level defense-in-depth limit, **not** part of the `BlobStore` contract — other backends set their own policy — but the externalized-tool-results follow-up should assume it and stream or split oversized payloads before they reach `put_bytes`.
 - The sidecar is GC metadata, **not a read dependency and not a reference count**: losing it must not make content unreadable, and `writer_thread_id` is advisory provenance that cannot stand in for liveness (see the deletion rule above).
 
 This backend already delivers multi-instance resolution when `root` points at a shared volume (NFS / EFS / a `ReadWriteMany` PVC). The S3/MinIO backend is a later, optional extra implementing the same contract — it is deliberately not part of this change, because it needs a dependency decision (`[tool.uv.sources]`, optional extra) that belongs in its own PR.
