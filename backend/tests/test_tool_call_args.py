@@ -544,3 +544,14 @@ class TestDuplicateIdsWithinOneMessage:
 
         assert rewrite_messages_tool_call_args([message], lambda _m, tool_call: {"content": "[elided]"}) is None
         assert rewrite_tool_call_args(message, {"dup": {"content": "[elided]"}}) is not message  # the low-level rewriter itself stays id-keyed
+
+    def test_unhashable_sibling_id_neither_crashes_nor_blocks_the_rewrite(self):
+        """Review on #5374 (round 3): a list/dict id from a malformed payload must be skipped, not hashed."""
+        message = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(ARGS)}])
+        message.tool_calls.append({"name": "bash", "id": ["not", "a", "string"], "args": {"command": "ls"}})
+        message.tool_calls.append({"name": "bash", "id": {"nested": "dict"}, "args": {"command": "ls"}})
+
+        (rewritten,) = rewrite_messages_tool_call_args([message], lambda _m, tool_call: NEW_ARGS if tool_call["id"] == "call-1" else None)
+
+        assert rewritten.tool_calls[0]["args"] == NEW_ARGS
+        assert rewritten.tool_calls[1:] == message.tool_calls[1:]

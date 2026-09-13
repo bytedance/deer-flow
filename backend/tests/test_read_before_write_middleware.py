@@ -828,3 +828,17 @@ class TestBlockedPayloadElision:
         mw.wrap_model_call(request, handler)
 
         assert self._captured(handler) is request
+
+    def test_unhashable_sibling_id_does_not_crash_the_model_call(self):
+        """Review on #5374 (round 3): a malformed sibling id next to a blocked call must be skipped, not hashed."""
+        mw = self._middleware()
+        ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "x" * 5000})
+        ai.tool_calls.append({"name": "bash", "id": ["not", "a", "string"], "args": {"command": "ls"}})
+        request = self._model_request([HumanMessage(content="go"), ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        rewritten = self._captured(handler).messages[1]
+        assert rewritten.tool_calls[0]["args"]["content"].startswith("[payload elided: 5000 chars")
+        assert rewritten.tool_calls[1] == ai.tool_calls[1]

@@ -2121,3 +2121,16 @@ class TestSupersededWriteElision:
         assert forwarded is request
         assert [call["args"]["path"] for call in turn.tool_calls] == [self.PATH, self.OTHER]
         assert turn.tool_calls[1]["args"]["content"] == "b" * 5000
+
+    def test_unhashable_sibling_id_does_not_crash_the_model_call(self):
+        """Review on #5374 (round 3): a malformed sibling id next to an elision candidate must be skipped, not hashed."""
+        mw = self._middleware(keep_recent_writes=0)
+        payload = "x" * 5000
+        turn, ok = _write("call-1", self.PATH, payload)
+        turn.tool_calls.append({"name": "bash", "id": ["not", "a", "string"], "args": {"command": "ls"}})
+        rd, rr = _read("call-2", self.PATH)
+
+        _request, forwarded = self._forward(mw, [turn, ok, rd, rr])
+
+        assert self._content(forwarded, 0).startswith("[content elided: 5000 chars")
+        assert forwarded.messages[0].tool_calls[1] == turn.tool_calls[1]

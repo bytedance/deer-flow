@@ -103,9 +103,14 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
 
 
 def _duplicated_call_ids(tool_calls: Sequence[Any]) -> set[str]:
-    """Ids that occur more than once in one message's structured tool-call list (the list every surface mirrors)."""
-    counts = Counter(tool_call.get("id") for tool_call in tool_calls if isinstance(tool_call, dict))
-    return {call_id for call_id, count in counts.items() if count > 1 and isinstance(call_id, str) and call_id}
+    """Ids that occur more than once in one message's structured tool-call list (the list every surface mirrors).
+
+    Only non-empty string ids are counted: a list or dict id from a malformed
+    provider payload is unhashable and must be skipped, never hashed, or the
+    whole model call would fail (review on #5374).
+    """
+    counts = Counter(call_id for tool_call in tool_calls if isinstance(tool_call, dict) and isinstance(call_id := tool_call.get("id"), str) and call_id)
+    return {call_id for call_id, count in counts.items() if count > 1}
 
 
 @dataclass(frozen=True, slots=True)
