@@ -1202,7 +1202,7 @@ def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
 
 @pytest.mark.anyio
 async def test_seeded_checkpoint_messages_precede_the_first_new_run_messages():
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from langchain_core.messages import AIMessage, HumanMessage
 
@@ -1232,7 +1232,7 @@ async def test_seeded_checkpoint_messages_precede_the_first_new_run_messages():
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
+        new=MagicMock(return_value=(accessor, {"configurable": {"thread_id": "thread-1"}})),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1272,7 +1272,7 @@ async def test_seeded_checkpoint_messages_precede_the_first_new_run_messages():
 
 @pytest.mark.anyio
 async def test_checkpoint_history_seed_skips_new_thread_without_checkpoint():
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from app.gateway.services import ensure_checkpoint_history_seeded
 
@@ -1292,7 +1292,7 @@ async def test_checkpoint_history_seed_skips_new_thread_without_checkpoint():
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("new threads should not build an accessor"),
+        new=MagicMock(side_effect=AssertionError("new threads should not build an accessor")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1305,7 +1305,7 @@ async def test_checkpoint_history_seed_skips_new_thread_without_checkpoint():
 
 @pytest.mark.anyio
 async def test_checkpoint_history_seed_is_skipped_when_journal_already_has_messages():
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from app.gateway.services import ensure_checkpoint_history_seeded
 
@@ -1317,7 +1317,7 @@ async def test_checkpoint_history_seed_is_skipped_when_journal_already_has_messa
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("checkpoint state should not be loaded"),
+        new=MagicMock(side_effect=AssertionError("checkpoint state should not be loaded")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1376,7 +1376,7 @@ async def test_checkpoint_history_seed_guard_is_thread_scoped_under_user_context
     even when a user is authenticated. Seed rows stamped by another principal
     (or NULL) are invisible to a user-scoped query, which would re-seed a
     duplicate history per principal."""
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from app.gateway.services import ensure_checkpoint_history_seeded
     from deerflow.runtime.user_context import AUTO
@@ -1392,7 +1392,7 @@ async def test_checkpoint_history_seed_guard_is_thread_scoped_under_user_context
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("checkpoint state should not be loaded"),
+        new=MagicMock(side_effect=AssertionError("checkpoint state should not be loaded")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1411,7 +1411,7 @@ async def test_checkpoint_history_seed_runs_exactly_once_across_principals(tmp_p
     user_id=NULL; a later authenticated run on the same thread must still
     see them and skip re-seeding (the MemoryRunEventStore-based tests above
     cannot catch this because the memory store ignores user_id)."""
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from langchain_core.messages import AIMessage, HumanMessage
 
@@ -1447,7 +1447,7 @@ async def test_checkpoint_history_seed_runs_exactly_once_across_principals(tmp_p
 
         with patch(
             "app.gateway.services.build_checkpoint_state_accessor",
-            return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
+            new=MagicMock(return_value=(accessor, {"configurable": {"thread_id": "thread-1"}})),
         ):
             # First seed: ownerless (no user contextvar) — rows stamped NULL.
             await ensure_checkpoint_history_seeded(

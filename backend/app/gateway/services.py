@@ -1067,7 +1067,13 @@ def build_checkpoint_state_accessor(
 
     agent_factory = resolve_agent_factory(assistant_id)
     try:
-        graph = _state_accessor_graph(agent_factory, assistant_id, ctx.checkpoint_channel_mode, getattr(ctx, "checkpoint_snapshot_frequency", None), config)
+        graph = _state_accessor_graph(
+            agent_factory,
+            assistant_id,
+            ctx.checkpoint_channel_mode,
+            getattr(ctx, "checkpoint_snapshot_frequency", None),
+            config,
+        )
     except Exception:
         if ctx.checkpoint_channel_mode != "full":
             # Delta materialization needs the graph's channel table; there is

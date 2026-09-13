@@ -796,12 +796,14 @@ def test_subagent_runtime_middlewares_attach_durable_context_before_summarizatio
         app_config=None,
         keep=None,
         skip_memory_flush=False,
+        archive_task_history=True,
         run_model_name=None,
         extensions=None,
     ):
         captured["app_config"] = app_config
         captured["keep"] = keep
         captured["skip_memory_flush"] = skip_memory_flush
+        captured["archive_task_history"] = archive_task_history
         captured["run_model_name"] = run_model_name
         captured["extensions"] = extensions
         return sentinel
@@ -822,6 +824,7 @@ def test_subagent_runtime_middlewares_attach_durable_context_before_summarizatio
     # skip_memory_flush=True so subagent-internal turns are not flushed into the
     # PARENT thread's durable memory (#3875 Phase 3 review).
     assert captured["skip_memory_flush"] is True
+    assert captured["archive_task_history"] is False
     # Model ownership: the subagent's own resolved model is threaded into the factory
     # so a distinct-model subagent summarizes with its model, not the parent's — the
     # subagent context/configurable never carries the child model.
