@@ -367,7 +367,8 @@ fi
 # appended here, so the default (local) and provisioner modes never expose the
 # host daemon. Mounting the socket = root-equivalent host control; see SECURITY.md.
 
-docker_socket="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
+docker_socket="$(read_dotenv_value DEER_FLOW_DOCKER_SOCKET)"
+docker_socket="${docker_socket:-/var/run/docker.sock}"
 
 if [ "$sandbox_mode" = "aio" ]; then
     if [ ! -S "$docker_socket" ]; then
