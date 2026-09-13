@@ -23,11 +23,16 @@ import pytest
 from langchain_core.messages import AnyMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.graph import StateGraph
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
+from app.gateway import checkpoint_retention
 from app.gateway.checkpoint_lineage import find_checkpoint_before_message
-from app.gateway.checkpoint_retention import RetentionPolicy, enforce_thread_retention
+from app.gateway.checkpoint_retention import (
+    RetentionPolicy,
+    _row_field,
+    enforce_thread_retention,
+)
 from deerflow.runtime.runs.worker import persist_run_durations
 
 
@@ -184,14 +189,14 @@ async def _write_count(env: _SaverEnv, thread_id: str, checkpoint_id: str) -> in
             (thread_id, checkpoint_id),
         ) as cursor:
             row = await cursor.fetchone()
-        return int(row[0])
+        return int(_row_field(row, "COUNT(*)", 0))
     async with env.saver._cursor() as cursor:
         await cursor.execute(
-            "SELECT COUNT(*) FROM checkpoint_writes WHERE thread_id = %s AND checkpoint_id = %s",
+            "SELECT COUNT(*) AS write_count FROM checkpoint_writes WHERE thread_id = %s AND checkpoint_id = %s",
             (thread_id, checkpoint_id),
         )
         row = await cursor.fetchone()
-    return int(row[0])
+    return int(_row_field(row, "write_count", 0))
 
 
 # ---------------------------------------------------------------------------
@@ -443,3 +448,157 @@ async def test_thread_lock_parameter_accepted(saver_env: _SaverEnv) -> None:
 
     assert report.deleted_checkpoint_ids == []
     assert report.protected_head_id == checkpoint_ids[-1]
+
+
+# ---------------------------------------------------------------------------
+# Policy validation and report shape
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_negative_max_delete_per_run_fails_closed_before_any_read(saver_env: _SaverEnv, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A negative cap is an invalid configuration, not a small one. It must
+    raise before the store is touched — the slice that applies the cap would
+    otherwise turn -1 into "everything except the last candidate", i.e. widen a
+    destructive pass to almost its maximum — and it must delete nothing."""
+    thread_id, checkpoint_ids, _message_ids = await _write_turns(saver_env, steps=3)
+    old_head_id = checkpoint_ids[-1]
+
+    graph = _build_graph(FullState, saver_env.saver)
+    fork_message = HumanMessage(content="regenerated turn: " + "z" * 256, id="fork-turn")
+    await graph.ainvoke({"messages": [fork_message]}, _config_thread(thread_id, checkpoint_ids[1]))
+    duration_id = await _append_duration_checkpoint(saver_env, thread_id)
+    before = await _listed_checkpoint_ids(saver_env, thread_id)
+    # Both leaves are prunable under this policy, so a widened batch would show
+    # up as deletions rather than as an empty report.
+    assert {old_head_id, duration_id}.issubset(before)
+
+    async def _no_store_access(*args: Any, **kwargs: Any) -> dict[str, int]:
+        raise AssertionError("validation must reject the policy before reading the store")
+
+    monkeypatch.setattr(checkpoint_retention, "_thread_storage_stats", _no_store_access)
+
+    with pytest.raises(ValueError, match="max_delete_per_run must be >= 0, got -1"):
+        await enforce_thread_retention(
+            saver_env.saver,
+            thread_id,
+            RetentionPolicy(
+                prune_leaf_sibling_branches=True,
+                strict_pending_write_guard=False,
+                max_delete_per_run=-1,
+            ),
+        )
+
+    monkeypatch.undo()
+    assert await _listed_checkpoint_ids(saver_env, thread_id) == before
+
+
+@pytest.mark.anyio
+async def test_zero_max_delete_per_run_deletes_nothing(saver_env: _SaverEnv) -> None:
+    """Zero is the disabled-but-valid boundary: it bounds the batch to nothing
+    and still reports the same before/after measurement shape."""
+    thread_id, checkpoint_ids, _message_ids = await _write_turns(saver_env, steps=3)
+    duration_id = await _append_duration_checkpoint(saver_env, thread_id)
+
+    report = await enforce_thread_retention(
+        saver_env.saver,
+        thread_id,
+        RetentionPolicy(max_delete_per_run=0),
+    )
+
+    assert report.deleted_checkpoint_ids == []
+    assert duration_id in await _listed_checkpoint_ids(saver_env, thread_id)
+    assert report.stats_after == report.stats_before
+
+
+@pytest.mark.anyio
+async def test_empty_thread_reports_the_same_before_and_after_stats(saver_env: _SaverEnv) -> None:
+    """An empty (or unknown) thread is a no-op, but the report contract still
+    holds: both measurement halves are present and identical, so a caller
+    aggregating stats does not have to special-case "nothing to classify"."""
+    thread_id = _thread_id()
+
+    report = await enforce_thread_retention(saver_env.saver, thread_id)
+
+    assert report.deleted_checkpoint_ids == []
+    assert report.protected_head_id is None
+    assert report.stats_before == report.stats_after
+    assert set(report.stats_before) == {
+        "logical_checkpoint_bytes",
+        "logical_write_bytes",
+        "checkpoint_rows",
+        "checkpoint_bytes",
+        "blob_rows",
+        "blob_bytes",
+        "write_rows",
+        "write_bytes",
+    }
+
+    without_stats = await enforce_thread_retention(saver_env.saver, thread_id, collect_stats=False)
+    assert without_stats.stats_before == {}
+    assert without_stats.stats_after == {}
+
+
+# ---------------------------------------------------------------------------
+# Namespaced (persistent subgraph) histories
+# ---------------------------------------------------------------------------
+
+
+class _ChildState(TypedDict):
+    value: int
+
+
+def _increment(state: _ChildState) -> dict[str, int]:
+    return {"value": state.get("value", 0) + 1}
+
+
+def _build_nested_graph(checkpointer: Any) -> Any:
+    """A parent graph whose node is a subgraph that owns its own checkpoints."""
+    child_builder = StateGraph(_ChildState)
+    child_builder.add_node("increment", _increment)
+    child_builder.add_edge(START, "increment")
+    child_builder.add_edge("increment", END)
+    child = child_builder.compile(checkpointer=True)
+
+    parent_builder = StateGraph(_ChildState)
+    parent_builder.add_node("child", child)
+    parent_builder.add_edge(START, "child")
+    parent_builder.add_edge("child", END)
+    return parent_builder.compile(checkpointer=checkpointer)
+
+
+@pytest.mark.anyio
+async def test_persistent_subgraph_resume_head_survives_a_prune(saver_env: _SaverEnv) -> None:
+    """A persistent subgraph checkpoints under its own namespace, and ``alist``
+    returns those rows alongside the parent's. Protecting only one global head
+    makes the child's latest checkpoint look like an off-chain sibling leaf, so
+    the opt-in E2 shape deletes it and the child's saved state rolls back to the
+    preceding checkpoint. Each namespace's resume head must be protected."""
+    graph = _build_nested_graph(saver_env.saver)
+    thread_id = _thread_id()
+    await graph.ainvoke({"value": 10}, _config(thread_id))
+
+    namespaces = {(tuple_.config["configurable"].get("checkpoint_ns") or "") async for tuple_ in saver_env.saver.alist(_config(thread_id), limit=None)}
+    child_namespaces = sorted(ns for ns in namespaces if ns)
+    assert child_namespaces, "the persistent subgraph must write its own namespace"
+    child_ns = child_namespaces[0]
+
+    child_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": child_ns}}
+    child_head = await saver_env.saver.aget_tuple(child_config)
+    assert child_head is not None
+    child_head_id = child_head.checkpoint["id"]
+    assert child_head.checkpoint["channel_values"]["value"] == 11
+
+    report = await enforce_thread_retention(
+        saver_env.saver,
+        thread_id,
+        RetentionPolicy(prune_leaf_sibling_branches=True),
+    )
+
+    assert child_head_id not in report.deleted_checkpoint_ids
+    resumed = await saver_env.saver.aget_tuple(child_config)
+    assert resumed is not None
+    assert resumed.checkpoint["id"] == child_head_id
+    assert resumed.checkpoint["channel_values"]["value"] == 11
+    listed = {tuple_.checkpoint["id"] async for tuple_ in saver_env.saver.alist(_config(thread_id), limit=None)}
+    assert child_head_id in listed
