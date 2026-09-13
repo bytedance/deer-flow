@@ -335,9 +335,8 @@ export function KnowledgeScopeSelector({
       aria-label={label}
       aria-pressed={active}
       className={cn(
-        "text-muted-foreground border border-transparent",
-        active &&
-          "border-primary/20 bg-primary/10 text-primary hover:bg-primary/15",
+        "text-muted-foreground",
+        active && "text-foreground hover:bg-transparent hover:text-foreground",
       )}
       data-testid="knowledge-scope-trigger"
       disabled={disabled || Boolean(unavailableReason)}
