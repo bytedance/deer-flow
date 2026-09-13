@@ -46,16 +46,62 @@ class FileAgentStore(AgentStore):
         name = validate_agent_name(name)
         agent_dir = resolve_agent_dir(name, user_id=user_id)
         config_file = agent_dir / "config.yaml"
-        if not agent_dir.exists():
-            raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
-        if not config_file.exists():
-            raise FileNotFoundError(f"Agent config not found: {config_file}")
+        if not agent_dir.exists() or not config_file.exists():
+            # ``create``/``update`` commit config.yaml via ``os.replace``, and
+            # ``resolve_agent_dir`` checked its own existence probes before
+            # this read — a run whose resolution lands mid-replace (e.g. a
+            # concurrent ``update_agent`` self-update, issue #3098) sees the
+            # resolved path momentarily without config.yaml (or, on a slow /
+            # non-POSIX filesystem, without the directory itself). Re-probe
+            # both layouts directly: a genuinely missing agent still raises,
+            # while a mid-replace read finds the old or new copy in the
+            # layout the stale resolution skipped.
+            alternate = self._find_existing_config(name, user_id=user_id, skip=agent_dir)
+            if alternate is not None:
+                config_file = alternate
+            elif not agent_dir.exists():
+                raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
+            else:
+                raise FileNotFoundError(f"Agent config not found: {config_file}")
         try:
             with open(config_file, encoding="utf-8") as f:
                 data: dict[str, Any] = yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            # Lost the race on the direct probe too (the replace landed between
+            # ``exists()`` and ``open()``): one last re-probe of both layouts.
+            alternate = self._find_existing_config(name, user_id=user_id, skip=None)
+            if alternate is None:
+                raise FileNotFoundError(f"Agent config not found: {config_file}") from None
+            try:
+                with open(alternate, encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+            except yaml.YAMLError as e:
+                raise ValueError(f"Failed to parse agent config {alternate}: {e}") from e
+            return parse_agent_config(data, name)
         except yaml.YAMLError as e:
             raise ValueError(f"Failed to parse agent config {config_file}: {e}") from e
         return parse_agent_config(data, name)
+
+    @staticmethod
+    def _find_existing_config(name: str, *, user_id: str | None, skip: Path | None) -> Path | None:
+        """Return a ``config.yaml`` for ``name`` from either layout, skipping ``skip``.
+
+        Probe order matches ``resolve_agent_dir`` (per-user first, then legacy)
+        so a stable system behaves identically to the pre-fix code; the ``skip``
+        argument excludes the path the caller already found missing.
+        """
+        paths = _ac.get_paths()
+        effective_user = user_id or _ac.get_effective_user_id()
+        for candidate_dir in (
+            paths.user_agent_dir(effective_user, name),
+            paths.agent_dir(name),
+        ):
+            candidate = candidate_dir / "config.yaml"
+            if skip is not None and candidate == skip / "config.yaml":
+                continue
+            if candidate.exists():
+                return candidate
+        return None
 
     def exists(self, name: str, *, user_id: str | None = None) -> bool:
         name = validate_agent_name(name)
