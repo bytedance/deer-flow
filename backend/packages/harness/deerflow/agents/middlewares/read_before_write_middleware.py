@@ -40,7 +40,6 @@ import logging
 import posixpath
 import threading
 import weakref
-from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from typing import Any, override
 
@@ -50,7 +49,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.tool_call_args import rewrite_messages_tool_call_args
+from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results, rewrite_messages_tool_call_args
 from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result, stamp_exception_meta
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
@@ -402,30 +401,12 @@ def elide_blocked_write_payloads(messages: list[Any], *, min_chars: int) -> list
 def _blocked_call_occurrences(messages: list[Any]) -> set[tuple[int, str]]:
     """Return ``(id(ai_message), call_id)`` for every call occurrence answered by a gate-blocked result.
 
-    Tool-call ids may repeat across assistant turns, so a history-wide id set
-    would also hit an earlier (or later) *successful* call with the same id and
-    mislabel it as blocked. Results are paired with call occurrences the way
-    ``DanglingToolCallMiddleware`` does: ToolMessages queue per id in history
-    order and each AIMessage call consumes the next one for its id.
+    Pairing is per occurrence (``tool_call_args.pair_tool_call_results``):
+    tool-call ids may repeat across assistant turns, so a history-wide id set
+    would also hit an earlier (or later) *successful* call with the same id
+    and mislabel it as blocked.
     """
-    results_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
-    for message in messages:
-        if isinstance(message, ToolMessage) and isinstance(message.tool_call_id, str) and message.tool_call_id:
-            results_by_id[message.tool_call_id].append(message)
-
-    blocked: set[tuple[int, str]] = set()
-    for message in messages:
-        if not isinstance(message, AIMessage):
-            continue
-        for tool_call in message.tool_calls or ():
-            call_id = tool_call.get("id") if isinstance(tool_call, dict) else None
-            if not isinstance(call_id, str) or not call_id:
-                continue
-            queue = results_by_id.get(call_id)
-            result = queue.popleft() if queue else None
-            if result is not None and isinstance((result.additional_kwargs or {}).get(WRITE_BLOCK_KEY), dict):
-                blocked.add((id(message), call_id))
-    return blocked
+    return {(id(occurrence.message), occurrence.call_id) for occurrence in pair_tool_call_results(messages) if occurrence.result is not None and isinstance((occurrence.result.additional_kwargs or {}).get(WRITE_BLOCK_KEY), dict)}
 
 
 def _elide_args(args: dict[str, Any], tool_name: str, min_chars: int) -> dict[str, Any] | None:

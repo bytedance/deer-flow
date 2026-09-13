@@ -4,7 +4,7 @@ import json
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
-from deerflow.agents.middlewares.tool_call_args import rewrite_messages_tool_call_args, rewrite_tool_call_args
+from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results, rewrite_messages_tool_call_args, rewrite_tool_call_args
 
 ARGS = {"path": "/mnt/user-data/outputs/report.md", "content": "x" * 50}
 NEW_ARGS = {"path": "/mnt/user-data/outputs/report.md", "content": "[elided]"}
@@ -385,3 +385,173 @@ class TestResponseChainInvalidation:
         assert calls[0]["id"] == "fc_1"
         assert any(item.get("type") == "function_call_output" for item in payload["input"])
         assert self.PAYLOAD not in json.dumps(payload, ensure_ascii=False)
+
+
+class TestPairToolCallResults:
+    """Per-occurrence pairing of AIMessage tool calls with the ToolMessage that answered them."""
+
+    @staticmethod
+    def _call(call_id, name="bash", args=None):
+        return {"name": name, "id": call_id, "args": {"command": "ls"} if args is None else args}
+
+    def test_pairs_each_call_with_the_result_that_answered_it(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1"), self._call("call-2")])
+        first = ToolMessage(content="1", tool_call_id="call-1")
+        second = ToolMessage(content="2", tool_call_id="call-2")
+
+        occurrences = pair_tool_call_results([HumanMessage(content="go"), ai, second, first])
+
+        assert [(o.index, o.message is ai, o.call_id, o.result) for o in occurrences] == [(1, True, "call-1", first), (1, True, "call-2", second)]
+        assert occurrences[0].name == "bash"
+        assert occurrences[0].args == {"command": "ls"}
+
+    def test_unanswered_call_gets_no_result(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+
+        occurrences = pair_tool_call_results([ai])
+
+        assert len(occurrences) == 1
+        assert occurrences[0].result is None
+
+    def test_reused_ids_pair_per_occurrence_in_history_order(self):
+        first_ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        first_result = ToolMessage(content="first", tool_call_id="call-1")
+        second_ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        second_result = ToolMessage(content="second", tool_call_id="call-1")
+
+        occurrences = pair_tool_call_results([first_ai, first_result, second_ai, second_result])
+
+        assert [(o.index, o.result) for o in occurrences] == [(0, first_result), (2, second_result)]
+
+    def test_calls_without_a_string_id_are_skipped(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1"), {"name": "bash", "id": None, "args": {}}, {"name": "bash", "id": "", "args": {}}])
+        ai.tool_calls.append({"name": "bash", "id": ["not", "a", "string"], "args": {}})
+
+        occurrences = pair_tool_call_results([ai, ToolMessage(content="1", tool_call_id="call-1")])
+
+        assert [o.call_id for o in occurrences] == ["call-1"]
+
+    def test_non_ai_messages_and_non_dict_calls_are_ignored(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        ai.tool_calls.append("not-a-dict")  # malformed provider payload
+
+        occurrences = pair_tool_call_results([HumanMessage(content="go"), ToolMessage(content="stray", tool_call_id="call-9"), ai])
+
+        assert [o.call_id for o in occurrences] == ["call-1"]
+
+    def test_accessors_tolerate_malformed_calls(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        # Malformed provider payloads can only get here past construction-time validation.
+        ai.tool_calls[0]["args"] = "not-a-dict"
+        del ai.tool_calls[0]["name"]
+
+        (occurrence,) = pair_tool_call_results([ai])
+
+        assert occurrence.name == ""
+        assert occurrence.args == {}
+        assert occurrence.call_id == "call-1"
+
+    def test_empty_history_pairs_nothing(self):
+        assert pair_tool_call_results([]) == []
+
+    def test_unanswered_call_never_consumes_a_later_turns_result_for_a_reused_id(self):
+        """Review on #5374: an interrupted call must not inherit the result of a later call that reused its id."""
+        interrupted = AIMessage(content="", tool_calls=[self._call("reused", args={"path": "report.md"})])
+        read = AIMessage(content="", tool_calls=[self._call("r1", name="read_file")])
+        read_result = ToolMessage(content="text", tool_call_id="r1")
+        later = AIMessage(content="", tool_calls=[self._call("reused", args={"path": "notes.md"})])
+        later_result = ToolMessage(content="OK", tool_call_id="reused")
+
+        occurrences = pair_tool_call_results([interrupted, read, read_result, later, later_result])
+
+        assert [(o.index, o.call_id, o.result) for o in occurrences] == [(0, "reused", None), (1, "r1", read_result), (3, "reused", later_result)]
+
+    def test_result_answers_only_the_most_recent_preceding_turn(self):
+        """A result never answers a call from an earlier turn (same rule as DanglingToolCallMiddleware)."""
+        first = AIMessage(content="", tool_calls=[self._call("call-x")])
+        second = AIMessage(content="", tool_calls=[self._call("call-y")])
+        stale = ToolMessage(content="late", tool_call_id="call-x")
+        fresh = ToolMessage(content="ok", tool_call_id="call-y")
+
+        occurrences = pair_tool_call_results([first, second, stale, fresh])
+
+        assert [(o.call_id, o.result) for o in occurrences] == [("call-x", None), ("call-y", fresh)]
+
+    def test_stray_results_before_any_call_are_ignored(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        stray = ToolMessage(content="stray", tool_call_id="call-1")
+        real = ToolMessage(content="real", tool_call_id="call-1")
+
+        occurrences = pair_tool_call_results([stray, ai, real])
+
+        assert [(o.call_id, o.result) for o in occurrences] == [("call-1", real)]
+
+    def test_second_result_for_an_answered_call_is_ignored(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1")])
+        first = ToolMessage(content="first", tool_call_id="call-1")
+        duplicate = ToolMessage(content="duplicate", tool_call_id="call-1")
+
+        occurrences = pair_tool_call_results([ai, first, duplicate])
+
+        assert [(o.call_id, o.result) for o in occurrences] == [("call-1", first)]
+
+    def test_non_ai_messages_between_call_and_result_do_not_break_pairing(self):
+        ai = AIMessage(content="", tool_calls=[self._call("call-1"), self._call("call-2")])
+        first = ToolMessage(content="1", tool_call_id="call-1")
+        second = ToolMessage(content="2", tool_call_id="call-2")
+
+        occurrences = pair_tool_call_results([ai, first, HumanMessage(content="reminder"), second])
+
+        assert [(o.call_id, o.result) for o in occurrences] == [("call-1", first), ("call-2", second)]
+
+
+class TestDuplicateIdsWithinOneMessage:
+    """Review on #5374: surfaces are addressed by id, so an id that repeats inside one AIMessage can never be rewritten for just one occurrence."""
+
+    @staticmethod
+    def _message():
+        calls = [
+            {"name": "write_file", "id": "dup", "args": {"path": "a.md", "content": "a" * 50}},
+            {"name": "write_file", "id": "dup", "args": {"path": "b.md", "content": "b" * 50}},
+            {"name": "write_file", "id": "solo", "args": {"path": "c.md", "content": "c" * 50}},
+        ]
+        return AIMessage(
+            content=[{"type": "tool_use", "id": call["id"], "name": call["name"], "input": dict(call["args"])} for call in calls],
+            tool_calls=[dict(call, args=dict(call["args"])) for call in calls],
+            additional_kwargs={"tool_calls": [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": json.dumps(call["args"])}} for call in calls]},
+        )
+
+    def test_duplicated_ids_are_never_offered_or_rewritten_on_any_surface(self):
+        message = self._message()
+        offered: list[str] = []
+
+        def replacement_for(_message, tool_call):
+            offered.append(tool_call["id"])
+            return {**tool_call["args"], "content": "[elided]"}
+
+        (rewritten,) = rewrite_messages_tool_call_args([message], replacement_for)
+
+        assert offered == ["solo"]
+        assert [call["args"]["content"][:1] for call in rewritten.tool_calls] == ["a", "b", "["]
+        assert [block["input"]["content"][:1] for block in rewritten.content] == ["a", "b", "["]
+        raw = [json.loads(entry["function"]["arguments"])["content"][:1] for entry in rewritten.additional_kwargs["tool_calls"]]
+        assert raw == ["a", "b", "["]
+        assert [call["args"]["path"] for call in rewritten.tool_calls] == ["a.md", "b.md", "c.md"]
+
+    def test_message_with_only_duplicated_ids_passes_through_by_identity(self):
+        message = self._message()
+        message.tool_calls.pop()  # leave the two ``dup`` calls only
+
+        assert rewrite_messages_tool_call_args([message], lambda _m, tool_call: {"content": "[elided]"}) is None
+        assert rewrite_tool_call_args(message, {"dup": {"content": "[elided]"}}) is not message  # the low-level rewriter itself stays id-keyed
+
+    def test_unhashable_sibling_id_neither_crashes_nor_blocks_the_rewrite(self):
+        """Review on #5374 (round 3): a list/dict id from a malformed payload must be skipped, not hashed."""
+        message = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(ARGS)}])
+        message.tool_calls.append({"name": "bash", "id": ["not", "a", "string"], "args": {"command": "ls"}})
+        message.tool_calls.append({"name": "bash", "id": {"nested": "dict"}, "args": {"command": "ls"}})
+
+        (rewritten,) = rewrite_messages_tool_call_args([message], lambda _m, tool_call: NEW_ARGS if tool_call["id"] == "call-1" else None)
+
+        assert rewritten.tool_calls[0]["args"] == NEW_ARGS
+        assert rewritten.tool_calls[1:] == message.tool_calls[1:]

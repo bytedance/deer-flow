@@ -224,6 +224,17 @@ This section accumulates work toward the **2.1.0** milestone
   `use_previous_response_id` chaining cannot resume the original server-side
   history. Controlled by `read_before_write.elide_blocked_payloads` (default
   on) and `read_before_write.elide_min_chars` (default 2000).
+- **agents:** `ToolOutputBudgetMiddleware` now also elides the `content` of a
+  successful `write_file` call from model-bound requests once the same path
+  was read or modified again later in the conversation. After a successful
+  write the file on disk is the source of truth, and the read-before-write
+  gate forces a `read_file` before the next modification, so the historical
+  copy was redundant with that read and long report-writing runs carried every
+  section twice. The newest `tool_output.keep_recent_writes` successful writes
+  (default 1) always stay visible, `str_replace` payloads are never touched,
+  and stored history, receipts, and the run journal keep the original
+  arguments. Controlled by `tool_output.elide_superseded_writes` (default on)
+  and `tool_output.superseded_write_min_chars` (default 2000).
 
 #### Memory
 
