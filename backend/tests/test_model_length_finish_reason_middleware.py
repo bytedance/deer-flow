@@ -110,11 +110,20 @@ def test_length_cap_detection_logs_observability_fields(caplog):
     assert record.stamped_stop_reason is True
 
 
-def test_finish_reason_length_with_tool_calls_passes_through():
+def test_finish_reason_length_drops_potentially_truncated_tool_calls():
     mw = ModelLengthFinishReasonMiddleware()
     runtime = _runtime()
     msg = AIMessage(
-        content="",
+        content="partial answer",
+        additional_kwargs={
+            "tool_calls": [
+                {
+                    "id": "call_write_1",
+                    "type": "function",
+                    "function": {"name": "write_file", "arguments": '{"path":"/tmp/report.md"'},
+                }
+            ]
+        },
         tool_calls=[
             {
                 "id": "call_write_1",
@@ -125,17 +134,88 @@ def test_finish_reason_length_with_tool_calls_passes_through():
         response_metadata={"finish_reason": "length"},
     )
 
-    assert mw._apply({"messages": [msg]}, runtime) is None
-    assert "stop_reason" not in runtime.context
+    result = mw._apply({"messages": [msg]}, runtime)
+
+    assert result is not None
+    replacement = result["messages"][0]
+    assert replacement.tool_calls == []
+    assert replacement.invalid_tool_calls == []
+    assert replacement.content == "partial answer"
+    assert "tool_calls" not in replacement.additional_kwargs
+    assert replacement.additional_kwargs["model_length_termination"]["suppressed_tool_call_count"] == 1
+    assert replacement.additional_kwargs["model_length_termination"]["suppressed_tool_call_names"] == ["write_file"]
+    assert runtime.context["stop_reason"] == MODEL_LENGTH_CAPPED_STOP_REASON
 
 
-def test_empty_finish_reason_length_passes_through_for_terminal_response_recovery():
+def test_finish_reason_length_suppresses_complete_tool_call_as_safety_policy():
+    """Even parsed arguments cannot be proven complete after a length cap."""
+    mw = ModelLengthFinishReasonMiddleware()
+    runtime = _runtime()
+    msg = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": "call_write_complete",
+                "name": "write_file",
+                "args": {"path": "/mnt/user-data/outputs/report.md", "content": "complete"},
+            }
+        ],
+        response_metadata={"finish_reason": "length"},
+    )
+
+    result = mw._apply({"messages": [msg]}, runtime)
+
+    assert result is not None
+    replacement = result["messages"][0]
+    assert replacement.tool_calls == []
+    assert replacement.additional_kwargs["model_length_termination"]["suppressed_tool_call_names"] == ["write_file"]
+    assert "output limit" in str(replacement.content)
+
+
+def test_empty_finish_reason_length_gets_visible_capped_message():
     mw = ModelLengthFinishReasonMiddleware()
     runtime = _runtime()
     msg = AIMessage(content="", response_metadata={"finish_reason": "length"})
 
-    assert mw._apply({"messages": [msg]}, runtime) is None
-    assert "stop_reason" not in runtime.context
+    result = mw._apply({"messages": [msg]}, runtime)
+
+    assert result is not None
+    replacement = result["messages"][0]
+    assert "output limit" in replacement.content
+    assert replacement.response_metadata["finish_reason"] == "length"
+    assert runtime.context["stop_reason"] == MODEL_LENGTH_CAPPED_STOP_REASON
+
+
+def test_reasoning_only_length_preserves_reasoning_when_adding_visible_message():
+    mw = ModelLengthFinishReasonMiddleware()
+    runtime = _runtime()
+    msg = AIMessage(
+        content="",
+        additional_kwargs={"reasoning_content": "internal reasoning"},
+        response_metadata={"finish_reason": "length"},
+    )
+
+    result = mw._apply({"messages": [msg]}, runtime)
+
+    assert result is not None
+    replacement = result["messages"][0]
+    assert replacement.additional_kwargs["reasoning_content"] == "internal reasoning"
+    assert "output limit" in replacement.content
+
+
+def test_thinking_blocks_are_preserved_when_length_notice_is_appended():
+    mw = ModelLengthFinishReasonMiddleware()
+    runtime = _runtime()
+    thinking_block = {"type": "thinking", "thinking": "internal reasoning"}
+    msg = AIMessage(content=[thinking_block], response_metadata={"finish_reason": "length"})
+
+    result = mw._apply({"messages": [msg]}, runtime)
+
+    assert result is not None
+    content = result["messages"][0].content
+    assert content[0] == thinking_block
+    assert content[-1]["type"] == "text"
+    assert "output limit" in content[-1]["text"]
 
 
 def test_existing_stop_reason_is_not_overwritten(caplog):

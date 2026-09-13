@@ -319,7 +319,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
 
     _warn_unknown_model_settings(model_class, name, model_settings_from_config)
 
-    model_instance = model_class(**kwargs, **model_settings_from_config)
+    # 配置提供默认值，调用方显式传入的非空参数统一覆盖配置。
+    # 先合并再展开，避免同名字段通过两个 **dict 传入时触发 TypeError。
+    effective_model_settings = dict(model_settings_from_config)
+    effective_model_settings.update({key: value for key, value in kwargs.items() if value is not None})
+    model_instance = model_class(**effective_model_settings)
 
     if translate_context_window:
         # Applied *after* construction and merged into the provider's inferred
