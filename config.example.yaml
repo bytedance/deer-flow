@@ -866,12 +866,13 @@ tools:
   #   contents_max_characters: 1000
   #   # api_key: $EXA_API_KEY
 
-  # Web search tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # Web search tool (uses Firecrawl. Cloud requires FIRECRAWL_API_KEY; self-host may need no key.)
   # - name: web_search
   #   group: web
   #   use: deerflow.community.firecrawl.tools:web_search_tool
   #   max_results: 5
   #   # api_key: $FIRECRAWL_API_KEY
+  #   # base_url: http://<host>:3002  # optional: self-hosted Firecrawl; no cloud API key needed
 
   # Web search tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # GroundRoute is a meta search layer: one API in front of six engines (Serper,
@@ -1057,11 +1058,12 @@ tools:
   #   # Timeout for navigating to the page (in seconds). Set to positive value to enable, -1 to disable
   #   navigation_timeout: 30
 
-  # Web fetch tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # Web fetch tool (uses Firecrawl. Cloud requires FIRECRAWL_API_KEY; self-host may need no key.)
   # - name: web_fetch
   #   group: web
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
+  #   # base_url: http://<host>:3002  # optional: self-hosted Firecrawl; no cloud API key needed
 
   # Web fetch tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # Fetches a page's extracted text via GroundRoute mode=page.
