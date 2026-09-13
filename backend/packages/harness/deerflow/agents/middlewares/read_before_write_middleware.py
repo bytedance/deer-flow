@@ -127,6 +127,8 @@ async def _await_off_thread(task: asyncio.Task[Any]) -> Any:
                 first_cancel = exc
             if not task.done():
                 continue
+            if task.cancelled():
+                raise first_cancel
             task.result()
             raise first_cancel
         if first_cancel is not None:
@@ -135,7 +137,7 @@ async def _await_off_thread(task: asyncio.Task[Any]) -> Any:
 
 
 async def _acquire_gate_lock(lock: threading.Lock) -> None:
-    """Acquire off-loop without orphaning a successful acquire on cancellation."""
+    """Acquire off-loop safely; threading.Lock permits cross-thread release."""
     acquire_task = asyncio.create_task(asyncio.to_thread(lock.acquire))
     try:
         await _await_off_thread(acquire_task)
