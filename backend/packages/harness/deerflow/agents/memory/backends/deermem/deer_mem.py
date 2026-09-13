@@ -633,3 +633,45 @@ class DeerMem(MemoryManager):
             )
         )
         return _compat_document(memory_data)
+
+    def batch_delete_facts(
+        self,
+        fact_ids: list[str],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically delete multiple facts in one transaction.
+        Pre-validates every id before mutating anything.
+        """
+        resolved_agent = _resolve_agent_name(agent_name)
+        memory_data = _call_backend(
+            lambda: self._updater.batch_delete_memory_facts(
+                fact_ids,
+                agent_name=resolved_agent,
+                user_id=user_id,
+            )
+        )
+        return _compat_document(memory_data)
+
+    def batch_update_facts(
+        self,
+        updates: list[dict[str, Any]],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically update multiple facts in one transaction.
+        Pre-validates every fact_id and field before mutating anything.
+        Each update dict must contain 'fact_id' and optional 'content', 'category',
+        'confidence' fields. Raises ValueError for empty fact_id.
+        """
+        resolved_agent = _resolve_agent_name(agent_name)
+        memory_data = _call_backend(
+            lambda: self._updater.batch_update_memory_facts(
+                updates,
+                agent_name=resolved_agent,
+                user_id=user_id,
+            )
+        )
+        return _compat_document(memory_data)

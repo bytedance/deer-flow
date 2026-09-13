@@ -52,3 +52,18 @@ export interface UserMemory {
   };
   facts: MemoryFact[];
 }
+
+export interface BatchFactUpdateInput {
+  fact_id: string;
+  content?: string;
+  category?: string;
+  confidence?: number;
+}
+
+export interface BatchDeleteInput {
+  fact_ids: string[];
+}
+
+export interface BatchUpdateInput {
+  updates: BatchFactUpdateInput[];
+}
