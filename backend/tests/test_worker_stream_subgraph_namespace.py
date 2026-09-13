@@ -476,7 +476,15 @@ def _build_delegating_parent_graph(executor_module, monkeypatch, *, child_emits_
     return parent_builder.compile()
 
 
-async def _run_delegation_through_worker(executor_module, monkeypatch, *, stream_subgraphs: bool, child_emits_error_fallback: bool = False, emit_task_running: bool = False) -> tuple[RunRecord, _RecordingStreamBridge]:
+async def _run_delegation_through_worker(
+    executor_module,
+    monkeypatch,
+    *,
+    stream_subgraphs: bool,
+    child_emits_error_fallback: bool = False,
+    emit_task_running: bool = False,
+    stream_modes: list[str] | None = None,
+) -> tuple[RunRecord, _RecordingStreamBridge]:
     from langgraph.checkpoint.memory import InMemorySaver
 
     parent_graph = _build_delegating_parent_graph(executor_module, monkeypatch, child_emits_error_fallback=child_emits_error_fallback, emit_task_running=emit_task_running)
@@ -499,7 +507,7 @@ async def _run_delegation_through_worker(executor_module, monkeypatch, *, stream
         agent_factory=lambda config: parent_graph,
         graph_input={"messages": [HumanMessage(content="delegate to the subagent")]},
         config={"configurable": {"thread_id": _THREAD_ID}},
-        stream_modes=["values", "messages-tuple", "custom"],
+        stream_modes=stream_modes or ["values", "messages-tuple", "custom"],
         stream_subgraphs=stream_subgraphs,
     )
     return record, bridge
@@ -556,14 +564,23 @@ class TestWorkerSubgraphStreamIntegration:
         assert any("child-fallback-sentinel" in _collect_ids(payload) for payload in namespaced_payloads)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("stream_subgraphs", [True, False])
-    async def test_delegated_error_fallback_in_task_running_event_does_not_mark_the_parent_run_as_error(self, real_executor_module, monkeypatch, stream_subgraphs):
+    @pytest.mark.parametrize(
+        ("stream_modes", "stream_subgraphs"),
+        [
+            (["values", "messages-tuple", "custom"], True),
+            (["values", "messages-tuple", "custom"], False),
+            # A single requested mode takes the worker's single-mode stream loop.
+            (["custom"], False),
+        ],
+    )
+    async def test_delegated_error_fallback_in_task_running_event_does_not_mark_the_parent_run_as_error(self, real_executor_module, monkeypatch, stream_modes, stream_subgraphs):
         record, bridge = await _run_delegation_through_worker(
             real_executor_module,
             monkeypatch,
             stream_subgraphs=stream_subgraphs,
             child_emits_error_fallback=True,
             emit_task_running=True,
+            stream_modes=stream_modes,
         )
 
         # task_running is a root-level custom frame, but the message it carries is
