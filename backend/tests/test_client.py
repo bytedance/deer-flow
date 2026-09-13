@@ -628,6 +628,8 @@ class TestStream:
         the tool_calls event comes from the values snapshot, not from the chunks.
         """
         call = {"name": "bash", "args": {"command": "ls -la"}, "id": "call-1"}
+        attribution = {"version": 1, "kind": "tool_batch", "shared_attribution": False, "actions": []}
+        assembled = AIMessage(content="", id="ai-1", tool_calls=[call], additional_kwargs={"token_usage_attribution": attribution})
         agent = MagicMock()
         agent.stream.return_value = iter(
             [
@@ -653,7 +655,7 @@ class TestStream:
                         {},
                     ),
                 ),
-                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), AIMessage(content="", id="ai-1", tool_calls=[call])]}),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), assembled]}),
             ]
         )
 
@@ -667,6 +669,7 @@ class TestStream:
         assert len(tool_call_events) == 1
         assert tool_call_events[0].data["id"] == "ai-1"
         assert [(tc["name"], tc["args"], tc["id"]) for tc in tool_call_events[0].data["tool_calls"]] == [("bash", {"command": "ls -la"}, "call-1")]
+        assert tool_call_events[0].data["additional_kwargs"] == {"token_usage_attribution": attribution}
 
     def test_stream_emits_additional_kwargs_updates_for_streamed_ai_messages(self, client):
         """stream() emits a follow-up AI event when attribution metadata arrives via values."""

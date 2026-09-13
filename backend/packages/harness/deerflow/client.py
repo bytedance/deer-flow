@@ -1045,6 +1045,8 @@ class DeerFlowClient:
                         )
                         sent_additional_kwargs = bool(additional_kwargs_delta)
 
+                    # A chunk without an id can't be matched to its values
+                    # snapshot, so it keeps the per-chunk event below.
                     if isinstance(msg_chunk, AIMessageChunk) and msg_chunk.tool_call_chunks and msg_id:
                         streamed_ids.add(msg_id)
                         pending_tool_call_ids.add(msg_id)
