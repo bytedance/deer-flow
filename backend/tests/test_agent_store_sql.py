@@ -44,6 +44,16 @@ def test_create_and_get_round_trips_config_and_soul(store):
     assert store.get_soul("reviewer", user_id="u1") == "You review."
 
 
+def test_display_name_is_config_data_not_storage_identity(store):
+    store.create("reviewer", {"name": "reviewer", "display_name": "代码审查助手"}, "Soul", user_id="u1")
+    assert store.get("reviewer", user_id="u1").display_name == "代码审查助手"
+    assert store.list(user_id="u1")[0].display_name == "代码审查助手"
+    assert not store.exists("reviewer", user_id="u2")
+    store.update("reviewer", {"name": "reviewer", "display_name": "新名称"}, None, user_id="u1")
+    assert store.get("reviewer", user_id="u1").display_name == "新名称"
+    assert store.get_soul("reviewer", user_id="u1") == "Soul"
+
+
 def test_name_is_stored_lowercase_and_excluded_from_document(store):
     store.create("Mixed", {"name": "Mixed", "description": "d"}, "s", user_id="u1")
     # Stored lowercase (matches the on-disk layout), and the JSON document does

@@ -26,6 +26,7 @@ import {
   isHiddenFromUIMessage,
 } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
+import { PROJECTS_QUERY_KEY } from "../projects/api";
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
@@ -33,14 +34,25 @@ import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
+import { uuid } from "../utils/uuid";
 
 import {
   branchThreadFromTurn,
   fetchThreadTokenUsage,
+  moveThreadToProject,
   patchThreadMetadata,
   searchThreadsByArchive,
   type ThreadMetadataPatch,
 } from "./api";
+import {
+  dedupeMessagesByIdentity,
+  insertByTrustedSeq,
+  isValidMessageSeq,
+  MESSAGE_SEQ_KEY,
+  mergeMessages,
+  messageIdentity,
+  trustedMessageSeq,
+} from "./message-order";
 import {
   hasRenderedThreadStateUpdate,
   reduceThreadStateUpdates,
@@ -61,7 +73,10 @@ import type {
   RunMessage,
   ThreadTokenUsageResponse,
 } from "./types";
-import { THREAD_PINNED_METADATA_KEY } from "./utils";
+import {
+  THREAD_PINNED_METADATA_KEY,
+  THREAD_PROJECT_METADATA_KEY,
+} from "./utils";
 
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
@@ -147,16 +162,24 @@ export function buildThreadSubmitMessages({
   additionalKwargs,
   additionalInputMessages = [],
   filesForSubmit = [],
+  humanMessageId,
 }: {
   text: string;
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   filesForSubmit?: FileInMessage[];
+  /**
+   * Client-generated id for the visible human message. The optimistic display
+   * copy and the actual submit share it, so the server echo (`<id>__user`)
+   * confirms the exact message the user already sees.
+   */
+  humanMessageId?: string;
 }): Message[] {
   return [
     ...additionalInputMessages,
     {
       type: "human",
+      ...(humanMessageId ? { id: humanMessageId } : {}),
       content: [
         {
           type: "text",
@@ -176,11 +199,35 @@ export function buildThreadSubmitMessages({
 const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_RUN_MESSAGES: RunMessage[] = [];
 const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
-const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
-// Thread-global feed position, attached by the backend to history rows and to
-// `values` frame messages it has already persisted. Mirrors MESSAGE_SEQ_KEY in
-// `deerflow/runtime/events/message_identity.py`.
-const MESSAGE_SEQ_KEY = "deerflow_seq";
+const EMPTY_MESSAGE_IDENTITIES_SET: ReadonlySet<string> = new Set<string>();
+/**
+ * The turn this client submitted, recorded at dispatch time. The visible human
+ * input gets one client-generated identity shared by the optimistic display
+ * copy and the submitted message, so the turn anchor is a *known* identity
+ * instead of a guess derived from the pre-submit baseline. `humanIdentity` is
+ * the normalized identity (`message:<id>`) of that human, or null when the
+ * turn has no visible human (hidden human-input reply, regenerate replay) —
+ * such turns must never borrow an older visible human as their anchor.
+ */
+export type LocalTurnAnchor = {
+  threadId: string;
+  humanIdentity: string | null;
+  baselineIdentities: ReadonlySet<string>;
+  /** Canonical REST-history identities already loaded when this turn began. */
+  preSubmitHistoryIdentities: ReadonlySet<string>;
+  /** Transient-bridge identities already established before this turn began. */
+  preSubmitBridgeIdentities: ReadonlySet<string>;
+  /**
+   * Highest authoritative feed position known before submit. Older pages that
+   * arrive later may still be confirmed as pre-submit history through this
+   * boundary; messages from later external turns may not.
+   */
+  preSubmitMaxSeq?: number;
+};
+
+function isNonEmptyString(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
 
 const EMPTY_THREAD_VALUES: AgentThreadState = {
   title: "",
@@ -189,100 +236,61 @@ const EMPTY_THREAD_VALUES: AgentThreadState = {
   todos: [],
 };
 
-function isNonEmptyString(value: string | undefined): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
 const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
   "SummarizationMiddleware.before_model",
   "DeerFlowSummarizationMiddleware.before_model",
 ]);
 
-/** Thread-global feed position, when the backend has attached one. */
-function messageSeq(message: Message): number | undefined {
-  const seq = message.additional_kwargs?.[MESSAGE_SEQ_KEY];
-  return typeof seq === "number" ? seq : undefined;
+function maxMessageSeq(messages: Message[]): number | undefined {
+  let maxSeq: number | undefined;
+  for (const message of messages) {
+    const seq = trustedMessageSeq(message);
+    if (seq !== undefined && (maxSeq === undefined || seq > maxSeq)) {
+      maxSeq = seq;
+    }
+  }
+  return maxSeq;
 }
 
-function messageIdentity(message: Message): string | undefined {
-  if (
-    "tool_call_id" in message &&
-    typeof message.tool_call_id === "string" &&
-    message.tool_call_id.length > 0
-  ) {
-    return `tool:${message.tool_call_id}`;
+function getConfirmedPreSubmitHistoryIdentities(
+  visibleHistory: Message[],
+  localTurnAnchor: LocalTurnAnchor | null,
+): Set<string> {
+  if (localTurnAnchor === null) {
+    return new Set();
   }
-  if (typeof message.id === "string" && message.id.length > 0) {
-    // DynamicContextMiddleware replaces the submitted HumanMessage(id=X) with
-    // a hidden SystemMessage(id=X) and the real HumanMessage(id=X__user).
-    // Treat those human copies as one UI message so a committed render ledger
-    // cannot retain X beside the later checkpoint copy X__user.
-    const messageId =
-      message.type === "human" &&
-      message.id.endsWith(INJECTED_USER_MESSAGE_ID_SUFFIX)
-        ? message.id.slice(0, -INJECTED_USER_MESSAGE_ID_SUFFIX.length) ||
-          message.id
-        : message.id;
-    return `message:${messageId}`;
+  const confirmed = new Set([
+    ...localTurnAnchor.preSubmitHistoryIdentities,
+    ...localTurnAnchor.preSubmitBridgeIdentities,
+  ]);
+  const maxSeq = localTurnAnchor.preSubmitMaxSeq;
+  if (maxSeq === undefined) {
+    return confirmed;
+  }
+  for (const message of visibleHistory) {
+    const identity = messageIdentity(message);
+    const seq = trustedMessageSeq(message);
+    if (identity !== undefined && seq !== undefined && seq <= maxSeq) {
+      confirmed.add(identity);
+    }
+  }
+  return confirmed;
+}
+
+function findMessageRunIdByIdentity(
+  messages: Message[],
+  identity: string,
+): string | undefined {
+  for (const message of messages) {
+    if (messageIdentity(message) !== identity) {
+      continue;
+    }
+    const runId = getMessageRunId(message);
+    if (runId) {
+      return runId;
+    }
   }
   return undefined;
-}
-
-function dedupeMessagesByIdentity(messages: Message[]): Message[] {
-  const lastIndexByIdentity = new Map<string, number>();
-  const lastVisibleIndexByIdentity = new Map<string, number>();
-
-  // This is a UI-display dedupe rule, not a general LangChain message-stream
-  // contract. Hidden messages that share an identity with a visible message are
-  // treated as control messages for this merged view; hidden messages carrying
-  // independent tracing/task semantics should use a distinct id or a custom
-  // stream/state channel instead of relying on message dedupe preservation.
-  const preservedTurnDurations = new Map<string, number>();
-  messages.forEach((message, index) => {
-    const identity = messageIdentity(message);
-    if (identity) {
-      lastIndexByIdentity.set(identity, index);
-      if (!isHiddenFromUIMessage(message)) {
-        lastVisibleIndexByIdentity.set(identity, index);
-      }
-      if (message.additional_kwargs?.turn_duration !== undefined) {
-        preservedTurnDurations.set(
-          identity,
-          message.additional_kwargs.turn_duration as number,
-        );
-      }
-    }
-  });
-
-  return messages
-    .filter((message, index) => {
-      const identity = messageIdentity(message);
-      if (!identity) {
-        return true;
-      }
-      const visibleIndex = lastVisibleIndexByIdentity.get(identity);
-      if (visibleIndex !== undefined) {
-        return visibleIndex === index;
-      }
-      return lastIndexByIdentity.get(identity) === index;
-    })
-    .map((message) => {
-      const identity = messageIdentity(message);
-      if (
-        identity &&
-        preservedTurnDurations.has(identity) &&
-        message.additional_kwargs?.turn_duration === undefined
-      ) {
-        return {
-          ...message,
-          additional_kwargs: {
-            ...message.additional_kwargs,
-            turn_duration: preservedTurnDurations.get(identity),
-          },
-        } as Message;
-      }
-      return message;
-    });
 }
 
 function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
@@ -321,7 +329,32 @@ export function buildVisibleHistoryMessages(
   const visibleRows = messageRows.filter(
     (message) => !supersededRunIds.has(message.run_id),
   );
-  return dedupeMessagesByIdentity([
+  // Content and position converge separately for a repeated identity: the
+  // newest visible row supplies the content, but the position stays the
+  // earliest trusted feed row — mirroring the backend `get_message_seqs`
+  // earliest-seq-wins rule, so a re-persisted update cannot push the message
+  // towards the tail. Hidden control copies never contribute a visible
+  // position (they only serve as a fallback when no visible row carries the
+  // identity).
+  const earliestSeqByIdentity = new Map<string, number>();
+  const earliestVisibleSeqByIdentity = new Map<string, number>();
+  for (const row of visibleRows) {
+    const identity = messageIdentity(row.content);
+    if (!identity || !isValidMessageSeq(row.seq)) {
+      continue;
+    }
+    const known = earliestSeqByIdentity.get(identity);
+    if (known === undefined || row.seq < known) {
+      earliestSeqByIdentity.set(identity, row.seq);
+    }
+    if (!isHiddenFromUIMessage(row.content)) {
+      const knownVisible = earliestVisibleSeqByIdentity.get(identity);
+      if (knownVisible === undefined || row.seq < knownVisible) {
+        earliestVisibleSeqByIdentity.set(identity, row.seq);
+      }
+    }
+  }
+  const deduped = dedupeMessagesByIdentity([
     // Carry the owning run_id onto the content message so historical subtask
     // cards can fetch their persisted step history on expand (#3779). run_id
     // lives on the RunMessage wrapper and would otherwise be dropped here.
@@ -337,6 +370,28 @@ export function buildVisibleHistoryMessages(
       },
     })),
   ]);
+  return deduped.map((message) => {
+    const identity = messageIdentity(message);
+    if (!identity) {
+      return message;
+    }
+    const earliestSeq =
+      earliestVisibleSeqByIdentity.get(identity) ??
+      earliestSeqByIdentity.get(identity);
+    if (
+      earliestSeq === undefined ||
+      message.additional_kwargs?.[MESSAGE_SEQ_KEY] === earliestSeq
+    ) {
+      return message;
+    }
+    return {
+      ...message,
+      additional_kwargs: {
+        ...message.additional_kwargs,
+        [MESSAGE_SEQ_KEY]: earliestSeq,
+      },
+    } as Message;
+  });
 }
 
 export type ThreadMessagesPageResponse = {
@@ -344,10 +399,6 @@ export type ThreadMessagesPageResponse = {
   has_more: boolean;
   next_before_seq: number | null;
 };
-
-function isValidThreadMessageSeq(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
-}
 
 /**
  * Validate the sequence fields that history reconciliation and pagination use
@@ -374,7 +425,7 @@ export function parseThreadMessagesPageResponse(
       typeof row === "object" && row !== null
         ? Reflect.get(row, "seq")
         : undefined;
-    if (!isValidThreadMessageSeq(seq)) {
+    if (!isValidMessageSeq(seq)) {
       throw new Error("Thread history returned a row with an invalid seq.");
     }
     if (seenSeqs.has(seq)) {
@@ -384,7 +435,7 @@ export function parseThreadMessagesPageResponse(
   }
 
   if (
-    (hasMore && !isValidThreadMessageSeq(nextBeforeSeq)) ||
+    (hasMore && !isValidMessageSeq(nextBeforeSeq)) ||
     (!hasMore && nextBeforeSeq !== null)
   ) {
     throw new Error(
@@ -459,7 +510,7 @@ export function reconcileThreadHistoryRows(
   const sourceRows = isAuthoritativeComplete
     ? currentRows
     : [...previousRows, ...currentRows];
-  if (sourceRows.some((row) => !isValidThreadMessageSeq(row.seq))) {
+  if (sourceRows.some((row) => !isValidMessageSeq(row.seq))) {
     console.error(
       "Thread history reconciliation received an invalid sequence value.",
     );
@@ -486,179 +537,46 @@ export function reconcileThreadHistoryRows(
   return reconciled;
 }
 
-export function mergeMessages(
-  historyMessages: Message[],
-  threadMessages: Message[],
-  optimisticMessages: Message[],
-): Message[] {
-  const savedTurnDurations = new Map<string, number>();
-  const savedRunIds = new Map<string, string>();
-  for (const msg of historyMessages) {
-    const identity = messageIdentity(msg);
-    const runId = getMessageRunId(msg);
-    if (identity && runId) {
-      savedRunIds.set(identity, runId);
-    }
-    if (identity && msg.additional_kwargs?.turn_duration !== undefined) {
-      savedTurnDurations.set(
-        identity,
-        msg.additional_kwargs.turn_duration as number,
-      );
-    }
+// mergeMessages now lives in ./message-order (pure, unit-testable ordering
+// module); it is imported above and re-exported here so existing consumers of
+// this module keep working unchanged.
+export { mergeMessages };
+
+/**
+ * Collect live run ids that were not part of the pre-submit checkpoint.
+ * An empty result is safe because restoreLocalTurnMessageOrder independently
+ * anchors the current turn from the pending human's run_id when interrupt/stop
+ * has already flushed the live steps into canonical history.
+ */
+export function getCurrentTurnRunIds(
+  messages: Message[],
+  baselineMessageIdentities: ReadonlySet<string> | null,
+  confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+): Set<string> {
+  const runIds = new Set<string>();
+  if (baselineMessageIdentities === null) {
+    return runIds;
   }
 
-  const canonical = dedupeMessagesByIdentity(historyMessages);
-  const live = dedupeMessagesByIdentity(threadMessages);
-  const canonicalByIdentity = new Map(
-    canonical.flatMap((message) => {
-      const identity = messageIdentity(message);
-      return identity ? [[identity, message] as const] : [];
-    }),
-  );
-  const replacementByIdentity = new Map<string, Message>();
-  // This uses the same identity-anchor weaving shape as
-  // resolveTransientHistoryBridge, but intentionally remains separate: live
-  // messages may replace canonical copies and identity-less entries survive.
-  const beforeAnchor = new Map<string, Message[]>();
-  let pending: Message[] = [];
-  let lastAnchorIdentity: string | undefined;
-
-  // Lower bound of the history page window that is currently loaded. A live
-  // message whose seq is below it belongs before everything on screen, which
-  // is knowledge the anchor weaving below cannot reach: the anchor only says
-  // "earlier than this row", and after compaction the nearest anchor can sit
-  // deep inside the window (#4666 — measured at row 25 of 50).
-  const canonicalMinSeq = canonical.reduce<number | undefined>(
-    (min, message) => {
-      const seq = messageSeq(message);
-      return seq !== undefined && (min === undefined || seq < min) ? seq : min;
-    },
-    undefined,
-  );
-  const beforeWindow: Message[] = [];
-
-  // Split off what the feed places before the loaded window BEFORE the anchor
-  // walk rather than inside it. A summarized checkpoint can share no identity
-  // at all with the loaded page — compaction keeps only this run's recent tail,
-  // while the page on screen was fetched turns earlier — and the anchor loop
-  // then never runs. That is exactly when a rescued early turn most needs its
-  // seq: user submits, waits without reloading, compaction fires, and the
-  // message is appended to the tail instead (#4666).
-  const liveInWindow: Message[] = [];
-  for (const message of live) {
-    const seq = messageSeq(message);
+  for (const message of messages) {
     if (
-      seq !== undefined &&
-      canonicalMinSeq !== undefined &&
-      seq < canonicalMinSeq
+      (message.type !== "ai" && message.type !== "tool") ||
+      isHiddenFromUIMessage(message)
     ) {
-      beforeWindow.push(message);
-    } else {
-      liveInWindow.push(message);
-    }
-  }
-
-  // A summarized checkpoint is not necessarily a contiguous history suffix:
-  // middleware may retain protected prompt/input messages at the front and a
-  // recent tail at the back. Treat every shared identity as an ordering anchor,
-  // replacing the canonical copy in place. New live messages are woven before
-  // the next shared anchor (or after the last one), so a protected early input
-  // can never be moved to the tail by global last-copy deduplication.
-  for (const message of liveInWindow) {
-    const identity = messageIdentity(message);
-    const canonicalMessage = identity
-      ? canonicalByIdentity.get(identity)
-      : undefined;
-    if (!identity || !canonicalMessage) {
-      pending.push(message);
       continue;
     }
-
-    // A summarized checkpoint may start with a protected message whose true
-    // canonical position is separated from this anchor by unloaded pages —
-    // rescued dynamic-context messages are the common case. Its position
-    // relative to this anchor is still known (both the checkpoint and
-    // seq-sorted history place it earlier), so it is woven in before the
-    // anchor like any other live-only segment. Dropping it instead was how a
-    // user's own question disappeared from a long thread once the first
-    // history page no longer reached back to it (#4666): a collapsed unloaded
-    // gap is recoverable by paging, a discarded message is not.
-    if (pending.length > 0) {
-      beforeAnchor.set(identity, [
-        ...(beforeAnchor.get(identity) ?? []),
-        ...pending,
-      ]);
-    }
-    pending = [];
-    lastAnchorIdentity = identity;
-
-    // A hidden checkpoint control message must not replace a visible canonical
-    // user turn that happens to reuse its identity. In every other case the
-    // live checkpoint copy is fresher and replaces history without moving it.
-    if (
-      !isHiddenFromUIMessage(message) ||
-      isHiddenFromUIMessage(canonicalMessage)
-    ) {
-      replacementByIdentity.set(identity, message);
-    }
-  }
-
-  let canonicalAndLive: Message[];
-  if (!lastAnchorIdentity) {
-    canonicalAndLive = [...canonical, ...liveInWindow];
-  } else {
-    canonicalAndLive = [];
-    for (const message of canonical) {
-      const identity = messageIdentity(message);
-      if (identity) {
-        canonicalAndLive.push(...(beforeAnchor.get(identity) ?? []));
-      }
-      const replacement = identity
-        ? replacementByIdentity.get(identity)
-        : undefined;
-      canonicalAndLive.push(replacement ?? message);
-    }
-    // A trailing live-only segment is known to come after the last shared
-    // anchor, but that anchor may not be the end of canonical history (for
-    // example, another client may have persisted newer rows). Preserve the
-    // canonical source order before appending the live tail.
-    canonicalAndLive.push(...pending);
-  }
-
-  const merged = dedupeMessagesByIdentity([
-    ...[...beforeWindow].sort(
-      (left, right) => (messageSeq(left) ?? 0) - (messageSeq(right) ?? 0),
-    ),
-    ...canonicalAndLive,
-    ...optimisticMessages,
-  ]);
-
-  return merged.map((message) => {
     const identity = messageIdentity(message);
-    if (!identity) {
-      return message;
+    const runId = getMessageRunId(message);
+    if (
+      runId &&
+      (!identity ||
+        (!baselineMessageIdentities.has(identity) &&
+          !confirmedHistoryIdentities.has(identity)))
+    ) {
+      runIds.add(runId);
     }
-    const shouldRestoreRunId =
-      savedRunIds.has(identity) && !getMessageRunId(message);
-    const shouldRestoreTurnDuration =
-      savedTurnDurations.has(identity) &&
-      message.additional_kwargs?.turn_duration === undefined;
-    if (shouldRestoreRunId || shouldRestoreTurnDuration) {
-      return {
-        ...message,
-        ...(shouldRestoreRunId ? { run_id: savedRunIds.get(identity) } : {}),
-        ...(shouldRestoreTurnDuration
-          ? {
-              additional_kwargs: {
-                ...message.additional_kwargs,
-                turn_duration: savedTurnDurations.get(identity),
-              },
-            }
-          : {}),
-      } as Message;
-    }
-    return message;
-  });
+  }
+  return runIds;
 }
 
 /**
@@ -666,26 +584,91 @@ export function mergeMessages(
  * LangGraph `messages-tuple` events can publish the first AI/tool steps before
  * canonical history contains the user message. Those steps are not part of the
  * pre-submit baseline, so move only that visible pending segment behind the
- * first new human message without disturbing established history or hidden
- * checkpoint controls. The caller keeps the baseline after stream completion
- * because the SDK may retain its transient event order until the next submit.
+ * latest new human message. Conversely, a baseline or history-confirmed message
+ * from an established turn can be woven after that human before a live
+ * checkpoint tail; move those established messages back before the input. The
+ * caller keeps the baseline after stream completion because the SDK may retain
+ * its transient event order until the next submit.
  */
 export function restoreLocalTurnMessageOrder(
   messages: Message[],
   baselineMessageIdentities: ReadonlySet<string>,
+  confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+  currentTurnRunIds: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+  anchorHumanIdentity?: string | null,
+  canonicalHistoryIdentities: ReadonlySet<string> = confirmedHistoryIdentities,
 ): Message[] {
-  const pendingHumanIndex = messages.findIndex((message) => {
-    const identity = messageIdentity(message);
-    return (
-      message.type === "human" &&
-      !isHiddenFromUIMessage(message) &&
-      identity !== undefined &&
-      !baselineMessageIdentities.has(identity)
-    );
-  });
-  if (pendingHumanIndex <= 0) {
+  // When the caller recorded the exact human identity this turn submitted
+  // (LocalTurnAnchor), only that message may anchor the repair. `null` means
+  // the turn has no visible human at all (hidden human-input reply,
+  // regenerate replay): no human may be borrowed from history. An identity
+  // that has not reached the render snapshot yet means the display is a frame
+  // behind — keep the established order instead of re-anchoring on an older
+  // history-only human (absence from the checkpoint baseline is not proof
+  // that a message belongs to this turn).
+  if (anchorHumanIdentity === null) {
     return messages;
   }
+  let pendingHumanIndex = -1;
+  if (anchorHumanIdentity !== undefined) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!;
+      if (
+        message.type === "human" &&
+        !isHiddenFromUIMessage(message) &&
+        messageIdentity(message) === anchorHumanIdentity
+      ) {
+        pendingHumanIndex = index;
+        break;
+      }
+    }
+  } else {
+    // Compat path for callers without a local-turn anchor. Context compaction
+    // can omit an older human from the checkpoint while the REST history page
+    // still supplies it, so anchor on the LATEST visible human that is not in
+    // the baseline; an old history-only turn then cannot claim the current
+    // stream. A freshly submitted human may not have a server id yet, and
+    // identity-less messages are necessarily absent from the baseline.
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!;
+      const identity = messageIdentity(message);
+      if (
+        message.type === "human" &&
+        !isHiddenFromUIMessage(message) &&
+        (identity === undefined || !baselineMessageIdentities.has(identity))
+      ) {
+        pendingHumanIndex = index;
+        break;
+      }
+    }
+  }
+  if (pendingHumanIndex < 0) {
+    return messages;
+  }
+
+  // The fixed confirmed set decides which suffix messages may move back across
+  // this turn's human. The wider canonical set has a different job in the
+  // prefix: a REST-history message is not speculative current-turn output just
+  // because the latest-page window advanced after submit.
+  const isConfirmedHistoryMessage = (identity: string | undefined) =>
+    identity !== undefined && confirmedHistoryIdentities.has(identity);
+  const isCanonicalHistoryMessage = (identity: string | undefined) =>
+    identity !== undefined && canonicalHistoryIdentities.has(identity);
+  // Steps of the CURRENT run must never be treated as displaced history: after
+  // an interrupt/stop the current turn's already-executed steps are persisted
+  // into canonical history, but they still belong AFTER the new human input.
+  // The pending human message itself carries the current run_id, so it is the
+  // most reliable anchor even when the live checkpoint no longer holds the
+  // current turn's steps (stop/interrupt can flush them to history).
+  const effectiveCurrentTurnRunIds = new Set(currentTurnRunIds);
+  const pendingHumanRunId = getMessageRunId(messages[pendingHumanIndex]!);
+  if (pendingHumanRunId) {
+    effectiveCurrentTurnRunIds.add(pendingHumanRunId);
+  }
+  const isCurrentTurnStep = (message: Message) => {
+    const runId = getMessageRunId(message);
+    return runId !== undefined && effectiveCurrentTurnRunIds.has(runId);
+  };
 
   const stablePrefix: Message[] = [];
   const earlyPendingSteps: Message[] = [];
@@ -695,22 +678,43 @@ export function restoreLocalTurnMessageOrder(
       (message.type === "ai" || message.type === "tool") &&
       !isHiddenFromUIMessage(message) &&
       identity !== undefined &&
-      !baselineMessageIdentities.has(identity);
+      !baselineMessageIdentities.has(identity) &&
+      ((!isCanonicalHistoryMessage(identity) &&
+        !isConfirmedHistoryMessage(identity)) ||
+        isCurrentTurnStep(message));
     if (isVisiblePendingStep) {
       earlyPendingSteps.push(message);
     } else {
       stablePrefix.push(message);
     }
   }
-  if (earlyPendingSteps.length === 0) {
+  const displacedMessages: Message[] = [];
+  const stableSuffix: Message[] = [];
+  for (const message of messages.slice(pendingHumanIndex + 1)) {
+    const identity = messageIdentity(message);
+    const wasPresentBeforeSubmit =
+      identity !== undefined && baselineMessageIdentities.has(identity);
+    const wasConfirmedInPreviousHistory =
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message) &&
+      isConfirmedHistoryMessage(identity) &&
+      !isCurrentTurnStep(message);
+    if (wasPresentBeforeSubmit || wasConfirmedInPreviousHistory) {
+      displacedMessages.push(message);
+    } else {
+      stableSuffix.push(message);
+    }
+  }
+  if (earlyPendingSteps.length === 0 && displacedMessages.length === 0) {
     return messages;
   }
 
   return [
     ...stablePrefix,
+    ...displacedMessages,
     messages[pendingHumanIndex]!,
     ...earlyPendingSteps,
-    ...messages.slice(pendingHumanIndex + 1),
+    ...stableSuffix,
   ];
 }
 
@@ -968,8 +972,28 @@ export function resolveTransientHistoryBridge(
     return visibleHistory;
   }
 
+  // Trusted seq outranks identity anchors — the same position priority
+  // mergeMessages applies. A rescued message whose seq is known lands exactly
+  // where the feed places it, even when no bridge identity overlaps the
+  // loaded window; anchor weaving below remains the fallback for entries
+  // without a trustworthy position.
+  const seqPositioned: Message[] = [];
+  const unpositioned: Message[] = [];
+  for (const message of missing) {
+    if (trustedMessageSeq(message) !== undefined) {
+      seqPositioned.push(message);
+    } else {
+      unpositioned.push(message);
+    }
+  }
+  // Place rescued seq rows first so weaving can anchor unsequenced
+  // neighbors to them without a later insertion reversing their order.
+  const positionedHistory = insertByTrustedSeq(visibleHistory, seqPositioned);
+  const anchorIdentities = new Set(
+    positionedHistory.map(messageIdentity).filter(isNonEmptyString),
+  );
   const missingByIdentity = new Map(
-    missing.flatMap((message) => {
+    unpositioned.flatMap((message) => {
       const identity = messageIdentity(message);
       return identity ? [[identity, message] as const] : [];
     }),
@@ -984,12 +1008,17 @@ export function resolveTransientHistoryBridge(
   );
   let pending: Message[] = [];
   let lastAnchorIdentity: string | undefined;
-  let hasCanonicalAnchor = false;
 
   for (const identity of bridgeOrder) {
-    if (presentIdentities.has(identity)) {
+    if (anchorIdentities.has(identity)) {
       if (pending.length > 0) {
-        if (hasCanonicalAnchor) {
+        // A rescued seq anchor preserves its captured prefix even if React
+        // has not rendered it yet. Only a leading prefix anchored to loaded
+        // history needs proof that it does not span an unloaded cursor gap.
+        if (
+          lastAnchorIdentity !== undefined ||
+          !presentIdentities.has(identity)
+        ) {
           beforeAnchor.set(identity, [
             ...(beforeAnchor.get(identity) ?? []),
             ...pending,
@@ -1022,12 +1051,7 @@ export function resolveTransientHistoryBridge(
           }
         }
       }
-      // The prefix before the first loaded anchor has no trustworthy position:
-      // cursor pages containing its intervening history may not be loaded yet.
-      // The sole exception is a prefix whose exact relative position was
-      // already committed to the previous UI frame.
       pending = [];
-      hasCanonicalAnchor = true;
       lastAnchorIdentity = identity;
       continue;
     }
@@ -1038,17 +1062,17 @@ export function resolveTransientHistoryBridge(
     }
   }
 
-  // No bridge identity overlaps canonical history. This is the original
+  // No bridge identity overlaps a positioned row. This is the original
   // persistence-gap case: loaded history is older and the rescued live turns
   // belong after it.
   if (!lastAnchorIdentity) {
-    return [...visibleHistory, ...missing];
+    return [...positionedHistory, ...unpositioned];
   }
 
   // A candidate added before its ordering snapshot (or carrying an identity
   // absent from that snapshot) cannot be anchored. Keep it in capture order at
   // the trailing edge of the anchored bridge rather than dropping it.
-  for (const message of missing) {
+  for (const message of unpositioned) {
     const identity = messageIdentity(message);
     if (identity && !emittedMissingIdentities.has(identity)) {
       pending.push(message);
@@ -1057,7 +1081,7 @@ export function resolveTransientHistoryBridge(
   }
 
   const resolved: Message[] = [];
-  for (const message of visibleHistory) {
+  for (const message of positionedHistory) {
     const identity = messageIdentity(message);
     if (identity) {
       resolved.push(...(beforeAnchor.get(identity) ?? []));
@@ -1100,9 +1124,27 @@ export function mergeTransientHistoryBridge(
       (!isHiddenFromUIMessage(captured) || isHiddenFromUIMessage(existing))
     ) {
       // Refresh the buffered snapshot without moving its first-known
-      // chronological position. Repeated compression can recapture protected
-      // prefix messages before a newer tail.
-      merged[existingIndex] = captured;
+      // chronological position — and without dropping a trusted position the
+      // earlier copy already carried. Repeated compression can recapture
+      // protected prefix messages before a newer tail; a refresh without seq
+      // must not reset the position the bridge resolver relies on.
+      const existingSeq = trustedMessageSeq(existing);
+      const capturedSeq = trustedMessageSeq(captured);
+      const keptSeq =
+        existingSeq !== undefined &&
+        (capturedSeq === undefined || existingSeq < capturedSeq)
+          ? existingSeq
+          : capturedSeq;
+      merged[existingIndex] =
+        keptSeq !== undefined && capturedSeq !== keptSeq
+          ? ({
+              ...captured,
+              additional_kwargs: {
+                ...captured.additional_kwargs,
+                [MESSAGE_SEQ_KEY]: keptSeq,
+              },
+            } as Message)
+          : captured;
     }
   }
   return merged;
@@ -1504,6 +1546,11 @@ export function invalidateStoppedThreadCaches(
   void queryClient.invalidateQueries({
     queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
   });
+  // A finished run updates the title/recency the project page thread list
+  // shows ([...PROJECTS_QUERY_KEY, "threads", id, ...]).
+  void queryClient.invalidateQueries({
+    queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+  });
 
   if (!threadId || isMock) {
     return;
@@ -1857,7 +1904,7 @@ export function useThreadStream({
         transientHistoryThreadIdRef.current = null;
         summarizedRef.current = new Set<string>();
         pendingUsageBaselineMessageIdsRef.current = new Set();
-        localTurnOrderBaselineIdentitiesRef.current = null;
+        localTurnAnchorRef.current = null;
         tasksRef.current = {};
         setTasks({});
         invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
@@ -1971,7 +2018,17 @@ export function useThreadStream({
     () => (threadId ? history : []),
     [history, threadId],
   );
-  const humanMessageCount = persistedMessages.filter(
+  // Render-facing coalesced snapshot. Optimistic-input confirmation and the
+  // turn anchor observe THIS snapshot — the same frames the user sees — so a
+  // human echo landing in the per-chunk SDK array one coalesce interval early
+  // can no longer withdraw the local input before the snapshot shows it.
+  // Refs, summarization capture, and token-usage tracking keep consuming the
+  // per-chunk `persistedMessages` array above, unchanged.
+  const renderMessages = useCoalescedStreamMessages(
+    persistedMessages,
+    thread.isLoading,
+  );
+  const humanMessageCount = renderMessages.filter(
     (m) => m.type === "human",
   ).length;
   const latestMessageCountsRef = useRef({ humanMessageCount });
@@ -1982,7 +2039,7 @@ export function useThreadStream({
   // the settled frame. The next local submit replaces it and a thread switch or
   // replay gap clears it. An empty set is meaningful for a new thread and must
   // not be confused with a reconnect that has no local turn anchor.
-  const localTurnOrderBaselineIdentitiesRef = useRef<Set<string> | null>(null);
+  const localTurnAnchorRef = useRef<LocalTurnAnchor | null>(null);
   // Current-stream lifecycle bridge for messages removed from the checkpoint
   // tail before the canonical run-event page refetch observes the journal
   // flush. It is never appended into useThreadHistory's persisted pages.
@@ -2031,7 +2088,7 @@ export function useThreadStream({
     };
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
-    localTurnOrderBaselineIdentitiesRef.current = null;
+    localTurnAnchorRef.current = null;
     pendingPreparedReplayRef.current = null;
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
@@ -2081,9 +2138,11 @@ export function useThreadStream({
 
   // Clear optimistic when server messages arrive.
   // For messages with a human optimistic message, wait until the server's
-  // human message has arrived to avoid clearing before canonical history (or
-  // replay-gap recovery) reports the input after individual messages-tuple
-  // events for AI messages.
+  // human message has arrived in the RENDER SNAPSHOT — identity match first,
+  // human-count growth of the rendered frames as fallback for runtime-re-keyed
+  // first turns — never in the unthrottled per-chunk array, which would
+  // withdraw the local input one coalesce interval before the user can see
+  // its confirmed copy.
   const optimisticMessageCount = optimisticMessages.length;
   const hasHumanOptimistic = optimisticMessages.some((m) => m.type === "human");
   useEffect(() => {
@@ -2100,12 +2159,12 @@ export function useThreadStream({
   useEffect(() => {
     if (
       optimisticMessageCount > 0 &&
-      areOptimisticMessagesConfirmed(optimisticMessages, persistedMessages)
+      areOptimisticMessagesConfirmed(optimisticMessages, renderMessages)
     ) {
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
     }
-  }, [optimisticMessageCount, optimisticMessages, persistedMessages]);
+  }, [optimisticMessageCount, optimisticMessages, renderMessages]);
 
   const sendMessage = useCallback(
     async (
@@ -2133,9 +2192,33 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      localTurnOrderBaselineIdentitiesRef.current = new Set(
-        pendingUsageBaselineMessageIdsRef.current,
-      );
+      // One client-generated id for this turn's human input: the optimistic
+      // display copy and the submitted message share it, so the render
+      // snapshot confirms the exact identity it already shows instead of the
+      // ordering repair guessing from the baseline (a compaction-trimmed
+      // checkpoint must never promote an older history-only human into this
+      // turn's anchor).
+      const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
+      const humanMessageId = `local-human-${uuid()}`;
+      localTurnAnchorRef.current = {
+        threadId,
+        humanIdentity: hideFromUI ? null : `message:${humanMessageId}`,
+        baselineIdentities: new Set(pendingUsageBaselineMessageIdsRef.current),
+        preSubmitHistoryIdentities: new Set(
+          visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+        ),
+        preSubmitBridgeIdentities: new Set(
+          transientHistoryThreadIdRef.current === threadId
+            ? transientHistoryBridgeRef.current
+                .map(messageIdentity)
+                .filter(isNonEmptyString)
+            : EMPTY_MESSAGE_IDENTITIES,
+        ),
+        preSubmitMaxSeq: maxMessageSeq([
+          ...visibleHistory,
+          ...persistedMessages,
+        ]),
+      };
 
       // Build optimistic files list with uploading status
       const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
@@ -2146,7 +2229,6 @@ export function useThreadStream({
         }),
       );
 
-      const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
       const optimisticAdditionalKwargs = {
         ...options?.additionalKwargs,
         ...(optimisticFiles.length > 0 ? { files: optimisticFiles } : {}),
@@ -2156,7 +2238,7 @@ export function useThreadStream({
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
-          id: `opt-human-${Date.now()}`,
+          id: humanMessageId,
           content: text ? [{ type: "text", text }] : "",
           additional_kwargs: optimisticAdditionalKwargs,
         });
@@ -2263,6 +2345,7 @@ export function useThreadStream({
               additionalKwargs: options?.additionalKwargs,
               additionalInputMessages: options?.additionalInputMessages,
               filesForSubmit,
+              humanMessageId,
             }),
           },
           {
@@ -2302,7 +2385,7 @@ export function useThreadStream({
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
         setIsUploading(false);
-        localTurnOrderBaselineIdentitiesRef.current = null;
+        localTurnAnchorRef.current = null;
         throw error;
       } finally {
         sendInFlightRef.current = false;
@@ -2315,6 +2398,7 @@ export function useThreadStream({
       queryClient,
       humanMessageCount,
       persistedMessages,
+      visibleHistory,
     ],
   );
 
@@ -2340,9 +2424,27 @@ export function useThreadStream({
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
-      localTurnOrderBaselineIdentitiesRef.current = new Set(
-        pendingUsageBaselineMessageIdsRef.current,
-      );
+      localTurnAnchorRef.current = {
+        threadId,
+        // Replay turns submit no new visible human; an edit replay adopts the
+        // prepare response's replacement identity once it lands below.
+        humanIdentity: null,
+        baselineIdentities: new Set(pendingUsageBaselineMessageIdsRef.current),
+        preSubmitHistoryIdentities: new Set(
+          visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+        ),
+        preSubmitBridgeIdentities: new Set(
+          transientHistoryThreadIdRef.current === threadId
+            ? transientHistoryBridgeRef.current
+                .map(messageIdentity)
+                .filter(isNonEmptyString)
+            : EMPTY_MESSAGE_IDENTITIES,
+        ),
+        preSubmitMaxSeq: maxMessageSeq([
+          ...visibleHistory,
+          ...persistedMessages,
+        ]),
+      };
       setLiveMessagesThreadId(threadId);
       listeners.current.onSend?.(threadId);
       let preparedSupersededRunId: string | null = null;
@@ -2361,6 +2463,15 @@ export function useThreadStream({
           typeof prepared.replacement_human_message_id === "string"
             ? prepared.replacement_human_message_id
             : undefined;
+        const replayAnchor = localTurnAnchorRef.current;
+        if (replayAnchor?.threadId === threadId && replacementHumanMessageId) {
+          // The edit replay reuses the server-prepared replacement identity;
+          // supersede semantics stay with the prepare response.
+          localTurnAnchorRef.current = {
+            ...replayAnchor,
+            humanIdentity: `message:${replacementHumanMessageId}`,
+          };
+        }
         const pendingReplay: PendingPreparedReplayMask = {
           kind: replacementHumanMessageId ? "edit" : "regenerate",
           targetRunId: prepared.target_run_id,
@@ -2429,7 +2540,7 @@ export function useThreadStream({
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
-        localTurnOrderBaselineIdentitiesRef.current = null;
+        localTurnAnchorRef.current = null;
         if (preparedSupersededRunId) {
           const supersededRunId = preparedSupersededRunId;
           pendingPreparedReplayRef.current = null;
@@ -2446,7 +2557,14 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [context, humanMessageCount, persistedMessages, queryClient, thread],
+    [
+      context,
+      humanMessageCount,
+      persistedMessages,
+      queryClient,
+      thread,
+      visibleHistory,
+    ],
   );
 
   const regenerateMessage = useCallback(
@@ -2531,14 +2649,6 @@ export function useThreadStream({
     messagesRef.current = persistedMessages;
   }
 
-  // Render-facing coalesced snapshot. Refs, counters and usage tracking keep
-  // consuming the per-chunk array above so lifecycle semantics (optimistic
-  // clearing, summarization capture, token-usage baselines) are unchanged.
-  const renderMessages = useCoalescedStreamMessages(
-    persistedMessages,
-    thread.isLoading,
-  );
-
   const rawVisibleOptimisticMessages = getVisibleOptimisticMessages(
     optimisticThreadId === currentViewThreadId ? optimisticMessages : [],
     prevHumanMsgCountRef.current,
@@ -2595,10 +2705,58 @@ export function useThreadStream({
       renderMessages,
       visibleOptimisticMessages,
     );
-    const localTurnOrderBaseline = localTurnOrderBaselineIdentitiesRef.current;
-    return localTurnOrderBaseline === null
+    const localTurnAnchor =
+      localTurnAnchorRef.current?.threadId === threadId
+        ? localTurnAnchorRef.current
+        : null;
+    const canonicalHistoryIdentities = new Set(
+      visibleHistory.map(messageIdentity).filter(isNonEmptyString),
+    );
+    // Only established history known to predate this local submit may be moved
+    // across its human anchor. The fixed identity snapshots cover messages
+    // already loaded from REST and pre-existing transient-bridge rescue; the
+    // authoritative seq boundary also admits older pages that finish loading
+    // after submit. Post-submit rescue and later external turns stay outside.
+    const confirmedHistoryIdentities = getConfirmedPreSubmitHistoryIdentities(
+      visibleHistory,
+      localTurnAnchor,
+    );
+    // The current turn's run(s): visible ai/tool steps that appear in the live
+    // checkpoint but are neither part of the pre-submit baseline nor already
+    // canonical REST history. These are output from the in-flight submit and
+    // must never be moved before their human.
+    const currentTurnRunIds = getCurrentTurnRunIds(
+      renderMessages,
+      localTurnAnchor ? localTurnAnchor.baselineIdentities : null,
+      canonicalHistoryIdentities,
+    );
+    if (localTurnAnchor?.humanIdentity) {
+      // The surviving merged copy of the submitted human can be the run_id-less
+      // optimistic one; recover the run from any rendered or canonical copy so
+      // an interrupt-flushed current-run step is still recognised as ours.
+      const anchorRunId =
+        findMessageRunIdByIdentity(
+          renderMessages,
+          localTurnAnchor.humanIdentity,
+        ) ??
+        findMessageRunIdByIdentity(
+          effectiveHistory,
+          localTurnAnchor.humanIdentity,
+        );
+      if (anchorRunId) {
+        currentTurnRunIds.add(anchorRunId);
+      }
+    }
+    return localTurnAnchor === null
       ? restoreReconnectedTurnMessageOrder(merged)
-      : restoreLocalTurnMessageOrder(merged, localTurnOrderBaseline);
+      : restoreLocalTurnMessageOrder(
+          merged,
+          localTurnAnchor.baselineIdentities,
+          confirmedHistoryIdentities,
+          currentTurnRunIds,
+          localTurnAnchor.humanIdentity,
+          canonicalHistoryIdentities,
+        );
   }, [
     previouslyRenderedOrder,
     renderMessages,
@@ -2608,10 +2766,27 @@ export function useThreadStream({
     visibleOptimisticMessages,
   ]);
   useEffect(() => {
-    const visibleMergedMessages = mergedMessages.filter(
-      (message) =>
-        !isHiddenFromUIMessage(message) && !message.id?.startsWith("opt-"),
+    // The committed render ledger excludes hidden control copies and the
+    // still-unconfirmed optimistic ones (keyed by identity, since the local
+    // input now shares its id with the submit instead of an `opt-` prefix):
+    // a failed send must never pin a message the server never saw.
+    const pendingOptimisticIdentities = new Set(
+      (optimisticThreadId === currentViewThreadId
+        ? optimisticMessages
+        : EMPTY_MESSAGES
+      )
+        .map(messageIdentity)
+        .filter(isNonEmptyString),
     );
+    const visibleMergedMessages = mergedMessages.filter((message) => {
+      if (isHiddenFromUIMessage(message)) {
+        return false;
+      }
+      const identity = messageIdentity(message);
+      return (
+        identity === undefined || !pendingOptimisticIdentities.has(identity)
+      );
+    });
     const previousLedger =
       thread.isLoading &&
       renderedMessageSnapshotRef.current.threadId === threadId
@@ -2629,7 +2804,15 @@ export function useThreadStream({
         .map(messageIdentity)
         .filter(isNonEmptyString),
     };
-  }, [mergedMessages, pendingSupersededMessageIds, thread.isLoading, threadId]);
+  }, [
+    mergedMessages,
+    optimisticMessages,
+    optimisticThreadId,
+    currentViewThreadId,
+    pendingSupersededMessageIds,
+    thread.isLoading,
+    threadId,
+  ]);
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
         persistedMessages,
@@ -3146,6 +3329,58 @@ export function usePinThread() {
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
       });
+      // Pin changes the ordering the project page thread list shows
+      // ([...PROJECTS_QUERY_KEY, "threads", id, ...]); without this, cached
+      // pages keep the old order and pagination can duplicate or skip
+      // entries across the refetch boundary.
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+      });
+    },
+  });
+}
+
+export function useMoveThreadToProject(options?: {
+  onError?: (
+    error: Error,
+    variables: { threadId: string; projectId: string | null },
+  ) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      threadId,
+      projectId,
+    }: {
+      threadId: string;
+      projectId: string | null;
+    }) => moveThreadToProject(threadId, projectId),
+    // Hook-level error handler: survives the caller's dropdown unmounting,
+    // unlike a per-mutate `onError` passed from inside a closing menu.
+    onError: options?.onError,
+    async onSuccess(_response, { threadId, projectId }) {
+      // An older GET must not overwrite the confirmed affiliation. Match all
+      // metadata variants, including an initial read with no cached snapshot.
+      await queryClient.cancelQueries({
+        queryKey: ["thread", "metadata", threadId],
+      });
+      setThreadMetadataInCaches(queryClient, threadId, {
+        [THREAD_PROJECT_METADATA_KEY]: projectId,
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ["thread", "metadata", threadId],
+      });
+    },
+    onSettled() {
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      });
+      // Moving a thread changes membership of project thread lists
+      // ([...PROJECTS_QUERY_KEY, "threads", id, ...]).
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+      });
     },
   });
 }
@@ -3328,6 +3563,11 @@ export function useDeleteThread() {
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
       });
+      // Deleting a thread changes membership of project thread lists
+      // ([...PROJECTS_QUERY_KEY, "threads", id, ...]).
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+      });
     },
   });
 }
@@ -3360,6 +3600,11 @@ export function useRenameThread() {
       for (const filter of filters) {
         void queryClient.invalidateQueries(filter);
       }
+      // The project page thread list is REST-shaped, not covered by
+      // setThreadTitleInCaches; invalidate it so renamed titles refresh.
+      void queryClient.invalidateQueries({
+        queryKey: [...PROJECTS_QUERY_KEY, "threads"],
+      });
     },
   });
 }

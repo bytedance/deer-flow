@@ -11,8 +11,11 @@ from __future__ import annotations
 import asyncio
 import errno
 import logging
+import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -136,20 +139,27 @@ class _FakeCommands:
             return _execution(exit_code=9)
         if command == "missing-complete":
             return _execution(stderr=("stream ended",), exit_code=None)
-        if command.startswith("find "):
+        if "__DF_SEARCH_STATUS__:" in command:
+            return self._search(command)
+        if command.startswith("find ") or "find -H " in command:
             return self._find(command)
         if command.startswith(("grep ", "{ grep ")):
             return self._grep(command)
         return _execution()
 
     def _find(self, command: str) -> _Execution:
-        tokens = shlex.split(command)
-        root = tokens[1].rstrip("/") or "/"
-        include_dirs = "d" in tokens
+        match = re.search(r"(?:^|[\s;{])find(?:\s+-[HLP])*\s+(\S+)", command)
+        root = (match.group(1).strip("'\"") if match else "").rstrip("/") or "/"
+        include_dirs = "-type d" in command
         paths = list(self._owner.file_data)
         if include_dirs:
             paths.extend(self._owner.directories)
         matches = sorted(path for path in set(paths) if path == root or path.startswith(f"{root}/"))
+        if "__DF_FIND_STATUS__:" in command:
+            status = 0 if matches else 1
+            marker = f"__DF_FIND_STATUS__:{status}"
+            stdout = (*matches, "", marker) if matches else ("", marker)
+            return _execution(stdout=stdout, exit_code=status)
         return _execution(stdout=tuple(matches))
 
     def _grep(self, command: str) -> _Execution:
@@ -169,6 +179,20 @@ class _FakeCommands:
         if self._owner.grep_duplicate_rows:
             rows.extend(rows)
         return _execution(stdout=tuple(rows))
+
+    def _search(self, command: str) -> _Execution:
+        # remote_search_command: a root-existence check, then the wrapped search and its status marker.
+        root = shlex.split(re.search(r"\[ ! -e (.+?) \]; then", command).group(1))[0].rstrip("/") or "/"
+        paths = set(self._owner.file_data) | set(self._owner.directories)
+        if not any(path == root or path.startswith(f"{root}/") for path in paths):
+            return _execution(stdout=("__DF_SEARCH_STATUS__:missing",))
+        inner = command[command.index("{ ") + 2 : command.index('; echo $? > "$_st"; }')]
+        if inner.startswith("find "):
+            rows, status = [message.text for message in self._find(inner).logs.stdout], 0
+        else:
+            rows = [message.text for message in self._grep(inner).logs.stdout]
+            status = 0 if rows else 1
+        return _execution(stdout=(*rows, "", f"__DF_SEARCH_STATUS__:{status}"))
 
 
 class _FakeRemote:
@@ -621,8 +645,11 @@ def test_list_glob_and_grep_return_virtual_paths() -> None:
     unsafe_glob_tokens = shlex.split(remote.commands.calls[-1][0])
     assert "--include=*.py; echo injected" in unsafe_glob_tokens
     assert unsafe_glob_tokens.count("grep") == 2
-    assert 'status=$?; [ "$status" -eq 2 ] &&' in remote.commands.calls[-1][0]
-    fallback_tokens = unsafe_glob_tokens[unsafe_glob_tokens.index("grep", 2) :]
+    # The fallback runs only on the primary's status 2, and the primary's
+    # status is kept otherwise so a missing grep (127) is not "no matches".
+    assert 'status=$?; if [ "$status" -eq 2 ]; then' in remote.commands.calls[-1][0]
+    assert '(exit "$status")' in remote.commands.calls[-1][0]
+    fallback_tokens = unsafe_glob_tokens[unsafe_glob_tokens.index("grep", unsafe_glob_tokens.index("grep") + 1) :]
     assert not any(token.startswith("--include=") or token.startswith("-m") for token in fallback_tokens)
 
 
@@ -759,6 +786,23 @@ def test_sandbox_id_matches_shared_identity():
     assert OpenSandboxProvider._sandbox_id("t-1", "") == derive_sandbox_scope_token(user_id="", thread_id="t-1")
 
 
+def test_list_dir_raises_when_find_returns_no_entries() -> None:
+    remote = _FakeRemote("remote")
+    box = _box(remote)
+
+    with pytest.raises(FileNotFoundError):
+        box.list_dir("/mnt/user-data/missing")
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
+    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    box = _box(_FakeRemote("remote"))
+    box._run = lambda *args, **kwargs: _execution(exit_code=127)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        box.list_dir("/mnt/user-data/workspace")
+
+
 def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     # "notes.txt " (trailing space) is a legal Linux filename; find prints it
     # verbatim, one entry per line, so a per-line strip() corrupts the name.
@@ -771,3 +815,68 @@ def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
     assert found == ["/mnt/user-data/workspace/notes.txt "]
     assert truncated is False
+
+
+# ── Remote grep/glob failure contract against a real POSIX sh (#5376) ─────────
+
+_RS_POSIX = pytest.mark.skipif(
+    os.name == "nt" or any(shutil.which(tool) is None for tool in ("sh", "head", "grep", "find")),
+    reason="POSIX sh, head, grep and find required",
+)
+
+
+def _rs_env(tmp_path, failing: str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    if failing is not None:
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir()
+        fake = bin_dir / failing
+        fake.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _rs_box(tmp_path, monkeypatch, failing: str | None = None) -> OpenSandboxSandbox:
+    box = _box(_FakeRemote("remote"))
+    shell_env = _rs_env(tmp_path, failing)
+
+    def run(command: str, *, env=None, timeout=None) -> _Execution:
+        # ``sh -c`` (not ``-lc``) keeps a login profile from overriding the fake PATH.
+        proc = subprocess.run(["sh", "-c", command], capture_output=True, text=True, env=shell_env, check=False)
+        return _execution(stdout=(proc.stdout,), stderr=(proc.stderr,) if proc.stderr else (), exit_code=proc.returncode)
+
+    monkeypatch.setattr(box, "_run", run)
+    return box
+
+
+def _rs_search(box, op: str, root: str):
+    return box.grep(root, "needle") if op == "grep" else box.glob(root, "**/*.py")
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("op", ["grep", "glob"])
+def test_remote_search_missing_root_raises_file_not_found(tmp_path, monkeypatch, op) -> None:
+    with pytest.raises(FileNotFoundError):
+        _rs_search(_rs_box(tmp_path, monkeypatch), op, str(tmp_path / "missing"))
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "binary"), [("grep", "grep"), ("glob", "find")])
+def test_remote_search_missing_binary_raises_instead_of_no_matches(tmp_path, monkeypatch, op, binary) -> None:
+    with pytest.raises(OSError, match="exited with code 127"):
+        _rs_search(_rs_box(tmp_path, monkeypatch, failing=binary), op, str(tmp_path))
+
+
+@_RS_POSIX
+def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeypatch) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("def needle():\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, _ = box.grep(str(tmp_path), "needle")
+    assert [(os.path.basename(m.path), m.line_number) for m in matches] == [("app.py", 1)]
+    assert box.grep(str(tmp_path), "zzz_nothing") == ([], False)
+    found, _ = box.glob(str(tmp_path), "**/*.py")
+    assert [os.path.basename(path) for path in found] == ["app.py"]
+    assert box.glob(str(tmp_path), "*.md") == ([], False)

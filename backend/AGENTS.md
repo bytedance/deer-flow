@@ -15,11 +15,12 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 - Gateway streams `write_file` and `str_replace` argument deltas in bounded batches for multi-mode `messages-tuple` consumers; single-mode message consumers retain the original per-chunk contract. Non-message frames flush pending batches, and `values` remains an optional complete-state snapshot rather than a prerequisite for batching.
 - With `stream_subgraphs`, subgraph frames keep their namespace in the SSE event name (`values|<ns>`, LangGraph Platform style) instead of impersonating root frames — a delegated subagent inherits the parent checkpoint namespace, so publishing its `values` snapshot as bare `values` replaces the whole thread view in SDK clients (#4399). Root-only consumers (file-tool chunk batcher, subagent event persistence, LLM error-fallback detection) ignore namespaced frames. The web frontend does not request subgraph streaming; subtask progress rides root-namespace `task_*` custom events.
 - Background subagent identity is deliberately split: the provider `tool_call_id` remains the correlation key for `ToolMessage`, `task_*` SSE events, persisted lifecycle events, frontend cards, and the public `ExtensionData.scope_id` contract (stored as `SubagentResult.external_task_id`), while `SubagentExecutor.execute_async()` generates a full server-side `execution_id` for `SubagentResult.task_id`, the process-wide registry, polling, cancellation, timeout handling, and cleanup. Provider IDs are not globally unique across parent runs, so they must never become registry ownership keys; scheduler closures retain their own `SubagentResult` rather than resolving ownership again through the mutable registry. Terminal subagent token usage travels in the current run's `ToolMessage.additional_kwargs` and is attributed from message state, never through a process-global provider-ID cache.
-- Scheduled-task executions must reuse that same Gateway run lifecycle. The scheduler may decide *when* work runs, but it must dispatch through the existing run path rather than introducing a parallel execution stack. Scheduled launches pass `scheduler.recursion_limit` (default 1000, matching the web UI's `recursion_limit: 1000`, clamped by `max_recursion_limit`) via `launch_scheduled_thread_run`; the value is read from `get_app_config()` at dispatch.
+- Scheduled-task executions must reuse that same Gateway run lifecycle. The scheduler may decide *when* work runs, but it must dispatch through the existing run path rather than introducing a parallel execution stack. Scheduled launches pass `scheduler.recursion_limit` (default 1000, matching the web UI's `recursion_limit: 1000`, clamped by `max_recursion_limit`) via `launch_scheduled_thread_run`; the value is read from `get_app_config()` at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
 - The background scheduler is single-instance by default. `scheduler.multi_instance=true` opts into lease-aware recovery across Gateway instances and requires shared Postgres, `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`; otherwise startup rejects the configuration. Live scheduled runs are preserved when a peer starts; expired launch claims return to the durable queue, expired run leases are atomically taken over, stale launch writes are fenced by lease ownership, and the Postgres advisory-locked budget makes `max_concurrent_runs` a shared global cap for `launching`/`running` rows.
 - Long-running MCP work uses a separate durable task runtime (`McpTaskService` + `mcp_tasks`, lease-based recovery) rather than keeping remote task IDs or status polling inside the Agent loop; only submit remains Agent-visible, the database is the source of truth, and `ThreadState` receives only a bounded current-thread projection. Full contract (leases, cancellation fencing, delivery idempotency, management-tool exposure): [packages/harness/deerflow/mcp/AGENTS.md](packages/harness/deerflow/mcp/AGENTS.md).
 - MCP task notification retries, dead-lettering, and the cancel endpoint's worker-stopped 503 are part of that same contract — see [packages/harness/deerflow/mcp/AGENTS.md](packages/harness/deerflow/mcp/AGENTS.md).
-- Scheduled-task dispatch enforces at most one non-terminal occurrence per task through `uq_scheduled_task_run_active` (`task_id WHERE status IN ('queued','launching','running')`). `queued` is durable and survives restart; `launching` carries a short owner/expiry lease and is the only state that may call the normal Gateway launch path; `running` is associated with the durable run. Each occurrence also supplies a stable run-admission idempotency key, so a recovered launch retry reuses the same durable run. A reused-thread `ConflictError` moves `launching` back to `queued`, while non-conflict launch errors become terminal `failed`. Waiting rows do not consume `max_concurrent_runs`; the atomic queue claim enforces the budget. Repeated triggers coalesce on the one active row, and same-thread FIFO treats older `queued`, `launching`, and `running` rows as blockers. The task definition stays immutable for all three active states because queue admission, PATCH/resume, pause, and delete serialize on the parent task row before touching the occurrence row. Pause/delete atomically interrupt existing `queued` rows and reject `launching`/`running` rows; PATCH/resume reject every active state, and mutation errors advertise pause cancellation only for `queued` work. A manual trigger may queue and run while the parent schedule remains paused. Recovery and multi-instance reconciliation lock task/run pairs in deterministic task-id/run-id order and must reconstruct `run_id`, `started_at`, and the live error state before releasing the short launch claim. Launch/failure/timeout bookkeeping changes the occurrence and its parent task in one parent-first transaction so a peer cannot claim the released task between those writes. Queue timeout marks the occurrence failed and advances a scheduled occurrence so it cannot immediately requeue forever; repository write boundaries coerce serialized task timestamps before binding SQL `DateTime` fields.
+- Scheduled-task dispatch permits one active occurrence per task via `uq_scheduled_task_run_active` (`task_id WHERE status IN ('queued','launching','running')`). Durable `queued` rows survive restarts; only lease-fenced `launching` may call Gateway launch; `running` references the durable run. Stable admission idempotency keys reuse that run after recovery. Reused-thread `ConflictError` returns `launching` to `queued`; other launch errors become `failed`. Atomic queue claims enforce `max_concurrent_runs`, excluding waiting rows. Repeated triggers coalesce; same-thread FIFO blocks behind older active rows. Queue admission, PATCH/resume, pause and delete lock the parent before the occurrence, freezing active task definitions. Pause/delete atomically cancel `queued` work but reject `launching`/`running`; PATCH/resume reject all active states. Only queued conflicts offer pause cancellation. Manual triggers may queue/run while paused. Recovery locks task/run pairs in task-id/run-id order and restores `run_id`, `started_at` and live errors before releasing launch claims. Launch/failure/timeout updates use one parent-first transaction to prevent interleaved claims. Queue timeout fails the occurrence and advances scheduled work to prevent immediate requeue. Repository boundaries coerce serialized timestamps before SQL `DateTime` binding.
+- `POST /api/scheduled-tasks/preview-cron` requires authenticated `threads:read`. Bounded cron previews call the shared scheduler calculator in `asyncio.to_thread`, preserving its DST semantics. Capture the optional aware reference once; return UTC and offset-bearing local occurrences without acquiring task/thread/run stores or dispatching work. This advisory API does not reserve execution.
 - `extensions_config.json` is written at runtime by the Gateway (`PUT`/`PATCH /api/mcp/config`, the MCP enable switch, skill updates), so the production compose mounts it read-write while `config.yaml` stays `:ro`; Helm copies its ConfigMap seed into a writable home-volume directory before Gateway starts. Every read-modify-write holds both `extensions_config_write_lock` and the sidecar advisory `extensions_config_file_lock`, because the process-local lock alone loses updates across workers. Docker mounts the compose file as its own mount point, and Linux refuses `rename()` over a mount point with `EBUSY` even when the mount is writable — so `atomic_write_extensions_config` keeps the temp-file-plus-rename path and falls back to an in-place overwrite only on `EBUSY`. That fallback is deliberately non-atomic (a crash mid-write truncates the file); it exists because the alternative is a write that can never succeed, and only its first occurrence per target is logged at warning level. Any other `errno` still propagates. Pinned by `tests/test_compose_extensions_config_writable.py`, `tests/test_extensions_config_atomic_write.py`, and `tests/test_helm_extensions_config_writable.py`.
 
 **Project Structure**:
@@ -75,6 +76,10 @@ deer-flow/
     └── custom/                # Custom skills (gitignored)
 ```
 
+ATX outline closing markers use a linear suffix scan; do not use unanchored
+whitespace regex searches on unbounded uploaded headings. The long-heading
+regression exercises the production extractor under a generous process deadline.
+
 ## Important Development Guidelines
 
 ### Documentation Update Policy
@@ -87,6 +92,9 @@ When making code changes, you MUST update the relevant documentation:
 - Ensure accuracy and timeliness of all documentation
 
 ### Backend Benchmarks
+
+`scripts/benchmark/context_snapshot/`: explicit `run-live` needs provider env
+vars; `summarize` and pytest are offline. See its README for the protocol.
 
 `scripts/benchmark/` contains standalone, reproducible measurements and
 evaluations of production backend behavior. A benchmark may import the
@@ -150,6 +158,7 @@ uv run pytest tests/test_bench_concurrency.py tests/test_bench_worker.py -q
 make check      # Check system requirements
 make install    # Install all dependencies (frontend + backend)
 make extension-install SOURCE=...  # Install and enable a trusted Python extension
+make extension-upgrade SOURCE=...  # Replace an installed extension and keep its config
 make extension-list                # List configured Python extensions
 make extension-enable NAME=...     # Enable an installed extension
 make extension-disable NAME=...    # Disable an extension without uninstalling it
@@ -225,6 +234,15 @@ the tool graph or subagent executor during state/schema imports.
 SQLite, and PostgreSQL: missing differs from null, bool differs from int, and
 float filters accept integer or real JSON numbers through `json_value_matches`.
 
+### Gateway Run-Context Trust Boundary
+
+A server-produced run-context key must be gated on both client-writable feeds:
+`body.context` (whitelist-merged) and free-form `body.config` (copied verbatim).
+`merge_run_context_overrides` forwards it only when `internal=True`;
+`strip_internal_context_keys` scrubs it from the assembled `context` *and*
+`configurable`. Trust and destination are separate axes, so a new key needs both
+decisions — and `disable_clarification` is no milder than `non_interactive`.
+
 ## Development Workflow
 
 ### Test-Driven Development (TDD) — MANDATORY
@@ -252,13 +270,12 @@ make test-live
 PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
 ```
 
-Direct pytest collection or execution of `tests/test_client_live.py` remains
-skipped unless `DEER_FLOW_RUN_LIVE_TESTS=1` is set. Do not add that opt-in to
-default CI workflows.
+Keep live tests opt-in via `DEER_FLOW_RUN_LIVE_TESTS=1`; guard POSIX-only
+markers with `os.name` for Windows collection.
 
-Jina request-failure logging tests set a dummy API key so the separate once-per-process
-missing-key warning cannot make assertions depend on test order or shard placement.
-Missing-key behavior has its own tests in `tests/test_jina_client.py`.
+Jina logging tests use dummy keys (`tests/test_jina_client.py`).
+Jina/Browserless/InfoQuest resolve URLs without rebuilding HTML.
+InfoQuest connect/read timeout is 30s, separate from crawl timeouts (`tests/test_infoquest_http_timeout.py`).
 
 ### Running the Full Application
 
@@ -310,26 +327,31 @@ When using `make dev` from root, the frontend automatically connects through ngi
 
 ### Web Search Recency
 
-DDG, Brave, Tavily, and SearXNG `web_search` share optional
+DDG, Brave, Tavily, SearXNG, and Sofya `web_search` share optional
 `time_range=day|week|month|year`; omission preserves request shape. DDG maps to
-`d|w|m|y`, Brave to `pd|pw|pm|py`, and Tavily/SearXNG pass values unchanged.
+`d|w|m|y`, Brave to `pd|pw|pm|py`, Tavily/SearXNG pass values unchanged, and
+Sofya passes them unchanged as `freshness`.
 For recency, DDGS 9.14.1 uses only enabled Brave, DuckDuckGo, and Yahoo engines
 that honor `timelimit`: `auto`/`all` resolves to this set, incompatible configured
 engines are removed, and an empty set falls back to it. Re-check on DDGS upgrades.
 
+### Tavily Fetch
+
+Title fallback: result URL, then request URL.
+
 ### File Upload
 
-Multi-file upload with automatic document conversion:
+Outlines use ATX syntax (1–6 hashes, space/tab separator, ≤3 leading spaces), strip closing hashes and skip fenced code.
 - Endpoint: `POST /api/threads/{thread_id}/uploads`
 - Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
-- Rejects directory inputs before copying so uploads stay all-or-nothing
-- Reuses one conversion worker per request when called from an active event loop
+- Rejects directories before copying to keep uploads all-or-nothing
+- One conversion worker per request when called from an active event loop
 - Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
-- Duplicate filenames in a single upload request are auto-renamed with `_N` suffixes so later files do not truncate earlier files
+- Duplicate filenames within one request get `_N` suffixes to prevent overwrites.
 - Gateway HTTP uploads stage bytes as `.upload-*.part` files and atomically replace the destination only after size validation. These staging files are hidden from upload listings, agent upload context, and sandbox listing/search tools, and swept on Gateway startup if a hard crash leaves one behind.
 - Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
-- Mounted upload paths skip both sandbox acquisition and per-file synchronization. For AIO remote/provisioner deployments this requires an explicit, accurate `sandbox.thread_data_mounts: true`; omission preserves backend auto-detection.
-- Agent receives uploaded file list via `UploadsMiddleware`; title generation continues to use the original user request rather than the injected upload-context wrapper, with attachment-only messages falling back to `New Conversation`
+- Mounted uploads skip sandbox acquire/sync. AIO remote/provisioner requires accurate `sandbox.thread_data_mounts: true`; omission keeps backend auto-detection.
+- `UploadsMiddleware` caps outline titles at 200 characters and previews at 2000 including markers. Titles use `original_user_content`, not upload-prefixed content; attachment-only titles use a sanitized, bounded filename or count.
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 

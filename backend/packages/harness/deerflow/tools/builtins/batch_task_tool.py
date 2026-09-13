@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
+    BatchItemInput,
     BatchSubmitRequest,
     SubagentBatchSubmitter,
     get_subagent_batch_submitter,
@@ -28,6 +29,7 @@ from deerflow.tools.types import Runtime
 class BatchTaskItem(BaseModel):
     key: str = Field(min_length=1, max_length=128)
     prompt: str = Field(min_length=1, max_length=100_000)
+    acceptance_criteria: list[str] | None = Field(default=None, description="Optional completion requirements checked separately from execution status, using the same bounded checklist as task.")
 
 
 _NO_EXPLICIT_BATCH_SUBMITTER = object()
@@ -148,9 +150,17 @@ async def batch_task(
     identifier immediately; it never inserts thousands of results into the lead
     agent context. Use ``batch_status`` for a compact progress snapshot.
 
+    Each item may carry ``acceptance_criteria`` using the same deterministic
+    checks as ``task``: ``file:<path> exists|non-empty``, ``file_written:<path>``,
+    or ``tests_passed:<command>`` against recorded execution evidence.
+    Other conditions are UNVERIFIED. Item queries and JSONL exports include the
+    separate acceptance verdict; ``succeeded`` only means execution completed.
+    Retain useful results, repair unmet conditions, and verify consequential
+    unknowns or preserve uncertainty. Acceptance never triggers automatic retries.
+
     Args:
         title: Short batch name shown to the user.
-        items: Stable item keys and self-contained prompts.
+        items: Stable item keys, self-contained prompts, and optional per-item acceptance_criteria.
         subagent_type: Native subagent definition used for every item.
         max_live_items: Optional queued-plus-running item window.
         max_running_items: Optional per-batch real execution concurrency.
@@ -223,7 +233,7 @@ async def batch_task(
                 submission_key=submission_key,
                 title=title.strip()[:256] or "Subagent batch",
                 subagent_type=subagent_type,
-                items=[item.model_dump() for item in items],
+                items=[cast(BatchItemInput, item.model_dump(exclude_none=True)) for item in items],
                 max_live_items=max_live_items,
                 max_running_items=max_running_items,
                 execution_spec=execution_spec,
@@ -241,6 +251,9 @@ async def batch_task(
 @tool("batch_status", parse_docstring=True)
 async def batch_status(runtime: Runtime, batch_id: str) -> str:
     """Return a compact durable batch progress snapshot.
+
+    Counts describe execution status, not acceptance. Inspect item queries or
+    JSONL exports for the recorded acceptance criteria and verdicts.
 
     Args:
         batch_id: Server batch identifier returned by ``batch_task``.

@@ -44,6 +44,7 @@ from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
 from deerflow.config.suggestions_config import SuggestionsConfig
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
+from deerflow.config.task_continuity_config import TaskContinuityConfig
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.config.token_usage_config import TokenUsageConfig
@@ -236,6 +237,7 @@ class AppConfig(BaseModel):
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
+    task_continuity: TaskContinuityConfig = Field(default_factory=TaskContinuityConfig, description="Thread-local notes and compacted-source recall")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
     agents_api: AgentsApiConfig = Field(default_factory=AgentsApiConfig, description="Custom-agent management API configuration")
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
@@ -285,7 +287,7 @@ class AppConfig(BaseModel):
         default_factory=SchedulerConfig,
         description=format_field_description(
             "scheduler",
-            field_doc="Scheduled task runtime configuration (background poller for one-time and cron agent runs).",
+            field_doc="Scheduled task runtime configuration (background poller for one-time, cron, and interval agent runs).",
         ),
     )
     mcp_tasks: McpTasksConfig = Field(

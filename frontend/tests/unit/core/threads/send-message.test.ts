@@ -96,3 +96,19 @@ test("keeps human input response metadata on the hidden user message", () => {
     },
   ]);
 });
+
+test("uses the caller-provided human message id for the visible user message", () => {
+  const messages = buildThreadSubmitMessages({
+    text: "hello",
+    humanMessageId: "local-human-1",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "human",
+      id: "local-human-1",
+      content: [{ type: "text", text: "hello" }],
+      additional_kwargs: {},
+    },
+  ]);
+});

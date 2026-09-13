@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -69,6 +70,7 @@ from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
+from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
@@ -80,6 +82,7 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -201,14 +204,24 @@ async def _ensure_thread_metadata(
     if existing is None:
         if require_existing_thread:
             raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
+        from deerflow.persistence.thread_meta import THREAD_PROJECT_METADATA_KEY
+
+        run_metadata = record.metadata or {}
+        metadata = {
+            key: value
+            for key, value in run_metadata.items()
+            # Strip the run-scoped trace id (existing) and the reserved
+            # membership key: run admission never modifies project membership —
+            # the column is written only by POST /api/threads and
+            # /threads/{id}/move — so the key must not persist either.
+            if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
+        }
         await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
-            # Seeded from the run that created the thread, minus the run-scoped
-            # trace id: a thread spans many runs and as many trace ids, so
-            # pinning the first one here would be misleading rather than useful.
-            metadata={key: value for key, value in (record.metadata or {}).items() if key != DEERFLOW_TRACE_METADATA_KEY},
+            metadata=metadata,
         )
+        return
 
 
 async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
@@ -447,7 +460,27 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
 #   ``disable_clarification`` — set for non-interactive channels (GitHub
 #                              webhooks) so ClarificationMiddleware proceeds
 #                              instead of dead-ending the run.
+#
+# Both are produced server-side by the channel run policies
+# (``ChannelManager._apply_channel_policy`` and ``app.gateway.github.run_policy``),
+# which reach the Gateway over the internally-authenticated request channel, so
+# they are internal-only as well — see :data:`_INTERNAL_ONLY_CONTEXT_KEYS`.
 _CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification"})
+
+# Every run-context key an external client may never supply, in either section.
+# The two sets differ only in *where* a legitimate internal caller's value lands
+# (both sections vs. ``context`` alone); their trust requirement is identical.
+#
+# ``disable_clarification`` is not a milder cousin of ``non_interactive``:
+# ``ClarificationMiddleware`` answers every clarification — ``risk_confirmation``
+# included — with "proceed without asking" instead of interrupting, and
+# ``SandboxMiddleware`` reads the two keys as the same non-interactive signal.
+# Accepting it from a client therefore reproduces the effect the
+# ``non_interactive`` gate exists to prevent. ``github_token`` is a live
+# credential that ``bash`` exports as ``GH_TOKEN``/``GITHUB_TOKEN``, and a copy
+# smuggled through ``body.config['configurable']`` would be written to the
+# checkpoint store.
+_INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS
 
 
 def strip_internal_context_keys(config: dict[str, Any]) -> None:
@@ -461,7 +494,7 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
     for section in ("context", "configurable"):
         value = config.get(section)
         if isinstance(value, dict):
-            for key in _CONTEXT_INTERNAL_CALLER_KEYS:
+            for key in _INTERNAL_ONLY_CONTEXT_KEYS:
                 value.pop(key, None)
 
 
@@ -482,10 +515,11 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     by :func:`strip_internal_context_keys`.
 
     A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``,
-    ``disable_clarification``) is forwarded into ``config['context']`` only, never
-    ``configurable``. These are secrets / runtime flags read by tools and middlewares
-    from ``runtime.context``; keeping them out of ``configurable`` avoids persisting a
-    short-lived token in the checkpoint store.
+    ``disable_clarification``) is likewise forwarded only when ``internal`` is True,
+    and then into ``config['context']`` only, never ``configurable``. These are
+    secrets / runtime flags read by tools and middlewares from ``runtime.context``;
+    keeping them out of ``configurable`` avoids persisting a short-lived token in the
+    checkpoint store.
     """
     if not context:
         return
@@ -499,10 +533,12 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
     # Context-only keys (secrets / runtime flags) land in ``config['context']``
-    # only — never ``configurable`` (which is persisted in checkpoints).
-    for key in _CONTEXT_RUNTIME_ONLY_KEYS:
-        if key in context and isinstance(runtime_context, dict):
-            runtime_context.setdefault(key, context[key])
+    # only — never ``configurable`` (which is persisted in checkpoints) — and only
+    # for internal callers, the sole legitimate producers.
+    if internal:
+        for key in _CONTEXT_RUNTIME_ONLY_KEYS:
+            if key in context and isinstance(runtime_context, dict):
+                runtime_context.setdefault(key, context[key])
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
 
@@ -873,6 +909,8 @@ def build_checkpoint_state_mutation_accessor(
 # a restart.
 _STATE_ACCESSOR_GRAPH_CACHE_MAX = 64
 _state_accessor_graph_cache: dict[tuple[str | None, str, int | None], tuple[Any, Any, Any]] = {}
+_state_accessor_graph_cache_lock = threading.Lock()
+_state_accessor_graph_build_locks = KeyedLockTable[tuple[str | None, str, int | None]]()
 
 
 def _accessor_graph_cache_max(app_config: Any) -> int:
@@ -883,25 +921,52 @@ def _accessor_graph_cache_max(app_config: Any) -> int:
     )
 
 
-def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
-    app_config = (config.get("context") or {}).get("app_config")
-    key = (assistant_id, mode, snapshot_frequency)
-    cached = _state_accessor_graph_cache.get(key)
-    if cached is not None and cached[0] is agent_factory and cached[1] is app_config:
-        return cached[2]
-    if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
-        _state_accessor_graph_cache.clear()
+def _cached_state_accessor_graph(key: tuple[str | None, str, int | None], agent_factory: Any, app_config: Any) -> Any | None:
+    with _state_accessor_graph_cache_lock:
+        cached = _state_accessor_graph_cache.get(key)
+        if cached is not None and cached[0] is agent_factory and cached[1] is app_config:
+            return cached[2]
+    return None
+
+
+def _cache_state_accessor_graph(key: tuple[str | None, str, int | None], agent_factory: Any, app_config: Any, graph: Any) -> None:
+    with _state_accessor_graph_cache_lock:
+        if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
+            _state_accessor_graph_cache.clear()
+        _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
+
+
+def _build_state_accessor_graph(agent_factory: Any, config: dict[str, Any]) -> Any:
     agent_result = agent_factory(config=config)
     try:
         from deerflow.agents.lead_agent.agent import unwrap_agent_graph
 
-        graph = unwrap_agent_graph(agent_result)
+        return unwrap_agent_graph(agent_result)
     except Exception:
         # A custom factory must keep working even if importing the lead
         # assembly type fails.
-        graph = agent_result
-    _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
-    return graph
+        return agent_result
+
+
+def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
+    app_config = (config.get("context") or {}).get("app_config")
+    key = (assistant_id, mode, snapshot_frequency)
+    cached = _cached_state_accessor_graph(key, agent_factory, app_config)
+    if cached is not None:
+        return cached
+
+    # Construction runs on assembly-pool threads, so same-key cold misses are
+    # serialized with a thread lock. The re-check under the lock makes
+    # overlapping first readers run the factory exactly once; a waiter whose
+    # factory or app-config identity changed while it waited still rebuilds,
+    # preserving identity-based cache invalidation.
+    with _state_accessor_graph_build_locks.hold(key):
+        cached = _cached_state_accessor_graph(key, agent_factory, app_config)
+        if cached is not None:
+            return cached
+        graph = _build_state_accessor_graph(agent_factory, config)
+        _cache_state_accessor_graph(key, agent_factory, app_config, graph)
+        return graph
 
 
 class _RawCheckpointSnapshot:
@@ -1002,7 +1067,13 @@ def build_checkpoint_state_accessor(
 
     agent_factory = resolve_agent_factory(assistant_id)
     try:
-        graph = _state_accessor_graph(agent_factory, assistant_id, ctx.checkpoint_channel_mode, getattr(ctx, "checkpoint_snapshot_frequency", None), config)
+        graph = _state_accessor_graph(
+            agent_factory,
+            assistant_id,
+            ctx.checkpoint_channel_mode,
+            getattr(ctx, "checkpoint_snapshot_frequency", None),
+            config,
+        )
     except Exception:
         if ctx.checkpoint_channel_mode != "full":
             # Delta materialization needs the graph's channel table; there is
@@ -1024,6 +1095,34 @@ def build_checkpoint_state_accessor(
         mode=ctx.checkpoint_channel_mode,
     )
     return accessor, config
+
+
+async def abuild_checkpoint_state_accessor(
+    request: Request,
+    *,
+    thread_id: str,
+    assistant_id: str | None = None,
+    checkpoint_id: str | None = None,
+) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
+    """Async variant of :func:`build_checkpoint_state_accessor`.
+
+    Identical accessor construction, but the agent-factory assembly — which
+    re-enters ``get_available_tools()`` and may block on MCP cache
+    initialization — runs off-loop on the dedicated assembly pool so the
+    Gateway event loop keeps making progress (issue #5172). Repeat calls hit
+    ``_state_accessor_graph_cache`` and only pay the thread hop; overlapping
+    cold readers with the same cache key are serialized per key so the
+    factory runs exactly once, and a reader whose factory or app-config
+    identity changed while it waited rebuilds instead of reusing the
+    winner's graph.
+    """
+    return await run_assembly(
+        build_checkpoint_state_accessor,
+        request,
+        thread_id=thread_id,
+        assistant_id=assistant_id,
+        checkpoint_id=checkpoint_id,
+    )
 
 
 async def resolve_thread_assistant_id(
@@ -1065,7 +1164,7 @@ async def build_thread_checkpoint_state_accessor(
     ``AgentMiddleware.state_schema`` from the response.
     """
     assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=fail_closed)
-    return build_checkpoint_state_accessor(
+    return await abuild_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=assistant_id,
@@ -1196,7 +1295,7 @@ async def ensure_checkpoint_history_seeded(
     if await get_checkpointer(request).aget_tuple(checkpoint_config) is None:
         return
 
-    accessor, config = build_checkpoint_state_accessor(
+    accessor, config = await abuild_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=assistant_id,
@@ -1479,6 +1578,12 @@ async def start_run(
                 )
 
                 if record.idempotency_reused:
+                    stored = record.kwargs or {}
+                    if stored.get("input") != body.input or record.assistant_id != body.assistant_id:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Idempotency-Key already used with a different request",
+                        )
                     return record
 
                 worker = run_after_metadata(record)
@@ -1673,6 +1778,7 @@ async def sse_consumer(
     run_mgr: RunManager,
     *,
     apply_on_disconnect: bool = True,
+    emit_gap_on_missing_stream: bool = False,
 ):
     """Async generator that yields SSE frames from the bridge.
 
@@ -1687,9 +1793,31 @@ async def sse_consumer(
     connection, and a read-only observer closing a join must not cancel the
     run (a runs:read-only credential would otherwise cancel without
     runs:cancel just by disconnecting).
+
+    ``emit_gap_on_missing_stream`` is a separate creating-retry signal, default
+    ``False``. ``create_or_reject`` sets ``record.idempotency_reused`` on the
+    shared cached record and never clears it, so this function must not read
+    that flag. Thread-scoped ``/runs/stream`` passes True only for this
+    request's reuse; default callers (joins, stateless ``/api/runs/stream``,
+    tests) keep ``end`` when a terminal record's stream is gone.
     """
     last_event_id = request.headers.get("Last-Event-ID")
     if await _terminal_record_stream_missing(bridge, record):
+        if emit_gap_on_missing_stream:
+            # Creating-endpoint retry: a bare `end` looks like the run
+            # produced nothing. Point the client at durable state instead.
+            yield format_sse(
+                "gap",
+                {
+                    "code": "stream_replay_gap",
+                    "run_id": record.run_id,
+                    "requested_event_id": last_event_id,
+                    "earliest_available_event_id": None,
+                    "latest_available_event_id": None,
+                    "recovery": "reload_durable_state",
+                },
+            )
+            return
         yield format_sse("end", None)
         return
 

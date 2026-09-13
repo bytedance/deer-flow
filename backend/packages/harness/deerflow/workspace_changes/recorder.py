@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shutil
 import tempfile
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -75,11 +76,33 @@ async def _reclaim_prepare_and_cleanup(prepare: asyncio.Future[tuple[list[Worksp
         await _remove_text_cache_dir(orphaned)
 
 
+def _consume_cancelled_scan_outcome(scan: asyncio.Future[WorkspaceSnapshot], *, thread_id: str) -> None:
+    """Consume a completed scan and retain diagnostics after caller cancellation."""
+    try:
+        scan.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logger.warning(
+            "Workspace scan failed after snapshot cancellation for thread %s",
+            thread_id,
+            exc_info=True,
+        )
+
+
 async def _drain_scan_and_cleanup(
     scan: asyncio.Future[WorkspaceSnapshot],
-    text_cache_dir: Path | None,
+    text_cache_dir: Path,
+    *,
+    thread_id: str,
 ) -> None:
     """Let a cancelled scan finish before removing the cache it may still use."""
+    if not scan.done():
+        logger.info(
+            "Waiting for cancelled workspace snapshot scan to finish before text-cache cleanup for thread %s",
+            thread_id,
+        )
+
     while not scan.done():
         try:
             await asyncio.shield(scan)
@@ -90,15 +113,7 @@ async def _drain_scan_and_cleanup(
 
     # Cancellation remains the caller-visible outcome, but consume any late scan
     # failure so the drained task cannot emit an un-retrieved exception warning.
-    try:
-        scan.result()
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        pass
-
-    if text_cache_dir is None:
-        return
+    _consume_cancelled_scan_outcome(scan, thread_id=thread_id)
 
     cleanup = asyncio.create_task(_remove_text_cache_dir(text_cache_dir))
     while not cleanup.done():
@@ -151,11 +166,19 @@ async def capture_workspace_snapshot(
     try:
         return await asyncio.shield(scan)
     except asyncio.CancelledError:
-        # The scan runs in a worker thread and cannot be stopped by cancelling
-        # this coroutine. Keep the cache alive until that worker has finished,
-        # then remove it before propagating cancellation. Repeated cancellation
-        # must not abandon either phase.
-        await _drain_scan_and_cleanup(scan, text_cache_dir)
+        # A metadata-only scan has no cache resource to protect. It still runs in
+        # the worker after caller cancellation, so retain ownership only long
+        # enough to consume/log its eventual outcome instead of delaying the
+        # cancellation until a full workspace scan finishes.
+        if text_cache_dir is None:
+            scan.add_done_callback(partial(_consume_cancelled_scan_outcome, thread_id=thread_id))
+            raise
+
+        # Text capture is different: the worker may still read/write the cache,
+        # so deleting it immediately would race the scan. Keep the cache alive
+        # until the worker drains, then remove it before propagating cancellation.
+        # Repeated cancellation must not abandon either phase.
+        await _drain_scan_and_cleanup(scan, text_cache_dir, thread_id=thread_id)
         raise
     except Exception:
         if text_cache_dir is not None:

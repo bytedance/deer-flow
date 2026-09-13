@@ -13,6 +13,11 @@ export function isThreadArchived(thread: Pick<AgentThread, "metadata">) {
   return thread.metadata?.[THREAD_ARCHIVED_METADATA_KEY] === true;
 }
 
+// Reserved metadata key recording a thread's project membership
+// (``metadata.deerflow_project_id``). Keep in sync with the backend
+// thread_meta constant and the E2E mock-api constant.
+export const THREAD_PROJECT_METADATA_KEY = "deerflow_project_id";
+
 export type ChannelThreadSource = {
   type: "im_channel";
   provider: string;
@@ -73,6 +78,15 @@ export function titleOfThread(thread: AgentThread) {
 
 export function isThreadPinned(thread: Pick<AgentThread, "metadata">) {
   return thread.metadata?.[THREAD_PINNED_METADATA_KEY] === true;
+}
+
+export function projectIdOfThread(
+  thread: Pick<AgentThread, "metadata">,
+): string | null {
+  const projectId = thread.metadata?.[THREAD_PROJECT_METADATA_KEY];
+  return typeof projectId === "string" && projectId.length > 0
+    ? projectId
+    : null;
 }
 
 export function sortPinnedThreads<T extends Pick<AgentThread, "metadata">>(
