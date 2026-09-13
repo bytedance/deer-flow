@@ -11,6 +11,8 @@ import {
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
+  getSelectableSkills,
+  shouldReseedPickDraft,
   GOAL_OBJECTIVE_COUNTER_VISIBLE_AT,
   isAbortError,
   isCurrentGoalRequest,
@@ -356,6 +358,39 @@ describe("getMatchingSkillSuggestions", () => {
     expect(result).toEqual([]);
   });
 
+  it("rejects names the slash parser can never activate", () => {
+    // The picker and this catalog are the two surfaces that offer skills;
+    // both must only offer names that can actually activate. A grammar-
+    // violating name here is worse than useless: picking it sends literal
+    // text to the model with nothing loaded, and `parseSlashSkillReference`
+    // confirms it — `/DataTools x` is null.
+    const skills = [
+      makeSkill("DataTools"),
+      makeSkill("data tools"),
+      makeSkill("data_tools"),
+      makeSkill("data.tools"),
+      makeSkill("data--analysis"),
+      makeSkill("-data"),
+      makeSkill("data-"),
+      makeSkill("data-analysis"),
+    ];
+    const result = getMatchingSkillSuggestions(skills, "", builtins);
+    expect(result.filter((s) => s.kind === "skill").map((s) => s.name)).toEqual(
+      ["data-analysis"],
+    );
+  });
+
+  it("agrees with the picker catalog on grammar-violating names", () => {
+    // Both entry points must apply one rule: offered ⇒ activatable.
+    const skills = [makeSkill("DataTools"), makeSkill("data-analysis")];
+    const selectable = getSelectableSkills(skills).map((skill) => skill.name);
+    const slashOffered = getMatchingSkillSuggestions(skills, "", builtins)
+      .filter((s) => s.kind === "skill")
+      .map((s) => s.name);
+    expect(selectable).toEqual(["data-analysis"]);
+    expect(slashOffered).toEqual(selectable);
+  });
+
   it("caps the number of suggestions", () => {
     const skills = Array.from({ length: 10 }, (_, i) =>
       makeSkill(`skill-${i}`),
@@ -459,5 +494,134 @@ describe("findSuggestionTemplatePlaceholder", () => {
 
   it("returns null when no placeholder is present", () => {
     expect(findSuggestionTemplatePlaceholder("no placeholder here")).toBeNull();
+  });
+});
+
+describe("getSelectableSkills", () => {
+  it("keeps enabled skills and drops disabled ones", () => {
+    const skills = [makeSkill("data-analysis"), makeSkill("pdf", false)];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "data-analysis",
+    ]);
+  });
+
+  it("excludes reserved slash names that shadow skills", () => {
+    const reserved = [...RESERVED_SLASH_SKILL_NAMES][0] ?? "goal";
+    const skills = [makeSkill(reserved), makeSkill("data-analysis")];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "data-analysis",
+    ]);
+  });
+
+  it("returns an empty list for empty input", () => {
+    expect(getSelectableSkills([])).toEqual([]);
+  });
+
+  it("excludes composer builtin command names that shadow skills", () => {
+    // `goal` is double-covered by the reserved set, but `compact` is a pure
+    // composer builtin: a skill with that name would submit as the compact
+    // command instead of the skill, so the picker must not offer it.
+    const skills = [makeSkill("compact"), makeSkill("data-analysis")];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "data-analysis",
+    ]);
+  });
+});
+
+describe("getSelectableSkills case folding", () => {
+  it("excludes case-variant reserved and builtin names like the slash path", () => {
+    // The slash suggestions fold the name once before the reserved lookup,
+    // so a custom skill named `Compact` or `HELP` is unreachable there; the
+    // picker must not offer an activation the composer can never perform.
+    const skills = [
+      makeSkill("Compact"),
+      makeSkill("HELP"),
+      makeSkill("New"),
+      makeSkill("compact"),
+      makeSkill("data-analysis"),
+    ];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "data-analysis",
+    ]);
+  });
+
+  it("keeps a distinct skill whose name only contains a shadowed word", () => {
+    const skills = [makeSkill("compact-plans"), makeSkill("goalie")];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "compact-plans",
+      "goalie",
+    ]);
+  });
+
+  it("agrees with the slash suggestion catalog on case variants", () => {
+    // Both entry points must apply one rule: offered ⇒ activatable.
+    const skills = [makeSkill("Memory"), makeSkill("data-analysis")];
+    const builtinCommands: SlashSuggestion[] = [
+      { name: "goal", kind: "builtin", description: "Set a goal" },
+    ];
+    const selectable = getSelectableSkills(skills).map((skill) => skill.name);
+    const slashOffered = getMatchingSkillSuggestions(
+      skills,
+      "",
+      builtinCommands,
+    )
+      .filter((s) => s.kind === "skill")
+      .map((s) => (s as { name: string }).name);
+    expect(selectable).toEqual(["data-analysis"]);
+    expect(slashOffered).toEqual(selectable);
+  });
+});
+
+describe("shouldReseedPickDraft", () => {
+  it("keeps prose and mixed drafts", () => {
+    expect(shouldReseedPickDraft("run the quarterly report")).toBe(true);
+    expect(shouldReseedPickDraft("/data-analysis analyze foo.csv")).toBe(true);
+    expect(shouldReseedPickDraft("  ")).toBe(true);
+  });
+
+  it("supersedes a draft that is itself a bare slash query", () => {
+    // Picking with a `/data-an` draft must not carry the partial into the
+    // chip editor: it would land as literal text after the chip, reopen the
+    // suggestion catalog, and submit `/skill-name /data-an`.
+    expect(shouldReseedPickDraft("/data-an")).toBe(false);
+    expect(shouldReseedPickDraft("/")).toBe(false);
+  });
+
+  it("supersedes a slash query followed by trailing whitespace", () => {
+    // A partial activation plus a trailing space or newline is still the user
+    // mid-activation: classifying the raw draft lets the whitespace hide the
+    // shape and reseed `/chosen-skill /data-an ` with the stale partial.
+    expect(shouldReseedPickDraft("/data-an ")).toBe(false);
+    expect(shouldReseedPickDraft("/data-an\n")).toBe(false);
+    // Whitespace-only and prose drafts keep their existing classification.
+    expect(shouldReseedPickDraft("  ")).toBe(true);
+    expect(shouldReseedPickDraft("/data-analysis analyze foo.csv ")).toBe(true);
+  });
+
+  it("drops empty drafts", () => {
+    expect(shouldReseedPickDraft("")).toBe(false);
+    expect(shouldReseedPickDraft(null)).toBe(false);
+    expect(shouldReseedPickDraft(undefined)).toBe(false);
+  });
+});
+
+describe("getSelectableSkills slash-name grammar", () => {
+  it("rejects names the slash parser can never activate", () => {
+    // The runtime parser accepts any non-empty metadata name, but the
+    // backend slash gate is lowercase-hyphen only: /DataTools never
+    // activates, and a whitespace name would parse as a different skill.
+    const skills = [
+      makeSkill("DataTools"),
+      makeSkill("data tools"),
+      makeSkill("data_tools"),
+      makeSkill("data.tools"),
+      makeSkill("data--analysis"),
+      makeSkill("-data"),
+      makeSkill("data-"),
+      makeSkill("data-analysis"),
+    ];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "data-analysis",
+    ]);
   });
 });
