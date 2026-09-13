@@ -16,6 +16,7 @@ from deerflow.workspace_changes import (
     capture_workspace_snapshot,
     compare_snapshots,
     get_changed_output_paths,
+    get_changed_paths,
     record_workspace_changes,
     scan_workspace_roots,
 )
@@ -95,6 +96,55 @@ def test_get_changed_output_paths_returns_only_created_or_modified_regular_outpu
         "/mnt/user-data/outputs/created.md",
         "/mnt/user-data/outputs/existing.md",
     ]
+
+
+@pytest.mark.parametrize(
+    ("before_contents", "after_contents", "expected_statuses"),
+    [
+        pytest.param(
+            {"b.txt": "before", "c.txt": "unchanged"},
+            {"a.txt": "new", "b.txt": "before", "c.txt": "unchanged"},
+            {"a.txt": "created"},
+            id="insertion-pushes-existing-file-out-of-scan",
+        ),
+        pytest.param(
+            {"a.txt": "removed", "b.txt": "before", "c.txt": "unchanged"},
+            {"b.txt": "before", "c.txt": "unchanged"},
+            {"a.txt": "deleted"},
+            id="deletion-brings-existing-file-into-scan",
+        ),
+        pytest.param(
+            {"a.txt": "removed", "b.txt": "before", "c.txt": "unchanged"},
+            {"b.txt": "after", "c.txt": "unchanged", "d.txt": "new"},
+            {"b.txt": "modified"},
+            id="both-truncated-preserve-observed-modifications",
+        ),
+    ],
+)
+def test_workspace_changes_do_not_infer_absence_from_truncated_snapshots(tmp_path, before_contents, after_contents, expected_statuses):
+    roots = _roots(tmp_path)
+    outputs = roots[1].host_path
+    limits = WorkspaceChangeLimits(max_scanned_files=2)
+    for name, content in before_contents.items():
+        (outputs / name).write_text(content, encoding="utf-8")
+    before = scan_workspace_roots(roots, limits=limits)
+
+    for name in before_contents.keys() - after_contents.keys():
+        (outputs / name).unlink()
+    for name, content in after_contents.items():
+        (outputs / name).write_text(content, encoding="utf-8")
+    after = scan_workspace_roots(roots, limits=limits)
+
+    result = compare_snapshots(before, after, limits=limits)
+
+    expected = {f"/mnt/user-data/outputs/{name}": status for name, status in expected_statuses.items()}
+    assert {change.path: change.status for change in result.files} == expected
+    assert result.summary.created == list(expected.values()).count("created")
+    assert result.summary.modified == list(expected.values()).count("modified")
+    assert result.summary.deleted == list(expected.values()).count("deleted")
+    assert result.summary.truncated is True
+    assert get_changed_paths(before, after) == set(expected)
+    assert get_changed_output_paths(before, after) == sorted(path for path, status in expected.items() if status != "deleted")
 
 
 def test_compare_snapshots_treats_utf16_markdown_as_text(tmp_path):

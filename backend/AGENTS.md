@@ -325,6 +325,22 @@ When using `make dev` from root, the frontend automatically connects through ngi
 
 ## Key Features
 
+### Workspace Change Detection
+
+`workspace_changes.diff.get_changed_paths()` owns change filtering for summaries,
+text capture, and output delivery detection. Absence from a truncated snapshot
+is unknown: require a complete before snapshot to infer creation and a complete
+after snapshot to infer deletion. Continue comparing files observed in both
+snapshots and preserve the summary's truncation flag.
+
+`get_changed_output_paths()` inherits this uncertainty: newly observed outputs
+are suppressed when the before snapshot was truncated, while modifications
+observed in both snapshots remain eligible. The worker passes this list through
+`_produced_output_paths()` to its delivery check. An empty list leaves
+`produced_paths` and `verification` absent from the delivery receipt, and
+`_delivery_error()` returns no error. Pin both cases through the real snapshot
+capture and `run_agent()` lifecycle in `tests/test_run_worker_delivery.py`.
+
 ### Web Search Recency
 
 DDG, Brave, Tavily, SearXNG, and Sofya `web_search` share optional
