@@ -123,17 +123,25 @@ async def _await_off_thread(task: asyncio.Task[Any]) -> Any:
         try:
             result = await asyncio.shield(task)
         except asyncio.CancelledError as exc:
+            if task.cancelled():
+                if first_cancel is not None:
+                    raise first_cancel
+                raise
             if first_cancel is None:
                 first_cancel = exc
             if not task.done():
                 continue
-            if task.cancelled():
-                raise first_cancel
-            task.result()
-            raise first_cancel
+        except BaseException:
+            if first_cancel is None:
+                raise
+        else:
+            if first_cancel is None:
+                return result
+
         if first_cancel is not None:
+            if task.done() and not task.cancelled():
+                task.exception()
             raise first_cancel
-        return result
 
 
 async def _acquire_gate_lock(lock: threading.Lock) -> None:
