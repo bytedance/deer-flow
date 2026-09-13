@@ -14,6 +14,8 @@ import logging
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -108,6 +110,13 @@ class _FakeFS:
         return _FakeFileInfo(path, len(self._owner.files[path]))
 
 
+def _search_inner(script: str) -> str:
+    """The grep/find command inside ``remote_search_command``, or ``script`` itself."""
+    if "__DF_SEARCH_STATUS__:" not in script:
+        return script
+    return script[script.index("{ ") + 2 : script.index('; echo $? > "$_st"; }')]
+
+
 class _FakeSandbox:
     """A fake tenki ``Sandbox``: a native ``fs`` API plus the handful of shell
     commands the adapter still emits for search, backed by one in-memory
@@ -155,6 +164,8 @@ class _FakeSandbox:
             return _FakeResult(exit_code=1, stdout=b"5 passed, 1 error\n")
         if "BOOTSTRAP_OK" in script:  # provider create-time bootstrap script
             return _FakeResult(stdout=b"BOOTSTRAP_OK\n")
+        if "__DF_SEARCH_STATUS__:" in script:
+            return self._search(script)
         if script.startswith("find ") or "find -H " in script:
             match = re.search(r"(?:^|[\s;{])find(?:\s+-[HLP])*\s+(\S+)", script)
             root = match.group(1).strip("'\"") if match else ""
@@ -177,6 +188,16 @@ class _FakeSandbox:
                         lines.append(f"{path}:{n}:{text}")
             return _FakeResult(stdout=("\n".join(lines) + "\n").encode() if lines else b"")
         return _FakeResult()
+
+    def _search(self, script: str) -> _FakeResult:
+        # remote_search_command: a root-existence check, then the wrapped search and its status marker.
+        root = shlex.split(re.search(r"\[ ! -e (.+?) \]; then", script).group(1))[0].rstrip("/") or "/"
+        if not any(p == root or p.startswith(f"{root}/") for p in (*self.files, *self.dirs)):
+            return _FakeResult(stdout=b"__DF_SEARCH_STATUS__:missing\n")
+        inner = _search_inner(script)
+        listing = self._run_script(inner).stdout_text
+        status = 0 if listing or inner.startswith("find ") else 1
+        return _FakeResult(stdout=f"{listing}\n__DF_SEARCH_STATUS__:{status}\n".encode())
 
     def close(self):
         self.closed = True
@@ -583,7 +604,7 @@ def test_grep_passes_capital_h_so_single_file_matches_parse() -> None:
     box = TenkiSandbox("sb", fake)
     box.write_file("/mnt/user-data/workspace/a.txt", "needle here\n")
     box.grep("/mnt/user-data/workspace", "needle")
-    grep_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("grep ")]
+    grep_scripts = [_search_inner(c["argv"][2]) for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and _search_inner(c["argv"][2]).startswith("grep ")]
     assert grep_scripts and "-H" in shlex.split(grep_scripts[0])
 
 
@@ -598,7 +619,7 @@ def test_grep_single_file_path_with_matching_glob() -> None:
 
 
 def _grep_script(fake: _FakeSandbox) -> list[str]:
-    scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("grep ")]
+    scripts = [_search_inner(c["argv"][2]) for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and _search_inner(c["argv"][2]).startswith("grep ")]
     assert scripts, "no grep command was issued"
     return shlex.split(scripts[0])
 
@@ -626,8 +647,9 @@ def test_grep_case_sensitive_omits_ignore_case_flag() -> None:
 def test_glob_include_dirs_adds_directory_type_to_find() -> None:
     fake = _FakeSandbox()
     box = TenkiSandbox("sb", fake)
+    box.write_file("/mnt/user-data/workspace/a.txt", "x")  # glob searches an existing root
     box.glob("/mnt/user-data/workspace", "*", include_dirs=True)
-    find_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("find ")]
+    find_scripts = [_search_inner(c["argv"][2]) for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and _search_inner(c["argv"][2]).startswith("find ")]
     assert find_scripts and "-type d" in find_scripts[-1]  # dirs requested, not just files
 
 
@@ -1051,3 +1073,68 @@ def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
     assert found == ["/mnt/user-data/workspace/notes.txt "]
     assert truncated is False
+
+
+# ── Remote grep/glob failure contract against a real POSIX sh (#5376) ─────────
+
+_RS_POSIX = pytest.mark.skipif(
+    os.name == "nt" or any(shutil.which(tool) is None for tool in ("sh", "head", "grep", "find")),
+    reason="POSIX sh, head, grep and find required",
+)
+
+
+def _rs_env(tmp_path, failing: str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    if failing is not None:
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir()
+        fake = bin_dir / failing
+        fake.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _rs_box(tmp_path, monkeypatch, failing: str | None = None) -> TenkiSandbox:
+    box = TenkiSandbox("sb", _FakeSandbox())
+    shell_env = _rs_env(tmp_path, failing)
+
+    def sh(script: str, env=None, timeout=None) -> _FakeResult:
+        # ``sh -c`` (not ``-lc``) keeps a login profile from overriding the fake PATH.
+        proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=shell_env, check=False)
+        return _FakeResult(exit_code=proc.returncode, stdout=proc.stdout.encode(), stderr=proc.stderr.encode())
+
+    monkeypatch.setattr(box, "_sh", sh)
+    return box
+
+
+def _rs_search(box, op: str, root: str):
+    return box.grep(root, "needle") if op == "grep" else box.glob(root, "**/*.py")
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("op", ["grep", "glob"])
+def test_remote_search_missing_root_raises_file_not_found(tmp_path, monkeypatch, op) -> None:
+    with pytest.raises(FileNotFoundError):
+        _rs_search(_rs_box(tmp_path, monkeypatch), op, str(tmp_path / "missing"))
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "binary"), [("grep", "grep"), ("glob", "find")])
+def test_remote_search_missing_binary_raises_instead_of_no_matches(tmp_path, monkeypatch, op, binary) -> None:
+    with pytest.raises(OSError, match="exited with code 127"):
+        _rs_search(_rs_box(tmp_path, monkeypatch, failing=binary), op, str(tmp_path))
+
+
+@_RS_POSIX
+def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeypatch) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("def needle():\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, _ = box.grep(str(tmp_path), "needle")
+    assert [(os.path.basename(m.path), m.line_number) for m in matches] == [("app.py", 1)]
+    assert box.grep(str(tmp_path), "zzz_nothing") == ([], False)
+    found, _ = box.glob(str(tmp_path), "**/*.py")
+    assert [os.path.basename(path) for path in found] == ["app.py"]
+    assert box.glob(str(tmp_path), "*.md") == ([], False)

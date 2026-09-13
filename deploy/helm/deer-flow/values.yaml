@@ -249,8 +249,10 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 40
+  config_version: 43
   log_level: info
+  recursion_limit: 100
+  max_recursion_limit: 1000
 
   models: []
   # Example (uncomment & set the matching secret in `secrets`):

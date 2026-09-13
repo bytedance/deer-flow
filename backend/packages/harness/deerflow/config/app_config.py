@@ -44,6 +44,7 @@ from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
 from deerflow.config.suggestions_config import SuggestionsConfig
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
+from deerflow.config.task_continuity_config import TaskContinuityConfig
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.config.token_usage_config import TokenUsageConfig
@@ -214,10 +215,15 @@ class AppConfig(BaseModel):
             ),
         ),
     )
+    recursion_limit: int = Field(
+        default=100,
+        ge=1,
+        description="Default LangGraph recursion_limit for Gateway runs when the client does not provide one. Applied per run and capped by max_recursion_limit.",
+    )
     max_recursion_limit: int = Field(
         default=1000,
         ge=1,
-        description="Hard server-side ceiling for a client-supplied run recursion_limit. Client values above this are clamped; prevents runaway LangGraph super-steps (LLM cost / DoS).",
+        description="Hard server-side ceiling for configured defaults and client-supplied run recursion_limit values. Values above this are clamped; prevents runaway LangGraph super-steps (LLM cost / DoS).",
     )
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(
@@ -236,6 +242,7 @@ class AppConfig(BaseModel):
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
+    task_continuity: TaskContinuityConfig = Field(default_factory=TaskContinuityConfig, description="Thread-local notes and compacted-source recall")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
     agents_api: AgentsApiConfig = Field(default_factory=AgentsApiConfig, description="Custom-agent management API configuration")
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")

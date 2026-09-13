@@ -271,7 +271,7 @@ async def web_fetch_tool(url: str) -> str:
         if isinstance(result, str):
             return result
 
-        article = await asyncio.to_thread(_readability_extractor.extract_article, result.html)
+        article = await asyncio.to_thread(_readability_extractor.extract_article, result.html, url=url)
         return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}"
 
     except Exception as e:

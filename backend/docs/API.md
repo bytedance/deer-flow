@@ -265,16 +265,19 @@ for runs without changed outputs keep their existing shape.
 **Recursion Limit:**
 
 `config.recursion_limit` caps the number of graph steps LangGraph will execute
-in a single run. The unified Gateway path defaults to `100` in
-`build_run_config` (see `backend/app/gateway/services.py`), which is a safer
-starting point for plan-mode or subagent-heavy runs. Clients can still set
-`recursion_limit` explicitly in the request body; increase it if you run deeply
-nested subagent graphs. Scheduled-task launches do not take a client body: they
+in a single run. The unified Gateway path uses the top-level `recursion_limit`
+from `config.yaml` (default `100`) when a request does not provide one. Clients
+can still set `recursion_limit` explicitly in the request body, and a valid
+request value takes precedence. Scheduled-task launches do not take a client body: they
 use `scheduler.recursion_limit` from `config.yaml` (default `1000`, matching
 the web UI). For safety, the Gateway clamps any supplied
-value to a configurable server ceiling (`max_recursion_limit` in `config.yaml`,
+or configured value to a server ceiling (`max_recursion_limit` in `config.yaml`,
 default `1000`) so a single run cannot execute unbounded graph steps (runaway
-LLM cost / DoS); invalid or non-positive values fall back to the `100` default.
+LLM cost / DoS); invalid or non-positive request values fall back to the
+configured default. Both top-level fields are read per run, so edits apply to
+the next request without restarting the Gateway. This top-level setting applies
+to Gateway API runs only; IM channel and embedded `DeerFlowClient` runs retain
+their own defaults and override paths.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
@@ -755,6 +758,17 @@ Content-Type: multipart/form-data
 }
 ```
 
+#### Export a Custom Skill
+
+Admin session authentication is required for both requests. PAT credentials cannot export. Only the current user's custom skill is eligible; public, legacy and integration fallback is never used. A disabled custom skill remains eligible.
+
+1. `GET /api/skills/custom/{skill_name}/export-manifest` returns `skill_name`, `revision` (SHA-256 or null), `can_export`, `file_count`, `directory_count`, `total_bytes`, `files` (`path`, `type`, `size`, `executable`), `requirements` (`compatibility`, `allowed_tools`, `required_secrets` names and optional flags), and structured `warnings`/`blockers`. Paths are relative; `.` is the package root, counted in directory/entry totals. Structural blockers return a non-downloadable manifest. Declarations are not credential values or dependency verification.
+2. `GET /api/skills/custom/{skill_name}/export?expected_revision=<64 lowercase hex characters>` recaptures content and rejects stale previews with 409 before sending ZIP headers. Successful responses carry `application/zip`, attachment `<skill_name>.skill`, accurate `Content-Length`, `Cache-Control: private, no-store`, and `X-Content-Type-Options: nosniff`.
+
+Error `detail` contains a safe `code`, `message`, and optional relative `path`. Codes/statuses: `skill_not_found` 404, `skill_changed` 409, `skill_export_limit_exceeded` 413, `skill_export_unsupported` 422, `skill_export_busy` 429, `skill_export_timeout` 503, `skill_export_failed` 500; existing 401/403 auth behavior applies. Limits are 4096 entries including directories, 64 MiB/file, 100 MiB raw/ZIP, 1 MiB frontmatter, 1024 UTF-8 bytes per ZIP path and depth 32. Frontmatter preflight rejects YAML aliases and bounds structure to 32 nesting levels / 16384 parser events before constructing YAML objects. A 5-second lock wait and 60-second cooperative worker deadline bound work; blocking OS calls cannot be forcibly interrupted. Two export slots are shared across all users in each Gateway process; both previews and downloads use them, and 429 means that process-wide capacity is occupied. Slots remain held through worker drain and temporary-file cleanup. The streaming phase has a separate 120-second inactivity deadline, reset after each successful ASGI send. A continuously progressing transfer may exceed 120 seconds overall; a stalled send does not reset the deadline. Expiry aborts the incomplete download (no replacement JSON after ZIP headers); clients must retry. Client disconnect during preparation cancels and drains the worker, then exits the handler normally rather than leaking a synthetic task cancellation. No export cache, persistent job or sharing URL is created.
+
+Raw skill files, sidecars and empty directories are preserved. No hooks/scripts run during export and no secrets are redacted from package files. Import still uses normal security scanning and conflict checks. Export requires no-follow descriptor-relative host filesystem operations; unsupported platforms receive 422 rather than following links unsafely.
+
 #### Reload Skills
 
 Invalidate the skill prompt caches for every user in the current Gateway
@@ -916,7 +930,7 @@ GET /api/threads/{thread_id}/artifacts/{path}
 **Query Parameters:**
 - `download` (boolean): If `true`, force download with Content-Disposition header
 
-**Response:** File content with appropriate Content-Type
+**Response:** File content with appropriate Content-Type. HTML and XML documents (`.html`, `.xml`, `.xhtml`, `.svg`, and other `+xml` types) are always returned as attachments, regardless of `download`, so generated markup never renders in the application origin.
 
 ---
 

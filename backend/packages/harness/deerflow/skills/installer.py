@@ -7,6 +7,7 @@ Both Gateway and Client delegate to these functions.
 import asyncio
 import concurrent.futures
 import logging
+import os
 import posixpath
 import shutil
 import stat
@@ -191,6 +192,8 @@ def safe_extract_skill_archive(
                 if total_written > max_total_size:
                     raise ValueError("Skill archive is too large or appears highly compressed.")
                 dst.write(chunk)
+        if os.name == "posix":
+            member_path.chmod(0o755 if (info.external_attr >> 16) & 0o111 else 0o644)
 
 
 def _is_script_support_file(rel_path: Path) -> bool:

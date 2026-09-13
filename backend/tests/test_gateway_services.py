@@ -623,6 +623,26 @@ def test_build_run_config_basic():
     assert config["recursion_limit"] == 100
 
 
+def test_build_run_config_uses_configured_default_recursion_limit(_stub_app_config):
+    """Runs without a request override use the operator-configured default."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "recursion_limit": 700,
+            }
+        )
+    )
+    try:
+        config = build_run_config("thread-1", None, None)
+        assert config["recursion_limit"] == 700
+    finally:
+        reset_app_config()
+
+
 def test_build_run_config_with_overrides():
     from app.gateway.services import build_run_config
 
@@ -721,13 +741,102 @@ def test_build_run_config_preserves_reasonable_recursion_limit(_stub_app_config)
     assert config["recursion_limit"] == 250
 
 
-def test_build_run_config_rejects_invalid_recursion_limit(_stub_app_config):
-    """Non-positive / non-int / bool values fall back to the server default."""
-    from app.gateway.services import _DEFAULT_RECURSION_LIMIT, build_run_config
+def test_build_run_config_client_recursion_limit_overrides_configured_default(_stub_app_config):
+    """An explicit valid client value takes precedence over the server default."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 
-    for bad in (0, -5, "1000", 3.5, True, None):
-        config = build_run_config("thread-1", {"recursion_limit": bad}, None)
-        assert config["recursion_limit"] == _DEFAULT_RECURSION_LIMIT, bad
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "recursion_limit": 700,
+            }
+        )
+    )
+    try:
+        config = build_run_config("thread-1", {"recursion_limit": 250}, None)
+        assert config["recursion_limit"] == 250
+    finally:
+        reset_app_config()
+
+
+def test_build_run_config_rejects_invalid_recursion_limit(_stub_app_config):
+    """Non-positive / non-int / bool values fall back to the configured default."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "recursion_limit": 700,
+            }
+        )
+    )
+
+    try:
+        for bad in (0, -5, "1000", 3.5, True, None):
+            config = build_run_config("thread-1", {"recursion_limit": bad}, None)
+            assert config["recursion_limit"] == 700, bad
+    finally:
+        reset_app_config()
+
+
+def test_build_run_config_logs_and_uses_fallback_when_app_config_unavailable(monkeypatch, caplog):
+    """A config-load failure falls back visibly instead of silently."""
+    from app.gateway import services
+
+    monkeypatch.setattr(services, "get_app_config", lambda: (_ for _ in ()).throw(RuntimeError("broken config")))
+    caplog.set_level(logging.WARNING, logger="app.gateway.services")
+
+    config = services.build_run_config("thread-1", {"recursion_limit": 0}, None)
+
+    assert config["recursion_limit"] == services._DEFAULT_RECURSION_LIMIT
+    assert any("failed to load app config; falling back to recursion_limit=100" in record.message for record in caplog.records)
+
+
+def test_build_run_config_invalid_client_recursion_limit_uses_configured_default(_stub_app_config):
+    """An invalid client value cannot erase the operator-configured default."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "recursion_limit": 700,
+            }
+        )
+    )
+    try:
+        config = build_run_config("thread-1", {"recursion_limit": 0}, None)
+        assert config["recursion_limit"] == 700
+    finally:
+        reset_app_config()
+
+
+def test_build_run_config_clamps_configured_default_to_ceiling(_stub_app_config, caplog):
+    """The operator default remains bounded by max_recursion_limit."""
+    from app.gateway.services import build_run_config
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "recursion_limit": 700,
+                "max_recursion_limit": 500,
+            }
+        )
+    )
+    try:
+        caplog.set_level(logging.WARNING, logger="app.gateway.services")
+        config = build_run_config("thread-1", None, None)
+        assert config["recursion_limit"] == 500
+        assert any("recursion_limit 700 exceeds max_recursion_limit 500" in record.message for record in caplog.records)
+    finally:
+        reset_app_config()
 
 
 def test_build_run_config_clamps_recursion_limit_with_context(_stub_app_config):
@@ -990,6 +1099,67 @@ def test_state_accessor_graph_cache_honors_configured_cap():
         gateway_services._state_accessor_graph_cache.clear()
 
 
+def test_state_accessor_graph_serializes_same_key_cold_construction():
+    """Overlapping first reads with the same factory object and app-config
+    identity must run the factory exactly once (per-key construction
+    serialization, PR #5224 review), while a changed factory identity still
+    rebuilds instead of reusing the stored graph."""
+    import threading
+    import time
+    from typing import Any
+
+    from app.gateway import services as gateway_services
+
+    builds = []
+    first_inside = threading.Event()
+    release_first = threading.Event()
+
+    def slow_factory(*, config):
+        graph = object()
+        builds.append(graph)
+        first_inside.set()
+        release_first.wait(timeout=10)
+        return graph
+
+    gateway_services._state_accessor_graph_cache.clear()
+    results: list[Any] = []
+    errors: list[BaseException] = []
+
+    def reader() -> None:
+        try:
+            results.append(gateway_services._state_accessor_graph(slow_factory, None, "full", None, {}))
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    try:
+        first = threading.Thread(target=reader)
+        second = threading.Thread(target=reader)
+        first.start()
+        assert first_inside.wait(timeout=5)
+        second.start()
+        # The second reader blocks on the per-key lock while the first is
+        # still inside the factory: no duplicate construction.
+        deadline = time.monotonic() + 5
+        while second.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(builds) == 1, errors
+        assert second.is_alive(), "second cold reader must wait for the in-flight construction"
+
+        release_first.set()
+        first.join(timeout=10)
+        second.join(timeout=10)
+        assert not (first.is_alive() or second.is_alive())
+        assert len(builds) == 1
+        assert len(results) == 2 and results[0] is results[1]
+
+        # A different factory object is an identity change: rebuild, not reuse.
+        other = gateway_services._state_accessor_graph(lambda *, config: object(), None, "full", None, {})
+        assert other is not results[0]
+        assert len(builds) == 1
+    finally:
+        gateway_services._state_accessor_graph_cache.clear()
+
+
 def test_build_run_config_configurable_custom_agent_dual_writes_agent_name():
     """Regression for issue #3549: even when the caller uses the legacy
     ``configurable`` path, ``agent_name`` must also land in
@@ -1141,7 +1311,7 @@ def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
 
 @pytest.mark.anyio
 async def test_seeded_checkpoint_messages_precede_the_first_new_run_messages():
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from langchain_core.messages import AIMessage, HumanMessage
 
@@ -1171,7 +1341,7 @@ async def test_seeded_checkpoint_messages_precede_the_first_new_run_messages():
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
+        new=MagicMock(return_value=(accessor, {"configurable": {"thread_id": "thread-1"}})),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1211,7 +1381,7 @@ async def test_seeded_checkpoint_messages_precede_the_first_new_run_messages():
 
 @pytest.mark.anyio
 async def test_checkpoint_history_seed_skips_new_thread_without_checkpoint():
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from app.gateway.services import ensure_checkpoint_history_seeded
 
@@ -1231,7 +1401,7 @@ async def test_checkpoint_history_seed_skips_new_thread_without_checkpoint():
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("new threads should not build an accessor"),
+        new=MagicMock(side_effect=AssertionError("new threads should not build an accessor")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1244,7 +1414,7 @@ async def test_checkpoint_history_seed_skips_new_thread_without_checkpoint():
 
 @pytest.mark.anyio
 async def test_checkpoint_history_seed_is_skipped_when_journal_already_has_messages():
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from app.gateway.services import ensure_checkpoint_history_seeded
 
@@ -1256,7 +1426,7 @@ async def test_checkpoint_history_seed_is_skipped_when_journal_already_has_messa
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("checkpoint state should not be loaded"),
+        new=MagicMock(side_effect=AssertionError("checkpoint state should not be loaded")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1315,7 +1485,7 @@ async def test_checkpoint_history_seed_guard_is_thread_scoped_under_user_context
     even when a user is authenticated. Seed rows stamped by another principal
     (or NULL) are invisible to a user-scoped query, which would re-seed a
     duplicate history per principal."""
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from app.gateway.services import ensure_checkpoint_history_seeded
     from deerflow.runtime.user_context import AUTO
@@ -1331,7 +1501,7 @@ async def test_checkpoint_history_seed_guard_is_thread_scoped_under_user_context
 
     with patch(
         "app.gateway.services.build_checkpoint_state_accessor",
-        side_effect=AssertionError("checkpoint state should not be loaded"),
+        new=MagicMock(side_effect=AssertionError("checkpoint state should not be loaded")),
     ):
         await ensure_checkpoint_history_seeded(
             request,
@@ -1350,7 +1520,7 @@ async def test_checkpoint_history_seed_runs_exactly_once_across_principals(tmp_p
     user_id=NULL; a later authenticated run on the same thread must still
     see them and skip re-seeding (the MemoryRunEventStore-based tests above
     cannot catch this because the memory store ignores user_id)."""
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     from langchain_core.messages import AIMessage, HumanMessage
 
@@ -1386,7 +1556,7 @@ async def test_checkpoint_history_seed_runs_exactly_once_across_principals(tmp_p
 
         with patch(
             "app.gateway.services.build_checkpoint_state_accessor",
-            return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
+            new=MagicMock(return_value=(accessor, {"configurable": {"thread_id": "thread-1"}})),
         ):
             # First seed: ownerless (no user contextvar) — rows stamped NULL.
             await ensure_checkpoint_history_seeded(
@@ -1673,6 +1843,7 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
             "disable_clarification": True,
             "agent_name": "coding-llm-gateway",
         },
+        internal=True,
     )
 
     # Forwarded into runtime context — what tools/middlewares read.
@@ -1685,15 +1856,46 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
     assert "disable_clarification" not in config.get("configurable", {})
 
 
+def test_context_only_keys_are_internal_only():
+    """``github_token`` / ``disable_clarification`` are produced by the channel run
+    policies, which reach the Gateway over the internally-authenticated channel. A
+    non-internal caller must not be able to supply either through ``body.context``.
+
+    ``disable_clarification`` is not a milder cousin of ``non_interactive``:
+    ``ClarificationMiddleware`` answers every clarification — ``risk_confirmation``
+    included — with "proceed without asking", and ``SandboxMiddleware`` reads the two
+    keys as the same non-interactive signal. Forwarding it ungated reopened exactly
+    the gate ``_CONTEXT_INTERNAL_CALLER_KEYS`` exists to close.
+    """
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(
+        config,
+        {
+            "github_token": "attacker-supplied",
+            "disable_clarification": True,
+            "agent_name": "coding-llm-gateway",
+        },
+    )
+
+    assert "github_token" not in config["context"]
+    assert "disable_clarification" not in config["context"]
+    assert "github_token" not in config.get("configurable", {})
+    assert "disable_clarification" not in config.get("configurable", {})
+    # Whitelisted agent-config keys still come through for ordinary callers.
+    assert config["context"]["agent_name"] == "coding-llm-gateway"
+
+
 def test_merge_run_context_overrides_context_only_keys_do_not_override_existing():
-    """A token already in ``config['context']`` must not be clobbered by a
-    client-supplied one (defense in depth — the manager is the only legitimate
-    source, but ``setdefault`` keeps the contract explicit)."""
+    """A token already in ``config['context']`` must not be clobbered by one supplied
+    in ``body.context`` (defense in depth — ``setdefault`` keeps the contract explicit
+    even now that only internal callers reach this branch)."""
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
     config["context"] = {"github_token": "pre-existing"}
-    merge_run_context_overrides(config, {"github_token": "attacker-supplied"})
+    merge_run_context_overrides(config, {"github_token": "later-supplied"}, internal=True)
 
     assert config["context"]["github_token"] == "pre-existing"
 
@@ -2914,6 +3116,71 @@ def test_strip_internal_context_keys_scrubs_config_smuggled_non_interactive():
     via_configurable = build_run_config("thread-1", {"configurable": {"non_interactive": True}}, None)
     strip_internal_context_keys(via_configurable)
     assert "non_interactive" not in via_configurable["configurable"]
+
+
+def test_strip_internal_context_keys_scrubs_config_smuggled_context_only_keys():
+    """The context-only internal keys need the same ``body.config`` scrub as
+    ``non_interactive``: ``build_run_config`` copies both sections verbatim, so gating
+    ``merge_run_context_overrides`` alone still leaves ``body.config['context']`` open.
+
+    The ``configurable`` half matters on its own — that dict is persisted in
+    checkpoints, so a smuggled ``github_token`` would write a live credential into the
+    checkpoint store even though no tool reads it from there.
+    """
+    from app.gateway.services import build_run_config, strip_internal_context_keys
+
+    via_context = build_run_config(
+        "thread-1",
+        {"context": {"github_token": "attacker-supplied", "disable_clarification": True, "model_name": "gpt"}},
+        None,
+    )
+    strip_internal_context_keys(via_context)
+    assert "github_token" not in via_context["context"]
+    assert "disable_clarification" not in via_context["context"]
+    assert via_context["context"]["model_name"] == "gpt"
+
+    via_configurable = build_run_config(
+        "thread-1",
+        {"configurable": {"github_token": "attacker-supplied", "disable_clarification": True}},
+        None,
+    )
+    strip_internal_context_keys(via_configurable)
+    assert "github_token" not in via_configurable["configurable"]
+    assert "disable_clarification" not in via_configurable["configurable"]
+
+
+def test_start_run_sequence_drops_context_only_keys_for_session_caller():
+    """Replay the real ``start_run`` assembly order for a session-authenticated caller
+    that pushes the keys through *both* smuggling surfaces at once."""
+    request = _make_request_with_auth_source("session")
+    config = _assemble_authz_run_config(
+        {"context": {"github_token": "via-config", "disable_clarification": True}},
+        request,
+        body_context={"github_token": "via-body-context", "disable_clarification": True},
+    )
+
+    assert "github_token" not in config["context"]
+    assert "disable_clarification" not in config["context"]
+    assert "github_token" not in config.get("configurable", {})
+    assert "disable_clarification" not in config.get("configurable", {})
+
+
+def test_start_run_sequence_keeps_context_only_keys_for_internal_caller():
+    """The channel path (internal auth) must keep carrying the minted token and the
+    non-interactive flag, and neither may land in checkpoint-persisted ``configurable``."""
+    from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+
+    request = _make_request_with_auth_source(AUTH_SOURCE_INTERNAL, system_role=INTERNAL_SYSTEM_ROLE)
+    config = _assemble_authz_run_config(
+        {},
+        request,
+        body_context={"github_token": "ghs_installation_token", "disable_clarification": True},
+    )
+
+    assert config["context"]["github_token"] == "ghs_installation_token"
+    assert config["context"]["disable_clarification"] is True
+    assert "github_token" not in config.get("configurable", {})
+    assert "disable_clarification" not in config.get("configurable", {})
 
 
 # --- Authorization identity anti-forgery tests ---

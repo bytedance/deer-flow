@@ -817,6 +817,7 @@ async def test_reconcile_stuck_once_tasks_finalizes_terminal_successful_run(tmp_
         sf = get_session_factory()
         assert sf is not None
         task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
         durable_run_repo = RunRepository(sf)
         now = datetime.now(UTC)
         await task_repo.create(
@@ -837,6 +838,17 @@ async def test_reconcile_stuck_once_tasks_finalizes_terminal_successful_run(tmp_
             user_id="user-1",
             updates={"status": "running", "last_run_id": "run-once-multi-success"},
         )
+        # The peer committed the terminal outcome (success) in the occurrence
+        # row; the multi-instance sweep finalises the parent from that
+        # projection rather than from the durable RunRow directly.
+        await run_repo.create(
+            run_record_id="task-once-multi-success-row",
+            task_id="task-once-multi-success",
+            thread_id="thread-multi-success",
+            scheduled_for=now,
+            trigger="schedule",
+            status="success",
+        )
         await durable_run_repo.put(
             "run-once-multi-success",
             thread_id="thread-multi-success",
@@ -854,7 +866,9 @@ async def test_reconcile_stuck_once_tasks_finalizes_terminal_successful_run(tmp_
 
 
 @pytest.mark.asyncio
-async def test_lease_aware_once_recovery_keeps_live_peer_and_finalizes_dead_run(tmp_path):
+async def test_lease_aware_once_recovery_keeps_live_peer_and_cancels_dead_run(tmp_path):
+    """A dead durable run with no committed occurrence keeps the generic
+    cancellation; a live peer with a live lease is left untouched."""
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
         sf = get_session_factory()
@@ -903,8 +917,72 @@ async def test_lease_aware_once_recovery_keeps_live_peer_and_finalizes_dead_run(
         live = await task_repo.get("task-once-live", user_id="user-1")
         dead = await task_repo.get("task-once-dead", user_id="user-1")
         assert live is not None and live["status"] == "running"
-        assert dead is not None and dead["status"] == "failed"
-        assert dead["last_error"] is not None
+        assert dead is not None and dead["status"] == "cancelled"
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_lease_aware_once_takeover_cas_loss_finalizes_peer_terminal_outcome(tmp_path):
+    """A takeover that observes a terminal peer outcome finalizes the parent.
+
+    Regression for review comment r3994555070 / r3979241541: when a peer's run
+    committed ``success`` around the takeover attempt, the parent must be
+    finalised to ``completed`` from the committed occurrence, not blindly set
+    to ``cancelled`` (the durable run is no longer ``pending``/``running``, so
+    the takeover-CAS guard does not ``continue``).
+    """
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        durable_run_repo = RunRepository(sf)
+        now = datetime.now(UTC)
+        await task_repo.create(
+            task_id="task-once-cas-loss",
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="cas loss",
+            prompt="p",
+            schedule_type="once",
+            schedule_spec={"run_at": (now + timedelta(minutes=5)).isoformat()},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_repo.update(
+            "task-once-cas-loss",
+            user_id="user-1",
+            updates={"status": "running", "last_run_id": "run-once-cas-loss"},
+        )
+        # The peer committed the terminal occurrence; its durable run is still
+        # present but no longer live (dead lease), so the sweep attempts a
+        # takeover and must finalise from the committed success instead of
+        # cancelling the parent.
+        await run_repo.create(
+            run_record_id="task-once-cas-loss-row",
+            task_id="task-once-cas-loss",
+            thread_id="thread-cas-loss",
+            scheduled_for=now,
+            trigger="schedule",
+            status="success",
+        )
+        await durable_run_repo.put(
+            "run-once-cas-loss",
+            thread_id="thread-cas-loss",
+            user_id="user-1",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
+        )
+
+        assert await task_repo.reconcile_stuck_once_tasks(error="restart", now=now) == 1
+        task = await task_repo.get("task-once-cas-loss", user_id="user-1")
+        assert task is not None and task["status"] == "completed"
+        assert task["last_error"] is None
     finally:
         await close_engine()
 

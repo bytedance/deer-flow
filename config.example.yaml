@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 40
+config_version: 43
 
 # ============================================================================
 # Logging
@@ -43,9 +43,13 @@ logging:
 # Optional AgentMiddleware classes loaded into the lead and subagent runtime
 # middleware chains after built-in runtime middlewares, but before the
 # safety/clarification tail. Missing packages, invalid classes, and broken
-# modules fail loudly at agent creation with an actionable import error.
-# The same zero-argument class list applies to both lead and subagent runtimes;
-# lead-only vs subagent-only configuration is not expressible yet. Treat these
+# modules fail at agent creation with an actionable import error; constructor
+# errors fail at agent creation with the underlying exception.
+# The same list applies to both lead and subagent runtimes; lead-only vs
+# subagent-only configuration is not expressible yet. Each entry is a class
+# path or `{class, kwargs}` for constructor arguments. kwargs values must be
+# JSON types (object, array, string, number, boolean, or null); YAML dates
+# and timestamps are coerced to ISO strings so they match JSON. Treat these
 # files as trusted operator config because middleware classes execute code.
 # Uncomment this block to define middlewares in config.yaml. Leaving it commented
 # lets extensions_config.json remain the source of truth for this fixed-slot
@@ -53,7 +57,9 @@ logging:
 # extensions:
 #   middlewares:
 #     - my_company.deerflow_middlewares:DomainGuardMiddleware
-#     - my_company.deerflow_middlewares:LatencyStampingMiddleware
+#     - class: my_company.deerflow_middlewares:LatencyStampingMiddleware
+#       kwargs:
+#         header: X-DeerFlow-Latency
 
 # ============================================================================
 # Tracing / Observability (Monocle)
@@ -88,14 +94,16 @@ token_budget:
   hard_stop_threshold: 1.0      # Force stop at 100% of the budget
 
 # ============================================================================
-# Recursion Limit — Hard ceiling for a client-supplied run recursion_limit
+# Recursion Limits
 # ============================================================================
 # A run's recursion_limit caps the number of LangGraph super-steps (each is at
-# least one LLM call). The Gateway never trusts a client-supplied value
-# verbatim: any value above this ceiling is clamped down to it, preventing
-# runaway API cost / DoS. Invalid or non-positive client values fall back to
-# the server default of 100. Raise this only if you legitimately run very
-# deeply nested subagent graphs.
+# least one LLM call). Clients may override the default per request; invalid or
+# non-positive client values fall back to this configured default.
+recursion_limit: 100
+
+# The Gateway never trusts a configured or client-supplied value above this
+# ceiling, preventing runaway API cost / DoS. Raise it only if you legitimately
+# run very deeply nested subagent graphs.
 max_recursion_limit: 1000
 
 
@@ -252,6 +260,12 @@ models:
   #   max_retries: 2
   #   use_responses_api: true
   #   output_version: responses/v1
+  #   # Optional, forwarded to ChatOpenAI as-is (default false): send only the new
+  #   # turn plus previous_response_id instead of replaying the full history. The
+  #   # chained context is still billed as input tokens, and any client-side
+  #   # history rewrite (e.g. blocked-write payload elision) is only honored when
+  #   # the history is replayed.
+  #   use_previous_response_id: false
   #   context_window: 400000
   #   supports_vision: true
 
@@ -854,12 +868,13 @@ tools:
   #   contents_max_characters: 1000
   #   # api_key: $EXA_API_KEY
 
-  # Web search tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # Web search tool (uses Firecrawl. Cloud requires FIRECRAWL_API_KEY; self-host may need no key.)
   # - name: web_search
   #   group: web
   #   use: deerflow.community.firecrawl.tools:web_search_tool
   #   max_results: 5
   #   # api_key: $FIRECRAWL_API_KEY
+  #   # base_url: http://<host>:3002  # optional: self-hosted Firecrawl; no cloud API key needed
 
   # Web search tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # GroundRoute is a meta search layer: one API in front of six engines (Serper,
@@ -1045,11 +1060,12 @@ tools:
   #   # Timeout for navigating to the page (in seconds). Set to positive value to enable, -1 to disable
   #   navigation_timeout: 30
 
-  # Web fetch tool (uses Firecrawl, requires FIRECRAWL_API_KEY)
+  # Web fetch tool (uses Firecrawl. Cloud requires FIRECRAWL_API_KEY; self-host may need no key.)
   # - name: web_fetch
   #   group: web
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
+  #   # base_url: http://<host>:3002  # optional: self-hosted Firecrawl; no cloud API key needed
 
   # Web fetch tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # Fetches a page's extracted text via GroundRoute mode=page.
@@ -1236,6 +1252,7 @@ loop_detection:
   warn_threshold: 3
   hard_limit: 5
   window_size: 20
+  # Compatibility name: bounds retained (thread_id, run_id) histories, not whole threads.
   max_tracked_threads: 100
   tool_freq_warn: 30
   tool_freq_hard_limit: 50
@@ -1283,6 +1300,15 @@ loop_detection:
 
 read_before_write:
   enabled: true
+  # A blocked call never ran and must be re-issued after a re-read, so its
+  # payload (write_file content, str_replace old_str/new_str) is dead weight in
+  # every later model call. Replace it with a short placeholder in model-bound
+  # requests; stored history, receipts, and the run journal keep the original.
+  elide_blocked_payloads: true
+  # Only elide payload fields at least this many characters long (a character
+  # count, not tokens: CJK text costs ~3-4x more per character than ASCII).
+  # 0 elides every non-empty payload.
+  elide_min_chars: 2000
 
 # ============================================================================
 # Provider Safety Termination Configuration
@@ -1809,6 +1835,13 @@ title:
 # ============================================================================
 # Automatically summarize conversation history when token limits are approached
 # This helps maintain context in long conversations without exceeding model limits
+
+# Optional task notes and keyword recall of compacted messages. See docs/task-continuity.md.
+task_continuity:
+  enabled: false
+  max_batches: 32
+  max_records_per_batch: 256
+  max_record_chars: 16000
 
 summarization:
   enabled: true
