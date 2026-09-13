@@ -35,7 +35,7 @@ from app.gateway.checkpoint_lineage import (
 from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
-    build_checkpoint_state_accessor,
+    abuild_checkpoint_state_accessor,
     build_checkpoint_state_mutation_accessor,
     build_thread_checkpoint_state_accessor,
     build_thread_checkpoint_state_mutation_accessor,
@@ -122,7 +122,9 @@ _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
 # parent's sandbox after its first run; the branch lazily acquires its own
 # sandbox keyed by its own thread_id instead. ``thread_data`` is recomputed
 # from the branch's thread_id by ThreadDataMiddleware on every run.
-_BRANCH_EXCLUDED_CHANNELS = frozenset({"sandbox", "thread_data"})
+# task_history binds source batches to the parent's archive scope. Notes may
+# carry over, but the branch must not advertise that archive as available.
+_BRANCH_EXCLUDED_CHANNELS = frozenset({"sandbox", "thread_data", "task_history"})
 _BRANCH_HISTORY_SCAN_LIMIT = 200
 _BRANCH_HISTORY_RAW_SCAN_LIMIT = _BRANCH_HISTORY_SCAN_LIMIT * 2
 _BRANCH_TITLE_MAX_LENGTH = 256
@@ -926,7 +928,7 @@ async def _branch_thread_with_reservation(
     source_metadata = source_record.get("metadata") or {}
     if source_metadata.get(_SIDECAR_METADATA_KEY) is True:
         raise HTTPException(status_code=409, detail="Branching is only available in the main conversation.")
-    source_accessor, source_config = build_checkpoint_state_accessor(
+    source_accessor, source_config = await abuild_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=source_record.get("assistant_id"),
@@ -1222,7 +1224,7 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
     checkpointer = get_checkpointer(request)
     record: dict | None = await thread_store.get(thread_id)
     try:
-        accessor, config = build_checkpoint_state_accessor(
+        accessor, config = await abuild_checkpoint_state_accessor(
             request,
             thread_id=thread_id,
             assistant_id=record.get("assistant_id") if record is not None else None,

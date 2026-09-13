@@ -397,6 +397,24 @@
 
 ### 修复
 
+- **Skills：** 切换 skill 启用状态时不再把解析后的密钥写入 `extensions_config.json`。
+  此前 Gateway 的 skill 开关与 `DeerFlowClient.update_skill` 通过
+  `ExtensionsConfig.from_file()` 读取配置（该方法会把所有 `$VAR` 值替换为环境变量的
+  实际值），再把模型整体写回，于是 `"$GITHUB_TOKEN"` 引用会被持久化为明文令牌，未设置
+  的变量则被永久写成 `""`。`DeerFlowClient.update_mcp_config` 对 `mcpServers` 以外的
+  所有键也存在同样问题。现在这些写入方直接修改磁盘上的原始 JSON，并按运行时的加载方式
+  校验候选配置后再写入，占位符与手写结构保持不变；MCP 路由也复用同一个原始读取函数。
+  已被旧版本改写过的文件仍保留明文值，请恢复 `$VAR` 引用并轮换已暴露的凭据。([#5357])
+- **Gateway：** `disable_clarification` 与 `github_token` 现在与 `non_interactive`
+  一样，仅对内部认证的调用方生效。此前这两个键无论调用方身份都会从 `body.context`
+  透传，而且不会从被逐字复制进 run config 的自由格式 `body.config` 中清除，因此任何
+  会话或 PAT 调用方都能设置它们。其中 `disable_clarification` 影响更大：
+  `ClarificationMiddleware` 会把包括 `risk_confirmation` 在内的所有澄清请求替换为
+  "无需确认，继续执行"，`SandboxMiddleware` 也把它与 `non_interactive` 视作同一个
+  非交互信号。`github_token` 则会进入 `runtime.context`，被 bash 工具导出为
+  `GH_TOKEN`/`GITHUB_TOKEN`；若经由 `body.config['configurable']` 夹带，还会被写入
+  checkpoint 存储。定时任务、IM 渠道与 GitHub webhook 渠道走内部请求通道，不受影响。
+  ([#5338])
 - **Artifact：** `PUT /api/threads/{id}/artifacts/{path}` 现在严格限制在
   `/mnt/user-data/outputs` 之内。此前 outputs-only 校验只是对原始路径做字符串前缀
   检查，百分号编码的 `..`（`outputs/%2e%2e/uploads/x.txt`，nginx 原样转发、Starlette
@@ -928,6 +946,13 @@
 - **沙箱：** 沙箱子进程环境会清除 `SSH_AUTH_SOCK`——继承宿主机 ssh-agent socket
   会让沙箱内代码用智能体持有的所有密钥签名与认证——除非技能通过 required-secrets
   显式声明。([#5145])
+- **Artifact：** XML 产物现在与 HTML、SVG 一样以下载附件形式返回。
+  `GET /api/threads/{id}/artifacts/{path}` 此前会在应用源内联渲染 `.xml`、`.xsl`、
+  `.rdf` 文件（以及宿主 MIME 数据库映射为 `+xml` 的 `.rss` 等类型），被 prompt
+  注入的智能体写出带 XHTML 命名空间 `<script>` 的 XML 后，用户从聊天链接打开即可
+  以其会话调用 API。所有 XML MIME 类型（`text/xml`、`application/xml`、`text/xsl`
+  及任意 `+xml` 子类型）现均视为主动内容，`.skill` 归档成员同样适用；Artifact
+  面板仍通过 Range 请求预览 XML。([#5353])
 
 ### 文档
 
@@ -2091,3 +2116,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5284]: https://github.com/bytedance/deer-flow/pull/5284
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
 [#5321]: https://github.com/bytedance/deer-flow/pull/5321
+[#5338]: https://github.com/bytedance/deer-flow/pull/5338
+[#5353]: https://github.com/bytedance/deer-flow/pull/5353
+[#5357]: https://github.com/bytedance/deer-flow/pull/5357

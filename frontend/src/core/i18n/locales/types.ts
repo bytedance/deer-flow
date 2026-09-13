@@ -27,6 +27,7 @@ export interface Translations {
     custom: string;
     notAvailableInDemoMode: string;
     loading: string;
+    error: string;
     version: string;
     lastUpdated: string;
     code: string;
@@ -244,6 +245,7 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    stopStreamingUnavailable: string;
   };
 
   // Sidebar
@@ -471,6 +473,17 @@ export interface Translations {
       failed: string;
       cancelled: string;
     };
+    history: {
+      navigation: string;
+      newer: string;
+      older: string;
+      latest: string;
+      page: string;
+      paused: string;
+      loading: string;
+      loadFailed: string;
+      retry: string;
+    };
     runTrigger: { scheduled: string; manual: string };
     runStatus: {
       queued: string;
@@ -529,6 +542,9 @@ export interface Translations {
     backToGallery: string;
     settings: string;
     settingsTitle: string;
+    settingsDisplayName: string;
+    settingsDisplayNameTooLong: string;
+    settingsDisplayNameHint: string;
     settingsDescription: string;
     settingsModel: string;
     settingsModelDefault: string;
@@ -665,6 +681,15 @@ export interface Translations {
 
   // Tool calls
   toolCalls: {
+    details: string;
+    toolName: string;
+    callId: string;
+    input: string;
+    result: string;
+    error: string;
+    noResult: string;
+    emptyResult: string;
+    truncated: string;
     moreSteps: (count: number) => string;
     lessSteps: string;
     executeCommand: string;
@@ -1063,6 +1088,38 @@ export interface Translations {
       };
     };
     skills: {
+      exportPrevious: string;
+      exportNotices: Record<string, string>;
+      exportSkill: string;
+      exportTitle: string;
+      exportDescription: string;
+      exportLoading: string;
+      exportFiles: string;
+      exportDirectories: string;
+      exportSize: string;
+      exportContents: string;
+      exportMore: string;
+      exportRequirements: string;
+      exportCompatibility: string;
+      exportTools: string;
+      exportSecrets: string;
+      exportOptional: string;
+      exportRequired: string;
+      exportUndeclared: string;
+      exportScope: string;
+      exportWarnings: string;
+      exportWarningDescription: string;
+      exportBlocked: string;
+      exportDownload: string;
+      exportDownloading: string;
+      exportHandedOff: string;
+      exportChanged: string;
+      exportRefresh: string;
+      exportFailed: string;
+      exportBusy: string;
+      exportTimeout: string;
+      exportLimit: string;
+      exportNotFound: string;
       title: string;
       description: string;
       createSkill: string;

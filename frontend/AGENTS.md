@@ -15,6 +15,12 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 - **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
 - **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
 
+`pnpm-workspace.yaml` overrides vulnerable `@xmldom/xmldom` 0.9.x releases to
+0.9.12 for GHSA-965w-775f-mr7g. Nextra pulls it in through MathJax and
+`speech-rule-engine@4.1.2`, which pins 0.9.8. Keep the override until the
+upstream dependency chain resolves a patched version without it; regenerate
+`pnpm-lock.yaml` and verify the docs build when changing this constraint.
+
 ## Commands
 
 | Command          | Purpose                                       |
@@ -37,6 +43,14 @@ Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` wi
 Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
+
+The dedicated `run-history.ts` hook replaces the unpaged runs hook. Show counts
+only after a successful history read, never during initial loading or errors.
+Scheduled run history uses task/page query keys and the existing live offset API.
+Fetch 51 rows to display 50 plus a next-page sentinel; never append pages. Only
+page zero polls or refreshes on focus/reconnect. Task switches reset to page zero,
+and consumed AbortSignals cancel obsolete reads. Live offsets are not snapshots;
+explicit mutations or navigation may observe newly inserted runs.
 
 ## Architecture
 
@@ -68,6 +82,12 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 More specific `AGENTS.md` files under `src/` contain the frontend sections split from this file.
 
 ## Code Style
+
+Custom Agent `display_name` is an optional Unicode UI label, edited in
+`AgentSettingsDialog`. Use it with a fallback to `name` for gallery/chat text;
+keep `name` for React identity, URLs, requests, and runtime `agent_name`.
+The 100-code-point budget uses `[...value.trim()].length`, matching Pydantic;
+do not use HTML `maxLength`, which counts UTF-16 code units instead.
 
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.
@@ -146,3 +166,9 @@ lists from the server instead of inserting those snapshots into either view.
 ### Delimited artifact preview
 
 CSV/TSV previews share `artifact-table-preview.tsx` between the panel and standalone viewer. Papa Parse runs only inside `delimited-preview.worker.ts`; `use-delimited-preview.ts` bounds input before transfer, cancels stale work, and enforces a five-second timeout. The parser detects the first record separator outside quoted fields and passes it explicitly to Papa Parse, so embedded newlines in an incomplete quoted field cannot corrupt newline detection. It retains at most 202 logical records and 50 columns, discarding an incomplete final record from truncated input. UI pagination displays at most 200 data rows in pages of 50. Keep the table mounted but inactive when switching to source so header/pagination state survives; changing file identity resets it. Pending `write_file` content stays in source mode until success.
+
+Custom skill export is admin-only and disabled in static demos. The lazy
+`skill-export-dialog.tsx` must abort requests and ignore stale callbacks on close
+or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob download;
+HTTP 409 requires explicit preview refresh. Keep file lists paginated and diagnostics
+localized. Browser handoff does not prove the file was saved to disk.

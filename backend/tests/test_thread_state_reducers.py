@@ -365,4 +365,5 @@ class TestThreadStateAnnotations:
             "promoted",
             "delegations",
             "skill_context",
+            "task_notes",
         }

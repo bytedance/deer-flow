@@ -1,0 +1,53 @@
+{
+  "scope": "controlled production-middleware integration; synthetic input; summary intentionally drops exact codes",
+  "cases": [
+    {
+      "case": 0,
+      "model": "qwen3.8-flash-next",
+      "archived": true,
+      "code_absent_from_active_context": true,
+      "tools_used": [
+        "history_read",
+        "history_search",
+        "task_note",
+        "write_manifest"
+      ],
+      "notes_saved": true,
+      "artifact_verified": true,
+      "artifact_sha256": "15fc7a1c1e2469cd40c1720ab897a1fe43b19e5fd9a56da63e3490d298bad85a",
+      "passed": true
+    },
+    {
+      "case": 1,
+      "model": "qwen3.8-flash-next",
+      "archived": true,
+      "code_absent_from_active_context": true,
+      "tools_used": [
+        "history_read",
+        "history_search",
+        "task_note",
+        "write_manifest"
+      ],
+      "notes_saved": true,
+      "artifact_verified": true,
+      "artifact_sha256": "75bed8fadbefd4250262af9e50ccd47716e0e2d8ed50b68aa941d714287d64b4",
+      "passed": true
+    },
+    {
+      "case": 2,
+      "model": "qwen3.8-flash-next",
+      "archived": true,
+      "code_absent_from_active_context": true,
+      "tools_used": [
+        "history_read",
+        "history_search",
+        "task_note",
+        "write_manifest"
+      ],
+      "notes_saved": true,
+      "artifact_verified": true,
+      "artifact_sha256": "7a8b7d062b6b22d5b45f4444255d8dd6e50c0f91f74ea786393fe4e9240d7833",
+      "passed": true
+    }
+  ]
+}
