@@ -13,6 +13,7 @@ metadata shape production emits.
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -33,7 +34,7 @@ from app.gateway.checkpoint_retention import (
     _row_field,
     enforce_thread_retention,
 )
-from deerflow.runtime.runs.worker import persist_run_durations
+from deerflow.runtime.runs.worker import _new_checkpoint_marker, persist_run_durations
 
 
 class FullState(TypedDict):
@@ -212,7 +213,7 @@ async def test_linear_thread_prunes_nothing(saver_env: _SaverEnv) -> None:
     report = await enforce_thread_retention(saver_env.saver, thread_id)
 
     assert report.deleted_checkpoint_ids == []
-    assert report.protected_head_id == checkpoint_ids[-1]
+    assert report.protected_head_ids == {"": checkpoint_ids[-1]}
     # one invoke lands several checkpoints (input/task/result); the ids we
     # collected are the resumable results, and all of them must survive
     listed = await _listed_checkpoint_ids(saver_env, thread_id)
@@ -236,13 +237,77 @@ async def test_runtime_duration_leaf_pruned_by_default(saver_env: _SaverEnv) -> 
     report = await enforce_thread_retention(saver_env.saver, thread_id)
 
     assert report.deleted_checkpoint_ids == [duration_id]
-    assert report.protected_head_id == checkpoint_ids[-1]
+    assert report.protected_head_ids == {"": checkpoint_ids[-1]}
     assert duration_id not in await _listed_checkpoint_ids(saver_env, thread_id)
     resumed = await saver_env.saver.aget_tuple(_config_thread(thread_id, checkpoint_ids[-1]))
     assert resumed is not None
     base = await _walk(saver_env, _config_thread(thread_id, checkpoint_ids[-1]), message_ids[-1])
     assert base is not None
     assert report.stats_after["checkpoint_rows"] == report.stats_before["checkpoint_rows"] - 1
+
+
+@pytest.mark.anyio
+async def test_postgres_round_trip_shape_pruned_by_default(saver_env: _SaverEnv) -> None:
+    """Deterministic pin for the shape-based fallback classifier, without Postgres.
+
+    On memory/SQLite the writer's ``writes`` marker survives a round trip, so
+    ``is_duration_only_checkpoint`` already classifies every writer-produced
+    leaf and the fallback in ``_mark_duration_leaves_without_the_marker`` is
+    only reached on the TEST_POSTGRES_URI-gated leg. This test hand-puts the
+    Postgres round-trip shape — a verbatim clone of its parent (fresh id/ts,
+    ``channel_versions`` copied unchanged) whose metadata has the ``writes``
+    marker popped but the writer's surviving stamps intact (``source ==
+    "update"``, a non-empty accumulated ``run_durations`` map) — and asserts
+    the shipping default still prunes it. The control bumps one channel
+    version (the shape a client ``update_state`` produces) with otherwise
+    identical metadata and must stay protected, so the class can neither
+    silently re-widen (a resumable head would lose head protection) nor
+    re-narrow (E1 would never fire on the production backend) without this
+    test failing.
+    """
+    thread_id, checkpoint_ids, _message_ids = await _write_turns(saver_env, steps=3)
+    head = await saver_env.saver.aget_tuple(_config(thread_id))
+    assert head is not None
+    head_id = head.checkpoint["id"]
+
+    def _pg_round_trip_meta(parent_meta: dict[str, Any]) -> dict[str, Any]:
+        meta = dict(parent_meta or {})
+        meta.pop("writes", None)  # what get_serializable_checkpoint_metadata does on Postgres
+        meta["source"] = "update"
+        meta["run_durations"] = {"run-1": 7}
+        meta["step"] = (meta["step"] + 1) if isinstance(meta.get("step"), int) else 1
+        return meta
+
+    def _leaf_config(parent_id: str) -> dict[str, Any]:
+        # aput needs the full configurable (namespace included) for the parent link.
+        return {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": parent_id}}
+
+    # Control: one NEW channel version on an otherwise verbatim clone — a
+    # client ``update_state`` can produce this, the runtime writer cannot.
+    control = copy.deepcopy(dict(head.checkpoint))
+    control.update(_new_checkpoint_marker())
+    control["channel_versions"] = dict(control["channel_versions"])
+    # A version value no real channel would carry; the classifier compares the
+    # frozenset of versions against the parent's, so any strictly-different
+    # set is what matters.
+    control["channel_versions"]["_control"] = "__control_version__"
+    control_id = control["id"]
+    control_meta = _pg_round_trip_meta(head.metadata)
+    await saver_env.saver.aput(_leaf_config(head_id), control, control_meta, {})
+
+    # The Postgres round-trip shape on top: verbatim clone of the control
+    # (identical ``channel_versions``), marker popped from the metadata.
+    pg_leaf = copy.deepcopy(control)
+    pg_leaf.update(_new_checkpoint_marker())
+    pg_leaf_id = pg_leaf["id"]
+    await saver_env.saver.aput(_leaf_config(control_id), pg_leaf, _pg_round_trip_meta(control_meta), {})
+
+    report = await enforce_thread_retention(saver_env.saver, thread_id)
+
+    assert report.deleted_checkpoint_ids == [pg_leaf_id]
+    assert report.protected_head_ids == {"": control_id}
+    assert pg_leaf_id not in await _listed_checkpoint_ids(saver_env, thread_id)
+    assert control_id in await _listed_checkpoint_ids(saver_env, thread_id)
 
 
 @pytest.mark.anyio
@@ -264,7 +329,7 @@ async def test_duration_link_protected_after_next_run(saver_env: _SaverEnv) -> N
 
     assert report.deleted_checkpoint_ids == []
     assert duration_id in await _listed_checkpoint_ids(saver_env, thread_id)
-    assert report.protected_head_id == snapshot.config["configurable"]["checkpoint_id"]
+    assert report.protected_head_ids == {"": snapshot.config["configurable"]["checkpoint_id"]}
 
 
 @pytest.mark.anyio
@@ -287,7 +352,7 @@ async def test_regenerated_old_head_pruned_opt_in(saver_env: _SaverEnv) -> None:
     report = await enforce_thread_retention(saver_env.saver, thread_id, policy)
 
     assert report.deleted_checkpoint_ids == [old_head_id]
-    assert report.protected_head_id == fork_head_id
+    assert report.protected_head_ids == {"": fork_head_id}
 
     fork_tuple = await saver_env.saver.aget_tuple(_config_thread(thread_id, fork_head_id))
     assert fork_tuple is not None
@@ -431,7 +496,7 @@ async def test_chain_walk_tolerates_missing_ancestor_row() -> None:
 
     report = await enforce_thread_retention(saver, thread_id)
 
-    assert report.protected_head_id == checkpoint_ids[-1]
+    assert report.protected_head_ids == {"": checkpoint_ids[-1]}
     # The head is protected; the remaining off-chain node (the oldest turn) is
     # a leaf sibling, which is not pruned unless opted in.
     assert report.deleted_checkpoint_ids == []
@@ -447,7 +512,7 @@ async def test_thread_lock_parameter_accepted(saver_env: _SaverEnv) -> None:
     report = await enforce_thread_retention(saver_env.saver, thread_id, thread_lock=lock)
 
     assert report.deleted_checkpoint_ids == []
-    assert report.protected_head_id == checkpoint_ids[-1]
+    assert report.protected_head_ids == {"": checkpoint_ids[-1]}
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +586,7 @@ async def test_empty_thread_reports_the_same_before_and_after_stats(saver_env: _
     report = await enforce_thread_retention(saver_env.saver, thread_id)
 
     assert report.deleted_checkpoint_ids == []
-    assert report.protected_head_id is None
+    assert report.protected_head_ids == {}
     assert report.stats_before == report.stats_after
     assert set(report.stats_before) == {
         "logical_checkpoint_bytes",

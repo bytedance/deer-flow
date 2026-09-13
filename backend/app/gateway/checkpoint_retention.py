@@ -74,7 +74,13 @@ class RetentionReport:
     """Outcome of one retention pass over one thread."""
 
     thread_id: str
-    protected_head_id: str | None = None
+    # Resume heads that survived this pass, per namespace (checkpoint_ns -> id).
+    # The root namespace (the "" key) is what an unsaved ``aget_tuple`` resolves
+    # as the thread's latest state; a persistent subgraph contributes its own
+    # child namespace whose head is protected too and would be invisible in a
+    # singular field. Consumers that only care about the thread's latest state
+    # read the root key.
+    protected_head_ids: dict[str, str] = field(default_factory=dict)
     deleted_checkpoint_ids: list[str] = field(default_factory=list)
     stats_before: dict[str, int] = field(default_factory=dict)
     stats_after: dict[str, int] = field(default_factory=dict)
@@ -448,8 +454,7 @@ async def enforce_thread_retention(
             current = heads.get(key[0])
             if current is None or key[1] > current[1]:
                 heads[key[0]] = key
-        head_key = max(resumable, key=lambda key: key[1]) if resumable else None
-        report.protected_head_id = head_key[1] if head_key else None
+        report.protected_head_ids = {ns: key[1] for ns, key in heads.items()}
 
         chain: set[tuple[str, str]] = set()
         for head in heads.values():
