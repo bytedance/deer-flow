@@ -625,6 +625,27 @@ def test_provisioner_create_reports_version_skew_when_capacity_is_missing(monkey
         backend._provisioner_create(None, "abc123")
 
 
+@pytest.mark.parametrize("reported_capacity", [4, 9, 13, None])
+def test_create_checks_runtime_minimum_without_sending_image_override(monkeypatch, reported_capacity):
+    backend = RemoteSandboxBackend("http://provisioner:8002", required_shell_sessions=9)
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+
+    def post(_url, *, json, **_kwargs):
+        assert "max_shell_sessions" not in json
+        payload = {"sandbox_url": "http://sandbox:8080"}
+        if reported_capacity is not None:
+            payload["max_shell_sessions"] = reported_capacity
+        return _StubResponse(payload=payload)
+
+    monkeypatch.setattr(requests, "post", post)
+    if reported_capacity == 4:
+        with pytest.raises(RuntimeError, match="insufficient shell-session capacity"):
+            backend.create("thread-a", "example")
+    else:
+        # A legacy provisioner without metadata retains the known image default.
+        assert backend.create("thread-a", "example").sandbox_url == "http://sandbox:8080"
+
+
 def test_provisioner_discover_returns_none_on_request_exception(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 

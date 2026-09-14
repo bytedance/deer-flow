@@ -147,6 +147,8 @@ class RemoteSandboxBackend(SandboxBackend):
         provisioner_url: str,
         api_key: str = "",
         max_shell_sessions: int | None = None,
+        *,
+        required_shell_sessions: int = 0,
     ):
         """Initialize with the provisioner service URL and optional API key.
 
@@ -157,10 +159,12 @@ class RemoteSandboxBackend(SandboxBackend):
                      Leave empty to send no authentication header.
             max_shell_sessions: Optional AIO shell-session capacity forwarded
                                 to each provisioned sandbox Pod.
+            required_shell_sessions: Minimum usable capacity, even when new Pods use the image default.
         """
         self._provisioner_url = provisioner_url.rstrip("/")
         self._api_key = api_key
         self._max_shell_sessions = max_shell_sessions
+        self._required_shell_sessions = max(required_shell_sessions, max_shell_sessions or 0)
 
     @property
     def provisioner_url(self) -> str:
@@ -170,11 +174,11 @@ class RemoteSandboxBackend(SandboxBackend):
         return {"X-API-Key": self._api_key} if self._api_key else {}
 
     def _requires_shell_capacity_replacement(self, payload: dict[str, object]) -> bool:
-        if self._max_shell_sessions is None:
+        if self._required_shell_sessions == 0:
             return False
         reported = payload.get("max_shell_sessions", _AIO_DEFAULT_MAX_SHELL_SESSIONS)
         try:
-            return int(reported) < self._max_shell_sessions
+            return int(reported) < self._required_shell_sessions
         except (TypeError, ValueError):
             return True
 

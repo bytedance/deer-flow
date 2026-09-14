@@ -168,8 +168,12 @@ For new sandbox requests, the Gateway also sends the effective AIO shell-session
 capacity derived from `subagent_runtime.max_running`. The provisioner writes it
 to the sandbox Pod as `MAX_SHELL_SESSIONS`; requests from older Gateways omit the
 field and retain the image default. Discovery responses report the effective
-capacity, and an idempotent create request replaces an existing Pod when its
-persisted capacity is lower than the requested value.
+capacity. The Gateway replaces a lower-capacity Pod through its ownership-fenced
+replacement path once the previous owner and recovery grace permit it. A create
+request for an existing Pod with insufficient capacity returns HTTP 409; the
+provisioner does not delete an existing Pod to upgrade its capacity, including
+after a transient Gateway discovery failure. If the old Pod has already gone
+but its Service remains, create can safely provision the missing Pod.
 
 ### Custom sandbox image
 

@@ -1224,24 +1224,18 @@ def create_sandbox(req: CreateSandboxRequest):
         try:
             existing_shell_capacity = _get_pod_shell_capacity(sandbox_id)
         except (ApiException, RuntimeError) as exc:
-            raise HTTPException(status_code=500, detail=f"Could not verify existing sandbox shell capacity: {exc}") from exc
-        if max_shell_sessions is not None and existing_shell_capacity < max_shell_sessions:
-            logger.info(
-                "Replacing sandbox '%s': persisted MAX_SHELL_SESSIONS=%s is below requested %s",
-                sandbox_id,
-                existing_shell_capacity,
-                max_shell_sessions,
-            )
-            destroy_sandbox(sandbox_id)
-            for _ in range(20):
-                pod_absent = _get_pod_phase(sandbox_id) == "NotFound"
-                service_absent = _sandbox_access_url(sandbox_id, tolerate_read_errors=True) is None
-                if pod_absent and service_absent:
-                    break
-                time.sleep(0.5)
-            else:
-                raise HTTPException(status_code=500, detail="Incompatible sandbox did not terminate in time")
+            # A Service can outlive its old Pod during asynchronous replacement.
+            # Only a confirmed missing Pod may fall through to creation.
+            if not isinstance(exc, ApiException) or exc.status != 404:
+                raise HTTPException(status_code=500, detail=f"Could not verify existing sandbox shell capacity: {exc}") from exc
         else:
+            if max_shell_sessions is not None and existing_shell_capacity < max_shell_sessions:
+                # Only the Gateway can fence replacement against active owners.
+                # A transient discovery failure can route a live Pod through create.
+                raise HTTPException(
+                    status_code=409,
+                    detail="Existing sandbox shell capacity is below the requested value; replacement must be coordinated by the Gateway",
+                )
             return SandboxResponse(
                 sandbox_id=sandbox_id,
                 sandbox_url=existing_url,

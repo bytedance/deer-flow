@@ -269,6 +269,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 provisioner_url=provisioner_url,
                 api_key=api_key,
                 max_shell_sessions=self._config.get("max_shell_sessions"),
+                required_shell_sessions=self._config.get("required_shell_sessions", 0),
             )
 
         logger.info("Using local container sandbox backend")
@@ -279,6 +280,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             config_mounts=self._config["mounts"],
             environment=self._config["environment"],
             network_config=self._config["network"],
+            required_shell_sessions=self._config.get("required_shell_sessions", 0),
         )
 
     # ── Configuration ────────────────────────────────────────────────────
@@ -324,6 +326,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "thread_data_mounts": getattr(sandbox_config, "thread_data_mounts", None),
             "environment": environment,
             "max_shell_sessions": max_shell_sessions,
+            "required_shell_sessions": required_shell_sessions,
             "network": sandbox_config.network.model_dump(),
             "ownership": getattr(sandbox_config, "ownership", None),
             # A redis stream bridge means the deployment is multi-instance, which

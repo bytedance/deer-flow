@@ -516,6 +516,7 @@ class LocalContainerBackend(SandboxBackend):
         config_mounts: list,
         environment: dict[str, str],
         network_config: dict[str, object] | None = None,
+        required_shell_sessions: int = 0,
     ):
         """Initialize the local container backend.
 
@@ -525,12 +526,14 @@ class LocalContainerBackend(SandboxBackend):
             container_prefix: Prefix for container names (e.g., "deer-flow-sandbox").
             config_mounts: Volume mount configurations from config (list of VolumeMountConfig).
             environment: Environment variables to inject into containers.
+            required_shell_sessions: Minimum usable capacity, independent of image environment overrides.
         """
         self._image = image
         self._base_port = base_port
         self._container_prefix = container_prefix
         self._config_mounts = config_mounts
         self._environment = environment
+        self._required_shell_sessions = required_shell_sessions
         self._network_config = network_config or {"mode": "open"}
         self._network_mode = str(self._network_config.get("mode", "open"))
         self._allow_synthetic_dns = False
@@ -576,12 +579,12 @@ class LocalContainerBackend(SandboxBackend):
         }
 
     def _has_compatible_shell_capacity(self, inspection: _ContainerInspection) -> bool:
-        """Check persisted capacity only when this Gateway configured it explicitly."""
+        """Check both the runtime minimum and any explicit environment override."""
         configured = self._environment.get("MAX_SHELL_SESSIONS")
-        if configured is None:
-            return True
+        required = self._required_shell_sessions
         try:
-            required = int(configured)
+            if configured is not None:
+                required = max(required, int(configured))
         except (TypeError, ValueError):
             return False
         actual = inspection.max_shell_sessions if inspection.max_shell_sessions is not None else _AIO_DEFAULT_MAX_SHELL_SESSIONS

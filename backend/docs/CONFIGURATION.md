@@ -898,7 +898,17 @@ positive integer at least as large as `subagent_runtime.max_running + 1`, or the
 provider fails at startup with the conflicting values. The setting is applied
 when a sandbox is created. Persisted local containers and provisioner Pods report
 their effective value; DeerFlow replaces one whose capacity is below the current
-requirement instead of reusing it.
+requirement instead of reusing it. Reuse checks also apply when no explicit
+override is needed for new containers: a previously configured lower limit must
+still fit the current concurrency. The Gateway waits for existing ownership and
+the orphan recovery grace before replacing an incompatible sandbox. A create
+request that encounters a lower-capacity Pod returns HTTP 409 without deleting
+it; a later acquisition can discover and replace it through that same ownership
+check.
+
+If a Service survives deletion of its old Pod, a later create repairs the
+missing Pod. A failed capacity read other than a Pod-not-found response remains
+an error and does not authorize replacement.
 
 ### Building a Custom AIO Sandbox Image
 

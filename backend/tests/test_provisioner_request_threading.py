@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import threading
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+import requests
 from blockbuster import BlockBuster
 from kubernetes.client.rest import ApiException
 
@@ -75,27 +78,57 @@ def test_provisioner_threads_shell_capacity_into_sandbox_pod(
     assert env["MAX_SHELL_SESSIONS"] == "13"
 
 
-def test_provisioner_replaces_existing_sandbox_with_insufficient_shell_capacity(
+def test_provisioner_rejects_insufficient_capacity_without_replacing_existing_pod(
     monkeypatch: pytest.MonkeyPatch,
     provisioner_module,
 ) -> None:
     fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
     monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
-    monkeypatch.setattr(provisioner_module.time, "sleep", lambda _seconds: None)
-
-    response = provisioner_module.create_sandbox(
-        provisioner_module.CreateSandboxRequest(
-            sandbox_id="sandbox-existing",
-            thread_id="thread-1",
-            max_shell_sessions=13,
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(
+            provisioner_module.CreateSandboxRequest(
+                sandbox_id="sandbox-existing",
+                thread_id="thread-1",
+                max_shell_sessions=13,
+            )
         )
-    )
 
-    assert response.max_shell_sessions == 13
-    assert fake_core_v1.created_pods == ["sandbox-existing"]
-    pod = fake_core_v1.created_pod_specs["sandbox-existing"]
-    env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
-    assert env["MAX_SHELL_SESSIONS"] == "13"
+    assert error.value.status_code == 409
+    assert "capacity" in error.value.detail
+    assert fake_core_v1.created_pods == []
+    assert fake_core_v1.pod_shell_capacities["sandbox-existing"] == 10
+    assert "sandbox-existing" in fake_core_v1.service_sandboxes
+
+
+def test_capacity_replacement_recovers_when_service_outlives_old_pod(monkeypatch, provisioner_module):
+    """A create racing asynchronous deletion can leave a Service without a Pod."""
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    core.pod_shell_capacities.pop("sandbox-existing")
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+
+    def existing_service(*_args):
+        raise ApiException(status=409)
+
+    monkeypatch.setattr(core, "create_namespaced_service", existing_service)
+    result = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing", thread_id="thread-a", max_shell_sessions=13))
+    assert result.max_shell_sessions == 13
+    assert core.created_pods == ["sandbox-existing"]
+    assert "sandbox-existing" in core.service_sandboxes
+
+
+@pytest.mark.parametrize("failure", [ApiException(status=403), ApiException(status=503), RuntimeError("invalid persisted capacity")])
+def test_capacity_read_failure_does_not_authorize_creation(monkeypatch, provisioner_module, failure):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_get_pod_shell_capacity", MagicMock(side_effect=failure))
+
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing", max_shell_sessions=13))
+
+    assert error.value.status_code == 500
+    assert core.created_pods == []
+    assert core.pod_shell_capacities["sandbox-existing"] == 10
+    assert "sandbox-existing" in core.service_sandboxes
 
 
 def test_list_sandboxes_skips_invalid_capacity_metadata(
@@ -117,6 +150,95 @@ def test_list_sandboxes_skips_invalid_capacity_metadata(
     response = provisioner_module.list_sandboxes()
 
     assert response == {"sandboxes": [], "count": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+async def test_capacity_upgrade_preserves_peer_pod_after_discovery_error(monkeypatch, tmp_path, provisioner_module, async_acquire):
+    """Discovery failure must not bypass ownership; a later safe retry replaces."""
+    from test_sandbox_orphan_reconciliation import _make_provider_for_reconciliation, _make_shared_ownership_store
+
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as provider_mod
+    from deerflow.community.aio_sandbox import remote_backend as remote_mod
+    from deerflow.community.aio_sandbox.ownership import compute_lease_ttl
+    from deerflow.config.paths import Paths
+
+    shared = _make_shared_ownership_store()
+    old = _make_provider_for_reconciliation(worker_id="old-gateway", store=shared)
+    new = _make_provider_for_reconciliation(worker_id="new-gateway", store=shared)
+    sid = "sandbox-existing"
+    old._publish_ownership(sid)
+    new._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002", max_shell_sessions=13)
+    core = _RecordingCoreV1(event_loop_thread_id=threading.get_ident())
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    deleted_under_lease = []
+    discovery_failed = False
+
+    def response(status, payload):
+        result = requests.Response()
+        result.status_code = status
+        result._content = json.dumps(payload).encode()
+        return result
+
+    def get(_url, **_kwargs):
+        nonlocal discovery_failed
+        if not discovery_failed:
+            discovery_failed = True
+            return response(503, {"detail": "temporarily unavailable"})
+        return response(200, provisioner_module.get_sandbox(sid).model_dump())
+
+    def post(_url, *, json, **_kwargs):
+        try:
+            result = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(**json))
+        except provisioner_module.HTTPException as exc:
+            return response(exc.status_code, {"detail": exc.detail})
+        return response(200, result.model_dump())
+
+    def delete(_url, **_kwargs):
+        deleted_under_lease.append((shared.owner(sid), old._ownership.claim(sid)))
+        return response(200, provisioner_module.destroy_sandbox(sid))
+
+    monkeypatch.setattr(requests, "get", get)
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(requests, "delete", delete)
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda _uid: False)
+    monkeypatch.setattr(provider_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready", lambda *_a, **_kw: True)
+    monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready_async", AsyncMock(return_value=True))
+    monkeypatch.setattr(provider_mod, "AioSandbox", MagicMock())
+    monkeypatch.setattr(new, "_get_extra_mounts", lambda *_a, **_kw: [])
+    monkeypatch.setattr(new, "_lark_integration_active", lambda *_a: False)
+    monkeypatch.setattr(new, "_lark_broker_active", lambda *_a: False)
+
+    async def acquire():
+        if async_acquire:
+            return await new._discover_or_create_with_lock_async("thread-a", sid, user_id="user-a")
+        return await asyncio.to_thread(new._discover_or_create_with_lock, "thread-a", sid, user_id="user-a")
+
+    try:
+        with pytest.raises(RuntimeError, match="409"):
+            await acquire()
+        assert core.pod_shell_capacities[sid] == 10
+        assert core.created_pods == []
+        assert sid in core.service_sandboxes
+        assert shared.owner(sid) == "old-gateway"
+
+        with pytest.raises(provider_mod.SandboxPolicyReplacementDeferredError):
+            await acquire()
+        old._ownership.release(sid)
+        with pytest.raises(provider_mod.SandboxPolicyReplacementDeferredError):
+            await acquire()
+        assert deleted_under_lease == []
+
+        new._unowned_since[sid] = time.time() - compute_lease_ttl(new._ownership_config) - 1
+        assert await acquire() == sid
+        assert deleted_under_lease == [("new-gateway", False)]
+        assert core.created_pods == [sid]
+        assert core.pod_shell_capacities[sid] == 13
+        assert shared.owner(sid) == "new-gateway"
+    finally:
+        old._acquire_serializer.close()
+        new._acquire_serializer.close()
 
 
 class _RecordingCoreV1:
