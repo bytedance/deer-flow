@@ -141,6 +141,48 @@ async def test_ensure_seq_loaded_recovers_from_disk():
         assert record["seq"] == 4, f"Expected seq=4 after recovery, got {record['seq']}"
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("write_mode", ["put", "put_batch", "put_if_absent"])
+@pytest.mark.parametrize("separator", ["\x85", "\u2028", "\u2029"])
+async def test_unicode_line_separators_round_trip_as_json_content(tmp_path, write_mode, separator):
+    """JSONL records split only on physical LF delimiters."""
+    content = f"before{separator}after"
+    event = {
+        "thread_id": "t1",
+        "run_id": "r1",
+        "event_type": "human_message",
+        "category": "message",
+        "content": {"type": "human", "content": content},
+    }
+    store = _make_store(tmp_path)
+
+    if write_mode == "put":
+        saved = await store.put(**event)
+    elif write_mode == "put_batch":
+        saved = (await store.put_batch([event]))[0]
+    else:
+        saved, created = await store.put_if_absent(**event)
+        assert created
+
+    assert (await store.list_messages("t1"))[0]["content"]["content"] == content
+    assert (await store.list_events("t1", "r1"))[0]["content"]["content"] == content
+
+    reopened = _make_store(tmp_path)
+    next_record = await reopened.put(
+        thread_id="t1",
+        run_id="r2",
+        event_type="trace",
+        category="trace",
+        content="next",
+    )
+    assert saved["seq"] == 1
+    assert next_record["seq"] == 2
+
+    duplicate, created = await reopened.put_if_absent(**event)
+    assert duplicate["seq"] == 1
+    assert not created
+
+
 # ---------------------------------------------------------------------------
 # asyncio.to_thread regression guard
 # ---------------------------------------------------------------------------
