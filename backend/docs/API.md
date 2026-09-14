@@ -34,6 +34,32 @@ PATs require a configured database backend (SQLite/PostgreSQL) — on the
 memory-only backend, Bearer credentials are rejected and PAT management routes
 return `503`.
 
+### Account Preferences
+
+`GET /api/v1/auth/preferences` returns the signed-in browser user's four
+preferences. `PATCH` updates only explicitly supplied fields and returns `204`.
+Both require `X-Expected-User-Id` matching the session user; PATCH also requires
+the normal `X-CSRF-Token` header. The expected ID is a stale-tab guard, not an
+authorization credential. PAT, internal, and auth-disabled callers receive
+`403`; a different session user receives `409`.
+
+```json
+{
+  "notification_enabled": false,
+  "model_name": "my-model",
+  "mode": "pro",
+  "reasoning_effort": "high"
+}
+```
+
+All four fields accept `null` to restore the default. `mode` accepts `flash`,
+`thinking`, `pro`, or `ultra`; `reasoning_effort` accepts `minimal`, `low`,
+`medium`, or `high`; model names are at most 200 characters. Unknown fields and
+invalid values return `422`. Missing preferences read as `null`. Separate-field
+patches preserve each other's changes, and same-field writes are last-commit-wins.
+Storage requires SQLite or PostgreSQL (`503` when unavailable). Browser
+notification permission remains device-local and is not changed by this API.
+
 ### Personal Access Tokens
 
 Base URL: `/api/v1/auth`
@@ -265,16 +291,19 @@ for runs without changed outputs keep their existing shape.
 **Recursion Limit:**
 
 `config.recursion_limit` caps the number of graph steps LangGraph will execute
-in a single run. The unified Gateway path defaults to `100` in
-`build_run_config` (see `backend/app/gateway/services.py`), which is a safer
-starting point for plan-mode or subagent-heavy runs. Clients can still set
-`recursion_limit` explicitly in the request body; increase it if you run deeply
-nested subagent graphs. Scheduled-task launches do not take a client body: they
+in a single run. The unified Gateway path uses the top-level `recursion_limit`
+from `config.yaml` (default `100`) when a request does not provide one. Clients
+can still set `recursion_limit` explicitly in the request body, and a valid
+request value takes precedence. Scheduled-task launches do not take a client body: they
 use `scheduler.recursion_limit` from `config.yaml` (default `1000`, matching
 the web UI). For safety, the Gateway clamps any supplied
-value to a configurable server ceiling (`max_recursion_limit` in `config.yaml`,
+or configured value to a server ceiling (`max_recursion_limit` in `config.yaml`,
 default `1000`) so a single run cannot execute unbounded graph steps (runaway
-LLM cost / DoS); invalid or non-positive values fall back to the `100` default.
+LLM cost / DoS); invalid or non-positive request values fall back to the
+configured default. Both top-level fields are read per run, so edits apply to
+the next request without restarting the Gateway. This top-level setting applies
+to Gateway API runs only; IM channel and embedded `DeerFlowClient` runs retain
+their own defaults and override paths.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model

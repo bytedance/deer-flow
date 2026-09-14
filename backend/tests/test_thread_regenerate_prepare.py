@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from _router_auth_helpers import call_unwrapped
@@ -242,7 +242,7 @@ def test_run_wait_readers_return_materialized_final_values() -> None:
                 services,
                 "build_checkpoint_state_accessor",
                 create=True,
-                return_value=(accessor, snapshot.config),
+                new=MagicMock(return_value=(accessor, snapshot.config)),
             ),
             patch.object(runs, "get_stream_bridge", return_value=object()),
             patch.object(runs, "get_run_manager", return_value=object()),
@@ -251,7 +251,7 @@ def test_run_wait_readers_return_materialized_final_values() -> None:
                 services,
                 "build_checkpoint_state_accessor",
                 create=True,
-                return_value=(accessor, snapshot.config),
+                new=MagicMock(return_value=(accessor, snapshot.config)),
             ),
         ):
             thread_result = await call_unwrapped(thread_runs.wait_run, "thread-1", body, request)
@@ -296,7 +296,7 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
             patch.object(
                 services,
                 "build_checkpoint_state_accessor",
-                return_value=(accessor, snapshot.config),
+                new=MagicMock(return_value=(accessor, snapshot.config)),
             ),
             patch.object(runs, "get_stream_bridge", return_value=object()),
             patch.object(runs, "get_run_manager", return_value=object()),
@@ -304,7 +304,7 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
             patch.object(
                 services,
                 "build_checkpoint_state_accessor",
-                return_value=(accessor, snapshot.config),
+                new=MagicMock(return_value=(accessor, snapshot.config)),
             ),
         ):
             thread_result = await call_unwrapped(thread_runs.wait_run, "thread-1", body, request)
@@ -342,7 +342,7 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
                 patch.object(
                     services,
                     "build_checkpoint_state_accessor",
-                    side_effect=RuntimeError("graph construction failed"),
+                    new=MagicMock(side_effect=RuntimeError("graph construction failed")),
                 ),
             ):
                 return await call_unwrapped(thread_runs.wait_run, "thread-1", body, request)
@@ -354,7 +354,7 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
             patch.object(
                 services,
                 "build_checkpoint_state_accessor",
-                side_effect=RuntimeError("graph construction failed"),
+                new=MagicMock(side_effect=RuntimeError("graph construction failed")),
             ),
         ):
             return await call_unwrapped(runs.stateless_wait, body, request)

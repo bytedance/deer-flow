@@ -51,6 +51,7 @@ import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useProject } from "@/core/projects";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import { resolveThreadContext } from "@/core/settings/store";
 import { createThread } from "@/core/threads/api";
 import {
   useBranchThread,
@@ -546,9 +547,11 @@ export default function ChatPage() {
                         isUploading ||
                         (!isNewThread && isHistoryLoading)
                       }
-                      onContextChange={(context) =>
-                        setSettings("context", context)
-                      }
+                      onContextChange={(context, options) => {
+                        if (options?.automatic)
+                          resolveThreadContext(threadId, context);
+                        else setSettings("context", context);
+                      }}
                       onGoalChange={setLocalGoal}
                       onPrepareThread={ensureProjectThread}
                       onSubmit={handleSubmit}

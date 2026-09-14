@@ -808,6 +808,20 @@ client.clear_goal("thread-1")
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
 
+## 项目成员归属 (Project Membership)
+
+会话在创建时（选择了某个 project）或之后通过移动菜单加入一个 project。Run
+永远不会修改成员归属：提交消息不能给会话指派或重新指派 project。将会话移出
+某个 project 后，它会保持未指派状态，直到被再次显式移动。
+
+移动会话时会同时刷新其头部归属信息和 project 列表，即使此前的元数据请求仍
+在途中也是如此。
+
+Projects 需要当前版本的数据库表和列。如果数据库已打上旧 0018 迁移序列的
+`0019_thread_incarnations` 版本标记而缺少 project schema，本次构建会在启动
+时拒绝该数据库。针对这类数据库启动此构建前，请先遵循
+[离线数据库恢复流程](docs/database-forward-revision-recovery.md)。
+
 ## 定时任务 (Scheduled Tasks)
 
 DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled-task）MVP。
@@ -837,6 +851,18 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 定时任务运行会读取 `config.yaml` 中的 `scheduler.recursion_limit`（默认 `1000`，与 Web UI 的交互式预算一致）。超过 `max_recursion_limit` 的值会被截断。该字段在 dispatch 时读取，因此下一次定时运行即可生效，无需重启 Gateway。
 
 后台调度器默认是单实例。多 Pod 部署时，请设置 `scheduler.multi_instance: true`，并使用共享 Postgres、`run_ownership.heartbeat_enabled: true` 和 `run_events.backend: db`；启动和周期性恢复会保留仍由对端持有的运行，把过期的 launch claim 原子退回队列，只接管过期的 run lease，并隔离过期的 launch 写入。`max_concurrent_runs` 是跨 Pod 共享的全局上限，只计入 `launching` / `running` 的执行；等待中的 `queued` 行不占用该配额。没有这些配置时，请只在一个 Gateway Pod 上启用调度器。这些 scheduler 字段只在启动时生效；修改后需要一起重启所有 Gateway Pod。
+
+### 通过 API 预览 cron 执行时间
+
+已认证且具有 `threads:read` 权限的客户端，可在创建任务前调用 `POST /api/scheduled-tasks/preview-cron`：
+
+```json
+{"cron":"0 9 * * 1-5","timezone":"Asia/Shanghai","count":3,"start_at":"2026-09-12T00:00:00Z"}
+```
+
+响应包含规范化的 `cron`、`timezone`、生效的 UTC `start_at`，以及 `occurrences` 列表中的 UTC `run_at` 和带偏移量的 `local_time`。此例的首次执行时间为 `2026-09-14T01:00:00Z` / `2026-09-14T09:00:00+08:00`。
+
+`count` 为 1–10 的整数，默认 5。`start_at` 必须带时区，省略时只读取一次服务器当前时间。cron 沿用调度器的五字段语法，最长 256 字符；时区名称最长 128 字符。输入无效或无法计算所需未来时间时返回 422。预览沿用实际调度器的夏令时语义，不创建任务、thread 或 run，也不预留执行资源。此能力目前通过 API 提供，workspace 表单尚未展示这些时间。
 
 ### 升级说明
 

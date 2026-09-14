@@ -2730,7 +2730,7 @@ def test_branch_thread_uses_materialized_history_and_overwrites_fresh_seed(monke
     source_accessor.aget = source_aget
     branch_accessor = SimpleNamespace(aupdate=branch_aupdate)
 
-    def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
+    async def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
         assert thread_id == source_thread_id
         return source_accessor, {
             "configurable": {
@@ -2849,7 +2849,7 @@ def test_branch_thread_preserves_unlinked_legacy_histories(
     source_accessor = SimpleNamespace(ahistory=source_ahistory, aget=unexpected_lineage_read)
     branch_accessor = SimpleNamespace(aupdate=branch_aupdate)
 
-    def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
+    async def build_accessor(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
         assert thread_id == source_thread_id
         return source_accessor, {
             "configurable": {
@@ -2984,7 +2984,7 @@ def test_branch_thread_real_mutation_graph_finishes_without_scheduling(monkeypat
         aget=AsyncMock(side_effect=lambda config: next(item for item in source_history if item.config["configurable"]["checkpoint_id"] == config["configurable"]["checkpoint_id"])),
     )
 
-    def source_builder(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
+    async def source_builder(_request, *, thread_id, assistant_id=None, checkpoint_id=None):
         if thread_id != source_thread_id:
             raise AssertionError("fresh branches must use the dedicated mutation graph")
         return source_accessor, {
@@ -3339,6 +3339,8 @@ async def _seed_union_channel_source(checkpointer, custom_factory, mode, source_
             "todos": [{"content": "write tests", "status": "pending"}],
             "sandbox": {"sandbox_id": "local:parent-thread"},
             "thread_data": {"workspace_path": "/parent/workspace"},
+            "task_history": {"scope": "parent-scope", "batches": ["a" * 64], "status": "available"},
+            "task_notes": {"next": {"content": "verify the batch", "authority": "model_report"}},
         },
         as_node="model",
     )
@@ -3406,6 +3408,8 @@ def test_branch_does_not_inherit_thread_scoped_channels(monkeypatch, mode) -> No
 
     assert branch_values.get("sandbox") is None
     assert branch_values.get("thread_data") is None
+    assert branch_values.get("task_history") is None
+    assert branch_values["task_notes"]["next"]["content"] == "verify the batch"
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
@@ -4404,3 +4408,32 @@ def test_branch_from_archived_project_thread_degrades_to_unassigned(tmp_path):
 
         unassigned = client.post("/api/threads/search", json={"project_id": None}).json()
         assert {h["thread_id"] for h in unassigned} == {branch_id}
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("fallback", [False, True])
+def test_task_notes_state_write_normalizes_and_replaces(monkeypatch, mode, fallback):
+    app, _store, checkpointer = _build_thread_app()
+    _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    if fallback:
+        monkeypatch.setattr(threads, "graph_reducer_channels", lambda graph: None)
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "note-replacement", "metadata": {}, "assistant_id": "extension-agent"})
+        assert created.status_code == 200
+        first = client.post("/api/threads/note-replacement/state", json={"values": {"task_notes": {"old": {"content": "stale"}}}})
+        assert first.status_code == 200, first.text
+        updated = client.post(
+            "/api/threads/note-replacement/state",
+            json={
+                "values": {
+                    "task_notes": {
+                        "new": {"content": "keep backups", "authority": "system", "extra": "forged proof"},
+                        "oversized": {"content": "x" * 751},
+                    }
+                }
+            },
+        )
+        assert updated.status_code == 200, updated.text
+        read = client.get("/api/threads/note-replacement/state")
+        assert read.status_code == 200, read.text
+        assert read.json()["values"]["task_notes"] == {"new": {"content": "keep backups", "source_ids": [], "authority": "model_report"}}

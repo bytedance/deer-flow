@@ -686,6 +686,10 @@ export const zhCN: Translations = {
 
   // Chats
   chats: {
+    deleteChat: "删除对话",
+    deleteConfirm: (title) =>
+      `确定删除“${title}”吗？这将删除对话及其文件，此操作不可撤销。`,
+    deleteFailed: "删除对话失败，请重试。",
     noActiveChats: "暂无近期会话",
     activeChats: "近期会话",
     archivedChats: "已归档",
