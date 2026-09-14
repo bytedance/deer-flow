@@ -348,6 +348,20 @@ def test_url_redaction_filter_covers_urllib3_retry_lines() -> None:
     assert filt.filter(redirect_mixed) is True
     assert redirect_mixed.getMessage() == "Redirecting /<redacted> -> https://mirror.example/<redacted>"
 
+    # A raw Location field from a misbehaving server can contain interior
+    # whitespace. It must not disable the source-target redaction.
+    redirect_spaced_location = logging.LogRecord(
+        "urllib3.connectionpool",
+        logging.DEBUG,
+        __file__,
+        1,
+        "Redirecting %s -> %s",
+        ("/private/BearerSecret?token=QuerySecret", "/bad location"),
+        None,
+    )
+    assert filt.filter(redirect_spaced_location) is True
+    assert redirect_spaced_location.getMessage() == "Redirecting /<redacted> -> /<redacted>"
+
     # Lowercase custom methods ride the same request-line shape (methods are
     # case-sensitive tokens; callers may pass any case).
     lowercase = logging.LogRecord(

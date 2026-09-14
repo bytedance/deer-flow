@@ -78,11 +78,13 @@ _URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection b
 # absolute-URL pass only sees scheme-bearing halves, so origin-form slots
 # collapse to ``/<redacted>`` here; absolute slots are left for that pass.
 # The pattern is anchored to the WHOLE message — urllib3's record is exactly
-# this line — because an ``-> /path`` arrow is not urllib3-owned shape:
+# this line — while allowing interior whitespace in the second slot because
+# it is the raw Location header. An ``-> /path`` arrow is not by itself an
+# urllib3-owned shape:
 # non-URL logs render it too (sandbox mount mappings log
 # ``sandbox.mounts entry <host_path> -> <container_path>``), and a substring
 # match rewrote the container path in that actionable error (CI round 11).
-_URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S+) -> (?P<t2>\S+)$")
+_URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S+) -> (?P<t2>\S.*)$")
 
 # The two scheme-bearing patterns start with a character class, so re.sub
 # retries the match at every position of a long token — a letter run with no
