@@ -1479,9 +1479,13 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 
 Gateway API callers can opt into `read_conversation` and submit a
 `conversation_references` list with a run. The lead agent can then read bounded
-pages of visible text from those owned conversations. References expire with the
-run; text in old messages does not grant access. This API-only feature adds no
-frontend selector or automatic history search. See [configuration](backend/docs/CONFIGURATION.md#reading-referenced-conversations)
+pages of the current visible text of those owned conversations. Read permission
+expires with the run, and text in old messages does not grant access. Text the
+agent has already read stays in the destination conversation after access
+expires or the source is deleted. When a message is truncated, the agent is told
+to ask for the missing part before claiming it has covered every requirement.
+This API-only feature adds no frontend selector or automatic history search. See
+[configuration](backend/docs/CONFIGURATION.md#reading-referenced-conversations)
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 
 ### Long-Term Memory
