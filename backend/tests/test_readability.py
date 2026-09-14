@@ -18,6 +18,12 @@ def probe_dir(monkeypatch, tmp_path):
     return tmp_path
 
 
+def _plant_packages(js_dir):
+    """Materialise the two packages ExtractArticle.js imports."""
+    (js_dir / "node_modules" / "jsdom").mkdir(parents=True)
+    (js_dir / "node_modules" / "@mozilla" / "readability").mkdir(parents=True)
+
+
 def _pin_probe_ready(monkeypatch):
     """Extractor stubs must stay hermetic: the probe must not touch the
     filesystem or spawn npm on hosts where node_modules is absent."""
@@ -74,16 +80,34 @@ def test_extract_article_re_raises_unexpected_exception(monkeypatch):
     assert calls == [True]
 
 
-def test_probe_short_circuits_when_node_modules_exists(probe_dir, monkeypatch):
-    (probe_dir / "node_modules").mkdir()
+def test_probe_short_circuits_when_packages_are_present(probe_dir, monkeypatch):
+    _plant_packages(probe_dir)
 
     def _fail(*args, **kwargs):
-        raise AssertionError("npm must not be probed or invoked when node_modules already exists")
+        raise AssertionError("npm must not be probed or invoked when the packages already exist")
 
     monkeypatch.setattr(readability_module.shutil, "which", _fail)
     monkeypatch.setattr(readability_module.subprocess, "run", _fail)
 
     assert readability_module._readability_js_ready() is True
+
+
+def test_probe_partial_node_modules_is_not_mistaken_for_ready(probe_dir, monkeypatch):
+    """An npm run killed mid-install leaves a bare node_modules behind; the
+    probe must not cache that as ready."""
+    (probe_dir / "node_modules").mkdir()
+    runs = []
+
+    def _fake_run(cmd, **kwargs):
+        runs.append(cmd)
+        _plant_packages(probe_dir)
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(readability_module.shutil, "which", lambda name: "npm")
+    monkeypatch.setattr(readability_module.subprocess, "run", _fake_run)
+
+    assert readability_module._readability_js_ready() is True
+    assert len(runs) == 1  # the partial tree triggered a real install first
 
 
 def test_probe_missing_npm_is_cached_permanently(probe_dir, monkeypatch):
@@ -97,20 +121,22 @@ def test_probe_missing_npm_is_cached_permanently(probe_dir, monkeypatch):
 
 
 def test_probe_failed_install_is_cached_permanently(probe_dir, monkeypatch):
-    (probe_dir / "package-lock.json").write_text("{}", encoding="utf-8")
     runs = []
 
     def _fake_run(cmd, **kwargs):
         runs.append(cmd)
-        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="offline")
+        # npm emits UTF-8 (box-drawing progress, typographic quotes); the
+        # probe must decode bytes with replacement, not the strict locale
+        # codec, or Windows ANSI code pages crash the first fetch.
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout=b"\xe2\x94\x80", stderr=b"\xe2\x94\x80 npm failed \xe2\x80\x9d")
 
     monkeypatch.setattr(readability_module.shutil, "which", lambda name: "C:/fake/npm.cmd")
     monkeypatch.setattr(readability_module.subprocess, "run", _fake_run)
 
     assert readability_module._readability_js_ready() is False
     assert readability_module._readability_js_ready() is False
-    # The shipped lockfile selects npm ci, and a non-zero exit settles False.
-    assert runs == [["C:/fake/npm.cmd", "ci", "--no-audit", "--no-fund"]]
+    # Deterministic failure: one install attempt, then the settled False.
+    assert runs == [["C:/fake/npm.cmd", "install", "--no-audit", "--no-fund"]]
 
 
 def test_probe_transient_failure_retries_on_a_later_call(probe_dir, monkeypatch):
@@ -120,8 +146,8 @@ def test_probe_transient_failure_retries_on_a_later_call(probe_dir, monkeypatch)
         runs.append(cmd)
         if len(runs) == 1:
             raise subprocess.TimeoutExpired(cmd, timeout=300)
-        (probe_dir / "node_modules").mkdir()
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+        _plant_packages(probe_dir)
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(readability_module.shutil, "which", lambda name: "npm")
     monkeypatch.setattr(readability_module.subprocess, "run", _fake_run)
@@ -134,8 +160,8 @@ def test_probe_transient_failure_retries_on_a_later_call(probe_dir, monkeypatch)
 
 def test_probe_success_bootstraps_node_modules(probe_dir, monkeypatch):
     def _fake_run(cmd, **kwargs):
-        (probe_dir / "node_modules").mkdir()
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+        _plant_packages(probe_dir)
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(readability_module.shutil, "which", lambda name: "npm")
     monkeypatch.setattr(readability_module.subprocess, "run", _fake_run)
@@ -153,8 +179,8 @@ def test_probe_waiter_never_blocks_on_inflight_bootstrap(probe_dir, monkeypatch)
     def _fake_run(cmd, **kwargs):
         bootstrap_started.set()
         release_bootstrap.wait(timeout=30)
-        (probe_dir / "node_modules").mkdir()
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+        _plant_packages(probe_dir)
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(readability_module.shutil, "which", lambda name: "npm")
     monkeypatch.setattr(readability_module.subprocess, "run", _fake_run)

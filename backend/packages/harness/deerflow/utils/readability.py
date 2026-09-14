@@ -160,6 +160,18 @@ _readability_js_state: bool | None = None  # None = not settled yet; False cache
 _readability_js_bootstrap_lock = threading.Lock()
 
 
+def _readability_js_packages_present() -> bool:
+    """True when node_modules holds the packages ExtractArticle.js imports.
+
+    readabilipy's own gate is bare ``node_modules`` existence, but an npm run
+    killed mid-install (timeout, crash) can leave a partial tree behind;
+    requiring its two runtime dependencies keeps a partial install from
+    being cached as ready.
+    """
+    node_modules = _READABILITY_JS_DIR / "node_modules"
+    return (node_modules / "jsdom").is_dir() and (node_modules / "@mozilla" / "readability").is_dir()
+
+
 def _readability_js_ready() -> bool:
     """Ensure readabilipy's Readability.js dependencies are usable.
 
@@ -193,7 +205,7 @@ def _readability_js_ready() -> bool:
     try:
         if _readability_js_state is not None:
             return _readability_js_state
-        if (_READABILITY_JS_DIR / "node_modules").exists():
+        if _readability_js_packages_present():
             _readability_js_state = True
             return True
         npm = shutil.which("npm")
@@ -201,17 +213,21 @@ def _readability_js_ready() -> bool:
             logger.warning("npm is unavailable; Readability.js extraction uses pure-Python mode")
             _readability_js_state = False
             return False
-        # readabilipy ships a lockfile for its javascript dependencies; npm
-        # ci keeps the install reproducible and never edits package.json.
-        install_verb = "ci" if (_READABILITY_JS_DIR / "package-lock.json").exists() else "install"
-        install_cmd = [npm, install_verb, "--no-audit", "--no-fund"]
+        # readabilipy's wheel ships only package.json — open-ended ranges, no
+        # lockfile — so every fresh bootstrap resolves current versions via
+        # npm install.
+        install_cmd = [npm, "install", "--no-audit", "--no-fund"]
         try:
+            # Capture bytes and decode with replacement: npm emits UTF-8
+            # (box-drawing progress, typographic quotes), and text=True would
+            # decode with the strict locale codec — on Windows ANSI code pages
+            # that raises UnicodeDecodeError, killing npm mid-install instead
+            # of falling back.
             result = subprocess.run(
                 install_cmd,
                 cwd=_READABILITY_JS_DIR,
                 check=False,
                 capture_output=True,
-                text=True,
                 timeout=_READABILITY_NPM_INSTALL_TIMEOUT_SECONDS,
                 env={**os.environ, "npm_config_update_notifier": "false"},
             )
@@ -221,10 +237,10 @@ def _readability_js_ready() -> bool:
             logger.warning("Bootstrapping Readability.js npm dependencies failed transiently; this call uses pure-Python extraction: %s", exc)
             return False
         if result.returncode != 0:
-            logger.warning("npm install for Readability.js dependencies failed: %s", result.stderr.strip()[:500])
+            logger.warning("npm install for Readability.js dependencies failed: %s", result.stderr.decode("utf-8", errors="replace").strip()[:500])
             _readability_js_state = False
             return False
-        _readability_js_state = (_READABILITY_JS_DIR / "node_modules").exists()
+        _readability_js_state = _readability_js_packages_present()
         if not _readability_js_state:
             logger.warning("Readability.js npm dependencies are still missing after install; using pure-Python extraction")
         return _readability_js_state
