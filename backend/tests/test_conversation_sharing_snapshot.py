@@ -2996,6 +2996,50 @@ def test_container_math_closer_is_scoped_to_the_openers_own_quote_shape():
     assert "dual-machine" not in out
 
 
+def test_tab_prefixed_quote_line_in_item_does_not_extend_the_segment():
+    """Round-23 (willem 09-14 05:13): the quote and list grammars are
+    space-only, so a tab-prefixed ``> `` line under an open item segment
+    was absorbed as lazy continuation; the renderer resolves the tab
+    against the item's content column and parses a nested blockquote —
+    two separate paragraphs, backticks literal, reasoning served as prose
+    — while the walk merged the lines and paired the backticks across the
+    boundary, masking the reasoning as code."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    # The reported shape (line 2 starts with a literal tab).
+    out = strip("- y`z\n\t> <think>REASONING</think>y`z")
+    assert "REASONING" not in out
+
+    # A space-then-tab prefix reaches the same gap.
+    out = strip("- y`z\n \t> <think>TABBED</think>y`z")
+    assert "TABBED" not in out
+
+
+def test_fence_info_string_is_not_protected():
+    """Round-23 (willem 09-14 05:13): the renderer keeps only the info
+    string's first word (escaped into the class attribute) and drops the
+    rest, so anything after the fence run on the opener line is never
+    served — protecting it published the reasoning verbatim in the raw
+    share payload (the round-12 publication precedent)."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    out = strip("```1. <think>REASONING</think> \nbody\n```")
+    assert "REASONING" not in out
+    assert "body" in out
+
+    # Unclosed fence: the opener line is equally unprotected.
+    out = strip("```lang <think>TAIL</think>\ncode stays")
+    assert "TAIL" not in out
+
+    # Literal tags inside the fence body stay protected, as ever.
+    out = strip("```\n<think>keep-in-code</think>\n```")
+    assert "keep-in-code" in out
+
+
 def test_no_opener_fast_path_memory_stays_bounded_on_many_fences():
     """Round-22 (bot 09-12 12:31): the no-think fast path still materialized
     one region tuple per fence pair through the region list — a 2 MiB

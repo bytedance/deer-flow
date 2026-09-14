@@ -78,6 +78,11 @@ _CONTAINER_LIST_MARKER_RE = re.compile(r"(?:[-+*]|\d{1,9}[.)])[ \t]+")
 # content column this walk does not model — such math conservatively runs
 # to the message end instead of closing on a guessed shape).
 _CONTAINER_MATH_QUOTE_PREFIX_RE = re.compile(r"[ \t]{0,3}(?:>[ \t]?)*")
+# Leading whitespace containing a tab: the renderer resolves it against
+# the container's content column (CommonMark tab expansion), so under an
+# open quote/list segment such a line can be a nested block the
+# space-only quote/list grammars never match.
+_TABBED_LEADING_WS_RE = re.compile(r"[ \t]*\t")
 _THEMATIC_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 _SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 # CommonMark type-1 start: the tag name must be followed by a space, a
@@ -1030,7 +1035,7 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
 
     fence_char: str | None = None
     fence_len = 0
-    fence_start = 0
+    fence_body_start = 0
     html_kind: str | None = None
     html_tag: str | None = None
     html_blank_end = False
@@ -1115,7 +1120,7 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
         content = text[start:content_end]
         if fence_char is not None:
             if _fence_closes(content, fence_char, fence_len):
-                emit(fence_start, line_end)
+                emit(fence_body_start, line_end)
                 fence_char = None
                 indented_eligible = True
             continue
@@ -1200,7 +1205,11 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
             flush_segment()
             fence_char = fence_match.group(1)[0]
             fence_len = len(fence_match.group(1))
-            fence_start = start
+            # Protection starts after the opener line: the renderer keeps
+            # only the info string's first word (HTML-escaped into the
+            # class attribute) and drops the rest, so anything after the
+            # fence run is never served and must not be protected.
+            fence_body_start = line_end
             indented_eligible = False
             continue
         kind, tag, ends_at_blank, closes_on_open = _html_open(content)
@@ -1311,6 +1320,18 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
             indented_start = start
             indented_end = line_end
             continue
+        if saw_quotelike and _TABBED_LEADING_WS_RE.match(content) is not None:
+            # Fail-closed flush: the renderer resolves a tab inside the
+            # leading whitespace against the item's content column, so the
+            # line can open a nested blockquote this space-only quote/list
+            # grammar never sees; absorbing it as lazy continuation let a
+            # code span pair across the renderer's block boundary and
+            # publish the reasoning it serves as prose. Document-level
+            # indented-code protection is already suppressed under
+            # ``saw_quotelike``, so the only cost is over-stripping shapes
+            # the renderer may keep as one paragraph — the accepted
+            # asymmetry.
+            flush_segment()
         if segment_start is None:
             segment_start = start
             segment_kind = None
@@ -1320,7 +1341,8 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
     close_indented()
     if fence_char is not None:
         # CommonMark: an unclosed fence runs to the end of the document.
-        emit(fence_start, n)
+        if fence_body_start < n:
+            emit(fence_body_start, n)
 
 
 def _code_regions(text: str, *, inline_spans: bool = True) -> list[tuple[int, int]]:
