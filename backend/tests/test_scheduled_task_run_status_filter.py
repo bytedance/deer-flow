@@ -13,7 +13,12 @@ from app.gateway.routers import scheduled_tasks
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
-from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.scheduled_tasks.model import (
+    ACTIVE_RUN_STATUSES,
+    TERMINAL_RUN_STATUSES,
+    ScheduledTaskRow,
+    ScheduledTaskRunStatus,
+)
 
 URL = "/api/scheduled-tasks/task-1/runs"
 NOW = datetime(2026, 9, 12, tzinfo=UTC)
@@ -104,7 +109,7 @@ async def test_omitted_status_preserves_mixed_history_and_pagination(history):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["queued", "launching", "running", "success", "failed", "skipped", "interrupted"])
+@pytest.mark.parametrize("status", list(ScheduledTaskRunStatus))
 async def test_each_occurrence_status_is_supported(history, status):
     async with history.sf() as session:
         session.add(occurrence("new-occurrence", status, created_at=NOW + timedelta(days=2)))
@@ -114,6 +119,16 @@ async def test_each_occurrence_status_is_supported(history, status):
     rows = response.json()
     assert rows[0]["id"] == "new-occurrence"
     assert all(row["status"] == status and row["task_id"] == "task-1" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_occurrence_status_contract_is_shared_with_openapi(history):
+    statuses = {status.value for status in ScheduledTaskRunStatus}
+    assert statuses == ACTIVE_RUN_STATUSES | TERMINAL_RUN_STATUSES
+
+    response = await history.client.get("/openapi.json")
+    assert response.status_code == 200
+    assert set(response.json()["components"]["schemas"]["ScheduledTaskRunStatus"]["enum"]) == statuses
 
 
 @pytest.mark.asyncio

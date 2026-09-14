@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import typing
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -20,6 +19,7 @@ from app.gateway.deps import (
 )
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
 from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRunStatus
 from deerflow.scheduler.schedules import (
     MAX_INTERVAL_SECONDS,
     normalize_cron_expression,
@@ -437,7 +437,7 @@ async def list_scheduled_task_runs(
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    status: typing.Literal["queued", "launching", "running", "success", "failed", "skipped", "interrupted"] | None = None,
+    status: ScheduledTaskRunStatus | None = None,
 ):
     task_repo = get_scheduled_task_repo(request)
     run_repo = get_scheduled_task_run_repo(request)
