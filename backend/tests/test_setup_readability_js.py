@@ -111,16 +111,3 @@ def test_main_fails_when_installed_packages_cannot_load(monkeypatch):
     monkeypatch.setattr(readability_setup, "node_dependencies_loadable", lambda *args, **kwargs: False)
 
     assert readability_setup.main() == 1
-
-
-class _FakeSubprocessModule:
-    """Route the script's subprocess calls through a stub while keeping the
-    exception types the script catches."""
-
-    def __init__(self, real, run):
-        self.TimeoutExpired = real.TimeoutExpired
-        self.CompletedProcess = real.CompletedProcess
-        self._run = run
-
-    def run(self, *args, **kwargs):
-        return self._run(*args, **kwargs)

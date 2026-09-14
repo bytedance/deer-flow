@@ -226,7 +226,7 @@ def _readability_js_ready() -> bool:
             _readability_js_state = True
         else:
             _readability_js_state = False
-            logger.warning("Readability.js dependencies are not installed; web fetch uses pure-Python extraction. Run scripts/setup_readability_js.py to install them.")
+            logger.warning("Readability.js dependencies are not installed; web fetch uses pure-Python extraction. Run scripts/setup_readability_js.py to install them, then restart the Gateway.")
         return _readability_js_state
     finally:
         _readability_js_bootstrap_lock.release()

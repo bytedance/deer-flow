@@ -380,7 +380,7 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
 
 2. **Install dependencies**:
    ```bash
-   make install  # Install backend + frontend dependencies + pre-commit hooks
+   make install  # Install backend + frontend dependencies + pre-commit hooks (+ Readability.js npm dependencies for web fetch; needs npm, which ships with Node.js — without them web fetch falls back to pure-Python extraction)
    ```
 
 3. **(Optional) Pre-pull sandbox image**:
