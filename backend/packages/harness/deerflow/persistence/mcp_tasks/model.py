@@ -20,6 +20,7 @@ class McpTaskRow(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     thread_id: Mapped[str] = mapped_column(String(64), index=True)
+    thread_incarnation: Mapped[str | None] = mapped_column(String(32), nullable=True)
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     server_name: Mapped[str] = mapped_column(String(MCP_TASK_SERVER_NAME_MAX_LENGTH))

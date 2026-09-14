@@ -6,12 +6,14 @@ the in-memory LangGraph Store backend used when database.backend=memory.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from langgraph.store.memory import InMemoryStore
 
 from deerflow.persistence.projects import ProjectNotAssignableError
+from deerflow.persistence.thread_meta import ThreadOwnershipConflictError
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -34,6 +36,207 @@ def _as_user(user):
 @pytest.fixture
 def store():
     return MemoryThreadMetaStore(InMemoryStore())
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_create_generates_stable_incarnation(store):
+    with _as_user(USER_A):
+        created = await store.create("incarnation-thread")
+        fetched = await store.get("incarnation-thread")
+
+    assert len(created["incarnation"]) == 32
+    assert fetched is not None
+    assert fetched["incarnation"] == created["incarnation"]
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_concurrent_create_preserves_overwrite_semantics_and_incarnation(store):
+    with _as_user(USER_A):
+        outcomes = await asyncio.gather(
+            store.create("same-thread", display_name="first"),
+            store.create("same-thread", display_name="second"),
+        )
+        fetched = await store.get("same-thread")
+
+    assert {outcome["display_name"] for outcome in outcomes} == {"first", "second"}
+    assert len({outcome["incarnation"] for outcome in outcomes}) == 1
+    assert fetched is not None
+    assert fetched["display_name"] in {"first", "second"}
+    assert fetched["incarnation"] == outcomes[0]["incarnation"]
+    assert not store._thread_locks._entries_by_loop
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_duplicate_create_overwrites_but_inherits_incarnation(store):
+    with _as_user(USER_A):
+        original = await store.create("duplicate", display_name="original")
+        replacement = await store.create("duplicate", display_name="replacement")
+        fetched = await store.get("duplicate")
+
+    assert replacement["incarnation"] == original["incarnation"]
+    assert replacement["display_name"] == "replacement"
+    assert fetched == replacement
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_duplicate_create_rejects_different_owner_without_overwrite(store):
+    with _as_user(USER_A):
+        original = await store.create("foreign-duplicate", display_name="original")
+
+    with _as_user(USER_B):
+        with pytest.raises(ThreadOwnershipConflictError):
+            await store.create("foreign-duplicate", display_name="replacement")
+
+    with _as_user(USER_A):
+        fetched = await store.get("foreign-duplicate")
+    assert fetched == original
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_concurrent_create_allows_one_owner_and_rejects_the_other(store):
+    async def create_for(user, display_name):
+        with _as_user(user):
+            return await store.create("owner-race", display_name=display_name)
+
+    outcomes = await asyncio.gather(create_for(USER_A, "A"), create_for(USER_B, "B"), return_exceptions=True)
+
+    records = [outcome for outcome in outcomes if isinstance(outcome, dict)]
+    conflicts = [outcome for outcome in outcomes if isinstance(outcome, ThreadOwnershipConflictError)]
+    assert len(records) == 1
+    assert len(conflicts) == 1
+    assert await store.get("owner-race", user_id=None) == records[0]
+    assert not store._thread_locks._entries_by_loop
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_duplicate_create_with_explicit_none_preserves_unscoped_overwrite(store):
+    with _as_user(USER_A):
+        original = await store.create("admin-overwrite", display_name="original")
+
+    replacement = await store.create("admin-overwrite", display_name="replacement", user_id=None)
+
+    assert replacement["incarnation"] == original["incarnation"]
+    assert replacement["display_name"] == "replacement"
+    assert replacement["user_id"] is None
+    assert await store.get("admin-overwrite", user_id=None) == replacement
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_claim_unowned_only_changes_none_owner(store):
+    await store.create("legacy", user_id=None)
+    await store.create("owned", user_id="original-owner")
+
+    assert await store.claim_unowned("missing", "owner-a") is False
+    assert await store.claim_unowned("owned", "owner-a") is False
+    assert await store.claim_unowned("legacy", "owner-a") is True
+    assert await store.claim_unowned("legacy", "owner-b") is False
+
+    assert (await store.get("owned", user_id=None))["user_id"] == "original-owner"
+    assert (await store.get("legacy", user_id=None))["user_id"] == "owner-a"
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_concurrent_claim_unowned_has_exactly_one_winner(store):
+    await store.create("legacy-race", user_id=None)
+
+    outcomes = await asyncio.gather(
+        store.claim_unowned("legacy-race", "owner-a"),
+        store.claim_unowned("legacy-race", "owner-b"),
+    )
+
+    assert sorted(outcomes) == [False, True]
+    record = await store.get("legacy-race", user_id=None)
+    assert record["user_id"] in {"owner-a", "owner-b"}
+    assert not store._thread_locks._entries_by_loop
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+@pytest.mark.parametrize(
+    "contender",
+    ["create", "claim_unowned", "update_display_name", "update_status", "update_metadata", "update_owner", "delete"],
+)
+async def test_all_memory_mutations_share_the_per_thread_lock(contender):
+    class PausingGetStore(InMemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.pause_next_get = False
+            self.get_entered = asyncio.Event()
+            self.allow_get = asyncio.Event()
+
+        async def aget(self, namespace, key):
+            item = await super().aget(namespace, key)
+            if self.pause_next_get:
+                self.pause_next_get = False
+                self.get_entered.set()
+                await self.allow_get.wait()
+            return item
+
+    backend = PausingGetStore()
+    store = MemoryThreadMetaStore(backend)
+    await store.create("locked-thread", user_id=None)
+    backend.pause_next_get = True
+    holder = asyncio.create_task(store.update_metadata("locked-thread", {"holder": True}, user_id=None))
+    await backend.get_entered.wait()
+
+    operations = {
+        "create": lambda: store.create("locked-thread", display_name="replacement", user_id=None),
+        "claim_unowned": lambda: store.claim_unowned("locked-thread", "new-owner"),
+        "update_display_name": lambda: store.update_display_name("locked-thread", "renamed", user_id=None),
+        "update_status": lambda: store.update_status("locked-thread", "busy", user_id=None),
+        "update_metadata": lambda: store.update_metadata("locked-thread", {"contender": True}, user_id=None),
+        "update_owner": lambda: store.update_owner("locked-thread", "new-owner", user_id=None),
+        "delete": lambda: store.delete("locked-thread", user_id=None),
+    }
+    waiting = asyncio.create_task(operations[contender]())
+    await asyncio.sleep(0)
+    assert not waiting.done(), f"{contender} bypassed the per-thread lock"
+
+    backend.allow_get.set()
+    await asyncio.gather(holder, waiting)
+    assert not store._thread_locks._entries_by_loop
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_delete_and_recreate_are_serialized_per_thread():
+    class PausingDeleteStore(InMemoryStore):
+        def __init__(self):
+            super().__init__()
+            self.delete_entered = asyncio.Event()
+            self.allow_delete = asyncio.Event()
+
+        async def adelete(self, namespace, key):
+            self.delete_entered.set()
+            await self.allow_delete.wait()
+            await super().adelete(namespace, key)
+
+    backend = PausingDeleteStore()
+    store = MemoryThreadMetaStore(backend)
+    with _as_user(USER_A):
+        original = await store.create("replace-me")
+        delete_task = asyncio.create_task(store.delete("replace-me"))
+        await backend.delete_entered.wait()
+        create_task = asyncio.create_task(store.create("replace-me"))
+        await asyncio.sleep(0)
+        assert not create_task.done()
+
+        backend.allow_delete.set()
+        await delete_task
+        replacement = await create_task
+        fetched = await store.get("replace-me")
+
+    assert replacement["incarnation"] != original["incarnation"]
+    assert fetched == replacement
+    assert not store._thread_locks._entries_by_loop
 
 
 @pytest.mark.anyio

@@ -2309,6 +2309,81 @@ def test_build_runtime_context_defaults_to_thread_and_run_id():
     assert ctx == {"thread_id": "thread-1", "run_id": "run-1"}
 
 
+@pytest.mark.parametrize("forged_reader", [lambda: None, {"allowed_ids": ["other-thread"]}])
+@pytest.mark.parametrize("carrier", ["context", "configurable"])
+def test_embedded_caller_cannot_supply_conversation_reader(forged_reader, carrier):
+    key = "__conversation_reader"
+    config = {carrier: {key: forged_reader}}
+
+    runtime_context = _build_runtime_context("thread-1", "run-1", config.get("context"))
+    _install_runtime_context(config, runtime_context)
+
+    assert key not in runtime_context
+    assert key not in config["context"]
+    assert key not in config.get("configurable", {})
+
+
+def test_host_conversation_reader_replaces_caller_value_in_both_contexts():
+    key = "__conversation_reader"
+    reader = AsyncMock()
+    config = {"context": {key: AsyncMock()}, "configurable": {key: AsyncMock()}}
+
+    runtime_context = _build_runtime_context("thread-1", "run-1", config["context"], conversation_reader=reader)
+    _install_runtime_context(config, runtime_context)
+
+    assert runtime_context[key] is reader
+    assert config["context"][key] is reader
+    assert key not in config["configurable"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+async def test_run_agent_scopes_conversation_reader_to_the_active_run(outcome):
+    key = "__conversation_reader"
+    reader = AsyncMock(return_value="authorized conversation")
+    run_manager = RunManager()
+    record = await run_manager.create(f"thread-conversation-{outcome}")
+    captured: dict[str, Any] = {}
+    config = {"context": {key: AsyncMock()}}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, stream_mode, subgraphs
+            captured["stream_config"] = config
+            runtime_context = config["configurable"]["__pregel_runtime"].context
+            captured["runtime_context"] = runtime_context
+            assert config["context"][key] is reader
+            assert runtime_context[key] is reader
+            assert await runtime_context[key]("allowed-thread") == "authorized conversation"
+            if outcome == "error":
+                raise RuntimeError("model failed")
+            if outcome == "cancel":
+                record.abort_event.set()
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_context"] = config["context"]
+        assert config["context"][key] is reader
+        return DummyAgent()
+
+    await run_agent(
+        _lease_test_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, conversation_reader=reader),
+        agent_factory=factory,
+        graph_input={},
+        config=config,
+    )
+    await asyncio.sleep(0)
+
+    reader.assert_awaited_once_with("allowed-thread")
+    expected_status = {"success": RunStatus.success, "error": RunStatus.error, "cancel": RunStatus.interrupted}[outcome]
+    assert record.status == expected_status
+    for context in (config["context"], captured["factory_context"], captured["stream_config"]["context"], captured["runtime_context"]):
+        assert key not in context
+
+
 def test_build_runtime_context_merges_caller_context():
     """Regression for issue #2677: keys from ``config['context']`` (e.g. ``agent_name``)
     must be merged into the Runtime's context so that ``ToolRuntime.context`` — which

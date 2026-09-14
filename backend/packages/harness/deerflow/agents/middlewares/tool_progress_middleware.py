@@ -473,16 +473,14 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
           the previous run are also cleared so a single first-call problem in the new run
           cannot falsely trip WARNED against stale context from a run the model no longer sees.
 
-        **Cross-run scoping vs LoopDetectionMiddleware**: this per-run reset is an intentional
-        policy choice, not an oversight.  Errors like ``rate_limited`` and ``transient`` are
-        time-bound: their root cause may resolve between user turns, so carrying a stale
-        counter forward risks a false-positive BLOCKED on calls that would now succeed.
-        LoopDetectionMiddleware takes the opposite stance — it retains ``_history`` across
-        runs (only clearing other-run *pending* warnings at ``before_agent``), because
-        call-pattern loops are time-invariant: a model that keeps issuing the same tool_calls
-        regardless of results does so regardless of when the run started.  The two middlewares
-        therefore guard different failure modes (result quality vs. call pattern) and their
-        cross-run scoping policies intentionally differ as a consequence.
+        **Graph-entry scoping vs LoopDetectionMiddleware**: this reset at every
+        ``before_agent`` is an intentional policy choice, not an oversight. Errors like
+        ``rate_limited`` and ``transient`` are time-bound, so carrying a stale counter into a
+        later graph entry risks a false-positive BLOCKED on calls that would now succeed.
+        LoopDetectionMiddleware instead keys call-pattern state by ``(thread_id, run_id)``:
+        separate user runs are isolated even on a cached graph, while repeated graph entries
+        in one Gateway run (including hidden goal continuations) share a loop budget. The two
+        middlewares therefore guard different failure modes and use different lifetimes.
         """
         thread_id = self._thread_id(runtime)
         with self._lock:

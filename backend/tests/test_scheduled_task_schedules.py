@@ -5,6 +5,7 @@ import pytest
 from deerflow.scheduler.schedules import (
     next_run_at,
     normalize_cron_expression,
+    parse_interval_seconds,
     validate_timezone,
 )
 
@@ -71,3 +72,60 @@ def test_next_run_at_for_cron_uses_timezone():
         now=now,
     )
     assert result == datetime(2026, 7, 1, 1, 0, tzinfo=UTC)
+
+
+def test_next_run_at_for_interval_adds_seconds_in_utc():
+    now = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    result = next_run_at(
+        "interval",
+        {"every_seconds": 90},
+        "UTC",
+        now=now,
+    )
+    assert result == datetime(2026, 7, 1, 0, 1, 30, tzinfo=UTC)
+    assert result.utcoffset() == timedelta(0)
+
+
+def test_next_run_at_for_interval_ignores_timezone():
+    now = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    shanghai = next_run_at(
+        "interval",
+        {"every_seconds": 5400},
+        "Asia/Shanghai",
+        now=now,
+    )
+    utc = next_run_at(
+        "interval",
+        {"every_seconds": 5400},
+        "UTC",
+        now=now,
+    )
+    assert shanghai == utc == datetime(2026, 7, 1, 1, 30, tzinfo=UTC)
+
+
+def test_next_run_at_for_interval_does_not_catch_up_from_a_stale_now():
+    # A late poller must schedule from the compute instant, not fill missed beats.
+    now = datetime(2026, 7, 1, 0, 10, tzinfo=UTC)
+    result = next_run_at(
+        "interval",
+        {"every_seconds": 60},
+        "UTC",
+        now=now,
+    )
+    assert result == datetime(2026, 7, 1, 0, 11, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {},
+        {"every_seconds": "90"},
+        {"every_seconds": 90.0},
+        {"every_seconds": True},
+        {"every_seconds": 0},
+        {"every_seconds": -30},
+    ],
+)
+def test_parse_interval_seconds_rejects_invalid_spec(spec):
+    with pytest.raises(ValueError, match="every_seconds"):
+        parse_interval_seconds(spec)
