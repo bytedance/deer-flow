@@ -20,8 +20,9 @@ Run scope:
   A single Gateway run may re-enter the graph for hidden goal continuations,
   and those continuations share one budget; a later user run gets a new
   ``run_id`` and a fresh budget. Only the per-message ``seen`` map is dropped
-  (``before_agent`` rebuilds it). Invocations without ``run_id`` in the
-  context still clear all of their state in ``after_agent``.
+  (``before_agent`` rebuilds it). Invocations without a non-empty string
+  ``run_id`` use runtime-local identity and clear their usage/warning state
+  in ``after_agent``.
 
 Stop-reason surfacing (#3875 Phase 2):
   The hard stop does NOT raise — it strips tool_calls so the agent loop
@@ -113,12 +114,16 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
             return self._stop_reason.pop(run_id, None)
 
     @staticmethod
-    def _get_run_id(runtime: Runtime) -> str:
+    def _context_run_id(runtime: Runtime) -> str | None:
+        """Resolve the explicit identity shared by continuation invocations."""
         ctx = getattr(runtime, "context", None)
-        if isinstance(ctx, dict) and "run_id" in ctx:
-            return ctx["run_id"]
+        run_id = ctx.get("run_id") if isinstance(ctx, dict) else None
+        return run_id if isinstance(run_id, str) and run_id else None
+
+    @classmethod
+    def _get_run_id(cls, runtime: Runtime) -> str:
         # Fallback to runtime object ID to prevent collisions across embedded client runs
-        return str(id(runtime))
+        return cls._context_run_id(runtime) or str(id(runtime))
 
     def _clear_run_state(self, run_id: str) -> None:
         with self._lock:
@@ -158,8 +163,7 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         if not self._config.enabled:
             return
         run_id = self._get_run_id(runtime)
-        ctx = getattr(runtime, "context", None)
-        if isinstance(ctx, dict) and "run_id" in ctx:
+        if self._context_run_id(runtime) is not None:
             # A Gateway run re-enters the graph for hidden goal continuations
             # under the same run_id, and they share this run's budget. Keep the
             # usage and warning state; before_agent rebuilds the seen map.
