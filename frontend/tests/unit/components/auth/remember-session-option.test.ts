@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { RememberSessionOption } from "@/components/auth/remember-session-option";
 import { I18nContext } from "@/core/i18n/context";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 
 describe("RememberSessionOption", () => {
   test("uses the active locale for setup and login copy", () => {
@@ -14,6 +15,7 @@ describe("RememberSessionOption", () => {
           value: {
             locale: "zh-CN",
             setLocale: () => undefined,
+            t: zhCN,
           },
         },
         createElement(RememberSessionOption, {

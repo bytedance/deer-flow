@@ -14,13 +14,17 @@ def list_dir(path: str, max_depth: int = 2) -> list[str]:
 
     Returns:
         A list of absolute paths for files and directories,
-        excluding items matching IGNORE_PATTERNS.
+        excluding items matching IGNORE_PATTERNS. An existing empty
+        directory returns an empty list.
+
+    Raises:
+        FileNotFoundError: If ``path`` does not exist or is not a directory.
     """
     result: list[str] = []
     root_path = Path(path).resolve()
 
     if not root_path.is_dir():
-        return result
+        raise FileNotFoundError(path)
 
     def _is_within_root(candidate: Path) -> bool:
         try:

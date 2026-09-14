@@ -134,6 +134,54 @@ export async function patchThreadMetadata(
   return (await response.json()) as ThreadMetadataPatchResponse;
 }
 
+export async function createThread(
+  threadId: string,
+  projectId?: string,
+): Promise<AgentThread> {
+  const response = await fetchWithAuth(`${getBackendBaseURL()}/api/threads`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      thread_id: threadId,
+      ...(projectId ? { project_id: projectId } : {}),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to create conversation."),
+    );
+  }
+
+  return (await response.json()) as AgentThread;
+}
+
+export async function moveThreadToProject(
+  threadId: string,
+  projectId: string | null,
+): Promise<ThreadMetadataPatchResponse> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/move`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ project_id: projectId }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to move conversation."),
+    );
+  }
+
+  return (await response.json()) as ThreadMetadataPatchResponse;
+}
+
 export async function compactThreadContext(
   threadId: string,
   options: CompactThreadContextOptions = {},
@@ -161,4 +209,34 @@ export async function compactThreadContext(
   }
 
   return (await response.json()) as ThreadCompactResponse;
+}
+
+/** Gateway extension not forwarded by the LangGraph SDK's search method. */
+export async function searchThreadsByArchive({
+  archived,
+  metadata,
+  status,
+  limit,
+  offset,
+}: {
+  archived: boolean;
+  metadata?: Record<string, unknown>;
+  status?: string;
+  limit: number;
+  offset: number;
+}): Promise<AgentThread[]> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/search`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archived, metadata, status, limit, offset }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to load conversations."),
+    );
+  }
+  return (await response.json()) as AgentThread[];
 }

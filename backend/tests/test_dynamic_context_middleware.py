@@ -397,8 +397,18 @@ def test_legacy_systemmessage_reminder_without_key_detected():
     assert result is None  # same day detected from content → no re-injection
 
 
-def test_injects_only_into_first_human_message_not_later_ones():
-    """Reminder targets the first HumanMessage; subsequent messages are not touched."""
+def test_first_turn_fallback_targets_the_latest_user_message():
+    """Fallback injection (history without any reminder) attaches to the LAST user target.
+
+    A history that reaches the ``last_date is None`` branch while already
+    holding multiple turns only exists because an earlier injection never
+    happened (e.g. the async degraded path skipped it) — the genuinely first
+    turn has exactly one message.  The reminder must therefore attach to the
+    latest user message: the ID-swap's ``{id}__user`` copy is appended by
+    ``add_messages``, so attaching to an earlier message would move that stale
+    prompt to the tail, ahead of the current question, and the model would
+    answer it as the current turn.
+    """
     mw = _make_middleware()
     state = {
         "messages": [
@@ -414,15 +424,15 @@ def test_injects_only_into_first_human_message_not_later_ones():
 
     assert result is not None
     msgs = result["messages"]
-    # Only the two injected messages are returned (reminder + original first query)
+    # Only the two injected messages are returned (reminder + latest user query)
     assert len(msgs) == 2
-    assert msgs[0].id == "msg-1"  # reminder takes first message's ID
+    assert msgs[0].id == "msg-2"  # reminder takes the latest message's ID
     assert msgs[0].additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY) is True
     assert _SYSTEM_REMINDER_TAG in msgs[0].content
-    assert msgs[1].id == "msg-1__user"  # original content with derived ID
-    assert msgs[1].content == "First"
-    # "Second" (msg-2) is not in the returned update — it is left unchanged
-    assert all(m.id != "msg-2" for m in msgs)
+    assert msgs[1].id == "msg-2__user"  # latest user content with derived ID
+    assert msgs[1].content == "Second"
+    # "First" (msg-1) is not in the returned update — it is left unchanged
+    assert all(m.id != "msg-1" for m in msgs)
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +522,43 @@ def test_user_message_containing_system_reminder_tag_does_not_prevent_injection(
     # Injection must happen — the user message does NOT carry the reminder flag
     assert result is not None
     assert result["messages"][0].additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY) is True
+
+
+def test_first_turn_injection_with_unguarded_history_targets_last_user_message():
+    """First-injection fallback after an un-reminded earlier turn must not reorder history.
+
+    When the earlier first-turn injection never happened (e.g. the async
+    ``abefore_agent`` degraded path timed out, so ``last_date is None`` at the
+    start of a *later* turn), the reminder must attach to the LAST user
+    injection target.  The ID-swap's ``{id}__user`` copy is appended by
+    ``add_messages``; picking the first message instead would move the stale
+    first user prompt to the tail, ahead of the current question — and the
+    model would answer the old prompt as the current turn.
+    """
+    from langgraph.graph.message import add_messages
+
+    mw = _make_middleware()
+    state = {
+        "messages": [
+            HumanMessage(content="first question", id="u1"),
+            AIMessage(content="first answer", id="a1"),
+            HumanMessage(content="second question", id="u2"),
+        ]
+    }
+
+    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""), mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime())
+
+    assert result is not None
+    assert [m.id for m in result["messages"]] == ["u2", "u2__user"]
+
+    # Fold the update through the real reducer — this is where the reorder
+    # would actually manifest for the model.
+    merged = add_messages(state["messages"], result["messages"])
+    last_visible = [m for m in merged if isinstance(m, HumanMessage)][-1]
+    assert last_visible.content == "second question"
+    assert [m.id for m in merged].index("u1") < [m.id for m in merged].index("u2__user")
 
 
 # ---------------------------------------------------------------------------
@@ -753,3 +800,168 @@ def test_no_recursive_id_swap_in_full_middleware_flow():
     msgs_v2 = result_v2["messages"]
     assert msgs_v2[0].id == "msg-2"  # reminder takes new message's ID
     assert msgs_v2[1].id == "msg-2__user"  # user content gets derived ID
+
+
+# ---------------------------------------------------------------------------
+# Date timezone formatting
+# ---------------------------------------------------------------------------
+
+
+def test_format_current_date_defaults_to_server_local_without_env(monkeypatch):
+    """Without DEER_FLOW_DATE_TIMEZONE the formatter keeps the legacy server-local behavior."""
+    from datetime import datetime
+
+    from deerflow.agents.middlewares.dynamic_context_middleware import _format_current_date
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 5, 8, 9, 0)
+        monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
+
+        assert _format_current_date() == "2026-05-08, Friday"
+        mock_dt.now.assert_called_once_with()
+
+
+def test_format_current_date_honors_configured_timezone(monkeypatch):
+    """A UTC instant must be rendered in the IANA zone named by DEER_FLOW_DATE_TIMEZONE."""
+    from datetime import UTC, datetime
+
+    from deerflow.agents.middlewares.dynamic_context_middleware import _format_current_date
+
+    # 2026-09-02 20:30 UTC is 2026-09-03 04:30 in Asia/Shanghai: a UTC-only
+    # formatter would report the wrong day for a Shanghai user.
+    fixed_utc = datetime(2026, 9, 2, 20, 30, 0, tzinfo=UTC)
+
+    def fake_now(tz=None):
+        # datetime.now(tz) semantics: the fixed instant expressed in *tz*.
+        return fixed_utc.astimezone(tz) if tz is not None else fixed_utc.replace(tzinfo=None)
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.side_effect = fake_now
+        monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Asia/Shanghai")
+
+        assert _format_current_date() == "2026-09-03, Thursday"
+
+
+def test_format_current_date_invalid_timezone_falls_back(monkeypatch, caplog):
+    """An unparseable IANA name must warn and degrade to the server-local timezone."""
+    from datetime import datetime
+
+    from deerflow.agents.middlewares.dynamic_context_middleware import _format_current_date
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 5, 8, 9, 0)
+        monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Not/A_Zone")
+
+        assert _format_current_date() == "2026-05-08, Friday"
+    assert "DEER_FLOW_DATE_TIMEZONE" in caplog.text
+
+
+def _declared_date_timezone_policies():
+    from deerflow.agents.middlewares.dynamic_context_middleware import (
+        DynamicContextMiddleware,
+        SubagentDateContextMiddleware,
+    )
+
+    return [
+        DynamicContextMiddleware().release_policy_parameters(),
+        SubagentDateContextMiddleware().release_policy_parameters(),
+    ]
+
+
+def test_date_middlewares_declare_configured_timezone(monkeypatch):
+    """Assembly identity must reflect the zone the injected date follows."""
+    monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Asia/Shanghai")
+
+    assert _declared_date_timezone_policies() == [
+        {"current_date_timezone": "Asia/Shanghai"},
+        {"current_date_timezone": "Asia/Shanghai"},
+    ]
+
+
+def test_date_middlewares_declare_utc_timezone(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "UTC")
+
+    assert _declared_date_timezone_policies() == [
+        {"current_date_timezone": "UTC"},
+        {"current_date_timezone": "UTC"},
+    ]
+
+
+def test_date_middlewares_declare_resolved_local_zone_without_env(monkeypatch):
+    """Without the knob the declaration resolves the actual local zone, so two
+    hosts that render different dates still get different assembly fingerprints."""
+    from deerflow.agents.middlewares.dynamic_context_middleware import _effective_date_timezone_name
+
+    monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
+    expected = {"current_date_timezone": _effective_date_timezone_name()}
+    assert expected["current_date_timezone"]
+
+    assert _declared_date_timezone_policies() == [expected, expected]
+
+
+def test_date_middlewares_declare_resolved_local_zone_for_invalid_env(monkeypatch, caplog):
+    """An invalid IANA name degrades to server-local and is declared as such."""
+    from deerflow.agents.middlewares.dynamic_context_middleware import _effective_date_timezone_name
+
+    monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Not/A_Zone")
+    expected = {"current_date_timezone": _effective_date_timezone_name()}
+
+    assert _declared_date_timezone_policies() == [expected, expected]
+    assert "DEER_FLOW_DATE_TIMEZONE" in caplog.text
+
+
+def test_server_local_timezone_name_reads_tz_env(monkeypatch):
+    """A POSIX TZ env var naming a real zone resolves to its IANA key."""
+    from deerflow.agents.middlewares.dynamic_context_middleware import _server_local_timezone_name
+
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    assert _server_local_timezone_name() == "Asia/Shanghai"
+
+
+def test_server_local_timezone_name_reads_direct_macos_symlink_target(monkeypatch):
+    """macOS /etc/localtime points at the unversioned zoneinfo dir; the direct
+    symlink target must be read instead of a fully resolved path."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(module.os, "readlink", lambda _path: "/var/db/timezone/zoneinfo/Asia/Shanghai")
+
+    assert module._server_local_timezone_name() == "Asia/Shanghai"
+
+
+def test_server_local_timezone_name_reads_apple_versioned_symlink_target(monkeypatch):
+    """Apple's canonical versioned zoneinfo path must still yield the zone key."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(
+        module.os,
+        "readlink",
+        lambda _path: "/private/var/db/timezone/tz/2026c.1.0/zoneinfo/America/New_York",
+    )
+
+    assert module._server_local_timezone_name() == "America/New_York"
+
+
+def test_server_local_timezone_name_normalizes_relative_symlink_target(monkeypatch):
+    """A relative /etc/localtime target is resolved against /etc."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(module.os, "readlink", lambda _path: "../usr/share/zoneinfo/Etc/UTC")
+
+    assert module._server_local_timezone_name() == "Etc/UTC"
+
+
+def test_effective_timezone_sentinel_uses_offset_when_local_zone_is_not_resolvable(monkeypatch):
+    """Without a recoverable IANA key the declaration pins a stable sentinel."""
+    import deerflow.agents.middlewares.dynamic_context_middleware as module
+
+    monkeypatch.setattr(module, "_server_local_timezone_name", lambda: None)
+    monkeypatch.setattr(module, "_server_local_utc_offset_minutes", lambda: 8 * 60)
+    monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
+
+    assert module._effective_date_timezone_name() == "server-local(+08:00)"
+
+    monkeypatch.setattr(module, "_server_local_utc_offset_minutes", lambda: -5 * 60 - 30)
+    assert module._effective_date_timezone_name() == "server-local(-05:30)"

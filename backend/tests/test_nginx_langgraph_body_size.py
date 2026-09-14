@@ -128,3 +128,24 @@ def test_uploads_route_still_has_its_own_body_size_settings(path):
 
     assert "client_max_body_size 100M;" in block
     assert "proxy_request_buffering off;" in block
+
+
+@pytest.mark.parametrize("path", NGINX_CONFIGS)
+def test_skills_upload_route_allows_archive_plus_multipart_framing(path):
+    """The upload route must stream archives and allow slow validation."""
+    content = _read(path)
+    block = _extract_location_block(content, "= /api/skills/install/upload")
+
+    assert "client_max_body_size 101M;" in block
+    assert "proxy_request_buffering off;" in block
+    assert "proxy_read_timeout 600s;" in block
+
+
+@pytest.mark.parametrize("path", NGINX_CONFIGS)
+def test_skills_prefix_keeps_default_request_body_policy(path):
+    """Large bodies must be allowed only on the admin upload endpoint."""
+    content = _read(path)
+    block = _extract_location_block(content, "/api/skills")
+
+    assert "client_max_body_size" not in block
+    assert "proxy_request_buffering" not in block

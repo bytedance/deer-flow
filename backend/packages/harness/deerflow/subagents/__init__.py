@@ -5,6 +5,7 @@ __all__ = [
     "SubagentConfig",
     "SubagentExecutor",
     "SubagentResult",
+    "SubagentRuntime",
     "get_available_subagent_names",
     "get_subagent_config",
     "list_subagents",
@@ -21,4 +22,9 @@ def __getattr__(name: str):
         }
         globals().update(exports)
         return exports[name]
+    if name == "SubagentRuntime":
+        from .runtime import SubagentRuntime
+
+        globals()[name] = SubagentRuntime
+        return SubagentRuntime
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

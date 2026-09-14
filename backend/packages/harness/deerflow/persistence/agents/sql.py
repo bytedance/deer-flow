@@ -12,6 +12,8 @@ the app, so this adds no dependency.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import shutil
 import threading
@@ -19,7 +21,7 @@ import uuid
 from collections.abc import Hashable
 from datetime import UTC, datetime
 
-from sqlalchemy import Engine, create_engine, delete, event, func, select
+from sqlalchemy import Engine, create_engine, delete, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -33,7 +35,6 @@ from deerflow.persistence.agents.base import (
 )
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,12 @@ def _build_engine(url: str) -> Engine:
     return engine
 
 
-def _get_sessionmaker(url: str) -> sessionmaker[Session]:
+def get_sync_sessionmaker(url: str) -> sessionmaker[Session]:
+    """Return the process-wide synchronous session factory for ``url``.
+
+    Managed subagents use the same SQL engine because both stores are read by
+    synchronous graph construction code as well as Gateway worker threads.
+    """
     engine = _engines.get(url)
     if engine is None:
         with _engines_lock:
@@ -82,6 +88,11 @@ def _get_sessionmaker(url: str) -> sessionmaker[Session]:
     return sessionmaker(engine, expire_on_commit=False)
 
 
+# Compatibility for existing internal callers; new shared stores use the
+# public name above.
+_get_sessionmaker = get_sync_sessionmaker
+
+
 def _config_document(config: dict) -> dict:
     """Strip the natural key from the stored document (``name`` is its own column)."""
     return {k: v for k, v in config.items() if k != "name"}
@@ -89,7 +100,7 @@ def _config_document(config: dict) -> dict:
 
 class SqlAgentStore(AgentStore):
     def __init__(self, url: str) -> None:
-        self._Session = _get_sessionmaker(url)
+        self._Session = get_sync_sessionmaker(url)
 
     def _row(self, session: Session, name: str, user_id: str) -> AgentRow | None:
         stmt = select(AgentRow).where(AgentRow.user_id == user_id, AgentRow.name == name.lower())
@@ -210,12 +221,35 @@ class SqlAgentStore(AgentStore):
         return "missing"
 
     def signature(self) -> Hashable:
-        # MAX(updated_at) is not covered by an index (only user_id and the
-        # (user_id, name) unique constraint are), so this is a small full scan.
-        # It runs only on the webhook registry's cache-freshness check against a
-        # tiny agents table, so an index is not warranted; revisit if agents ever
-        # grow into the thousands with frequent webhook deliveries.
+        # The GitHub registry uses this token to decide whether cached agent
+        # bindings are still current. Timestamps alone are not sufficient
+        # because two writes can reuse the same database timestamp.
+        # Computing the digest reads the small agents table only on the
+        # registry's cache-freshness check; revisit if agent counts or webhook
+        # delivery rates grow enough for this scan to become material.
         with self._Session() as session:
-            max_updated, count = session.execute(select(func.max(AgentRow.updated_at), func.count(AgentRow.id))).one()
-        token = coerce_iso(max_updated) if isinstance(max_updated, datetime) else str(max_updated)
-        return (token, int(count))
+            rows = session.execute(
+                select(
+                    AgentRow.user_id,
+                    AgentRow.name,
+                    AgentRow.config,
+                    AgentRow.soul,
+                ).order_by(AgentRow.user_id, AgentRow.name)
+            ).all()
+
+        payload = [
+            {
+                "user_id": user_id,
+                "name": name,
+                "config": config or {},
+                "soul": soul or "",
+            }
+            for user_id, name, config, soul in rows
+        ]
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

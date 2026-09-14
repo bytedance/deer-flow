@@ -6,9 +6,24 @@ Run from repo root:
 
 from __future__ import annotations
 
+import importlib.util
 import sys
+from pathlib import Path
 
 import doctor
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_script(path: Path, name: str):
+    assert path.exists(), f"{path} must exist"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 # ---------------------------------------------------------------------------
 # check_python
@@ -28,6 +43,18 @@ class TestCheckPython:
 
 
 class TestCheckPnpm:
+    def test_resolves_shared_runner_from_relative_script_path(self, monkeypatch):
+        # Load the script as `scripts/doctor.py`, as a user would from the
+        # repository root. The derived paths must not depend on that relative
+        # invocation path.
+        monkeypatch.chdir(REPO_ROOT)
+        relative_doctor = _load_script(Path("scripts/doctor.py"), "deerflow_doctor_relative")
+
+        assert relative_doctor.PNPM_SCRIPT_PATH == REPO_ROOT / "scripts" / "pnpm.py"
+        assert relative_doctor.PNPM_SCRIPT_PATH.is_absolute()
+        assert relative_doctor.FRONTEND_DIR == REPO_ROOT / "frontend"
+        assert relative_doctor.FRONTEND_DIR.is_absolute()
+
     def test_uses_shared_runner_from_frontend(self, monkeypatch):
         captured = {}
 
@@ -160,6 +187,14 @@ class TestCheckModelsConfigured:
         result = doctor.check_models_configured(tmp_path / "config.yaml")
         assert result.status == "skip"
 
+    def test_commented_out_models_block(self, tmp_path):
+        # config.example.yaml ships a `models:` key whose entries are all
+        # commented out, so it parses as None rather than an empty list.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        result = doctor.check_models_configured(cfg)
+        assert result.status == "fail"
+
 
 # ---------------------------------------------------------------------------
 # check_llm_api_key
@@ -189,6 +224,14 @@ class TestCheckLLMApiKey:
         results = doctor.check_llm_api_key(tmp_path / "config.yaml")
         assert results == []
 
+    def test_commented_out_models_block_returns_empty(self, tmp_path):
+        # Regression: iterating a null `models:` raised TypeError, which the
+        # broad handler rendered as "('NoneType' object is not iterable)".
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        results = doctor.check_llm_api_key(cfg)
+        assert results == []
+
 
 # ---------------------------------------------------------------------------
 # check_llm_auth
@@ -210,6 +253,12 @@ class TestCheckLLMAuth:
         results = doctor.check_llm_auth(cfg)
         assert any(result.status == "ok" and "Claude auth available" in result.label for result in results)
 
+    def test_commented_out_models_block_returns_empty(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  # - name: default\n")
+        assert doctor.check_llm_auth(cfg) == []
+        assert doctor.check_llm_package(cfg) == []
+
 
 # ---------------------------------------------------------------------------
 # check_web_search
@@ -225,6 +274,24 @@ class TestCheckWebSearch:
         result = doctor.check_web_search(cfg)
         assert result.status == "ok"
         assert "DuckDuckGo" in result.detail
+
+    def test_commented_out_tools_block_warns_without_traceback(self, tmp_path):
+        # config.example.yaml ships a `tools:` key whose entries can all be
+        # commented out, so it parses as None rather than an empty list.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  # - name: web_search\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "no web_search tool in config"
+
+    def test_scalar_tools_entry_warns_without_traceback(self, tmp_path):
+        # A bare string entry is not a mapping; `t.get("name")` used to raise
+        # AttributeError, which the broad handler rendered as the check result.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - web_search\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "no web_search tool in config"
 
     def test_tavily_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
@@ -274,6 +341,22 @@ class TestCheckWebSearch:
         result = doctor.check_web_search(cfg)
         assert result.status == "ok"
         assert "BRAVE_SEARCH_API_KEY set from config" in result.detail
+
+    def test_sofya_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SOFYA_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.sofya.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "sofya" in result.detail
+
+    def test_sofya_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SOFYA_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.sofya.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "SOFYA_API_KEY" in (result.fix or "")
 
     def test_serper_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SERPER_API_KEY", "test-key")
@@ -329,6 +412,33 @@ class TestCheckWebSearch:
         assert result.status == "warn"
         assert "SERPER_API_KEY" in (result.fix or "")
 
+    def test_tencent_wsa_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TENCENTCLOUD_WSA_APIKEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tencent_wsa.tools:web_search_tool\n")
+
+        result = doctor.check_web_search(cfg)
+
+        assert result.status == "warn"
+        assert "tencent_wsa configured but TENCENTCLOUD_WSA_APIKEY not set" in result.detail
+        assert "TENCENTCLOUD_WSA_APIKEY" in (result.fix or "")
+
+    def test_serply_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SERPLY_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serply.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "serply" in result.detail
+
+    def test_serply_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SERPLY_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serply.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "SERPLY_API_KEY" in (result.fix or "")
+
     def test_no_search_tool_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\ntools: []\n")
@@ -368,6 +478,14 @@ class TestCheckWebFetch:
         result = doctor.check_web_fetch(cfg)
         assert result.status == "warn"
         assert "FIRECRAWL_API_KEY" in (result.fix or "")
+
+    def test_sofya_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SOFYA_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.sofya.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "warn"
+        assert "SOFYA_API_KEY" in (result.fix or "")
 
     def test_no_fetch_tool_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
@@ -558,6 +676,17 @@ class TestCheckSandbox:
         cfg.write_text("config_version: 5\n")
         results = doctor.check_sandbox(cfg)
         assert results[0].status == "fail"
+
+    def test_commented_out_tools_block_reports_no_traceback(self, tmp_path):
+        # Regression: iterating a null `tools:` raised TypeError, which the
+        # broad handler rendered as "('NoneType' object is not iterable)".
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\nsandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\ntools:\n  # - name: bash\n")
+        results = doctor.check_sandbox(cfg)
+        # Empty `tools:` means no bash tool, so the path is deterministic.
+        assert len(results) == 1
+        assert results[0].status == "ok"
+        assert results[0].detail == "Local sandbox"
 
     def test_local_sandbox_with_disabled_host_bash_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"

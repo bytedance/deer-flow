@@ -131,6 +131,24 @@ def _message_content_str(msg: ToolMessage) -> str:
     return msg.content if isinstance(msg.content, str) else ""
 
 
+def _result_tool_message(result: ToolMessage | Command, tool_call_id: str) -> ToolMessage | None:
+    """Return the ToolMessage for this tool call, including Command-wrapped results."""
+    if isinstance(result, ToolMessage):
+        return result
+    update = result.update
+    if not isinstance(update, dict):
+        return None
+    messages = update.get("messages", [])
+    if isinstance(messages, ToolMessage):
+        messages = [messages]
+    if not isinstance(messages, (list, tuple)):
+        return None
+    for message in messages:
+        if isinstance(message, ToolMessage) and str(message.tool_call_id) == tool_call_id:
+            return message
+    return None
+
+
 def _parse_tool_meta(meta_dict: object) -> ToolResultMeta | None:
     """Safely deserialize a ToolResultMeta from a raw dict; returns None on schema mismatch."""
     if not isinstance(meta_dict, dict):
@@ -303,11 +321,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         result: ToolMessage | Command,
         tool_name: str,
         runtime: Runtime,
+        tool_call_id: str,
     ) -> ToolMessage | Command:
         """Update the state machine from a tool result; queue hints if warranted."""
-        if not isinstance(result, ToolMessage):
+        message = _result_tool_message(result, tool_call_id)
+        if message is None:
             return result
-        meta = _parse_tool_meta((result.additional_kwargs or {}).get(TOOL_META_KEY))
+        meta = _parse_tool_meta((message.additional_kwargs or {}).get(TOOL_META_KEY))
         if meta is None:
             if tool_name not in self._exempt_tools:
                 logger.warning(
@@ -315,7 +335,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                     tool_name,
                 )
             return result
-        content = _message_content_str(result)
+        content = _message_content_str(message)
         thread_id = self._thread_id(runtime)
         with self._lock:
             state = self._get_state(thread_id, tool_name)
@@ -453,16 +473,14 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
           the previous run are also cleared so a single first-call problem in the new run
           cannot falsely trip WARNED against stale context from a run the model no longer sees.
 
-        **Cross-run scoping vs LoopDetectionMiddleware**: this per-run reset is an intentional
-        policy choice, not an oversight.  Errors like ``rate_limited`` and ``transient`` are
-        time-bound: their root cause may resolve between user turns, so carrying a stale
-        counter forward risks a false-positive BLOCKED on calls that would now succeed.
-        LoopDetectionMiddleware takes the opposite stance — it retains ``_history`` across
-        runs (only clearing other-run *pending* warnings at ``before_agent``), because
-        call-pattern loops are time-invariant: a model that keeps issuing the same tool_calls
-        regardless of results does so regardless of when the run started.  The two middlewares
-        therefore guard different failure modes (result quality vs. call pattern) and their
-        cross-run scoping policies intentionally differ as a consequence.
+        **Graph-entry scoping vs LoopDetectionMiddleware**: this reset at every
+        ``before_agent`` is an intentional policy choice, not an oversight. Errors like
+        ``rate_limited`` and ``transient`` are time-bound, so carrying a stale counter into a
+        later graph entry risks a false-positive BLOCKED on calls that would now succeed.
+        LoopDetectionMiddleware instead keys call-pattern state by ``(thread_id, run_id)``:
+        separate user runs are isolated even on a cached graph, while repeated graph entries
+        in one Gateway run (including hidden goal continuations) share a loop budget. The two
+        middlewares therefore guard different failure modes and use different lifetimes.
         """
         thread_id = self._thread_id(runtime)
         with self._lock:
@@ -502,7 +520,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 block_reason,
             )
             return self._make_blocked_message(request, tool_name, block_reason)
-        return self._update_state_from_result(handler(request), tool_name, runtime)
+        return self._update_state_from_result(handler(request), tool_name, runtime, str(request.tool_call.get("id") or ""))
 
     @override
     async def awrap_tool_call(
@@ -525,7 +543,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 block_reason,
             )
             return self._make_blocked_message(request, tool_name, block_reason)
-        return self._update_state_from_result(await handler(request), tool_name, runtime)
+        return self._update_state_from_result(await handler(request), tool_name, runtime, str(request.tool_call.get("id") or ""))
 
     # ------------------------------------------------------------------
     # wrap_model_call: drain pending hints and inject before model sees messages

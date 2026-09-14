@@ -278,6 +278,37 @@ def test_app_config_loads_extension_middlewares_from_extensions_config(tmp_path,
     assert config.extensions.middlewares == ["pkg.from_file:FileMiddleware"]
 
 
+def test_app_config_loads_middleware_kwargs_from_config_yaml(tmp_path, monkeypatch):
+    from deerflow.config.extensions_config import ConfiguredMiddlewareSpec
+
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg.from_file:FileMiddleware"]}),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(
+        config_path,
+        {
+            "extensions": {
+                "middlewares": [
+                    "pkg.from_yaml:PlainMiddleware",
+                    {"class": "pkg.from_yaml:KwargsMiddleware", "kwargs": {"max_tool_calls": 4}},
+                ],
+            }
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.extensions.middlewares[0] == "pkg.from_yaml:PlainMiddleware"
+    spec = config.extensions.middlewares[1]
+    assert isinstance(spec, ConfiguredMiddlewareSpec)
+    assert spec.class_path == "pkg.from_yaml:KwargsMiddleware"
+    assert spec.kwargs == {"max_tool_calls": 4}
+
+
 def test_app_config_defaults_empty_database_to_sqlite(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"
@@ -642,6 +673,56 @@ def test_get_app_config_keeps_persistence_runtime_singletons_when_checkpointer_u
 
         assert get_checkpointer() is initial_checkpointer
         assert get_store() is initial_store
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_app_config_does_not_reset_persistence_singletons_when_database_changes(tmp_path, monkeypatch):
+    # ``database`` is a restart-required field: the ORM engine is built once at
+    # startup and never rebuilt on a config.yaml edit. Resetting only the sync
+    # checkpointer/store singletons on a live ``postgres_schema`` change would
+    # half-migrate the deployment (new checkpoint/store tables in the new schema,
+    # ORM rows still in the old one). So a ``database`` change must NOT trigger a
+    # partial reset -- the operator must restart.
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    _write_config_with_sections(
+        config_path,
+        {"database": {"backend": "postgres", "postgres_url": "postgresql://localhost/db", "postgres_schema": "schema_a"}},
+    )
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    _reset_config_singletons()
+
+    reset_calls = {"checkpointer": 0, "store": 0}
+
+    def _reset_checkpointer() -> None:
+        reset_calls["checkpointer"] += 1
+
+    def _reset_store() -> None:
+        reset_calls["store"] += 1
+
+    monkeypatch.setattr("deerflow.runtime.checkpointer.reset_checkpointer", _reset_checkpointer)
+    monkeypatch.setattr("deerflow.runtime.store.reset_store", _reset_store)
+
+    try:
+        get_app_config()
+        reset_calls["checkpointer"] = 0
+        reset_calls["store"] = 0
+
+        _write_config_with_sections(
+            config_path,
+            {"database": {"backend": "postgres", "postgres_url": "postgresql://localhost/db", "postgres_schema": "schema_b"}},
+        )
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        get_app_config()
+
+        assert get_checkpointer_config() is None
+        assert reset_calls == {"checkpointer": 0, "store": 0}
     finally:
         _reset_config_singletons()
 

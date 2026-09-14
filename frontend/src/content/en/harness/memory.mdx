@@ -89,11 +89,13 @@ memory:
     max_injection_tokens: 2000
 ```
 
-## OpenViking HTTP backend
+## OpenViking backend
 
 Set `manager_class: openviking` to send completed turns to an independent
-OpenViking server and recall its memory over HTTP. This backend currently
-supports middleware mode only; DeerMem remains the default.
+OpenViking server and recall its memory through the official
+`langchain-openviking` adapter. This first version supports one DeerFlow user
+with one OpenViking USER API key in middleware mode; DeerMem remains the
+default.
 
 ```yaml
 memory:
@@ -103,8 +105,7 @@ memory:
   mode: middleware
   backend_config:
     base_url: http://openviking:1933
-    auth_mode: trusted
-    account: deerflow
+    owner_user_id: default
     api_key_env: OPENVIKING_API_KEY
     failure_policy:
       read: fail_open
@@ -115,9 +116,11 @@ memory:
       max_injection_chars: 12000
 ```
 
-The backend hashes each DeerFlow user/agent scope into a distinct OpenViking
-trusted identity. Keep trusted-mode OpenViking on an internal network and put
-the API key in the server environment, not directly in `config.yaml`.
+Use `owner_user_id: default` when DeerFlow authentication is disabled. Put the
+USER key in the server environment, not directly in `config.yaml`. Trusted-mode
+account headers, root-key memory access, and multi-user key provisioning are not
+part of this version. See `docs/OPENVIKING.md` for the full boundary and startup
+guide.
 
 ## Global vs per-agent memory
 

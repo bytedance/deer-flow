@@ -25,6 +25,11 @@ from app.gateway.deps import get_local_provider
 
 auth = Auth()
 
+# StudioUser was added after DeerFlow's historical langgraph-sdk floor. Resolve
+# it once so older compatible SDK installs keep ordinary owner scoping instead
+# of failing every request with an AttributeError.
+_STUDIO_USER_TYPE = getattr(Auth.types, "StudioUser", None)
+
 # Methods that require CSRF validation (state-changing per RFC 7231).
 _CSRF_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 
@@ -109,9 +114,27 @@ async def add_owner_filter(ctx: Auth.types.AuthContext, value: dict):
     Gateway stores thread ownership as ``metadata.user_id``.
     This handler ensures LangGraph Server enforces the same isolation.
     """
-    # On create/update: stamp user_id into metadata
+    # LangGraph represents its trusted local Studio principal with a dedicated
+    # user type. Do not infer that privilege from its public identity string:
+    # an ordinary authenticated principal may reuse the same string.
+    if _STUDIO_USER_TYPE is not None and isinstance(ctx.user, _STUDIO_USER_TYPE) and ctx.resource == "assistants" and ctx.action in {"read", "search"}:
+        return {
+            "$or": [
+                {"created_by": "system"},
+                {"user_id": ctx.user.identity},
+            ]
+        }
+
+    # Ownership and provenance on external assistant writes are server-owned.
+    # LangGraph treats ``created_by=system`` as privileged during run creation,
+    # so accepting that marker from request metadata would cross the auth
+    # boundary. The standalone pre-runtime persistence repair also scrubs this
+    # marker from legacy active rows and their version history before normal
+    # version selection becomes available.
     metadata = value.setdefault("metadata", {})
     metadata["user_id"] = ctx.user.identity
+    if ctx.resource == "assistants" and ctx.action in {"create", "update"}:
+        metadata["created_by"] = "user"
 
     # Return filter dict — LangGraph applies it to search/read/delete
     return {"user_id": ctx.user.identity}

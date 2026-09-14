@@ -2,6 +2,36 @@
 
 The value stored here is DeerFlow's request-level correlation id. It is
 separate from Langfuse's own trace id and from DeerFlow run ids.
+
+**This ContextVar is the only source of a trace id.** Every path that reaches a
+run binds one first: the Gateway ``TraceMiddleware`` for HTTP, and
+:func:`ensure_trace_context` for the entry points that never touch ASGI --
+scheduled occurrences, MCP task notification runs, IM channel messages, and the
+embedded :class:`~deerflow.client.DeerFlowClient`. Downstream code can therefore
+treat the trace id as a plain ``str`` and use :func:`ensure_trace_id` or
+:func:`resolve_trace_id` instead of the ``if trace_id:`` guards a nullable id
+used to require.
+
+Everything else that carries the id -- the ``X-Trace-Id`` response header,
+``runtime.context[DEERFLOW_TRACE_METADATA_KEY]``, the run record's metadata,
+log records -- is a **derived output, never read back as an input**. A caller
+that sends ``metadata.deerflow_trace_id`` on a run request has it replaced
+rather than honoured: reading it back would let the persisted run disagree with
+the header the same request already returned, and a trace id you cannot trust
+to match the logs is worse than no trace id at all. Callers that need to pin a
+correlation id across services send ``X-Trace-Id``.
+
+``logging.enhance.enabled`` gates log output only -- whether records carry a
+``trace_id`` field, and in which format. It does not gate the id's existence,
+the response header, or the run metadata.
+
+Crossing execution boundaries
+-----------------------------
+The ContextVar is task-local and does not survive a bare thread hop, which is
+why the id also travels as data. Code re-entering on the far side of such a
+boundary rebinds with :func:`ensure_trace_context` and reads carriers through
+:func:`resolve_trace_id`, keeping the fallback order in one place instead of
+open-coding it per call site.
 """
 
 from __future__ import annotations
@@ -17,10 +47,6 @@ DEERFLOW_TRACE_METADATA_KEY: Final[str] = "deerflow_trace_id"
 _MAX_TRACE_ID_LENGTH: Final[int] = 512
 
 _current_trace_id: Final[ContextVar[str | None]] = ContextVar("deerflow_current_trace_id", default=None)
-_trace_id_from_request_header: Final[ContextVar[bool]] = ContextVar(
-    "deerflow_trace_id_from_request_header",
-    default=False,
-)
 
 
 def generate_trace_id() -> str:
@@ -51,55 +77,73 @@ def normalize_trace_id(value: object) -> str | None:
     return trace_id
 
 
-def set_current_trace_id(trace_id: str) -> Token[str | None]:
-    """Bind *trace_id* to the current execution context."""
-    normalized = normalize_trace_id(trace_id)
-    if normalized is None:
-        normalized = generate_trace_id()
-    return _current_trace_id.set(normalized)
-
-
-def reset_current_trace_id(token: Token[str | None]) -> None:
-    """Restore the trace context captured by *token*."""
-    _current_trace_id.reset(token)
-
-
 def get_current_trace_id() -> str | None:
-    """Return the current request trace id, if one is bound."""
+    """Return the bound trace id, or ``None`` when nothing is bound.
+
+    Prefer :func:`ensure_trace_id` or :func:`resolve_trace_id`, which honour
+    the non-nullable contract. This nullable accessor exists for callers that
+    must neither mutate context nor fabricate a value: the logging filter,
+    which runs on records emitted before any entry point (import time,
+    third-party threads) and renders those as ``trace_id=-``.
+    """
     return _current_trace_id.get()
 
 
-def mark_trace_id_from_request_header(*, from_header: bool) -> Token[bool]:
-    """Record whether the current trace id came from a valid inbound header."""
-    return _trace_id_from_request_header.set(from_header)
+def ensure_trace_id() -> str:
+    """Return the ambient trace id, minting and binding one when unset.
 
-
-def reset_trace_id_from_request_header(token: Token[bool]) -> None:
-    """Restore the inbound-header flag captured by *token*."""
-    _trace_id_from_request_header.reset(token)
-
-
-def is_trace_id_from_request_header() -> bool:
-    """Return ``True`` when a valid ``X-Trace-Id`` header bound the request."""
-    return _trace_id_from_request_header.get()
-
-
-def resolve_deerflow_trace_id(metadata_trace_id: object) -> str | None:
-    """Resolve the effective ``deerflow_trace_id`` for a run.
-
-    When Gateway ``TraceMiddleware`` bound a valid inbound ``X-Trace-Id``,
-    that value wins over ``config.metadata.deerflow_trace_id`` so logs,
-    response headers, Langfuse, and runtime context stay aligned. Otherwise
-    caller metadata wins, then the ambient request trace context.
+    Binding rather than returning a throwaway id is what makes repeated calls
+    inside one context agree.
     """
-    if is_trace_id_from_request_header():
-        return get_current_trace_id()
-    return normalize_trace_id(metadata_trace_id) or get_current_trace_id()
+    trace_id = _current_trace_id.get()
+    if trace_id is None:
+        trace_id = generate_trace_id()
+        _current_trace_id.set(trace_id)
+    return trace_id
+
+
+def resolve_trace_id(*carriers: object) -> str:
+    """Return the first usable value in *carriers*, else the ambient trace id.
+
+    The single place that knows the carrier fallback order, so a consumer
+    reading the id back out of ``runtime.context`` states its carriers and
+    nothing else. Carriers are listed most authoritative first and validated
+    with :func:`normalize_trace_id`, so an absent key and a malformed value
+    fall through identically.
+    """
+    for carrier in carriers:
+        normalized = normalize_trace_id(carrier)
+        if normalized is not None:
+            return normalized
+    return ensure_trace_id()
+
+
+def bind_trace_id(trace_id: str | None) -> Token[str | None]:
+    """Bind *trace_id* in the current context; ``None`` clears the binding.
+
+    The low-level pair for callers that cannot use the context managers: a
+    sync generator that must bind per step (``DeerFlowClient.stream``), and
+    test harnesses restoring an unbound baseline. Values are normalized, and
+    an unusable one clears rather than fabricating an id -- every caller here
+    has already resolved the value it means to bind.
+    """
+    return _current_trace_id.set(normalize_trace_id(trace_id))
+
+
+def reset_trace_id(token: Token[str | None]) -> None:
+    """Restore the binding captured by *token*."""
+    _current_trace_id.reset(token)
 
 
 @contextmanager
 def request_trace_context(trace_id: str | None = None) -> Iterator[str]:
-    """Bind a request trace id for the duration of a request or entry point."""
+    """Open a trace scope for an HTTP request, always binding a fresh id.
+
+    *trace_id* is the inbound ``X-Trace-Id``; an absent or unusable one is
+    replaced by a generated id. Deliberately does **not** inherit the ambient
+    context: a crafted header must not silently fall back to the id of
+    whatever request ran before it on the same task.
+    """
     normalized = normalize_trace_id(trace_id) or generate_trace_id()
     token = _current_trace_id.set(normalized)
     try:
@@ -110,10 +154,30 @@ def request_trace_context(trace_id: str | None = None) -> Iterator[str]:
 
 @contextmanager
 def ensure_trace_context(trace_id: str | None = None) -> Iterator[str]:
-    """Bind *trace_id*, inherit the current trace, or create a fresh one."""
-    normalized = normalize_trace_id(trace_id) or get_current_trace_id() or generate_trace_id()
-    token = _current_trace_id.set(normalized)
+    """Open a trace scope that inherits the ambient one when there is one.
+
+    Two callers, one rule -- *reuse the surrounding scope, otherwise start a
+    self-contained one*:
+
+    - Non-HTTP entry points (a scheduled occurrence, an MCP task notification
+      run, an inbound IM message) called with no id: the scope mints one, and
+      unbinds it on exit so the next unit of work on the same long-lived
+      worker task does not inherit it. Reached from inside an HTTP request --
+      a manual scheduled trigger, say -- it stays on the caller's trace
+      instead of minting a competing id.
+    - Crossing an execution boundary (a thread hop, a background task, a queue
+      hand-off) where the ContextVar may not have survived: pass the id that
+      travelled as data alongside the work.
+    """
+    normalized = normalize_trace_id(trace_id)
+    inherited = _current_trace_id.get()
+    if inherited is not None and (normalized is None or inherited == normalized):
+        yield inherited
+        return
+
+    resolved = normalized or generate_trace_id()
+    token = _current_trace_id.set(resolved)
     try:
-        yield normalized
+        yield resolved
     finally:
         _current_trace_id.reset(token)

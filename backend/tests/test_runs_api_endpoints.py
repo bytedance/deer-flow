@@ -324,6 +324,19 @@ def test_resolve_thread_id_handles_null_configurable():
     assert runs._resolve_thread_id(RunCreateRequest(config={"configurable": {"thread_id": "t1"}})) == "t1"
 
 
+@pytest.mark.parametrize(
+    "thread_id",
+    ["", "thread.with.dot", "../escape", "x" * 65, 123],
+)
+def test_run_request_rejects_invalid_configurable_thread_id(thread_id):
+    from pydantic import ValidationError
+
+    from app.gateway.run_models import RunCreateRequest
+
+    with pytest.raises(ValidationError):
+        RunCreateRequest(config={"configurable": {"thread_id": thread_id}})
+
+
 def test_build_run_config_handles_null_configurable():
     """A null ``configurable`` must also survive ``build_run_config``.
 

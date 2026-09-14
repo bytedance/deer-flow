@@ -238,17 +238,28 @@ class MindIEChatModel(ChatOpenAI):
             msg = gen.message
             content = msg.content
             standard_tool_calls = getattr(msg, "tool_calls", [])
+            # Attach the full response's terminal usage to the *last* simulated
+            # chunk (OpenAI terminal-frame style) so add_usage() counts it once.
+            usage_metadata = getattr(msg, "usage_metadata", None)
 
             # Yield text in chunks to allow downstream UI/Markdown parsers to render smoothly
             if isinstance(content, str) and content:
                 chunk_size = 15
                 for i in range(0, len(content), chunk_size):
                     chunk_text = content[i : i + chunk_size]
-                    chunk_msg = AIMessageChunk(content=chunk_text, id=msg.id, response_metadata=msg.response_metadata if i == 0 else {})
+                    # Without tool calls the last text chunk terminates the stream.
+                    is_final_chunk = i + chunk_size >= len(content)
+                    chunk_msg = AIMessageChunk(
+                        content=chunk_text,
+                        id=msg.id,
+                        response_metadata=msg.response_metadata if i == 0 else {},
+                        usage_metadata=usage_metadata if (not standard_tool_calls and is_final_chunk) else None,
+                    )
                     yield ChatGenerationChunk(message=chunk_msg, generation_info=gen.generation_info if i == 0 else None)
 
                 if standard_tool_calls:
-                    yield ChatGenerationChunk(message=AIMessageChunk(content="", id=msg.id, tool_calls=standard_tool_calls, invalid_tool_calls=getattr(msg, "invalid_tool_calls", [])))
+                    # Tool-call chunk terminates the stream: carry the usage here.
+                    yield ChatGenerationChunk(message=AIMessageChunk(content="", id=msg.id, tool_calls=standard_tool_calls, invalid_tool_calls=getattr(msg, "invalid_tool_calls", []), usage_metadata=usage_metadata))
             else:
-                chunk_msg = AIMessageChunk(content=content, id=msg.id, tool_calls=standard_tool_calls, invalid_tool_calls=getattr(msg, "invalid_tool_calls", []))
+                chunk_msg = AIMessageChunk(content=content, id=msg.id, tool_calls=standard_tool_calls, invalid_tool_calls=getattr(msg, "invalid_tool_calls", []), usage_metadata=usage_metadata)
                 yield ChatGenerationChunk(message=chunk_msg, generation_info=gen.generation_info)

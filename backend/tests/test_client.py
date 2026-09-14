@@ -26,6 +26,9 @@ from deerflow.client import DeerFlowClient
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.sandbox.lease import ensure_sandbox_lease_owner, get_sandbox_lease_manager
+from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
 from deerflow.skills.types import SkillCategory
 from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.uploads.manager import PathTraversalError
@@ -121,6 +124,16 @@ class TestClientInit:
         ):
             DeerFlowClient(config_path="/tmp/custom.yaml")
             mock_reload.assert_called_once_with("/tmp/custom.yaml")
+
+    def test_installs_process_subagent_capacity_from_frozen_config(self, mock_app_config):
+        runtime_config = SubagentRuntimeConfig(max_running=7)
+        mock_app_config.subagent_runtime = runtime_config
+        with (
+            patch("deerflow.client.get_app_config", return_value=mock_app_config),
+            patch("deerflow.client.configure_subagent_execution_capacity") as configure,
+        ):
+            DeerFlowClient()
+        configure.assert_called_once_with(runtime_config)
 
     def test_checkpointer_stored(self, mock_app_config):
         cp = MagicMock()
@@ -234,7 +247,7 @@ class TestConfigQueries:
 # ---------------------------------------------------------------------------
 
 
-def _make_agent_mock(chunks: list[dict]):
+def _make_agent_mock(chunks: list[dict | tuple[str, dict]]):
     """Create a mock agent whose .stream() yields the given chunks."""
     agent = MagicMock()
     agent.stream.return_value = iter(chunks)
@@ -483,6 +496,33 @@ class TestStream:
         assert values_events[-1].data["title"] == "Greeting"
         assert "messages" in values_events[-1].data
 
+    @pytest.mark.parametrize("mode_tagged", [False, True], ids=["bare-dict", "mode-tuple"])
+    def test_values_events_preserve_summary_text_updates(self, client, mode_tagged):
+        messages = [HumanMessage(content="hi", id="h-1"), AIMessage(content="ok", id="ai-1")]
+        summaries = [None, "first summary", "first summary", "revised summary", "", None]
+        chunks = [{"messages": messages, "summary_text": summary} for summary in summaries]
+        agent = _make_agent_mock([("values", chunk) for chunk in chunks] if mode_tagged else chunks)
+
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="summary-stream"))
+
+        values_events = [event for event in events if event.type == "values"]
+        assert [event.data["summary_text"] for event in values_events] == summaries
+        assert all(len(event.data["messages"]) == 2 for event in values_events)
+        assert len(_ai_events(events)) == 1
+        assert events[-1].type == "end"
+
+    @pytest.mark.parametrize("mode_tagged", [False, True], ids=["bare-dict", "mode-tuple"])
+    def test_values_events_without_summary_expose_none(self, client, mode_tagged):
+        chunk = {"messages": [HumanMessage(content="hi", id="h-1")]}
+        agent = _make_agent_mock([("values", chunk) if mode_tagged else chunk])
+
+        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+            events = list(client.stream("hi", thread_id="no-summary"))
+
+        values_events = [event for event in events if event.type == "values"]
+        assert values_events[0].data["summary_text"] is None
+
     def test_deduplication(self, client):
         """Messages with the same id are not emitted twice."""
         ai = AIMessage(content="Hello!", id="ai-1")
@@ -580,6 +620,56 @@ class TestStream:
         # stream_mode includes ``messages`` — the whole point of this fix.
         call_kwargs = agent.stream.call_args.kwargs
         assert "messages" in call_kwargs["stream_mode"]
+
+    def test_stream_emits_streamed_tool_calls_once_with_complete_args(self, client):
+        """Tool-call arguments streamed in fragments are emitted once, complete.
+
+        Each chunk only parses to a partial call (``args={}``, or no name/id), so
+        the tool_calls event comes from the values snapshot, not from the chunks.
+        """
+        call = {"name": "bash", "args": {"command": "ls -la"}, "id": "call-1"}
+        attribution = {"version": 1, "kind": "tool_batch", "shared_attribution": False, "actions": []}
+        assembled = AIMessage(content="", id="ai-1", tool_calls=[call], additional_kwargs={"token_usage_attribution": attribution})
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            id="ai-1",
+                            tool_call_chunks=[{"name": "bash", "args": "", "id": "call-1", "index": 0}],
+                        ),
+                        {},
+                    ),
+                ),
+                (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            id="ai-1",
+                            tool_call_chunks=[{"name": None, "args": '{"command": "ls -la"}', "id": None, "index": 0}],
+                        ),
+                        {},
+                    ),
+                ),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), assembled]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-tools"))
+
+        tool_call_events = _tool_call_events(events)
+        assert len(tool_call_events) == 1
+        assert tool_call_events[0].data["id"] == "ai-1"
+        assert [(tc["name"], tc["args"], tc["id"]) for tc in tool_call_events[0].data["tool_calls"]] == [("bash", {"command": "ls -la"}, "call-1")]
+        assert tool_call_events[0].data["additional_kwargs"] == {"token_usage_attribution": attribution}
 
     def test_stream_emits_additional_kwargs_updates_for_streamed_ai_messages(self, client):
         """stream() emits a follow-up AI event when attribution metadata arrives via values."""
@@ -889,6 +979,7 @@ class TestStream:
                 "values",
                 {
                     "title": None,
+                    "summary_text": None,
                     "messages": [
                         {"type": "human", "content": "hi", "id": "h-1"},
                         {"type": "ai", "content": "Hello", "id": "ai-1", "usage_metadata": usage},
@@ -1088,17 +1179,22 @@ class TestExtractText:
 
 class TestEnsureAgent:
     def test_authorization_filters_framework_tools_and_reuses_provider(self, client, mock_app_config):
+        from deerflow.authz.provider import AuthzDecision, AuthzReason
+
         class Provider:
             name = "test"
 
             def filter_resources(self, principal, resource_type, candidates):
-                return [name for name in candidates if name == "safe_tool"]
+                return [name for name in candidates if name in {"safe_tool", "history_read"}]
 
             def authorize(self, request):
-                raise AssertionError("not called while assembling")
+                # Phase 3: model:use is now checked during assembly; allow it so
+                # the model name passes through. Tool-level authorize is still
+                # not invoked here (filter_resources drives tool assembly).
+                return AuthzDecision(allow=True, reasons=[AuthzReason(code="authz.allowed")])
 
             async def aauthorize(self, request):
-                raise AssertionError("not called while assembling")
+                return self.authorize(request)
 
         provider = Provider()
         mock_app_config.authorization = AuthorizationConfig(
@@ -1106,6 +1202,9 @@ class TestEnsureAgent:
             provider=AuthorizationProviderConfig(use="unused:Provider"),
         )
         mock_app_config.skills.deferred_discovery = True
+        from deerflow.config.task_continuity_config import TaskContinuityConfig
+
+        mock_app_config.task_continuity = TaskContinuityConfig(enabled=True)
         client._app_config = mock_app_config
 
         safe_tool = StructuredTool.from_function(lambda: "safe", name="safe_tool", description="safe")
@@ -1121,11 +1220,12 @@ class TestEnsureAgent:
             patch("deerflow.client.build_skill_search_setup", return_value=SimpleNamespace(describe_skill_tool=describe_tool, skill_names=frozenset({"example"}))),
             patch.object(client, "_get_tools", return_value=[safe_tool, denied_tool]),
             patch("deerflow.authz.tool_filter.resolve_authorization_provider", return_value=provider),
+            patch("deerflow.agents.lead_agent.agent.resolve_authorization_provider", return_value=provider),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
         ):
             client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})
 
-        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool"]
+        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool", "history_read"]
         assert mock_build_middlewares.call_args.kwargs["authorization_provider"] is provider
 
     def test_authorization_cache_key_uses_complete_principal(self, client, mock_app_config):
@@ -1152,6 +1252,28 @@ class TestEnsureAgent:
             client._ensure_agent(config, context={"user_id": "u2", "user_role": "user", "authz_attributes": {"department": "eng"}})
 
         assert mock_create_agent.call_count == 2
+
+    def test_disabled_authorization_cache_key_still_isolates_effective_users(self, client, mock_app_config):
+        """User-bound prompts/middleware must never be reused across embedded callers."""
+        mock_app_config.authorization = AuthorizationConfig(enabled=False)
+        client._app_config = mock_app_config
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            config = client._get_runnable_config("t1")
+            client._ensure_agent(config, context={"user_id": "alice"})
+            client._ensure_agent(config, context={"user_id": "bob"})
+
+        assert mock_create_agent.call_count == 2
+        assert [call.kwargs["user_id"] for call in mock_build_middlewares.call_args_list] == ["alice", "bob"]
+        assert [call.kwargs["user_id"] for call in mock_apply_prompt.call_args_list] == ["alice", "bob"]
 
     def test_authorization_cache_key_snapshots_nested_attributes(self, client, mock_app_config):
         mock_app_config.authorization = AuthorizationConfig(
@@ -1334,7 +1456,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None, None, None, "full", 10, None)
+        client._agent_config_key = (None, True, False, False, None, None, None, None, "full", 10, "test-user-autouse", None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
@@ -1829,6 +1951,51 @@ class TestMcpConfig:
         finally:
             tmp_path.unlink()
 
+    def test_update_mcp_config_preserves_raw_sibling_keys(self, client, tmp_path, monkeypatch):
+        """Only ``mcpServers`` is replaced; every other key keeps its on-disk ``$VAR`` form."""
+        monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {"old": {"type": "stdio", "command": "npx"}},
+                    "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+                    "skills": {"kept": {"enabled": False}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config", return_value=ExtensionsConfig()),
+        ):
+            client.update_mcp_config({"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}})
+
+        written_text = config_file.read_text(encoding="utf-8")
+        assert json.loads(written_text) == {
+            "mcpServers": {"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}},
+            "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+            "skills": {"kept": {"enabled": False}},
+        }
+        assert "ghp_live_secret_value" not in written_text
+
+    def test_update_mcp_config_rejects_invalid_candidate_without_writing(self, client, tmp_path):
+        config_file = tmp_path / "extensions_config.json"
+        original = json.dumps({"mcpServers": {}, "skills": {"kept": {"enabled": False}}})
+        config_file.write_text(original, encoding="utf-8")
+        reload = MagicMock()
+
+        with (
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config", reload),
+            pytest.raises(ValueError),
+        ):
+            client.update_mcp_config({"bad": {"enabled": "not-a-bool"}})
+
+        assert config_file.read_text(encoding="utf-8") == original
+        reload.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Skills management
@@ -1861,10 +2028,8 @@ class TestSkillsManagement:
         skill = self._make_skill(enabled=True)
         updated_skill = self._make_skill(enabled=False)
 
-        ext_config = ExtensionsConfig()
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({}, f)
+            json.dump({"mcpServers": {}, "skills": {"untouched-skill": {"enabled": False}}}, f)
             tmp_path = Path(f.name)
 
         try:
@@ -1881,14 +2046,77 @@ class TestSkillsManagement:
                     side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
                 ),
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
-                patch("deerflow.client.get_extensions_config", return_value=ext_config),
                 patch("deerflow.client.reload_extensions_config"),
             ):
                 result = client.update_skill("test-skill", enabled=False)
             assert result["enabled"] is False
             assert client._agent is None  # M2: agent invalidated
+            persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
+            assert persisted["skills"]["untouched-skill"] == {"enabled": False}
         finally:
             tmp_path.unlink()
+
+    def test_update_skill_persists_state_when_source_omits_skills(self, client):
+        skill = self._make_skill(enabled=True)
+        updated_skill = self._make_skill(enabled=False)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"mcpServers": {}}, f)
+            tmp_path = Path(f.name)
+
+        try:
+            with (
+                patch(
+                    "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
+                    side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
+                ),
+                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
+                patch("deerflow.client.reload_extensions_config"),
+            ):
+                client.update_skill("test-skill", enabled=False)
+
+            persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
+            assert persisted["skills"] == {"test-skill": {"enabled": False}}
+        finally:
+            tmp_path.unlink()
+
+    @staticmethod
+    def _config_with_placeholders() -> dict:
+        return {
+            "mcpServers": {"github": {"type": "stdio", "command": "npx", "env": {"GITHUB_TOKEN": "$DEERFLOW_TEST_GH_TOKEN", "OPTIONAL": "$DEERFLOW_TEST_UNSET_VAR"}}},
+            "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+            "skills": {},
+        }
+
+    @pytest.mark.parametrize("category", ["public", "custom"])
+    def test_update_skill_preserves_env_placeholders(self, client, tmp_path, monkeypatch, category):
+        """Toggling a skill must not persist resolved ``$VAR`` values or blank unset ones.
+
+        ``public`` covers the shared-state path; ``custom`` with non-user-scoped
+        storage covers the fallback that also writes ``extensions_config.json``.
+        """
+        monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
+        monkeypatch.delenv("DEERFLOW_TEST_UNSET_VAR", raising=False)
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(json.dumps(self._config_with_placeholders()), encoding="utf-8")
+
+        skill = self._make_skill(enabled=True)
+        skill.category = category
+        storage = MagicMock()
+        storage.load_skills.side_effect = [[skill], [self._make_skill(enabled=False)]]
+
+        with (
+            patch("deerflow.client.get_or_new_user_skill_storage", return_value=storage),
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config"),
+        ):
+            client.update_skill("test-skill", enabled=False)
+
+        expected = self._config_with_placeholders()
+        expected["skills"]["test-skill"] = {"enabled": False}
+        written_text = config_file.read_text(encoding="utf-8")
+        assert json.loads(written_text) == expected
+        assert "ghp_live_secret_value" not in written_text
 
     def test_update_skill_not_found(self, client):
         with patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", return_value=[]):
@@ -2790,6 +3018,22 @@ class TestScenarioAgentRecreation:
         assert captured["user_id"] == "test-user-autouse"
         assert agent.stream.call_args.kwargs["context"]["user_id"] == "test-user-autouse"
 
+    def test_stream_uses_effective_user_context_when_authorization_is_disabled(self, client, mock_app_config):
+        mock_app_config.authorization = AuthorizationConfig(enabled=False)
+        client._app_config = mock_app_config
+        agent = _make_agent_mock([{"messages": [AIMessage(content="ok", id="ai-1")]}])
+        captured: dict = {}
+
+        def fake_ensure(config, *, context):
+            captured.update(context)
+            client._agent = agent
+
+        with patch.object(client, "_ensure_agent", side_effect=fake_ensure):
+            list(client.stream("hi", thread_id="t1"))
+
+        assert captured["user_id"] == "test-user-autouse"
+        assert agent.stream.call_args.kwargs["context"]["user_id"] == "test-user-autouse"
+
 
 class TestScenarioThreadIsolation:
     """Scenario: Operations on different threads don't interfere."""
@@ -3611,6 +3855,85 @@ class TestStreamHardening:
         ):
             with pytest.raises(RuntimeError, match="model quota exceeded"):
                 list(client.stream("hi", thread_id="t-err"))
+
+    def test_agent_exception_releases_embedded_execution_lease(self, client):
+        provider = MagicMock()
+        provider.get.return_value = MagicMock()
+        manager = get_sandbox_lease_manager(provider)
+        owner_ids: list[str] = []
+
+        def failing_stream(state, *, config, context, stream_mode):
+            del state, config, stream_mode
+            owner_id = ensure_sandbox_lease_owner(context)
+            assert owner_id is not None
+            owner_ids.append(owner_id)
+            context["sandbox_id"] = "shared"
+            manager.retain(
+                owner_id,
+                "shared",
+                thread_id="t-err-lease",
+                user_id="anonymous",
+            )
+            raise RuntimeError("model quota exceeded")
+            yield  # pragma: no cover
+
+        agent = MagicMock()
+        agent.stream.side_effect = failing_stream
+        set_sandbox_provider(provider)
+        try:
+            with (
+                patch.object(client, "_ensure_agent"),
+                patch.object(client, "_agent", agent),
+                pytest.raises(RuntimeError, match="model quota exceeded"),
+            ):
+                list(client.stream("hi", thread_id="t-err-lease"))
+
+            assert len(owner_ids) == 1
+            assert manager.binding_for(owner_ids[0]) is None
+            provider.get.return_value.release_command_scope.assert_called_once_with(owner_ids[0])
+            provider.release.assert_called_once_with("shared")
+        finally:
+            reset_sandbox_provider()
+
+    def test_abandoned_embedded_stream_releases_execution_lease(self, client):
+        provider = MagicMock()
+        provider.get.return_value = MagicMock()
+        manager = get_sandbox_lease_manager(provider)
+        owner_ids: list[str] = []
+
+        def blocking_stream(state, *, config, context, stream_mode):
+            del state, config, stream_mode
+            owner_id = ensure_sandbox_lease_owner(context)
+            assert owner_id is not None
+            owner_ids.append(owner_id)
+            context["sandbox_id"] = "shared"
+            manager.retain(
+                owner_id,
+                "shared",
+                thread_id="t-abandoned-lease",
+                user_id="anonymous",
+            )
+            yield "values", {"messages": []}
+            raise AssertionError("abandoned stream continued")
+
+        agent = MagicMock()
+        agent.stream.side_effect = blocking_stream
+        set_sandbox_provider(provider)
+        try:
+            with (
+                patch.object(client, "_ensure_agent"),
+                patch.object(client, "_agent", agent),
+            ):
+                stream = client.stream("hi", thread_id="t-abandoned-lease")
+                assert next(stream).type == "values"
+                stream.close()
+
+            assert len(owner_ids) == 1
+            assert manager.binding_for(owner_ids[0]) is None
+            provider.get.return_value.release_command_scope.assert_called_once_with(owner_ids[0])
+            provider.release.assert_called_once_with("shared")
+        finally:
+            reset_sandbox_provider()
 
     def test_messages_without_id(self, client):
         """Messages without id attribute are emitted without crashing."""

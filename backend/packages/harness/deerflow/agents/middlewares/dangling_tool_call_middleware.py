@@ -195,7 +195,13 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             normalized.append(normalized_call)
 
         raw_tool_calls = (getattr(msg, "additional_kwargs", None) or {}).get("tool_calls") or []
-        if not tool_calls:
+        # The raw payload is a fallback serialization of the same calls: the
+        # OpenAI serializer reaches for it only once BOTH structured views are
+        # empty (mirrors the gating in _normalize_tool_call_ids).  Collecting
+        # it while invalid_tool_calls is non-empty would count the same call
+        # twice and emit two ToolMessages for one id — the exact duplicate-id
+        # shape strict providers reject.
+        if not tool_calls and not getattr(msg, "invalid_tool_calls", None):
             for raw_tc in raw_tool_calls:
                 if not isinstance(raw_tc, dict):
                     continue

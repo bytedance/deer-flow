@@ -2,26 +2,21 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from shutil import which
 
 import pytest
+from support.shell import find_script_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "docker.sh"
-BASH_CANDIDATES = [
-    Path(r"C:\Program Files\Git\bin\bash.exe"),
-    Path(which("bash")) if which("bash") else None,
-]
-BASH_EXECUTABLE = next(
-    (str(path) for path in BASH_CANDIDATES if path is not None and path.exists() and "WindowsApps" not in str(path)),
-    None,
-)
+BASH_EXECUTABLE = find_script_bash()
 
 if BASH_EXECUTABLE is None:
-    pytestmark = pytest.mark.skip(reason="bash is required for docker.sh detection tests")
+    pytestmark = pytest.mark.skip(reason="Git Bash is required for docker.sh detection tests")
 
 
 def _detect_mode_with_config(config_content: str) -> str:
@@ -104,3 +99,655 @@ sandbox:
 """.strip()
 
     assert _detect_mode_with_config(config) == "local"
+
+
+def _seed_compose_file(tmp_root: Path) -> None:
+    """Give require_compose_file the file it validates."""
+    (tmp_root / "docker-compose-dev.yaml").write_text("services: {}\n", encoding="utf-8")
+
+
+def _seed_env_examples(tmp_root: Path) -> None:
+    """Provide the templates ensure_env_files copies from."""
+    (tmp_root / ".env.example").write_text("# test\n", encoding="utf-8")
+    frontend = tmp_root / "frontend"
+    frontend.mkdir(exist_ok=True)
+    (frontend / ".env.example").write_text("# test\n", encoding="utf-8")
+
+
+def _run_docker_sh(tmp_root: Path, body: str) -> None:
+    """Run docker.sh against a temp checkout, stubbing the real Compose version probe.
+
+    Keep SCRIPT_DIR at the real scripts/ directory so stop's cleanup-containers.sh
+    path still resolves; only PROJECT_ROOT / DOCKER_DIR are redirected.
+    """
+    command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+require_compose_version() {{ :; }}
+{body}
+"""
+    subprocess.check_call([BASH_EXECUTABLE, "-lc", command])
+
+
+@pytest.mark.parametrize("docker_command", ["logs --gateway", "stop", "restart"])
+def test_compose_commands_set_deer_flow_root_before_compose(docker_command):
+    """Read-only compose commands should resolve mounts from the repository root."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        _run_docker_sh(
+            tmp_root,
+            f"""
+COMPOSE_CMD=capture_compose
+capture_compose() {{ test "${{DEER_FLOW_ROOT:-}}" = "$PROJECT_ROOT"; }}
+unset DEER_FLOW_ROOT
+{docker_command}
+""",
+        )
+
+
+@pytest.mark.parametrize("docker_command", ["logs --gateway", "stop", "restart"])
+def test_read_only_commands_do_not_create_env_files(docker_command):
+    """Only start may write configuration; logs/stop/restart must leave a checkout alone."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        _seed_env_examples(tmp_root)
+
+        _run_docker_sh(tmp_root, f"COMPOSE_CMD=true\n{docker_command}")
+
+        assert not (tmp_root / ".env").exists(), f"{docker_command} created .env"
+        assert not (tmp_root / "frontend" / ".env").exists(), f"{docker_command} created frontend/.env"
+
+
+@pytest.mark.parametrize("docker_command", ["logs --gateway", "stop", "restart"])
+def test_read_only_commands_run_without_env_examples(docker_command):
+    """A missing .env.example must never block stopping or inspecting containers."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+
+        _run_docker_sh(tmp_root, f"COMPOSE_CMD=true\n{docker_command}")
+
+
+def test_ensure_env_files_copies_from_examples():
+    """start's env-file step should create .env files from their examples when missing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_env_examples(tmp_root)
+
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+ensure_env_files
+"""
+        subprocess.check_call([BASH_EXECUTABLE, "-lc", command])
+
+        assert (tmp_root / ".env").is_file()
+        assert (tmp_root / "frontend" / ".env").is_file()
+        assert (tmp_root / ".env").read_text(encoding="utf-8") == "# test\n"
+        assert (tmp_root / "frontend" / ".env").read_text(encoding="utf-8") == "# test\n"
+
+
+def test_ensure_env_files_leaves_existing_env_untouched():
+    """ensure_env_files must not overwrite an already-present .env."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_env_examples(tmp_root)
+        (tmp_root / ".env").write_text("KEEP=me\n", encoding="utf-8")
+        frontend = tmp_root / "frontend"
+        (frontend / ".env").write_text("KEEP=frontend\n", encoding="utf-8")
+
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+ensure_env_files
+"""
+        subprocess.check_call([BASH_EXECUTABLE, "-lc", command])
+
+        assert (tmp_root / ".env").read_text(encoding="utf-8") == "KEEP=me\n"
+        assert (frontend / ".env").read_text(encoding="utf-8") == "KEEP=frontend\n"
+
+
+@pytest.mark.parametrize(
+    ("reported_version", "expected_returncode"),
+    [
+        ("2.23.3", 1),
+        ("2.5.0", 1),
+        ("2.24.0", 0),
+        ("v2.40.2-desktop.1", 0),
+        ("3.0.1", 0),
+        ("", 0),  # undetectable: warn, but do not block
+    ],
+)
+def test_require_compose_version_enforces_minimum(reported_version, expected_returncode):
+    """Old clients get our actionable message instead of a raw Compose parser error."""
+    # Stub both binaries so an empty plugin probe cannot fall through to the
+    # real hyphenated docker-compose installed on the developer machine.
+    command = f"""
+source '{SCRIPT_PATH}'
+docker() {{ echo '{reported_version}'; }}
+docker-compose() {{ echo '{reported_version}'; }}
+require_compose_version
+"""
+    result = subprocess.run(
+        [BASH_EXECUTABLE, "-lc", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert result.returncode == expected_returncode, result.stdout + result.stderr
+    if expected_returncode != 0:
+        assert "too old" in result.stdout
+        assert "docs.docker.com/compose/install" in result.stdout
+
+
+def test_require_compose_version_falls_back_to_hyphenated_binary():
+    """Plugin missing + docker-compose 2.24: version check passes and stop uses that binary.
+
+    Regression for the half-fallback where require_compose_version accepted
+    docker-compose but COMPOSE_CMD stayed hardcoded to `docker compose`.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        marker = tmp_root / "hyphenated_invoke.txt"
+
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+docker() {{
+  if [ "$1" = compose ]; then
+    echo "docker: unknown command" >&2
+    return 1
+  fi
+  command docker "$@"
+}}
+docker-compose() {{
+  if [ "$1" = version ]; then
+    echo '2.24.0'
+    return 0
+  fi
+  # Real wrapper ops (down/logs/...) must hit this binary, not `docker compose`.
+  printf '%s\n' "$*" > '{marker}'
+}}
+unset DEER_FLOW_ROOT
+stop
+"""
+        result = subprocess.run(
+            [BASH_EXECUTABLE, "-lc", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.is_file(), "stop never invoked docker-compose for the compose operation"
+        assert "down" in marker.read_text(encoding="utf-8")
+
+
+def test_require_compose_version_rejects_old_hyphenated_binary():
+    """An old docker-compose binary must still fail the floor check."""
+    command = f"""
+source '{SCRIPT_PATH}'
+docker() {{
+  if [ "$1" = compose ]; then
+    return 1
+  fi
+  command docker "$@"
+}}
+docker-compose() {{ echo '2.23.3'; }}
+require_compose_version
+"""
+    result = subprocess.run(
+        [BASH_EXECUTABLE, "-lc", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "too old" in result.stdout
+
+
+def test_aio_dood_socket_preflight_allows_windows_when_docker_reachable():
+    """Windows Git Bash without /var/run/docker.sock proceeds when Docker daemon is reachable."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        _seed_env_examples(tmp_root)
+        (tmp_root / "config.yaml").write_text(
+            "sandbox:\n  use: deerflow.community.aio_sandbox:AioSandboxProvider\n",
+            encoding="utf-8",
+        )
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+require_compose_version() {{ :; }}
+uname() {{ echo 'MINGW64_NT-10.0'; }}
+docker() {{
+  if [ "$1" = info ]; then
+    return 0
+  fi
+  return 0
+}}
+DEER_FLOW_DOCKER_SOCKET='/var/run/docker.sock'
+COMPOSE_CMD=echo
+start
+"""
+        result = subprocess.run(
+            [BASH_EXECUTABLE, "-lc", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "docker-compose.dood.yaml" in result.stdout
+
+
+def test_aio_dood_socket_preflight_rejects_missing_socket_on_posix():
+    """POSIX hosts without a physical socket file must fail fast."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        _seed_env_examples(tmp_root)
+        (tmp_root / "config.yaml").write_text(
+            "sandbox:\n  use: deerflow.community.aio_sandbox:AioSandboxProvider\n",
+            encoding="utf-8",
+        )
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+require_compose_version() {{ :; }}
+uname() {{ echo 'Linux'; }}
+DEER_FLOW_DOCKER_SOCKET='/nonexistent/docker.sock'
+COMPOSE_CMD=echo
+start
+"""
+        result = subprocess.run(
+            [BASH_EXECUTABLE, "-lc", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "Docker socket not found" in result.stdout
+
+
+def test_aio_dood_socket_preflight_rejects_missing_custom_socket_on_windows():
+    """Windows Git Bash must fail if a custom non-existent socket path is specified."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        _seed_env_examples(tmp_root)
+        (tmp_root / "config.yaml").write_text(
+            "sandbox:\n  use: deerflow.community.aio_sandbox:AioSandboxProvider\n",
+            encoding="utf-8",
+        )
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+require_compose_version() {{ :; }}
+uname() {{ echo 'MINGW64_NT-10.0'; }}
+docker() {{
+  if [ "$1" = info ]; then
+    return 0
+  fi
+  return 0
+}}
+DEER_FLOW_DOCKER_SOCKET='/nonexistent/docker.sock'
+COMPOSE_CMD=echo
+start
+"""
+        result = subprocess.run(
+            [BASH_EXECUTABLE, "-lc", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "Docker socket not found" in result.stdout
+
+
+@pytest.mark.skipif(
+    Path("/var/run/docker.sock").is_socket(),
+    reason="Host has real /var/run/docker.sock",
+)
+def test_aio_dood_socket_preflight_rejects_windows_when_docker_unreachable():
+    """Windows Git Bash must fail if Docker daemon is not reachable."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        _seed_env_examples(tmp_root)
+        (tmp_root / "config.yaml").write_text(
+            "sandbox:\n  use: deerflow.community.aio_sandbox:AioSandboxProvider\n",
+            encoding="utf-8",
+        )
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+require_compose_version() {{ :; }}
+uname() {{ echo 'MINGW64_NT-10.0'; }}
+docker() {{
+  if [ "$1" = info ]; then
+    return 1
+  fi
+  return 0
+}}
+DEER_FLOW_DOCKER_SOCKET='/var/run/docker.sock'
+COMPOSE_CMD=echo
+start
+"""
+        result = subprocess.run(
+            [BASH_EXECUTABLE, "-lc", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "Docker socket not found" in result.stdout
+
+
+def _setup_deploy_worktree(tmp_path: Path) -> Path:
+    worktree = tmp_path / "repo"
+    shutil.copytree(REPO_ROOT / "scripts", worktree / "scripts")
+    shutil.copytree(REPO_ROOT / "docker", worktree / "docker")
+    (worktree / "backend").mkdir()
+    (worktree / "config.yaml").write_text(
+        "sandbox:\n  use: deerflow.community.aio_sandbox:AioSandboxProvider\n",
+        encoding="utf-8",
+    )
+    (worktree / "extensions_config.json").write_text("{}\n", encoding="utf-8")
+    (worktree / ".env").write_text("TEST=1\n", encoding="utf-8")
+    return worktree
+
+
+def test_aio_deploy_socket_preflight_allows_windows_when_docker_reachable(tmp_path):
+    """deploy.sh on Windows Git Bash proceeds past preflight when Docker daemon is reachable."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture_args = tmp_path / "docker_args.txt"
+    docker = bin_dir / "docker"
+    docker.write_text(
+        f'#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 0; fi\nfor arg in "$@"; do printf "%s\\n" "$arg"; done > "{capture_args}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text("uname() { echo 'MINGW64_NT-10.0'; }\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env["DEER_FLOW_DOCKER_SOCKET"] = "/var/run/docker.sock"
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "docker-compose.dood.yaml" in capture_args.read_text(encoding="utf-8")
+
+
+def test_aio_deploy_socket_preflight_rejects_missing_socket_on_posix(tmp_path):
+    """deploy.sh on POSIX hosts without a physical socket file fails fast."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text("uname() { echo 'Linux'; }\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["BASH_ENV"] = str(bash_env)
+    env["DEER_FLOW_DOCKER_SOCKET"] = "/nonexistent/docker.sock"
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Docker socket not found" in result.stdout + result.stderr
+
+
+def test_aio_deploy_socket_preflight_rejects_missing_custom_socket_on_windows(tmp_path):
+    """deploy.sh on Windows Git Bash fails if a custom non-existent socket path is specified."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(
+        '#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 0; fi\nexit 0\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text("uname() { echo 'MINGW64_NT-10.0'; }\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env["DEER_FLOW_DOCKER_SOCKET"] = "/nonexistent/docker.sock"
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Docker socket not found" in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(
+    Path("/var/run/docker.sock").is_socket(),
+    reason="Host has real /var/run/docker.sock",
+)
+def test_aio_deploy_socket_preflight_rejects_windows_when_docker_unreachable(tmp_path):
+    """deploy.sh on Windows Git Bash fails if Docker daemon is not reachable."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text('#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 1; fi\nexit 0\n', encoding="utf-8")
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text("uname() { echo 'MINGW64_NT-10.0'; }\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env["DEER_FLOW_DOCKER_SOCKET"] = "/var/run/docker.sock"
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Docker socket not found" in result.stdout + result.stderr
+
+
+def test_aio_deploy_socket_unsets_default_on_windows(tmp_path):
+    """deploy.sh on Windows Git Bash unsets default /var/run/docker.sock before calling Compose."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture_socket_env = tmp_path / "docker_socket_env.txt"
+    docker = bin_dir / "docker"
+    docker.write_text(
+        f'#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 0; fi\nprintf "%s" "$DEER_FLOW_DOCKER_SOCKET" > "{capture_socket_env}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text("uname() { echo 'MINGW64_NT-10.0'; }\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env["DEER_FLOW_DOCKER_SOCKET"] = "/var/run/docker.sock"
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture_socket_env.read_text(encoding="utf-8") == ""
+
+
+def test_aio_deploy_socket_preserves_unset_default_on_windows(tmp_path):
+    """deploy.sh does not export default /var/run/docker.sock when unset initially."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture_socket_env = tmp_path / "docker_socket_env.txt"
+    docker = bin_dir / "docker"
+    docker.write_text(
+        f'#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 0; fi\nprintf "%s" "$DEER_FLOW_DOCKER_SOCKET" > "{capture_socket_env}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text("uname() { echo 'MINGW64_NT-10.0'; }\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env.pop("DEER_FLOW_DOCKER_SOCKET", None)
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture_socket_env.read_text(encoding="utf-8") == ""
+
+
+def test_aio_deploy_socket_preserves_custom_socket_on_windows(tmp_path):
+    """deploy.sh preserves and exports custom DEER_FLOW_DOCKER_SOCKET on Windows."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture_socket_env = tmp_path / "docker_socket_env.txt"
+    docker = bin_dir / "docker"
+    docker.write_text(
+        f'#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 0; fi\nprintf "%s" "$DEER_FLOW_DOCKER_SOCKET" > "{capture_socket_env}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text(
+        'uname() { echo "MINGW64_NT-10.0"; }\n[() {\n    if [[ "$1" == "!" && "$2" == "-S" ]]; then\n        return 1\n    fi\n    builtin [ "$@"\n}\n',
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env["DEER_FLOW_DOCKER_SOCKET"] = "/custom/docker.sock"
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture_socket_env.read_text(encoding="utf-8") == "/custom/docker.sock"
+
+
+def test_aio_deploy_socket_reads_from_dotenv(tmp_path):
+    """deploy.sh resolves DEER_FLOW_DOCKER_SOCKET from .env when unset in shell environment."""
+    worktree = _setup_deploy_worktree(tmp_path)
+    (worktree / ".env").write_text("DEER_FLOW_DOCKER_SOCKET=/var/run/docker.sock\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture_socket_env = tmp_path / "docker_socket_env.txt"
+    docker = bin_dir / "docker"
+    docker.write_text(
+        f'#!/usr/bin/env sh\nif [ "$1" = "info" ]; then exit 0; fi\nprintf "%s" "$DEER_FLOW_DOCKER_SOCKET" > "{capture_socket_env}"\nexit 0\n',
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    bash_env = tmp_path / "env.sh"
+    bash_env.write_text("uname() { echo 'MINGW64_NT-10.0'; }\n", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BASH_ENV"] = str(bash_env)
+    env.pop("DEER_FLOW_DOCKER_SOCKET", None)
+    env["BETTER_AUTH_SECRET"] = "test-secret"
+    env["DEER_FLOW_INTERNAL_AUTH_TOKEN"] = "test-token"
+    env["UV_EXTRAS"] = "redis"
+
+    result = subprocess.run(
+        [BASH_EXECUTABLE, str(worktree / "scripts" / "deploy.sh"), "start"],
+        cwd=worktree,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture_socket_env.read_text(encoding="utf-8") == ""

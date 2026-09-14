@@ -6,6 +6,7 @@ from deerflow.authz.principal import build_principal_from_context, normalize_aut
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzReason, AuthzRequest, Principal
 from deerflow.authz.rbac import RbacAuthorizationProvider
 from deerflow.authz.runtime import resolve_authorization_provider
+from deerflow.authz.sandbox_authz import authorize_sandbox_execution
 from deerflow.authz.tool_filter import apply_tool_authorization
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "Principal",
     "RbacAuthorizationProvider",
     "apply_tool_authorization",
+    "authorize_sandbox_execution",
     "build_principal_from_context",
     "filter_tools_by_authorization",
     "normalize_authz_attributes",

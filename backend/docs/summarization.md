@@ -95,6 +95,18 @@ summarization:
      value: 0.8  # 80% of max input tokens
    ```
 
+   The percentage resolves from the **summary model's** declared `context_window`
+   — the anchor that generates summaries: `summarization.model_name` when set,
+   otherwise the run's own model. Declare `context_window` on that models entry
+   in `config.yaml`. Third-party OpenAI-compatible models carry no built-in
+   capacity profile, so without a declared `context_window` the fraction clause
+   is dropped with a warning at agent build — any remaining absolute clauses
+   (`tokens` / `messages`) keep working. Caveat: when a separate summary model
+   is configured, its window sizes the threshold — a 64k run model paired with
+   a 128k-window summary model resolves `fraction: 0.8` to ~102k tokens and
+   auto-summarization cannot fire before the run model overflows; in that setup
+   prefer absolute `tokens` thresholds sized for the run model.
+
 **Multiple Triggers:**
 ```yaml
 trigger:
@@ -130,7 +142,7 @@ keep:
 #### `trim_tokens_to_summarize`
 - **Type**: Integer or null
 - **Default**: `4000`
-- **Description**: Maximum tokens to include when preparing messages for the summarization call itself. Set to `null` to skip trimming (not recommended for very long conversations).
+- **Description**: Token budget used to trim the raw input sections for the summarization call. Escaping, wrapper tags, and the summary prompt add overhead beyond this budget; it is not a hard limit on the final model request. When preserving the current user request leaves an assistant/tool-only summary window, trimming favors the most recent content in that window. If a mixed window still contains a human message but the human-anchored trim is empty, the existing final-message fallback is preserved. Set to `null` to skip trimming (not recommended for very long conversations).
 
 #### `summary_prompt`
 - **Type**: String or null

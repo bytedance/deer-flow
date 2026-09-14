@@ -1,6 +1,10 @@
 import { expect, test } from "@rstest/core";
 
-import { sanitizeRunStreamOptions } from "@/core/api/stream-mode";
+import {
+  CHAT_RUN_STREAM_MODES,
+  forceChatRunStreamOptions,
+  sanitizeRunStreamOptions,
+} from "@/core/api/stream-mode";
 
 test("rejects mixed supported and unsupported stream modes", () => {
   expect(() =>
@@ -60,4 +64,41 @@ test("sanitizes streamResumable while preserving valid stream modes", () => {
   expect(sanitized).toEqual({
     streamMode: ["values", "custom"],
   });
+});
+
+test("forces incremental modes for chat streams instead of values snapshots", () => {
+  const sanitized = forceChatRunStreamOptions({
+    streamResumable: true,
+    streamMode: ["values", "messages-tuple", "updates", "custom", "debug"],
+    signal: "keep-me",
+  });
+
+  expect(sanitized).toEqual({
+    signal: "keep-me",
+    streamMode: [...CHAT_RUN_STREAM_MODES, "debug"],
+  });
+  expect(sanitized.streamMode).not.toContain("values");
+});
+
+test("adds explicit chat stream modes when no options are provided", () => {
+  expect(forceChatRunStreamOptions(undefined)).toEqual({
+    streamMode: [...CHAT_RUN_STREAM_MODES],
+  });
+});
+
+test("preserves a direct AbortSignal while adding chat stream modes", () => {
+  const signal = new AbortController().signal;
+
+  expect(forceChatRunStreamOptions(signal)).toEqual({
+    signal,
+    streamMode: [...CHAT_RUN_STREAM_MODES],
+  });
+});
+
+test("rejects unsupported chat stream modes before replacing them", () => {
+  expect(() =>
+    forceChatRunStreamOptions({
+      streamMode: ["messages-tuple", "events"],
+    }),
+  ).toThrow("Unsupported LangGraph stream mode(s): events");
 });

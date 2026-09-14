@@ -715,7 +715,17 @@ def test_validate_thread_id_rejects_dot_traversal(thread_id):
 
 def test_validate_thread_id_accepts_safe_ids():
     support_bundle._validate_thread_id("thread-123")
-    support_bundle._validate_thread_id("a.b_c-1")
+    support_bundle._validate_thread_id("ab_c-1")
+
+
+def test_validate_thread_id_rejects_noncanonical_ids():
+    """The script's pattern is pinned byte-identical to the canonical
+    ``THREAD_ID_PATTERN`` (see test_thread_id_validation.py) — dotted or
+    over-length IDs are rejected even though they are not traversals."""
+    with pytest.raises(ValueError, match="Invalid thread_id"):
+        support_bundle._validate_thread_id("a.b_c-1")
+    with pytest.raises(ValueError, match="Invalid thread_id"):
+        support_bundle._validate_thread_id("x" * 65)
 
 
 def test_main_reports_invalid_thread_id_without_traceback(tmp_path, capsys):

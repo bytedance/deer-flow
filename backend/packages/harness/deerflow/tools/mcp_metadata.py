@@ -20,17 +20,45 @@ from langchain.tools import BaseTool
 
 MCP_TOOL_METADATA_KEY = "deerflow_mcp"
 MCP_TOOL_ROUTING_METADATA_KEY = "deerflow_mcp_routing"
+MCP_TOOL_SOURCE_METADATA_KEY = "deerflow_mcp_source"
 
 
-def tag_mcp_tool(tool: BaseTool) -> BaseTool:
+def tag_mcp_tool(
+    tool: BaseTool,
+    *,
+    server_name: str | None = None,
+    transport: str | None = None,
+) -> BaseTool:
     """Mark ``tool`` as MCP-sourced. Mutates in place and returns it for chaining."""
-    tool.metadata = {**(tool.metadata or {}), MCP_TOOL_METADATA_KEY: True}
+    metadata: dict[str, Any] = {**(tool.metadata or {}), MCP_TOOL_METADATA_KEY: True}
+    if server_name:
+        metadata[MCP_TOOL_SOURCE_METADATA_KEY] = {
+            "server_name": server_name,
+            "transport": transport or "unknown",
+        }
+    tool.metadata = metadata
     return tool
 
 
 def is_mcp_tool(tool: BaseTool) -> bool:
     """True when ``tool`` carries the MCP-source tag written by :func:`tag_mcp_tool`."""
     return (getattr(tool, "metadata", None) or {}).get(MCP_TOOL_METADATA_KEY) is True
+
+
+def get_mcp_source(tool: BaseTool) -> dict[str, str] | None:
+    """Return only the credential-free logical MCP source metadata."""
+
+    source = (getattr(tool, "metadata", None) or {}).get(MCP_TOOL_SOURCE_METADATA_KEY)
+    if not isinstance(source, Mapping):
+        return None
+    server_name = source.get("server_name")
+    transport = source.get("transport")
+    if not isinstance(server_name, str) or not server_name:
+        return None
+    return {
+        "server_name": server_name,
+        "transport": transport if isinstance(transport, str) and transport else "unknown",
+    }
 
 
 def tag_mcp_routing(tool: BaseTool, routing: Mapping[str, Any]) -> BaseTool:

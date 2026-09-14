@@ -16,12 +16,65 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi import FastAPI
 
 
 @asynccontextmanager
 async def _noop_langgraph_runtime(_app, _startup_config):
     yield
+
+
+@asynccontextmanager
+async def _langgraph_runtime_with_scheduler_repositories(app, _startup_config):
+    app.state.scheduled_task_repo = object()
+    app.state.scheduled_task_run_repo = object()
+    yield
+
+
+def test_enabled_scheduler_start_failure_aborts_gateway_lifespan():
+    """An enabled scheduler must fail lifespan before channel or request admission."""
+    from app.gateway.app import lifespan
+
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        startup_config.scheduler.enabled = True
+        startup_config.scheduler.multi_instance = False
+        startup_config.scheduler.poll_interval_seconds = 5
+        startup_config.scheduler.lease_seconds = 120
+        startup_config.scheduler.max_concurrent_runs = 3
+        startup_config.scheduler.queue_timeout_seconds = 3600
+        startup_config.run_ownership.grace_seconds = 10
+        channel_service = MagicMock()
+        channel_service.get_status.return_value = {}
+        start_channel_service = AsyncMock(return_value=channel_service)
+        scheduler_service = MagicMock()
+        scheduler_service.start = AsyncMock(side_effect=RuntimeError("scheduled recovery failed"))
+        scheduler_service.stop = AsyncMock()
+
+        with (
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+            patch("app.gateway.app.langgraph_runtime", _langgraph_runtime_with_scheduler_repositories),
+            patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+            patch("app.channels.service.start_channel_service", start_channel_service),
+            patch("app.channels.service.stop_channel_service", AsyncMock()),
+            patch("app.scheduler.ScheduledTaskService", return_value=scheduler_service),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="scheduled recovery failed"):
+                async with lifespan(app):
+                    pass
+
+        scheduler_service.start.assert_awaited_once()
+        start_channel_service.assert_not_awaited()
+
+    asyncio.run(scenario())
 
 
 async def _run_lifespan_with_hanging_stop() -> float:
@@ -52,6 +105,7 @@ async def _run_lifespan_with_hanging_stop() -> float:
         patch("app.gateway.app.get_app_config", return_value=startup_config),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
         patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
         patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
         patch("app.channels.service.stop_channel_service", side_effect=hang_forever),
@@ -98,6 +152,7 @@ async def _run_lifespan_with_upload_staging_cleanup():
         patch("app.gateway.app.get_app_config", return_value=startup_config),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
         patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
         patch("app.gateway.app.cleanup_stale_upload_staging_files", cleanup_upload_staging_files),
         patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
@@ -117,7 +172,72 @@ def test_lifespan_sweeps_upload_staging_files_on_startup():
     stop_channel_service.assert_awaited_once()
 
 
-async def _run_lifespan_with_memory_flush(*, enabled: bool, flush_return: bool | Exception) -> MagicMock:
+async def _run_lifespan_with_mcp_task_config_snapshot() -> None:
+    from app.gateway.app import lifespan
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, validate_mcp_task_config_snapshot
+
+    app = FastAPI()
+    startup_config = SimpleNamespace(
+        log_level="INFO",
+        memory=SimpleNamespace(
+            token_counting="char",
+            enabled=False,
+            shutdown_flush_timeout_seconds=30.0,
+        ),
+    )
+    startup_extensions = ExtensionsConfig()
+    changed_extensions = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "reports": {
+                    "command": "reports-mcp",
+                    "task_toolsets": [
+                        {
+                            "name": "reports",
+                            "submit_tool": "submit_report",
+                            "status_tool": "status_report",
+                            "cancel_tool": "cancel_report",
+                        }
+                    ],
+                }
+            }
+        }
+    )
+    fake_service = MagicMock()
+    fake_service.get_status.return_value = {}
+
+    async def fake_start(_startup_config, **_kwargs):
+        return fake_service
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", side_effect=fake_start),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=startup_extensions),
+    ):
+        async with lifespan(app):
+            with pytest.raises(McpTaskConfigurationError, match="reports.*restart"):
+                validate_mcp_task_config_snapshot(changed_extensions)
+
+    validate_mcp_task_config_snapshot(changed_extensions)
+
+
+def test_lifespan_sets_and_clears_mcp_task_config_snapshot() -> None:
+    asyncio.run(_run_lifespan_with_mcp_task_config_snapshot())
+
+
+async def _run_lifespan_with_memory_flush(
+    *,
+    enabled: bool,
+    flush_return: bool | Exception,
+    shutdown_events: list[str] | None = None,
+) -> MagicMock:
     """Drive lifespan with a spied memory manager.shutdown_flush.
 
     Returns the manager mock so the caller can assert the shutdown flush was
@@ -149,17 +269,30 @@ async def _run_lifespan_with_memory_flush(*, enabled: bool, flush_return: bool |
     manager = MagicMock()
     if isinstance(flush_return, Exception):
         manager.shutdown_flush.side_effect = flush_return
+    elif shutdown_events is not None:
+
+        def record_memory_flush(_timeout: float) -> bool:
+            shutdown_events.append("memory_flush_started")
+            return flush_return
+
+        manager.shutdown_flush.side_effect = record_memory_flush
     else:
         manager.shutdown_flush.return_value = flush_return
+
+    suspend_system_observations = MagicMock()
+    if shutdown_events is not None:
+        suspend_system_observations.side_effect = lambda: shutdown_events.append("system_observations_suspended")
 
     with (
         patch("app.gateway.app.get_app_config", return_value=startup_config),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
         patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
         patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
         patch("app.channels.service.stop_channel_service", stop_channel_service),
         patch("deerflow.agents.memory.get_memory_manager", return_value=manager),
+        patch("deerflow.extensions.notify.suspend_extension_system_observations", suspend_system_observations),
     ):
         async with lifespan(app):
             pass
@@ -175,6 +308,21 @@ def test_lifespan_drains_memory_on_shutdown_with_configured_timeout(caplog) -> N
     manager = asyncio.run(_run_lifespan_with_memory_flush(enabled=True, flush_return=True))
     manager.shutdown_flush.assert_called_once_with(5.0)
     assert any(r.levelno == logging.INFO and "flush completed" in r.message for r in caplog.records)
+
+
+def test_lifespan_suspends_system_observations_before_memory_flush() -> None:
+    """Shutdown-flushed memory calls cannot enqueue observations onto a dying loop."""
+    shutdown_events: list[str] = []
+
+    asyncio.run(
+        _run_lifespan_with_memory_flush(
+            enabled=True,
+            flush_return=True,
+            shutdown_events=shutdown_events,
+        )
+    )
+
+    assert shutdown_events == ["system_observations_suspended", "memory_flush_started"]
 
 
 def test_lifespan_warns_when_memory_flush_does_not_finish(caplog) -> None:

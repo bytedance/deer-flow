@@ -5,6 +5,7 @@ import {
   completeLarkConfiguration,
   installLarkIntegration,
   loadLarkIntegrationStatus,
+  setLarkAppCredentials,
   startLarkAuthorization,
   startLarkConfiguration,
 } from "./api";
@@ -14,7 +15,7 @@ export const larkIntegrationQueryKey = ["integrations", "lark"] as const;
 export function useLarkIntegrationStatus() {
   return useQuery({
     queryKey: larkIntegrationQueryKey,
-    queryFn: loadLarkIntegrationStatus,
+    queryFn: ({ signal }) => loadLarkIntegrationStatus(signal),
   });
 }
 
@@ -45,24 +46,19 @@ export function useStartLarkConfiguration() {
 }
 
 export function useCompleteLarkConfiguration() {
-  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: completeLarkConfiguration,
-    onSuccess: async (result) => {
-      queryClient.setQueryData(larkIntegrationQueryKey, result.status);
-      await queryClient.invalidateQueries({
-        queryKey: larkIntegrationQueryKey,
-      });
-    },
+  });
+}
+
+export function useSetLarkAppCredentials() {
+  return useMutation({
+    mutationFn: setLarkAppCredentials,
   });
 }
 
 export function useCompleteLarkAuthorization() {
-  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: completeLarkAuthorization,
-    onSuccess: (result) => {
-      queryClient.setQueryData(larkIntegrationQueryKey, result.status);
-    },
   });
 }

@@ -8,6 +8,10 @@ class ThreadOperationKind(StrEnum):
 
     run = "run"
     checkpoint_write = "checkpoint_write"
+    artifact_write = "artifact_write"
+    artifact_archive = "artifact_archive"
+    branch = "branch"
+    delete = "delete"
 
 
 class RunStatus(StrEnum):

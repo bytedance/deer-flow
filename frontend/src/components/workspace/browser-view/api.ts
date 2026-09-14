@@ -50,6 +50,8 @@ export function browserStreamURL(threadId: string, seedUrl?: string): string {
         ? window.location.origin
         : "";
   const wsOrigin = origin.replace(/^http/i, "ws");
-  const query = seedUrl ? `?seed=${encodeURIComponent(seedUrl)}` : "";
-  return `${wsOrigin}/api/threads/${encodeURIComponent(threadId)}/browser/stream${query}`;
+  const query = new URLSearchParams();
+  query.set("frame_format", "binary");
+  if (seedUrl) query.set("seed", seedUrl);
+  return `${wsOrigin}/api/threads/${encodeURIComponent(threadId)}/browser/stream?${query.toString()}`;
 }

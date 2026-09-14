@@ -108,6 +108,22 @@ def agent_facts_directory(memory_path: Path, agent_name: str) -> Path:
     return memory_path.parent / "agents" / agent_name.lower() / "facts"
 
 
+def agent_metadata_directory(memory_path: Path, agent_name: str) -> Path:
+    """Return the non-canonical usage/audit sidecar root for one agent."""
+    validate_agent_name(agent_name)
+    return memory_path.parent / "agents" / agent_name.lower() / ".metadata"
+
+
+def agent_usage_path(memory_path: Path, agent_name: str) -> Path:
+    """Return the lightweight query-access sidecar path for one agent."""
+    return agent_metadata_directory(memory_path, agent_name) / "fact-usage.json"
+
+
+def agent_eviction_audit_path(memory_path: Path, agent_name: str) -> Path:
+    """Return the bounded metadata-only capacity audit path for one agent."""
+    return agent_metadata_directory(memory_path, agent_name) / "eviction-audit.json"
+
+
 def fact_file_path(memory_path: Path, fact_id: str, *, agent_name: str) -> Path:
     """Return the sharded Markdown path for one agent-owned fact."""
     if not fact_id or not re.fullmatch(r"[A-Za-z0-9_-]+", fact_id):

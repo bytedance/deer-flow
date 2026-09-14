@@ -5,12 +5,19 @@ import logging
 import re
 import shlex
 import threading
+from typing import TYPE_CHECKING
 
+from e2b import FileNotFoundException
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
+from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+
+if TYPE_CHECKING:
+    from deerflow.community.e2b_sandbox.e2b_sandbox_provider import MountUploadResult
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +54,10 @@ class E2BSandbox(Sandbox):
             :data:`DEFAULT_E2B_HOME_DIR`.
     """
 
+    #: Every call is a fresh ``sandbox.commands.run`` execution — no shell
+    #: state survives into the next command.
+    persistent_shell_sessions = False
+
     def __init__(
         self,
         id: str,
@@ -60,6 +71,7 @@ class E2BSandbox(Sandbox):
         self._lock = threading.Lock()
         self._closed = False
         self._dead = False
+        self.mount_upload_result: MountUploadResult | None = None
 
     # ── Properties / lifecycle ───────────────────────────────────────────
 
@@ -161,8 +173,12 @@ class E2BSandbox(Sandbox):
                     output = f"{stdout}\n{stderr}"
                 else:
                     output = stdout or stderr
-                if exit_code not in (0, None) and not output:
-                    output = f"Command exited with code {exit_code}"
+                if exit_code not in (0, None):
+                    # Mirror LocalSandbox: a nonzero exit must survive in the
+                    # output text even when the command produced output, so
+                    # evidence consumers (acceptance checklist) can recover the
+                    # actual shell status.
+                    output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
                 return output if output else "(no output)"
             except Exception as e:
                 if _is_sandbox_gone_error(e):
@@ -205,13 +221,23 @@ class E2BSandbox(Sandbox):
             logger.warning("e2b sandbox ping raised non-fatal error: %s", e)
             return True
 
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         resolved = self._resolve_path(path)
         try:
             content = self._client.files.read(resolved)
-            if isinstance(content, bytes):
-                return content.decode("utf-8", errors="replace")
-            return content if content is not None else ""
+            if start_line is None and end_line is None:
+                return content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
+            text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
+            lines = text.splitlines()
+            start = start_line or 1
+            end = end_line if end_line is not None else len(lines)
+            content = "\n".join(lines[start - 1 : end])
+            return content
         except Exception as e:
             logger.error("Failed to read file %s in e2b sandbox: %s", resolved, e)
             return f"Error: {e}"
@@ -316,14 +342,17 @@ class E2BSandbox(Sandbox):
         with self._lock:
             client = self._client
             if client is None:
-                return []
+                raise RuntimeError("sandbox client has been closed")
             try:
-                result = client.commands.run(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-                output = getattr(result, "stdout", "") or ""
-                return [line.strip() for line in output.splitlines() if line.strip()]
+                result = client.commands.run(remote_list_dir_command(resolved, max_depth))
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
-                return []
+                raise OSError(f"Failed to list_dir {resolved} in e2b sandbox: {e}") from e
+            return parse_remote_list_dir_output(
+                getattr(result, "stdout", "") or "",
+                resolved,
+                pipeline_exit_code=getattr(result, "exit_code", None),
+            )
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         resolved = self._resolve_path(path)
@@ -331,16 +360,24 @@ class E2BSandbox(Sandbox):
             client = self._client
             if client is None:
                 raise RuntimeError("sandbox client has been closed")
-            try:
-                if append:
+            if append:
+                # E2B has no append write. Read-modify-write must treat only
+                # explicit not-found as empty; any other read failure would
+                # otherwise overwrite the original file with just the tail.
+                try:
+                    existing = client.files.read(resolved) or ""
+                except (FileNotFoundException, FileNotFoundError):
                     existing = ""
-                    try:
-                        existing = client.files.read(resolved) or ""
-                        if isinstance(existing, bytes):
-                            existing = existing.decode("utf-8", errors="replace")
-                    except Exception:
-                        existing = ""
-                    content = (existing or "") + content
+                except Exception:
+                    logger.error(
+                        "Append pre-read failed for %s; refusing to overwrite",
+                        resolved,
+                    )
+                    raise
+                if isinstance(existing, bytes):
+                    existing = existing.decode("utf-8", errors="replace")
+                content = existing + content
+            try:
                 client.files.write(resolved, content)
             except Exception as e:
                 logger.error("Failed to write file %s in e2b sandbox: %s", resolved, e)
@@ -370,24 +407,26 @@ class E2BSandbox(Sandbox):
     ) -> tuple[list[str], bool]:
         resolved = self._resolve_path(path)
         types = "f,d" if include_dirs else "f"
+        hard_limit = max(max_results * 4, max_results + 50)
+        # -H follows a symlinked search root (e.g. /mnt/acp-workspace), as list_dir does.
+        search = f"find -H {shlex.quote(resolved)} \\( " + " -o ".join(f"-type {t}" for t in types.split(",")) + " \\) -print 2>/dev/null"
         with self._lock:
             client = self._client
             if client is None:
-                return [], False
+                raise RuntimeError("sandbox client has been closed")
             try:
-                hard_limit = max(max_results * 4, max_results + 50)
-                cmd = f"find {shlex.quote(resolved)} \\( " + " -o ".join(f"-type {t}" for t in types.split(",")) + f" \\) -print 2>/dev/null | head -{hard_limit}"
-                result = client.commands.run(cmd)
-                output = getattr(result, "stdout", "") or ""
+                result = client.commands.run(remote_search_command(search, resolved, limit=hard_limit))
             except Exception as e:
                 logger.error("Failed to glob in e2b sandbox: %s", e)
-                return [], False
+                raise OSError(f"Failed to glob {resolved} in e2b sandbox: {e}") from e
+        # A missing root or a failed find must not read as "no files matched" (#5376).
+        output = parse_remote_search_output(getattr(result, "stdout", "") or "", resolved, tool="find", limit=hard_limit)
 
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in output.splitlines():
-            entry = entry.strip()
+        for entry in output.text.splitlines():
+            # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry:
                 continue
             if entry != root and not entry.startswith(root_prefix):
@@ -401,7 +440,7 @@ class E2BSandbox(Sandbox):
                 matches.append(entry)
                 if len(matches) >= max_results:
                     return matches, True
-        return matches, False
+        return matches, output.truncated
 
     def grep(
         self,
@@ -442,25 +481,26 @@ class E2BSandbox(Sandbox):
         total_cap = max(max_results * 4, max_results + 50)
         flags.append(f"-m{per_file_cap}")
 
-        cmd = "grep " + " ".join(flags) + f" -- {shlex.quote(regex_source)} {shlex.quote(resolved)} 2>/dev/null" + f" | head -{total_cap}"
+        search = "grep " + " ".join(flags) + f" -- {shlex.quote(regex_source)} {shlex.quote(resolved)} 2>/dev/null"
 
         with self._lock:
             client = self._client
             if client is None:
-                return [], False
+                raise RuntimeError("sandbox client has been closed")
             try:
-                result = client.commands.run(cmd)
-                output = getattr(result, "stdout", "") or ""
+                result = client.commands.run(remote_search_command(search, resolved, limit=total_cap))
             except Exception as e:
                 logger.error("Failed to grep in e2b sandbox: %s", e)
-                return [], False
+                raise OSError(f"Failed to grep {resolved} in e2b sandbox: {e}") from e
+        # A missing root, a missing grep or an unreadable tree must not read as "no matches" (#5376).
+        output = parse_remote_search_output(getattr(result, "stdout", "") or "", resolved, tool="grep", limit=total_cap)
 
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
 
         matches: list[GrepMatch] = []
-        truncated = False
-        for raw in output.splitlines():
+        truncated = output.truncated
+        for raw in output.text.splitlines():
             try:
                 file_path, line_no_str, line_text = raw.split(":", 2)
             except ValueError:

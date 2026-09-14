@@ -749,6 +749,13 @@ def _call_is_network_sink(call_name: str) -> bool:
 # in complex binding targets deliberately produce no finding from this signal; any names those
 # skipped constructs may bind are invalidated so stale state cannot create a finding.
 #
+# Handles reached by a value rather than by a name -- an attribute, a container item, a factory
+# return, a locally aliased constructor, a dynamic `getattr` -- and sinks invoked as anything other
+# than `name.method(...)` are outside that chain by construction: following them is value tracking,
+# which RFC #2634 puts beyond Phase 5. These are scope decisions, not gaps; issue #4296 enumerates
+# them and `test_python_declared_false_negatives_stay_unreported` pins each one, so widening or
+# narrowing the model has to change that test rather than change behaviour silently.
+#
 # Compound bodies are still walked from isolated entry-state copies so `if True:` is not a
 # universal bypass, but ambiguous bindings are dropped rather than joined. Every AST visit
 # and copied scope entry consumes a deterministic work budget, and the walk stops as soon

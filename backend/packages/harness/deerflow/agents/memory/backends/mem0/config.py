@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -38,7 +39,8 @@ class Mem0Config:
     top_k: int = 8
     #: Minimum relevance score for search() results (mem0 `threshold`, 0-1).
     score_threshold: float = 0.1
-    #: Hard cap on the injection text returned by get_context.
+    #: Hard cap on the injection text returned by get_context; memories that
+    #: do not fit whole are skipped (truncation happens on entry boundaries).
     max_injection_chars: int = 12000
     #: Per-request HTTP timeout in seconds.
     timeout_seconds: float = 10.0
@@ -104,8 +106,8 @@ class Mem0Config:
             raise ValueError("mem0 score_threshold must be in [0, 1]")
         if config.max_injection_chars <= 0:
             raise ValueError("mem0 max_injection_chars must be positive")
-        if config.timeout_seconds <= 0:
-            raise ValueError("mem0 timeout_seconds must be positive")
+        if not isfinite(config.timeout_seconds) or config.timeout_seconds <= 0:
+            raise ValueError("mem0 timeout_seconds must be a finite value > 0")
         if not config.api_key_env.strip():
             raise ValueError("mem0 api_key_env must be a non-empty env var name")
         parsed_base_url = urlsplit(config.base_url)

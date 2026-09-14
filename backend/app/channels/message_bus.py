@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_INBOUND_QUEUE_MAXSIZE = 1000
 
 PENDING_CLARIFICATION_METADATA_KEY = "pending_clarification"
 RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY = "resolved_from_pending_clarification"
@@ -134,6 +137,40 @@ class OutboundMessage:
 OutboundCallback = Callable[[OutboundMessage], Coroutine[Any, Any, None]]
 
 
+class InboundQueueFullError(RuntimeError):
+    """Raised when bounded inbound admission has no capacity."""
+
+
+class InboundQueueClosedError(RuntimeError):
+    """Raised when inbound admission has closed during shutdown."""
+
+
+class InboundReservationExpiredError(RuntimeError):
+    """Raised when a reservation was already committed or invalidated."""
+
+
+class InboundReservation:
+    """One capacity slot reserved before a provider hands work to the bus.
+
+    Some provider SDKs invoke DeerFlow on a foreign thread. Reserving before
+    scheduling their final identity/ack preparation onto the Gateway loop
+    bounds both the queue and those scheduled callbacks. A reservation must be
+    committed exactly once or released in a ``finally`` block.
+    """
+
+    def __init__(self, bus: MessageBus, token: object) -> None:
+        self._bus = bus
+        self._token = token
+
+    def commit(self, msg: InboundMessage) -> None:
+        """Commit the reserved message from the MessageBus event loop."""
+        self._bus._commit_inbound(self._token, msg)
+
+    def release(self) -> None:
+        """Release the slot if it has not already been committed or closed."""
+        self._bus._release_inbound_reservation(self._token)
+
+
 class MessageBus:
     """Async pub/sub hub connecting channels and the agent dispatcher.
 
@@ -142,15 +179,86 @@ class MessageBus:
     via registered callbacks.
     """
 
-    def __init__(self) -> None:
-        self._inbound_queue: asyncio.Queue[InboundMessage] = asyncio.Queue()
+    def __init__(self, *, inbound_queue_maxsize: int = DEFAULT_INBOUND_QUEUE_MAXSIZE) -> None:
+        if isinstance(inbound_queue_maxsize, bool) or not isinstance(inbound_queue_maxsize, int) or inbound_queue_maxsize <= 0:
+            raise ValueError("inbound_queue_maxsize must be a positive integer")
+
+        self._inbound_queue: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=inbound_queue_maxsize)
+        # Provider callbacks may reserve capacity from SDK-owned threads before
+        # scheduling async identity/ack preparation on the Gateway loop.
+        self._inbound_admission_lock = threading.Lock()
+        self._inbound_queued = 0
+        self._inbound_reservations: set[object] = set()
+        self._accepting_inbound = True
+        self._full_rejection_count = 0
+        self._last_full_warning_at = 0.0
         self._outbound_listeners: list[OutboundCallback] = []
 
     # -- inbound -----------------------------------------------------------
 
     async def publish_inbound(self, msg: InboundMessage) -> None:
-        """Enqueue an inbound message from a channel."""
-        await self._inbound_queue.put(msg)
+        """Admit a message immediately or raise instead of waiting for space.
+
+        This deliberately uses reservation + ``put_nowait`` rather than an
+        awaited ``Queue.put``. Under overload, producers get an explicit
+        rejection and cannot accumulate an unbounded set of pending put tasks.
+        The initial zero-delay sleep is a scheduling handoff, not a capacity
+        wait: a producer that publishes a batch (notably GitHub webhook
+        fan-out) gives fixed workers a chance to dequeue between entries so a
+        batch larger than the queue does not repeatedly fail on the same
+        prefix during redelivery. It occurs before admission so cancellation
+        cannot report failure after this call already committed the message.
+        """
+        await asyncio.sleep(0)
+        reservation = self.reserve_inbound(msg)
+        try:
+            reservation.commit(msg)
+        finally:
+            reservation.release()
+
+    def reserve_inbound(self, msg: InboundMessage) -> InboundReservation:
+        """Reserve one bounded intake slot, safely callable from SDK threads."""
+        token = object()
+        should_warn = False
+        rejection_count = 0
+        with self._inbound_admission_lock:
+            if not self._accepting_inbound:
+                raise InboundQueueClosedError("channel inbound intake is closed")
+            admitted = self._inbound_queued + len(self._inbound_reservations)
+            if admitted >= self._inbound_queue.maxsize:
+                self._full_rejection_count += 1
+                rejection_count = self._full_rejection_count
+                now = time.monotonic()
+                if now - self._last_full_warning_at >= 1.0:
+                    self._last_full_warning_at = now
+                    should_warn = True
+            else:
+                self._inbound_reservations.add(token)
+                return InboundReservation(self, token)
+
+        if should_warn:
+            logger.warning(
+                "[Bus] inbound capacity exhausted: channel=%s, chat_id=%s, capacity=%d, rejected_total=%d",
+                msg.channel_name,
+                msg.chat_id,
+                self._inbound_queue.maxsize,
+                rejection_count,
+            )
+        raise InboundQueueFullError(f"channel inbound queue is full (capacity={self._inbound_queue.maxsize})")
+
+    def _commit_inbound(self, token: object, msg: InboundMessage) -> None:
+        with self._inbound_admission_lock:
+            if token not in self._inbound_reservations:
+                raise InboundReservationExpiredError("inbound reservation is no longer active")
+            self._inbound_reservations.remove(token)
+            if not self._accepting_inbound:
+                raise InboundQueueClosedError("channel inbound intake closed before reservation commit")
+            try:
+                self._inbound_queue.put_nowait(msg)
+            except asyncio.QueueFull as exc:  # pragma: no cover - reservation accounting invariant
+                raise RuntimeError("inbound reservation accounting exceeded queue capacity") from exc
+            self._inbound_queued += 1
+
         logger.info(
             "[Bus] inbound enqueued: channel=%s, chat_id=%s, type=%s, queue_size=%d",
             msg.channel_name,
@@ -159,12 +267,70 @@ class MessageBus:
             self._inbound_queue.qsize(),
         )
 
+    def _release_inbound_reservation(self, token: object) -> None:
+        with self._inbound_admission_lock:
+            if token in self._inbound_reservations:
+                self._inbound_reservations.remove(token)
+
     async def get_inbound(self) -> InboundMessage:
         """Block until the next inbound message is available."""
-        return await self._inbound_queue.get()
+        msg = await self._inbound_queue.get()
+        with self._inbound_admission_lock:
+            self._inbound_queued -= 1
+        return msg
+
+    def get_inbound_nowait(self) -> InboundMessage:
+        """Return one queued message immediately and release admission capacity."""
+        msg = self._inbound_queue.get_nowait()
+        with self._inbound_admission_lock:
+            self._inbound_queued -= 1
+        return msg
+
+    def inbound_task_done(self) -> None:
+        """Mark one dequeued inbound message as fully handled."""
+        self._inbound_queue.task_done()
+
+    async def join_inbound(self) -> None:
+        """Wait until every admitted queue item has completed or been dropped."""
+        await self._inbound_queue.join()
+
+    def close_inbound(self) -> int:
+        """Reject new intake and invalidate uncommitted reservations.
+
+        Returns the number of provider-side reservations invalidated. Queued
+        messages remain until workers finish or ``discard_pending_inbound`` is
+        called by shutdown.
+        """
+        with self._inbound_admission_lock:
+            self._accepting_inbound = False
+            invalidated = len(self._inbound_reservations)
+            self._inbound_reservations.clear()
+        return invalidated
+
+    def open_inbound(self) -> None:
+        """Re-open admission when a stopped manager is explicitly restarted."""
+        with self._inbound_admission_lock:
+            self._accepting_inbound = True
+
+    def discard_pending_inbound(self) -> int:
+        """Drop queued, not-yet-started messages during shutdown."""
+        discarded = 0
+        while True:
+            try:
+                self.get_inbound_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self._inbound_queue.task_done()
+            discarded += 1
+        return discarded
+
+    @property
+    def inbound_queue_maxsize(self) -> int:
+        return self._inbound_queue.maxsize
 
     @property
     def inbound_queue(self) -> asyncio.Queue[InboundMessage]:
+        """Expose the queue for read-only size/empty inspection."""
         return self._inbound_queue
 
     # -- outbound ----------------------------------------------------------

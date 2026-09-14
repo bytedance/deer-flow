@@ -210,6 +210,48 @@ def test_skill_manage_rejects_support_path_traversal(monkeypatch, tmp_path):
         )
 
 
+def test_skill_manage_remove_file_updates_sandbox_projection_before_return(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    config = _make_config(skills_root)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    async def _refresh(user_id: str):
+        return None
+
+    monkeypatch.setattr(skill_manage_module, "refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr(skill_manage_module, "scan_skill_content", lambda *args, **kwargs: _async_result("allow", "ok"))
+
+    runtime = _make_runtime(user_id="default")
+    anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "create", "demo-skill", _skill_content("demo-skill"))
+    anyio.run(
+        skill_manage_module.skill_manage_tool.coroutine,
+        runtime,
+        "write_file",
+        "demo-skill",
+        "supporting content",
+        "references/guide.md",
+    )
+    projected_file = tmp_path / "users" / "default" / "skills_view" / "custom" / "demo-skill" / "references" / "guide.md"
+    assert projected_file.read_text(encoding="utf-8") == "supporting content"
+
+    result = anyio.run(
+        skill_manage_module.skill_manage_tool.coroutine,
+        runtime,
+        "remove_file",
+        "demo-skill",
+        None,
+        "references/guide.md",
+    )
+
+    assert result == "Removed 'references/guide.md' from custom skill 'demo-skill'."
+    assert not projected_file.exists()
+
+
 def test_skill_manage_static_critical_blocks_create_before_llm(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     config = _make_config(skills_root)

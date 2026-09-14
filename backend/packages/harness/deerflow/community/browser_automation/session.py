@@ -15,7 +15,6 @@ private loop so the core harness installs without it.
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 import logging
 import os
@@ -23,7 +22,7 @@ import threading
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import urlparse
 
 if TYPE_CHECKING:
@@ -32,6 +31,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+ScreenshotType = Literal["png", "jpeg", "webp"]
 
 # Element roles/tags treated as interactive when building a page snapshot. The
 # model addresses elements by the ``data-df-ref`` index this snapshot stamps, so
@@ -301,7 +301,7 @@ class BrowserSession:
         # Live screencast state. When streaming, ``_on_frame`` is retained so the
         # screencast can be re-bound to a new page — login/OAuth flows commonly
         # open a popup or a fresh tab, and the user must see (and drive) it.
-        self._on_frame: Callable[[str], None] | None = None
+        self._on_frame: Callable[[bytes], None] | None = None
         # The page the live screencast's CDP session is currently bound to. Frames
         # are captured from ``self._page`` (the live active page), but the CDP
         # repaint signal is tied to a specific page; when the active page diverges
@@ -316,6 +316,16 @@ class BrowserSession:
         self._input_live_frame_generation = 0
         self._input_live_frame_pending = False
         self._page_listener_bound = False
+        # The event loop only holds weak references to tasks, so a fire-and-forget
+        # task can be collected mid-execution. The schedulers below clear their
+        # ``*_pending`` guards in a ``finally`` block, which would then never run.
+        self._background_tasks: set[asyncio.Future[Any]] = set()
+
+    def _spawn_background(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Run *coro* detached, keeping a strong reference until it settles."""
+        task = asyncio.ensure_future(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     @property
     def active_refs(self) -> int:
@@ -403,7 +413,7 @@ class BrowserSession:
         """
         self._page = page
         if self._on_frame is not None and not self._screencast_binding and page is not self._screencast_page:
-            asyncio.ensure_future(self._rebind_screencast_safe())
+            self._spawn_background(self._rebind_screencast_safe())
 
     def _bind_new_page_listener(self) -> None:
         """Follow popups/new tabs so auth flows stay visible and controllable.
@@ -534,14 +544,20 @@ class BrowserSession:
         text = await page.inner_text("body")
         return text[:max_chars]
 
-    async def _screenshot_bytes(self, full_page: bool) -> bytes:
+    async def _screenshot_bytes(
+        self,
+        full_page: bool,
+        image_type: ScreenshotType,
+        quality: int | None,
+    ) -> bytes:
         page = await self._ensure_page()
-        return await page.screenshot(full_page=full_page, type="png")
+        if quality is None:
+            return await page.screenshot(full_page=full_page, type=image_type)
+        return await page.screenshot(full_page=full_page, type=image_type, quality=quality)
 
-    async def _live_frame(self) -> str:
+    async def _live_frame(self) -> bytes:
         page = await self._ensure_page()
-        shot = await page.screenshot(type="jpeg", quality=_LIVE_FRAME_JPEG_QUALITY)
-        return base64.b64encode(shot).decode("ascii")
+        return await page.screenshot(type="jpeg", quality=_LIVE_FRAME_JPEG_QUALITY)
 
     async def _emit_live_frame(self) -> None:
         if self._on_frame is None:
@@ -564,7 +580,7 @@ class BrowserSession:
         if self._settle_live_frames_pending:
             return
         self._settle_live_frames_pending = True
-        asyncio.ensure_future(self._settle_live_frames())
+        self._spawn_background(self._settle_live_frames())
 
     async def _push_live_frame(self) -> None:
         if self._on_frame is None:
@@ -598,7 +614,7 @@ class BrowserSession:
         if self._input_live_frame_pending:
             return
         self._input_live_frame_pending = True
-        asyncio.ensure_future(self._flush_input_live_frames())
+        self._spawn_background(self._flush_input_live_frames())
 
     async def _back(self) -> PageSnapshot:
         page = await self._ensure_page()
@@ -679,7 +695,7 @@ class BrowserSession:
             self._page_listener_bound = False
             self._request_guard_bound = False
 
-    async def _start_screencast(self, on_frame: Callable[[str], None]) -> None:
+    async def _start_screencast(self, on_frame: Callable[[bytes], None]) -> None:
         """Start Live mode and send an initial JPEG frame.
 
         This used to attach Chrome's CDP screencast and then turn every repaint
@@ -698,7 +714,7 @@ class BrowserSession:
         await self._emit_live_frame()
         self._schedule_settle_live_frames()
 
-    async def _stop_screencast(self, on_frame: Callable[[str], None] | None = None) -> None:
+    async def _stop_screencast(self, on_frame: Callable[[bytes], None] | None = None) -> None:
         if on_frame is not None and self._on_frame is not on_frame:
             return
         self._on_frame = None
@@ -788,11 +804,17 @@ class BrowserSession:
         with self._activity():
             return await self._loop.run(self._get_text(max_chars))
 
-    async def screenshot_bytes(self, full_page: bool = False) -> bytes:
+    async def screenshot_bytes(
+        self,
+        full_page: bool = False,
+        *,
+        image_type: ScreenshotType = "png",
+        quality: int | None = None,
+    ) -> bytes:
         with self._activity():
-            return await self._loop.run(self._screenshot_bytes(full_page))
+            return await self._loop.run(self._screenshot_bytes(full_page, image_type, quality))
 
-    async def live_frame(self) -> str:
+    async def live_frame(self) -> bytes:
         with self._activity():
             return await self._loop.run(self._live_frame())
 
@@ -815,11 +837,11 @@ class BrowserSession:
         with self._activity():
             return await self._loop.run(self._tabs())
 
-    async def start_screencast(self, on_frame: Callable[[str], None]) -> None:
+    async def start_screencast(self, on_frame: Callable[[bytes], None]) -> None:
         with self._activity():
             await self._loop.run(self._start_screencast(on_frame))
 
-    async def stop_screencast(self, on_frame: Callable[[str], None] | None = None) -> None:
+    async def stop_screencast(self, on_frame: Callable[[bytes], None] | None = None) -> None:
         with self._activity():
             await self._loop.run(self._stop_screencast(on_frame))
 
