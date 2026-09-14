@@ -51,10 +51,15 @@ class RequestAdmission(BaseRateLimiter):
             self._waiters.remove(ticket)
 
     def _delay(self, deadline: float) -> float:
-        remaining = deadline - monotonic()
+        now = monotonic()
+        remaining = deadline - now
         if remaining <= 0:
             raise AdmissionError("LLM admission timed out before dispatch; increase max_wait_seconds or reduce workload.")
-        return min(0.05, remaining)
+        with self._lock:
+            until_next = self._next - now
+        # Track short admission intervals rather than imposing a 20/s ceiling.
+        # Non-head waiters still yield when the schedule is already due.
+        return min(0.05, self._interval, until_next if until_next > 0 else self._interval, remaining)
 
     def acquire(self, *, blocking: bool = True) -> bool:
         if self._try(None):

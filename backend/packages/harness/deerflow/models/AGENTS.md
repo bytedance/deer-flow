@@ -1,5 +1,10 @@
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
+Request-admission waits follow the next scheduled admission and configured
+interval, capped at 50 ms; the cap must not become a minimum poll interval that
+limits high-RPM throughput. Local `AdmissionError` is structurally non-retriable
+in LLM error handling regardless of its message text.
+
 - `create_chat_model(name, thinking_enabled)` instantiates LLM from config via reflection
 - Supports `thinking_enabled` flag with per-model `when_thinking_enabled` overrides
 - Supports vLLM-style thinking toggles via `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking` for Qwen reasoning models, while normalizing legacy `thinking` configs for backward compatibility

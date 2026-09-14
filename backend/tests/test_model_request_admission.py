@@ -31,6 +31,17 @@ def test_pacing_has_no_catch_up_burst(clock):
     assert not limiter.acquire(blocking=False)
 
 
+def test_high_rpm_wait_tracks_next_admission(clock):
+    limiter = admission.RequestAdmission(RequestAdmissionConfig(requests_per_minute=6000))
+    limiter.acquire()
+    assert limiter._delay(300) == pytest.approx(0.01)
+    clock[0] = 0.009
+    assert limiter._delay(300) == pytest.approx(0.001)
+    clock[0] = 0.02
+    # A non-head waiter must yield, rather than spin on an overdue schedule.
+    assert 0 < limiter._delay(300) <= 0.01
+
+
 @pytest.mark.asyncio
 async def test_fifo_cancellation_and_queue_capacity(clock):
     limiter = admission.RequestAdmission(RequestAdmissionConfig(requests_per_minute=60, max_queue_size=2))
@@ -206,6 +217,12 @@ def test_admission_failures_are_not_retried_as_provider_errors(monkeypatch):
     monkeypatch.setattr(errors, "_PROCESS_LIMITER", None)
     monkeypatch.setattr(errors, "_CAP_RESOLVED", False)
     middleware = errors.LLMErrorHandlingMiddleware(app_config=AppConfig(sandbox=SandboxConfig(use="test")))
-    for message in ("LLM admission queue is full; reduce workload or increase queue capacity.", "LLM admission timed out before dispatch; increase max_wait_seconds or reduce workload."):
+    for message in (
+        "LLM admission queue is full; reduce workload or increase queue capacity.",
+        "LLM admission timed out before dispatch; increase max_wait_seconds or reduce workload.",
+        "rate limit exceeded locally",
+        "provider quota",
+        "server busy",
+    ):
         retry, _ = middleware._classify_error(admission.AdmissionError(message))
         assert retry is False
