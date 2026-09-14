@@ -582,6 +582,10 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **sandbox:** Stop BoxLite `grep` from ignoring the directory part of `glob`.
+  It compared only file names, so `src/*.js` matched every `.js` file in the
+  tree. The glob now applies to the path relative to the search root, the same
+  scope as `glob()` and the other providers.
 - **models:** Stop every Claude model after the first from losing its
   credential when the Claude Code OAuth token is handed off through
   `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`. Every `ClaudeChatModel` instance
