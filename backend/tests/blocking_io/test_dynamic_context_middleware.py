@@ -26,7 +26,6 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import PrivateAttr
 
-from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.agents.memory import MemoryManager, MemoryReadError, reset_memory_manager
 from deerflow.agents.memory.manager import _scan_backends
 from deerflow.agents.middlewares.dynamic_context_middleware import (
@@ -91,7 +90,7 @@ async def test_abefore_agent_does_not_block_event_loop() -> None:
 
     with (
         mock.patch.object(mw, "_build_full_reminder", slow_build_reminder),
-        mock.patch.object(prompt_module, "_get_memory_context", return_value=""),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.load_memory_context", return_value=""),
     ):
         agent = await asyncio.to_thread(
             lambda: create_agent(
@@ -118,7 +117,7 @@ async def test_abefore_agent_returns_same_result_as_before_agent() -> None:
     runtime = SimpleNamespace(context={})
 
     with (
-        mock.patch.object(prompt_module, "_get_memory_context", return_value=""),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.load_memory_context", return_value=""),
         mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
     ):
         mock_dt.now.return_value.strftime.return_value = "2026-06-05, Friday"

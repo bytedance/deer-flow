@@ -188,7 +188,9 @@ class MemoryConfigResponse(BaseModel):
 
     enabled: bool = Field(..., description="Whether the memory mechanism is enabled (call-site gate).")
     mode: Literal["middleware", "tool"] = Field(..., description="Memory operation mode: 'middleware' (passive per-turn LLM summarization) or 'tool' (model calls memory tools directly). Mechanism-level, applies to any backend.")
-    injection_enabled: bool = Field(..., description="Whether memory is injected into the system prompt (call-site gate).")
+    injection_enabled: bool = Field(..., description="Master gate for automatic memory injection.")
+    session_injection_enabled: bool = Field(..., description="Whether the baseline memory snapshot is injected at session start.")
+    turn_injection_enabled: bool = Field(..., description="Whether capable backends recall against each latest user query.")
     shutdown_flush_timeout_seconds: float = Field(..., description="Hard budget (s) to drain pending memory updates on Gateway graceful shutdown; must fit inside the pod's K8s terminationGracePeriodSeconds.")
     manager_class: str = Field(..., description="Active memory backend selector (backend name or dotted path).")
     backend_config: dict = Field(..., description="Backend-private config (self-interpreted by the backend).")
@@ -443,8 +445,8 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
 
     Returns:
         The current memory configuration. The response is backend-agnostic:
-        ``enabled`` / ``injection_enabled`` / ``mode`` are mechanism-level
-        fields that apply to any backend (``mode`` selects middleware vs tool
+        ``enabled`` / injection controls / ``mode`` are mechanism-level fields
+        that apply to any backend (``mode`` selects middleware vs tool
         operation), and ``backend_config`` is an opaque dict the active
         backend (``manager_class``) self-interprets. DeerMem's knobs
         (``storage_path``, ``max_facts``, ``debounce_seconds``, ...) live under
@@ -456,6 +458,8 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         {
             "enabled": true,
             "injection_enabled": true,
+            "session_injection_enabled": true,
+            "turn_injection_enabled": false,
             "shutdown_flush_timeout_seconds": 30.0,
             "mode": "middleware",
             "manager_class": "deermem",
@@ -475,6 +479,8 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         enabled=config.enabled,
         mode=config.mode,
         injection_enabled=config.injection_enabled,
+        session_injection_enabled=config.session_injection_enabled,
+        turn_injection_enabled=config.turn_injection_enabled,
         shutdown_flush_timeout_seconds=config.shutdown_flush_timeout_seconds,
         manager_class=config.manager_class,
         backend_config=config.backend_config,
@@ -503,6 +509,8 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
             enabled=config.enabled,
             mode=config.mode,
             injection_enabled=config.injection_enabled,
+            session_injection_enabled=config.session_injection_enabled,
+            turn_injection_enabled=config.turn_injection_enabled,
             shutdown_flush_timeout_seconds=config.shutdown_flush_timeout_seconds,
             manager_class=config.manager_class,
             backend_config=config.backend_config,

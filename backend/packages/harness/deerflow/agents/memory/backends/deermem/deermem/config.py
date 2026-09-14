@@ -1,10 +1,10 @@
 """DeerMem backend configuration (parsed from ``MemoryConfig.backend_config``).
 
 DeerMem-private config lives here, NOT on the shared ``MemoryConfig`` (which
-only carries host-shared fields: ``enabled`` / ``injection_enabled`` /
-``manager_class`` / ``backend_config``). The factory passes ``backend_config``
-(a dict) to ``DeerMem.__init__``, which parses it into a ``DeerMemConfig``.
-Defaults let DeerMem run with zero ``backend_config``.
+only carries host-shared enablement, mode, injection timing, shutdown budget,
+backend selection, and ``backend_config``). The factory passes
+``backend_config`` (a dict) to ``DeerMem.__init__``, which parses it into a
+``DeerMemConfig``. Defaults let DeerMem run with zero ``backend_config``.
 
 Field names mirror the pre-abstraction ``MemoryConfig`` private fields so the
 migration is a pure move (config.yaml ``memory.<field>`` ->

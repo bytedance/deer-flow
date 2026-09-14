@@ -3,7 +3,7 @@
 DeerMem-private fields live in ``backends/deermem/config.py`` (``DeerMemConfig``),
 reached via ``backend_config`` (a dict the factory passes to the backend's
 ``__init__``). This module holds ONLY the host-shared fields every backend /
-call site / factory reads: ``enabled`` / ``injection_enabled`` /
+call site / factory reads: ``enabled`` / injection controls /
 ``shutdown_flush_timeout_seconds`` / ``manager_class`` / ``backend_config``.
 Keeping the shared schema slim is what
 makes backends swappable and portable (DeerMem's knobs do not leak onto the
@@ -13,12 +13,23 @@ shared contract).
 import logging
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
 # Host-shared MemoryConfig fields (read by every backend / call site / factory).
-_SHARED_FIELDS = frozenset({"enabled", "mode", "injection_enabled", "shutdown_flush_timeout_seconds", "manager_class", "backend_config"})
+_SHARED_FIELDS = frozenset(
+    {
+        "enabled",
+        "mode",
+        "injection_enabled",
+        "session_injection_enabled",
+        "turn_injection_enabled",
+        "shutdown_flush_timeout_seconds",
+        "manager_class",
+        "backend_config",
+    }
+)
 
 # DeerMem-private fields that used to live at the top level of `memory:` in
 # config.yaml (pre-abstraction). On load they are auto-migrated into
@@ -67,7 +78,15 @@ class MemoryConfig(BaseModel):
     )
     injection_enabled: bool = Field(
         default=True,
-        description="Whether to inject memory into the system prompt (call-site gate).",
+        description="Master gate for all automatic memory injection.",
+    )
+    session_injection_enabled: bool = Field(
+        default=True,
+        description="Whether to persist the baseline memory snapshot at session start.",
+    )
+    turn_injection_enabled: bool = Field(
+        default=False,
+        description="Whether capable backends recall against the latest user query for each turn.",
     )
     shutdown_flush_timeout_seconds: float = Field(
         default=30.0,
@@ -109,6 +128,12 @@ class MemoryConfig(BaseModel):
             "they do not belong on the shared `MemoryConfig` schema."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_injection_controls(self) -> "MemoryConfig":
+        if self.injection_enabled and not (self.session_injection_enabled or self.turn_injection_enabled):
+            raise ValueError("memory.injection_enabled=true requires session_injection_enabled or turn_injection_enabled; set injection_enabled=false to disable all injection")
+        return self
 
 
 def should_use_memory_tools(config: MemoryConfig) -> bool:
@@ -163,7 +188,7 @@ def set_memory_config(config: MemoryConfig) -> None:
 def load_memory_config_from_dict(config_dict: dict) -> None:
     """Load memory configuration from a dictionary.
 
-    Host-shared fields (``enabled`` / ``mode`` / ``injection_enabled`` /
+    Host-shared fields (``enabled`` / ``mode`` / injection controls /
     ``manager_class`` / ``backend_config``) are read directly. DeerMem-private
     fields that used to live at the top level of ``memory:`` in config.yaml
     (pre-abstraction: ``storage_path``, ``max_facts``, ``debounce_seconds``,
