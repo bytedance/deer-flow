@@ -18,6 +18,10 @@ writes within a single process to prevent interleaved JSONL lines.
 Known trade-off: ``list_messages()`` must scan all run files for a
 thread since messages from multiple runs need unified seq ordering.
 ``list_events()`` reads only one file -- the fast path.
+
+Read records using physical newline boundaries, not ``str.splitlines()``:
+Unicode line separators are valid JSON string content and must stay inside
+their record. ``read_text`` normalizes CRLF before the LF split.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -49,6 +54,35 @@ class JsonlRunEventStore(RunEventStore):
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
         return self._write_locks.setdefault(thread_id, asyncio.Lock())
+
+    async def _run_mutation[T](self, thread_id: str, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
+        """Drain an admitted mutation before propagating caller cancellation.
+
+        Cancelling ``to_thread`` only stops its awaiter, not the filesystem
+        worker. Keep the thread lock through I/O, rollback and bookkeeping,
+        even if the caller is cancelled repeatedly. Queued callers can still
+        cancel before acquiring the lock, without starting a mutation.
+        """
+        async with self._get_write_lock(thread_id):
+            task = asyncio.create_task(operation(), name=f"jsonl-mutation:{thread_id}")
+            cancellation: asyncio.CancelledError | None = None
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError as exc:
+                    if cancellation is None:
+                        cancellation = exc
+                except Exception:
+                    # Retrieve the failure below, after preserving any earlier
+                    # cancellation. The operation has already finished rollback.
+                    break
+            if cancellation is not None:
+                try:
+                    task.result()
+                except Exception as exc:
+                    raise cancellation from exc
+                raise cancellation
+            return task.result()
 
     @staticmethod
     def _validate_id(value: str, label: str) -> str:
@@ -75,7 +109,7 @@ class JsonlRunEventStore(RunEventStore):
         thread_dir = self._thread_dir(thread_id)
         if thread_dir.exists():
             for f in thread_dir.glob("*.jsonl"):
-                for line in f.read_text(encoding="utf-8").strip().splitlines():
+                for line in f.read_text(encoding="utf-8").strip().split("\n"):
                     try:
                         record = json.loads(line)
                         max_seq = max(max_seq, record.get("seq", 0))
@@ -103,7 +137,7 @@ class JsonlRunEventStore(RunEventStore):
         if not thread_dir.exists():
             return events
         for f in sorted(thread_dir.glob("*.jsonl")):
-            for line in f.read_text(encoding="utf-8").strip().splitlines():
+            for line in f.read_text(encoding="utf-8").strip().split("\n"):
                 if not line:
                     continue
                 try:
@@ -119,7 +153,7 @@ class JsonlRunEventStore(RunEventStore):
         if not path.exists():
             return []
         events = []
-        for line in path.read_text(encoding="utf-8").strip().splitlines():
+        for line in path.read_text(encoding="utf-8").strip().split("\n"):
             if not line:
                 continue
             try:
@@ -141,7 +175,7 @@ class JsonlRunEventStore(RunEventStore):
             path.unlink()
 
     async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):
-        async with self._get_write_lock(thread_id):
+        async def mutate():
             await self._ensure_seq_loaded(thread_id)
             seq = self._next_seq(thread_id)
             record = {
@@ -157,6 +191,8 @@ class JsonlRunEventStore(RunEventStore):
             await asyncio.to_thread(self._write_record, record)
             return record
 
+        return await self._run_mutation(thread_id, mutate)
+
     async def put_batch(self, events):
         """Persist a batch of events under a per-thread write lock.
 
@@ -167,8 +203,9 @@ class JsonlRunEventStore(RunEventStore):
         so callers (e.g. worker.py's flush-retry path) may safely re-buffer
         that thread's batch. When a batch contains multiple thread IDs, thread
         groups are processed sequentially, so a later failure does not roll
-        back earlier thread groups. This rollback does not make a multi-file
-        batch crash-atomic.
+        back earlier thread groups. Cancellation drains the current thread group
+        before propagating, without starting subsequent groups. This rollback
+        does not make a multi-file batch crash-atomic.
         """
         if not events:
             return []
@@ -195,7 +232,7 @@ class JsonlRunEventStore(RunEventStore):
         metadata=None,
         created_at=None,
     ):
-        async with self._get_write_lock(thread_id):
+        async def mutate():
             existing = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
             for event in existing:
                 if event.get("event_type") == event_type:
@@ -214,8 +251,10 @@ class JsonlRunEventStore(RunEventStore):
             await asyncio.to_thread(self._write_record, record)
             return record, True
 
+        return await self._run_mutation(thread_id, mutate)
+
     async def _write_batch_async(self, thread_id: str, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        async with self._get_write_lock(thread_id):
+        async def mutate():
             await self._ensure_seq_loaded(thread_id)
             records: list[dict[str, Any]] = []
             for ev in batch:
@@ -237,6 +276,8 @@ class JsonlRunEventStore(RunEventStore):
             run_batches = [(self._run_file(thread_id, run_id), run_records) for run_id, run_records in records_by_run.items()]
             await asyncio.to_thread(self._append_record_groups, run_batches)
             return records
+
+        return await self._run_mutation(thread_id, mutate)
 
     def _append_records(self, path: Path, records: list[dict[str, Any]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -372,21 +413,25 @@ class JsonlRunEventStore(RunEventStore):
         return found
 
     async def delete_by_thread(self, thread_id):
-        async with self._get_write_lock(thread_id):
+        async def mutate():
             all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
             count = len(all_events)
             await asyncio.to_thread(self._delete_thread_files, thread_id)
             self._seq_counters.pop(thread_id, None)
-            # Pop the lock inside the held scope to minimise the window where a new caller
+            # Pop the lock inside the held mutation to minimise the window where a new caller
             # could obtain a fresh lock while a waiting coroutine still holds the old one.
             # Note: coroutines that already acquired a reference to this lock before the
             # delete will still proceed after we release — this is an accepted narrow race.
             self._write_locks.pop(thread_id, None)
             return count
 
+        return await self._run_mutation(thread_id, mutate)
+
     async def delete_by_run(self, thread_id, run_id):
-        async with self._get_write_lock(thread_id):
+        async def mutate():
             events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
             count = len(events)
             await asyncio.to_thread(self._delete_run_file, thread_id, run_id)
             return count
+
+        return await self._run_mutation(thread_id, mutate)
