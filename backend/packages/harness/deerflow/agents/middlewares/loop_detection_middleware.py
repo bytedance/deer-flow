@@ -879,14 +879,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             queued = self._pending_warnings[pending_key]
             queued[:0] = [warning for warning in warnings if warning not in queued]
-            if len(queued) > _MAX_PENDING_WARNINGS_PER_RUN:
-                del queued[: len(queued) - _MAX_PENDING_WARNINGS_PER_RUN]
+            # Keep the restored warnings at the front; trim what came after them.
+            del queued[_MAX_PENDING_WARNINGS_PER_RUN:]
             self._touch_pending_warning_key_locked(pending_key)
             self._prune_pending_warning_state_locked(protected_key=pending_key)
-
-    def _augment_request(self, request: ModelRequest) -> ModelRequest:
-        """Append queued loop warnings (if any) to the outgoing message list."""
-        return self._inject_warnings(request, self._drain_pending_warnings(request.runtime))
 
     def _inject_warnings(self, request: ModelRequest, warnings: list[str]) -> ModelRequest:
         """Append *warnings* to the outgoing message list.
