@@ -1479,9 +1479,13 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 
 Gateway API callers can opt into `read_conversation` and submit a
 `conversation_references` list with a run. The lead agent can then read bounded
-pages of visible text from those owned conversations. References expire with the
-run; text in old messages does not grant access. This API-only feature adds no
-frontend selector or automatic history search. See [configuration](backend/docs/CONFIGURATION.md#reading-referenced-conversations)
+pages of the current visible text of those owned conversations. Read permission
+expires with the run, and text in old messages does not grant access. Text the
+agent has already read stays in the destination conversation after access
+expires or the source is deleted. When a message is truncated, the agent is told
+to ask for the missing part before claiming it has covered every requirement.
+This API-only feature adds no frontend selector or automatic history search. See
+[configuration](backend/docs/CONFIGURATION.md#reading-referenced-conversations)
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 
 ### Long-Term Memory
@@ -1641,6 +1645,12 @@ Current MVP capabilities:
 - Pause, resume, trigger, inspect history, and delete tasks
 - Execute scheduled work through the normal DeerFlow run lifecycle
 - Browse execution history in pages of 50; older pages pause automatic refresh, with an explicit return to the latest runs. Counts appear only after a successful read; loading and failed reads are not reported as zero runs.
+
+**Filter execution history through the API**
+
+To inspect failures without downloading every successful occurrence, authenticated clients with `threads:read` can request `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0` for an owned task. The optional `status` accepts `queued`, `launching`, `running`, `success`, `failed`, `skipped`, or `interrupted`; these are occurrence statuses, so task statuses such as `completed` are invalid (422).
+
+Filtering happens before pagination. `limit` (1–200, default 50) and `offset` (nonnegative, default 0) apply to matching records, ordered by creation time then ID, both descending. Omitting `status` preserves the existing mixed-history array response; no matches return `[]`. The API does not change task execution, and the workspace history UI remains unfiltered.
 
 Current MVP limits:
 

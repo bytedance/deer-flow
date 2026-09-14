@@ -402,6 +402,10 @@
   范围），但只有达到 `max_results` 时才报告 `truncated`。若被截取的行全部被过滤掉，截断位置之后仍有
   真实匹配的搜索会返回空结果且显示为完整。现在搜索会多输出一行以判断是否被截断，`glob` 和 `grep`
   工具对被截断的空结果会说明结果不完整，而不是显示 "No matches found"。([#5427])
+- **沙箱：** 当输出用 `:` 连接主机路径（如 `$PATH`、`$PYTHONPATH`）时，主机路径不再暴露给模型。
+  匹配的路径会一直延伸到列表末尾，导致同一根目录下之后的条目都未被遮蔽；多余的遮蔽轮次每次
+  恰好补回一个条目，因此短列表掩盖了这一泄露。现在遮蔽时匹配的路径在 `:` 处结束。
+  挂载目录内指向所有挂载之外的符号链接，在命令输出和 `glob` 结果中改为显示其挂载路径，而不是目标的主机路径。([#5418])
 - **沙箱：** BoxLite `grep` 不再忽略 `glob` 的目录部分。此前只比较文件名，`src/*.js`
   会匹配整棵目录树中的所有 `.js` 文件。现在 glob 作用于相对搜索根目录的路径，与 `glob()`
   及其他 provider 的范围一致。([#5419])
@@ -2166,5 +2170,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5401]: https://github.com/bytedance/deer-flow/pull/5401
 [#5403]: https://github.com/bytedance/deer-flow/pull/5403
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
+[#5418]: https://github.com/bytedance/deer-flow/pull/5418
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
 [#5427]: https://github.com/bytedance/deer-flow/pull/5427

@@ -1,3 +1,4 @@
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from deerflow.sandbox.exceptions import SandboxError
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
@@ -207,6 +209,59 @@ def test_mask_local_paths_still_matches_base_before_non_slash_boundaries(boundar
 
         assert masked == f"root is {expected}"
         assert "/home/user/deer-flow/skills" not in masked
+
+
+# Every redundant masking pass -- separator variants, the realpath spelling, the
+# ``/mnt/user-data`` root mapping, ``LocalSandbox``'s own reverse resolution --
+# happened to recover one swallowed entry, which hid the leak for short lists.
+# The lists below outnumber those passes on every platform.
+_PATH_LIST_ENTRIES = 8
+
+
+def test_mask_local_paths_masks_every_entry_of_a_colon_joined_path_list() -> None:
+    """Both source kinds: skills use the compiled regex, user-data the scanner."""
+    skills = "/home/user/deer-flow/skills"
+    workspace = _THREAD_DATA["workspace_path"]
+    hosts = [f"{skills}/s{i}/bin" for i in range(_PATH_LIST_ENTRIES)] + [f"{workspace}/w{i}/bin" for i in range(_PATH_LIST_ENTRIES)]
+    virtuals = [f"/mnt/skills/s{i}/bin" for i in range(_PATH_LIST_ENTRIES)] + [f"/mnt/user-data/workspace/w{i}/bin" for i in range(_PATH_LIST_ENTRIES)]
+
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value=skills),
+    ):
+        masked = mask_local_paths_in_output("PATH=" + ":".join([*hosts, "/usr/bin"]), _THREAD_DATA)
+
+    assert masked == "PATH=" + ":".join([*virtuals, "/usr/bin"])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell and ':'-separated PATH")
+def test_local_bash_tool_output_masks_every_entry_of_a_colon_joined_path_list(tmp_path: Path, monkeypatch) -> None:
+    """End to end through ``bash_tool``: output passes ``LocalSandbox``'s reverse
+    resolution and then ``mask_local_paths_in_output`` before reaching the model."""
+    thread_root = tmp_path / "threads" / "t1" / "user-data"
+    thread_data = {f"{name}_path": str(thread_root / name) for name in ("workspace", "uploads", "outputs")}
+    for path in thread_data.values():
+        Path(path).mkdir(parents=True)
+    workspace = str(Path(thread_data["workspace_path"]).resolve())
+    sandbox = LocalSandbox(
+        id="local",
+        path_mappings=[PathMapping(container_path=f"{VIRTUAL_PATH_PREFIX}/workspace", local_path=workspace)],
+    )
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": thread_data},
+        context={"thread_id": "t1"},
+        config={},
+    )
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+
+    # The shell expands ``$PWD`` (the host workspace), so the host paths exist only
+    # in the output -- the ``export PATH="$PWD/.venv/bin:$PATH"`` shape.
+    command = "echo " + ":".join(f"$PWD/e{i}/bin" for i in range(_PATH_LIST_ENTRIES))
+    result = bash_tool.func(runtime=runtime, description="print PATH", command=command)
+
+    assert str(tmp_path) not in result
+    assert result.strip() == ":".join(f"{VIRTUAL_PATH_PREFIX}/workspace/e{i}/bin" for i in range(_PATH_LIST_ENTRIES))
 
 
 @pytest.mark.parametrize("prefix", ["", "cwd: ", "see "])
