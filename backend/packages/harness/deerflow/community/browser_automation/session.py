@@ -21,6 +21,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Coroutine
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import urlparse
@@ -172,6 +173,14 @@ def _is_playwright_timeout_error(exc: Exception) -> bool:
     return exc.__class__.__name__ == "TimeoutError" and exc.__class__.__module__.startswith("playwright.")
 
 
+def _consume_future_exception(future: asyncio.Future[Any]) -> None:
+    """Retrieve detached close errors; the concurrent-future callback logs them."""
+    if future.cancelled():
+        return
+    with contextlib.suppress(Exception):
+        future.exception()
+
+
 def redact_browser_url(url: str) -> str:
     """Drop query/fragment so a blocked-URL log line can't leak tokens/PII."""
     try:
@@ -198,7 +207,7 @@ class _PlaywrightLoopThread:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return await asyncio.wrap_future(future)
 
-    def submit(self, coro: Coroutine[Any, Any, Any]) -> None:
+    def submit(self, coro: Coroutine[Any, Any, Any]) -> Future[Any]:
         """Schedule *coro* on the private loop without blocking the caller."""
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
 
@@ -209,6 +218,7 @@ class _PlaywrightLoopThread:
                 logger.debug("browser background task failed: %s", exc)
 
         future.add_done_callback(_log_failure)
+        return future
 
     def run_sync(self, coro: Coroutine[Any, Any, T], timeout: float | None = None) -> T:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -849,8 +859,13 @@ class BrowserSession:
         with self._activity():
             await self._loop.run(self._dispatch_input(event))
 
+    def _submit_close(self) -> Future[Any]:
+        return self._loop.submit(self._close())
+
     async def close(self) -> None:
-        await self._loop.run(self._close())
+        close_future = asyncio.wrap_future(self._submit_close())
+        close_future.add_done_callback(_consume_future_exception)
+        await asyncio.shield(close_future)
 
 
 class BrowserSessionManager:
@@ -1019,8 +1034,11 @@ class BrowserSessionManager:
             sessions = list(self._sessions.values())
             self._sessions.clear()
             self._last_used.clear()
-        for session in sessions:
-            await session.close()
+        close_futures = [asyncio.wrap_future(session._submit_close()) for session in sessions]
+        for close_future in close_futures:
+            close_future.add_done_callback(_consume_future_exception)
+        if close_futures:
+            await asyncio.shield(asyncio.gather(*close_futures))
         return len(sessions)
 
 
