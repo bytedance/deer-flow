@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
+from support.symlinks import symlink_or_skip
 
 from app.channels.base import Channel
 from app.channels.message_bus import InboundMessage, MessageBus, OutboundMessage, ResolvedAttachment
@@ -237,10 +237,7 @@ class TestResolveAttachments:
         uploads_dir.mkdir(parents=True)
         victim = uploads_dir / "secret.pdf"
         victim.write_bytes(b"%PDF-1.4 secret")
-        try:
-            (outputs_dir / "report.pdf").symlink_to(victim)
-        except OSError:
-            pytest.skip("symlinks are unavailable on this platform")
+        symlink_or_skip(outputs_dir / "report.pdf", victim)
 
         with patch("app.gateway.path_utils.get_paths", return_value=paths):
             result = _resolve_attachments("t1", ["/mnt/user-data/outputs/report.pdf"], user_id="owner-1")
@@ -316,7 +313,7 @@ class TestInboundFileIngestion:
         uploads_dir = tmp_path / "uploads"
         uploads_dir.mkdir()
         outside_file = tmp_path / "outside-created.txt"
-        (uploads_dir / "victim.txt").symlink_to(outside_file)
+        symlink_or_skip(uploads_dir / "victim.txt", outside_file)
 
         msg = InboundMessage(
             channel_name="test-channel",
@@ -345,7 +342,7 @@ class TestInboundFileIngestion:
         uploads_dir = tmp_path / "uploads"
         uploads_dir.mkdir()
         missing_target = tmp_path / "missing-created.txt"
-        (uploads_dir / "victim.txt").symlink_to(missing_target)
+        symlink_or_skip(uploads_dir / "victim.txt", missing_target)
 
         msg = InboundMessage(
             channel_name="test-channel",

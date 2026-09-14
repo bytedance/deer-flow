@@ -582,6 +582,38 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **sandbox:** Stop BoxLite `grep` from ignoring the directory part of `glob`.
+  It compared only file names, so `src/*.js` matched every `.js` file in the
+  tree. The glob now applies to the path relative to the search root, the same
+  scope as `glob()` and the other providers. ([#5419])
+- **models:** Stop every Claude model after the first from losing its
+  credential when the Claude Code OAuth token is handed off through
+  `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`. Every `ClaudeChatModel` instance
+  loaded credentials again, but a descriptor can be drained only once, so the
+  title, summarization, and subagent models — and every later run — had no
+  credential and failed with `TypeError: Could not resolve authentication
+  method`. The token is now read once per process and reused. ([#5411])
+- **models:** Stop the lead agent from failing to build whenever a model with
+  `supports_reasoning_effort: true` also gets a `reasoning_effort` from its
+  profile — at the top level, in `when_thinking_enabled` or
+  `when_thinking_disabled`, or from the `extra_body.thinking` disable path. The
+  regular lead-agent build forwards the requested effort even when unset, so
+  the key reached the provider constructor twice and raised `TypeError: got
+  multiple values for keyword argument 'reasoning_effort'`. The requested value now
+  layers like per-agent `model_settings`: it replaces a top-level profile
+  value, an unset request keeps that value, and the thinking-mode settings still
+  decide the final one. Codex keeps its own level check. ([#5403])
+- **runtime:** Stop a keyed run retry from failing with 500 on the SQL run
+  store. HTTP admissions do not pass a `user_id`; the SQL store stamps the
+  request user on the row, but the process-local run record kept `None`. A
+  retry with the same `Idempotency-Key` that reached another Gateway worker, or
+  the same worker after the finished run was cleaned up, compared the two
+  owners, took its own run for another user's, and raised. The same mismatch
+  dropped HTTP runs from owner-scoped history reads and skipped the MCP
+  `background_tasks` projection for them, so `values` events for these runs now
+  include `background_tasks`. `RunManager` now resolves an omitted owner from
+  the request user the way the SQL store does, so every store records the same
+  owner. ([#5401])
 - **runtime:** Stop a cross-worker idempotent run reuse from permanently
   blocking the thread on the reusing worker. The reuse registered the hydrated
   store row as a local run record, but only the owning worker finalizes and
@@ -1456,6 +1488,20 @@ This section accumulates work toward the **2.1.0** milestone
   and the conversation block in the memory-update prompt - and neutralize
   prompt-injection tags in `web_capture` tool results. ([#4028], [#4119], [#4137],
   [#4157], [#4162], [#4099], [#4060], [#4097], [#4128])
+- **prompt-injection:** Close two input-sanitization bypasses. `hide_from_ui` and
+  a human `name="summary"` tell `is_genuine_user_message` that the framework
+  authored a message, which skips sanitization entirely. Untrusted run input and
+  thread-state writes carrying either marker are now marked server-side and
+  sanitized regardless, so a caller can no longer land a raw `<system-reminder>`
+  outside the user-input boundary markers that the lead-agent prompt declares
+  trusted framework data. The markers themselves are preserved, so messages that
+  use `hide_from_ui` only to stay out of the transcript — quoted conversation
+  context, sidecar context, the agent save command, HumanInputCard replies — keep
+  doing that, and trusted internal launchers are unaffected. Sanitization also
+  covers every genuine user message instead of only the newest: the
+  transformation is request-scoped, so a last-turn-only scan neutralized a
+  payload for exactly one model call and then replayed it verbatim from the next
+  turn on. ([#5375])
 - **secrets:** Scrub inherited secret environment variables (`MYSQL_PWD`,
   `REDISCLI_AUTH`, abbreviated `*_PASS`, and Postgres `PGPASSFILE`) from the
   skill environment; request-scoped secrets are bound for both slash-activated
@@ -2772,4 +2818,9 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
 [#5353]: https://github.com/bytedance/deer-flow/pull/5353
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357
+[#5375]: https://github.com/bytedance/deer-flow/pull/5375
 [#5393]: https://github.com/bytedance/deer-flow/pull/5393
+[#5401]: https://github.com/bytedance/deer-flow/pull/5401
+[#5403]: https://github.com/bytedance/deer-flow/pull/5403
+[#5411]: https://github.com/bytedance/deer-flow/pull/5411
+[#5419]: https://github.com/bytedance/deer-flow/pull/5419

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from pydantic_core import PydanticCustomError
@@ -22,6 +22,9 @@ class RunCreateRequest(BaseModel):
     metadata: dict[str, Any] | None = Field(default=None, description="Run metadata")
     config: dict[str, Any] | None = Field(default=None, description="RunnableConfig overrides")
     context: dict[str, Any] | None = Field(default=None, description="DeerFlow context overrides (model_name, thinking_enabled, etc.)")
+    conversation_references: list[Annotated[str, Field(strict=True, min_length=1, max_length=2048)]] = Field(
+        default_factory=list, max_length=3, description="Explicit thread IDs or same-origin chat URLs readable only during this run (opt-in read_conversation tool)"
+    )
     webhook: None = Field(default=None, description="Compatibility placeholder; completion callbacks are not supported")
     checkpoint_id: str | None = Field(default=None, description="Resume from checkpoint")
     checkpoint: dict[str, Any] | None = Field(default=None, description="Full checkpoint object")
