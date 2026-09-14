@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import re
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from deerflow.skills.frontmatter import ALLOWED_FRONTMATTER_PROPERTIES, split_skill_markdown
-from deerflow.skills.package_paths import is_eval_fixture_path, is_eval_fixture_skill_md
+from deerflow.skills.package_paths import is_eval_fixture_skill_md
 from deerflow.skills.parser import parse_allowed_tools, parse_required_secrets
 from deerflow.skills.review.digest import compute_package_digest
 from deerflow.skills.review.eval_schema import analyze_eval_manifests
@@ -303,16 +304,23 @@ def _add_agentskills_findings(metadata: dict[str, Any], declared_name: str | Non
 
 
 def _scan_with_skillscan(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-    files = [entry for entry in snapshot.get("files", []) if entry.get("kind") == "text" and not is_eval_fixture_path(str(entry.get("path") or ""))]
+    # Eval fixture SKILL.md files are deliberately unsafe review samples. Every
+    # other file, binaries and fixture scripts included, is scanned byte for byte.
+    files = [entry for entry in snapshot.get("files", []) if entry.get("kind") != "symlink" and not is_eval_fixture_skill_md(str(entry.get("path") or ""))]
     if not files:
         return []
     with tempfile.TemporaryDirectory(prefix="skill-review-") as tmp:
         root = Path(tmp)
         for entry in files:
-            rel = str(entry["path"])
-            target = root / rel
+            data = _snapshot_entry_bytes(entry, truncated=bool(snapshot.get("truncated")))
+            if data is None:
+                continue
+            target = root / str(entry["path"])
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(str(entry.get("content") or ""), encoding="utf-8")
+            # Exclusive create: a duplicate archive member or a case-folded name
+            # would otherwise overwrite an earlier file and hide it from the scan.
+            with target.open("xb") as handle:
+                handle.write(data)
         result = scan_skill_dir(root)
     findings: list[dict[str, Any]] = []
     for finding in result.get("findings", []):
@@ -343,6 +351,20 @@ def _scan_with_skillscan(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             )
         )
     return findings
+
+
+def _snapshot_entry_bytes(entry: dict[str, Any], *, truncated: bool) -> bytes | None:
+    if entry.get("kind") == "text":
+        content = entry.get("content")
+        data = content.encode("utf-8") if isinstance(content, str) else None
+    else:
+        encoded = entry.get("content_base64")
+        data = base64.b64decode(encoded) if isinstance(encoded, str) else None
+    # Oversized entries carry no bytes, and truncation already marks the review
+    # incomplete. Any other bytes-less entry would silently skip the scan.
+    if data is not None or truncated:
+        return data
+    raise ValueError(f"Snapshot entry has no content to scan: {entry.get('path')}")
 
 
 def _valid_skill_name(name: str) -> bool:
