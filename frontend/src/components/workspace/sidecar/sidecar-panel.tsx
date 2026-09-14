@@ -82,16 +82,13 @@ import { cn } from "@/lib/utils";
 
 import {
   ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
   ModelSelectorName,
   ModelSelectorTrigger,
 } from "../../ai-elements/model-selector";
 import { MessageList, MESSAGE_LIST_DEFAULT_PADDING_BOTTOM } from "../messages";
 import { useThread as useParentThread } from "../messages/context";
 import { ModeHoverGuide } from "../mode-hover-guide";
+import { ModelPickerContent } from "../model-picker-content";
 import { Tooltip } from "../tooltip";
 
 import { type SidecarReference, useSidecar } from "./context";
@@ -646,7 +643,6 @@ export function SidecarPanel({ className }: { className?: string }) {
               <PromptInputTools className="min-w-0 justify-end">
                 <SidecarModelSelector
                   className="max-w-40 min-w-0 sm:max-w-56 @max-[240px]:hidden"
-                  context={sidecar.context}
                   models={models}
                   open={modelDialogOpen}
                   selectedModel={selectedModel}
@@ -918,7 +914,6 @@ function SidecarModeMenu({
 
 function SidecarModelSelector({
   className,
-  context,
   models,
   open,
   selectedModel,
@@ -926,15 +921,12 @@ function SidecarModelSelector({
   onOpenChange,
 }: {
   className?: string;
-  context: ThreadStreamOptions["context"];
   models: Model[];
   open: boolean;
   selectedModel?: Model;
   onModelSelect: (modelName: string) => void;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { t } = useI18n();
-
   if (!selectedModel) {
     return null;
   }
@@ -950,30 +942,12 @@ function SidecarModelSelector({
           </div>
         </PromptInputButton>
       </ModelSelectorTrigger>
-      <ModelSelectorContent>
-        <ModelSelectorInput placeholder={t.inputBox.searchModels} />
-        <ModelSelectorList>
-          {models.map((model) => (
-            <ModelSelectorItem
-              key={model.name}
-              value={model.name}
-              onSelect={() => onModelSelect(model.name)}
-            >
-              <div className="flex min-w-0 flex-1 flex-col">
-                <ModelSelectorName>{model.display_name}</ModelSelectorName>
-                <span className="text-muted-foreground truncate text-[10px]">
-                  {model.model}
-                </span>
-              </div>
-              {model.name === context.model_name ? (
-                <CheckIcon className="ml-auto size-4" />
-              ) : (
-                <div className="ml-auto size-4" />
-              )}
-            </ModelSelectorItem>
-          ))}
-        </ModelSelectorList>
-      </ModelSelectorContent>
+      <ModelPickerContent
+        open={open}
+        models={models}
+        selectedModelName={selectedModel.name}
+        onModelSelect={onModelSelect}
+      />
     </ModelSelector>
   );
 }

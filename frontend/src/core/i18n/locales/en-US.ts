@@ -163,6 +163,21 @@ export const enUS: Translations = {
     downloadFailed: "Failed to download artifact archive.",
   },
 
+  modelPicker: {
+    title: "Choose a model",
+    description: "Search for and select a model.",
+    manageFavorites: "Manage favorites",
+    done: "Done",
+    favorites: "Favorites",
+    otherModels: "Other models",
+    search: "Search models",
+    noResults: "No matching models",
+    noModels: "No models available",
+    favoriteModel: (displayName, name) => `Favorite ${displayName} (${name})`,
+    localOnly: "Favorites are stored in this browser.",
+    sessionOnly: "Favorites are stored for this session only.",
+  },
+
   // Citations
   citations: {
     sourcesSummary: (count) =>

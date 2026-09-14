@@ -30,3 +30,50 @@ describe("selected model name truncation", () => {
     expect(classes).not.toContain("items-start");
   });
 });
+
+describe("model picker integration", () => {
+  it.each([
+    {
+      relativePath: "src/components/workspace/input-box.tsx",
+      open: "modelDialogOpen",
+      selectedModelName: "selectedModel?.name",
+      onModelSelect: "handleModelSelect",
+    },
+    {
+      relativePath: "src/components/workspace/sidecar/sidecar-panel.tsx",
+      open: "open",
+      selectedModelName: "selectedModel.name",
+      onModelSelect: "onModelSelect",
+    },
+  ])(
+    "uses ModelPickerContent inside the existing selector in $relativePath",
+    ({ relativePath, open, selectedModelName, onModelSelect }) => {
+      const contents = source(relativePath);
+      const picker = /<ModelPickerContent[\s\S]*?\/>/.exec(contents)?.[0];
+
+      expect(contents).toMatch(/<ModelSelector\s/);
+      expect(contents).toContain("<ModelSelectorTrigger asChild>");
+      expect(picker).toBeDefined();
+      expect(picker).toMatch(
+        new RegExp(`open=\\{${open.replace("?", "\\?")}\\}`),
+      );
+      expect(picker).toMatch(/models=\{models\}/);
+      expect(picker).toMatch(
+        new RegExp(
+          `selectedModelName=\\{${selectedModelName.replace("?", "\\?")}\\}`,
+        ),
+      );
+      expect(picker).toMatch(
+        new RegExp(`onModelSelect=\\{${onModelSelect}\\}`),
+      );
+      for (const legacyComponent of [
+        "ModelSelectorContent",
+        "ModelSelectorInput",
+        "ModelSelectorList",
+        "ModelSelectorItem",
+      ]) {
+        expect(contents).not.toContain(`<${legacyComponent}`);
+      }
+    },
+  );
+});
