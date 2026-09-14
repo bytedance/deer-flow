@@ -542,6 +542,41 @@ def test_queue_refuses_older_generation_overwrite_of_newer_fenced_work() -> None
     )
 
 
+def test_queue_refuses_older_sequence_overwrite_of_newer_same_generation_snapshot() -> None:
+    """Same clear-generation merge must keep the newer call-arrival snapshot.
+
+    Sequence is stamped before the queue lock. A caller that peeked first
+    (lower sequence) but acquired the lock second used to replace the already
+    queued, longer snapshot. Watermark sequence guards cannot recover that
+    loss: the newer feed never ran.
+    """
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (0, 0)
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["A", "B"], agent_name="researcher", user_id="alice")
+        with queue._lock:
+            kept = queue._enqueue_locked(
+                thread_id="thread-1",
+                messages=["A"],
+                agent_name="researcher",
+                user_id="alice",
+                trace_id=None,
+                signals=frozenset({"preference"}),
+                bypass_watermark=False,
+                captured_clear_generation=(0, 0),
+                call_sequence=0,
+            )
+
+    assert kept.messages == ["A", "B"]
+    assert kept.sequence == 1
+    assert kept.clear_generation == (0, 0)
+    assert kept.signals == frozenset({"preference"})
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["A", "B"]
+    mock_updater.mark_feed_consumed.assert_not_called()
+
+
 def test_queue_keeps_newer_fence_when_older_incoming_consume_fails() -> None:
     mock_updater = MagicMock()
     mock_updater.peek_clear_generation.side_effect = [(1, 0), (0, 0)]

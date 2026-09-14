@@ -94,7 +94,10 @@ class ConversationContext:
     # refuses to move its internal watermark backward: a call whose sequence
     # is lower than the watermark's already-stored sequence is a delayed
     # completion of older work and must not undo a more-advanced watermark
-    # another, later call already set. ``0`` is only the field default for
+    # another, later call already set. Same-key queue merges use the same
+    # ordering: an incoming snapshot whose sequence is lower than the queued
+    # item is refused so a delayed, possibly shorter feed cannot replace a
+    # newer one. ``0`` is only the field default for
     # contexts a test builds directly (bypassing ``add``/``add_nowait``); such
     # contexts still order relative to each other and to real queue-assigned
     # sequences (which start at ``1``), never regressing the latter.
@@ -299,6 +302,12 @@ class MemoryUpdateQueue:
             self._consume_pre_clear_feed(incoming)
             # Keep the queued snapshot and fence, but do not drop signals from
             # the refused add: a signal seen on any update for this key stays.
+            existing.signals = merged_signals
+            return existing
+        elif call_sequence < existing.sequence:
+            # Same-or-newer generation, but this call started earlier than the
+            # snapshot already queued. Keep the later arrival: replacing it
+            # would drop turns the older, possibly shorter feed never carried.
             existing.signals = merged_signals
             return existing
         elif existing.bypass_watermark or existing.clear_generation is None:

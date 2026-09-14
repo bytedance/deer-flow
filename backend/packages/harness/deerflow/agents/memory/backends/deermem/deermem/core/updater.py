@@ -857,6 +857,11 @@ def _message_identity(msg: Any) -> tuple[str, ...] | None:
     return ("content", msg_type, text)
 
 
+def _message_identities(messages: list[Any]) -> frozenset[tuple[str, ...]]:
+    """Return every resolvable identity in ``messages`` (skips empty items)."""
+    return frozenset(identity for msg in messages if (identity := _message_identity(msg)) is not None)
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -908,6 +913,21 @@ class MemoryUpdater:
         # dependency on the queue and cannot deadlock against it.
         self._watermark_lock = threading.Lock()
         self._watermarks: OrderedDict[tuple[str | None, str | None, str | None], tuple[int | None, tuple[str, ...] | None]] = OrderedDict()
+        # Identities of every message successfully extracted for a key,
+        # including emergency (bypass) flushes that must not advance
+        # ``_watermarks``. The watermark still stores only the tail (for
+        # slice-after-last); this set is what ``promote_clear_exclusions``
+        # copies so a later prefix-only emergency flush cannot restore A
+        # after A+B was already extracted and then cleared, and so a later
+        # clear can see emergency-only threads that never wrote a watermark.
+        self._extracted_coverages: OrderedDict[tuple[str | None, str | None, str | None], frozenset[tuple[str, ...]]] = OrderedDict()
+        # Clear-exclusion coverage: every message identity consumed because a
+        # clear landed. Distinct from ``_watermarks`` (extraction progress).
+        # Emergency (bypass) flushes skip the extraction watermark so they can
+        # still capture a subset about to be summarized, but they must not
+        # re-feed turns the user already cleared. Stored as a set and merged
+        # by union so a later, shorter emergency subset cannot shrink it.
+        self._clear_exclusions: OrderedDict[tuple[str | None, str | None, str | None], tuple[int | None, frozenset[tuple[str, ...]]]] = OrderedDict()
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
@@ -953,12 +973,16 @@ class MemoryUpdater:
         than what is already recorded for this key is refused so a delayed
         caller cannot move the watermark backward past a later snapshot
         another caller already consumed or persisted.
+
+        Also records the clear-exclusion coverage so a later emergency flush
+        cannot restore the same pre-clear turns.
         """
         self._mark_feed_consumed(
             (thread_id, user_id, agent_name),
             messages,
             bypass_watermark=bypass_watermark,
             sequence=sequence,
+            exclude_cleared=True,
         )
 
     def reload_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
@@ -1736,6 +1760,46 @@ class MemoryUpdater:
             self._watermarks.move_to_end(key)
             return self._watermarks[key][1]
 
+    def promote_clear_exclusions(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+        all_agents: bool = False,
+    ) -> None:
+        """Union extracted coverage for a cleared scope into the exclusion set.
+
+        Pending-queue consume already records exclusion coverage for snapshots
+        it drops. Threads whose extraction had already finished have only
+        watermark/coverage state; this copies that coverage so emergency
+        flushes cannot restore those turns after a clear. The copy is a
+        union: a later, shorter snapshot must not shrink an already-wider set.
+
+        The scan includes emergency-only coverage: a successful ``add_nowait``
+        persist publishes coverage without writing a watermark, and those
+        keys must still become exclusions. This scan only sees coverage that
+        is already published. A persist that finishes, then observes a newer
+        clear, must register exclusion on its own completion path -- it
+        cannot rely on this method having run once at clear time.
+        """
+        with self._watermark_lock:
+            keys = set(self._watermarks) | set(self._extracted_coverages)
+            for key in keys:
+                _thread_id, key_user, key_agent = key
+                if key_user != user_id:
+                    continue
+                if not all_agents and key_agent != agent_name:
+                    continue
+                coverage = self._extracted_coverages.get(key)
+                stored = self._watermarks.get(key)
+                sequence = stored[0] if stored is not None else None
+                identity = stored[1] if stored is not None else None
+                if not coverage:
+                    if identity is None:
+                        continue
+                    coverage = frozenset((identity,))
+                self._union_exclusion_locked(key, coverage, sequence)
+
     def _mark_feed_consumed(
         self,
         watermark_key: tuple[str | None, str | None, str | None],
@@ -1743,6 +1807,7 @@ class MemoryUpdater:
         *,
         bypass_watermark: bool,
         sequence: int | None = None,
+        exclude_cleared: bool = False,
     ) -> None:
         """Advance the conversation watermark without claiming a persisted write.
 
@@ -1752,10 +1817,25 @@ class MemoryUpdater:
 
         ``sequence`` is forwarded to ``_watermark_set`` so a stale, delayed
         caller cannot undo a further-advanced watermark (see that method).
+
+        ``exclude_cleared`` unions every identity in ``messages`` into the
+        clear-exclusion coverage set. Emergency flushes skip the extraction
+        watermark but still honor that coverage. Bypass itself still does not
+        advance the extraction watermark; it does still publish extracted
+        coverage so a later clear can promote emergency-only threads.
+        Exclusion coverage is monotonic: a later shorter subset cannot
+        replace a wider prefix.
         """
-        if bypass_watermark or not messages:
+        if not messages:
             return
-        self._watermark_set(watermark_key, _message_identity(messages[-1]), sequence=sequence)
+        identities = _message_identities(messages)
+        identity = _message_identity(messages[-1])
+        with self._watermark_lock:
+            if exclude_cleared and identities:
+                self._union_exclusion_locked(watermark_key, identities, sequence)
+            if not bypass_watermark:
+                self._store_identity_locked(self._watermarks, watermark_key, identity, sequence)
+            self._union_coverage_locked(watermark_key, identities)
 
     def _watermark_set(
         self,
@@ -1794,20 +1874,101 @@ class MemoryUpdater:
         though the sequence comparison above is individually correct.
         """
         with self._watermark_lock:
-            existing = self._watermarks.get(key)
-            if existing is not None and existing[0] is not None and sequence is not None and sequence < existing[0]:
-                logger.info(
-                    "Skipping watermark regression for %s: incoming sequence %s is older than stored sequence %s",
-                    key,
-                    sequence,
-                    existing[0],
-                )
-                return
-            self._watermarks[key] = (sequence, value)
-            self._watermarks.move_to_end(key)
-            cap = self._config.watermark_max_keys
-            if cap > 0 and len(self._watermarks) > cap:
-                self._watermarks.popitem(last=False)
+            self._store_identity_locked(self._watermarks, key, value, sequence)
+            if value is not None:
+                self._union_coverage_locked(key, frozenset((value,)))
+
+    def _store_identity_locked(
+        self,
+        store: OrderedDict[tuple[str | None, str | None, str | None], tuple[int | None, tuple[str, ...] | None]],
+        key: tuple[str | None, str | None, str | None],
+        value: tuple[str, ...] | None,
+        sequence: int | None,
+    ) -> None:
+        """Write ``(sequence, value)`` into ``store``. Caller holds ``_watermark_lock``."""
+        existing = store.get(key)
+        if existing is not None and existing[0] is not None and sequence is not None and sequence < existing[0]:
+            logger.info(
+                "Skipping identity regression for %s: incoming sequence %s is older than stored sequence %s",
+                key,
+                sequence,
+                existing[0],
+            )
+            return
+        store[key] = (sequence, value)
+        store.move_to_end(key)
+        cap = self._config.watermark_max_keys
+        if cap > 0 and len(store) > cap:
+            evicted_key, _ = store.popitem(last=False)
+            if store is self._watermarks:
+                self._extracted_coverages.pop(evicted_key, None)
+
+    def _union_coverage_locked(
+        self,
+        key: tuple[str | None, str | None, str | None],
+        identities: frozenset[tuple[str, ...]],
+    ) -> None:
+        """Union ``identities`` into extracted coverage. Caller holds ``_watermark_lock``.
+
+        Emergency (bypass) flushes publish coverage without a watermark, so
+        those keys are not evicted by ``_store_identity_locked``. They share
+        ``watermark_max_keys``: over cap, the least-recently-used
+        coverage-only entry is dropped. Watermark-backed coverage is evicted
+        with its watermark.
+        """
+        if not identities:
+            return
+        self._extracted_coverages[key] = self._extracted_coverages.get(key, frozenset()) | identities
+        self._extracted_coverages.move_to_end(key)
+        cap = self._config.watermark_max_keys
+        if cap <= 0:
+            return
+        coverage_only = [coverage_key for coverage_key in self._extracted_coverages if coverage_key not in self._watermarks]
+        overflow = len(coverage_only) - cap
+        if overflow > 0:
+            for evict_key in coverage_only[:overflow]:
+                self._extracted_coverages.pop(evict_key, None)
+
+    def _union_exclusion_locked(
+        self,
+        key: tuple[str | None, str | None, str | None],
+        identities: frozenset[tuple[str, ...]],
+        sequence: int | None,
+    ) -> None:
+        """Union ``identities`` into exclusion coverage. Caller holds ``_watermark_lock``.
+
+        Coverage only grows. ``sequence`` is bookkeeping (max of the two); a
+        later call with a shorter prefix cannot shrink the set, which is the
+        failure that would let a summarization subset restore a cleared tail.
+        """
+        if not identities:
+            return
+        existing = self._clear_exclusions.get(key)
+        if existing is None:
+            merged_seq = sequence
+            merged_ids = identities
+        else:
+            existing_seq, existing_ids = existing
+            merged_ids = existing_ids | identities
+            if existing_seq is None:
+                merged_seq = sequence
+            elif sequence is None:
+                merged_seq = existing_seq
+            else:
+                merged_seq = max(existing_seq, sequence)
+        self._clear_exclusions[key] = (merged_seq, merged_ids)
+        self._clear_exclusions.move_to_end(key)
+        cap = self._config.watermark_max_keys
+        if cap > 0 and len(self._clear_exclusions) > cap:
+            self._clear_exclusions.popitem(last=False)
+
+    def _clear_exclusion_get(self, key: tuple[str | None, str | None, str | None]) -> frozenset[tuple[str, ...]] | None:
+        """Return the clear-exclusion coverage for ``key``, marking it most-recently-used."""
+        with self._watermark_lock:
+            if key not in self._clear_exclusions:
+                return None
+            self._clear_exclusions.move_to_end(key)
+            return self._clear_exclusions[key][1]
 
     def _feed_after_watermark(
         self,
@@ -1824,12 +1985,117 @@ class MemoryUpdater:
         failure direction that would lose facts.
         """
         last_id = self._watermark_get(watermark_key)
+        return self._slice_after_identity(last_id, messages)
+
+    def _feed_after_clear_exclusion(
+        self,
+        watermark_key: tuple[str | None, str | None, str | None],
+        messages: list[Any],
+    ) -> list[Any]:
+        """Return ``messages`` with the cleared prefix removed.
+
+        Applied even when ``bypass_watermark`` is set: summarization may skip
+        extraction progress, but it must not restore turns a clear already
+        consumed. Coverage is the whole cleared prefix. If that prefix's tail
+        is still in the feed and the match is a stable message id, everything
+        through the rightmost covered id is dropped. Content-based identities
+        are not a position boundary: a later turn can repeat the same wording,
+        so those matches only drop the matching message itself. If the feed is
+        an older subset that does not contain the tail, membership still drops
+        the overlapping identities. Messages that are not in the set stay
+        eligible -- a missing tail is not treated as "no boundary, feed
+        everything".
+        """
+        excluded = self._clear_exclusion_get(watermark_key)
+        return self._drop_excluded_identities(excluded, messages)
+
+    @staticmethod
+    def _slice_after_identity(last_id: tuple[str, ...] | None, messages: list[Any]) -> list[Any]:
         if last_id is None:
             return messages
         for i, msg in enumerate(messages):
             if _message_identity(msg) == last_id:
                 return messages[i + 1 :]
         return messages
+
+    @staticmethod
+    def _drop_excluded_identities(
+        excluded: frozenset[tuple[str, ...]] | None,
+        messages: list[Any],
+    ) -> list[Any]:
+        if not excluded:
+            return messages
+        last_idx = -1
+        for i, msg in enumerate(messages):
+            identity = _message_identity(msg)
+            # Only a unique message id is a reliable prefix boundary. Content
+            # fallback can collide across turns (the same assistant wording
+            # after a new user message) and must not cut uncovered messages.
+            if identity is not None and identity in excluded and identity[0] == "id":
+                last_idx = i
+        remaining = messages[last_idx + 1 :]
+        return [msg for msg in remaining if (identity := _message_identity(msg)) is None or identity not in excluded]
+
+    def _peek_newer_clear(
+        self,
+        fence_generation: tuple[int, int] | None,
+        agent_name: str | None,
+        user_id: str | None,
+        *,
+        on_peek_error: str,
+    ) -> tuple[int, int] | None:
+        """Return the current generation when it is newer than ``fence_generation``."""
+        if fence_generation is None:
+            return None
+        try:
+            current_generation = self.peek_clear_generation(agent_name, user_id=user_id)
+        except Exception:
+            logger.warning(on_peek_error, exc_info=True)
+            return None
+        if not is_stale_clear_generation(fence_generation, current_generation):
+            return None
+        return current_generation
+
+    def _consume_feed_if_stale_clear(
+        self,
+        watermark_key: tuple[str | None, str | None, str | None],
+        messages: list[Any],
+        *,
+        fence_generation: tuple[int, int] | None,
+        agent_name: str | None,
+        user_id: str | None,
+        bypass_watermark: bool,
+        sequence: int | None,
+    ) -> None:
+        """If a newer clear landed during a failed update, still consume the feed.
+
+        Must not run for ordinary retryable failures: consuming those would
+        skip turns that can still be extracted on the next attempt.
+        """
+        if not messages:
+            return
+        current_generation = self._peek_newer_clear(
+            fence_generation,
+            agent_name,
+            user_id,
+            on_peek_error="Failed to re-check clear generation after a memory update error; leaving the feed retryable",
+        )
+        if current_generation is None:
+            return
+        logger.info(
+            "Consuming memory feed after update failure because a newer clear completed (user_id=%s agent_name=%s expected=%s current=%s)",
+            user_id,
+            agent_name,
+            fence_generation,
+            current_generation,
+        )
+        self._mark_feed_consumed(
+            watermark_key,
+            messages,
+            bypass_watermark=bypass_watermark,
+            sequence=sequence,
+            exclude_cleared=True,
+        )
 
     def _do_update_memory_sync_impl(
         self,
@@ -1857,27 +2123,36 @@ class MemoryUpdater:
         messages. The watermark stores the identity of the last-extracted
         message (content/id based, in-memory only) so it stays correct when
         summarization removes the conversation front; a restart loses it and
-        re-extracts one batch. ``bypass_watermark`` is set by the emergency
+        re-extracts one batch.         ``bypass_watermark`` is set by the emergency
         (summarization) flush path: the subset it carries is a one-shot
-        "extract before removal" snapshot, so it is fed in full and does not
-        read or advance the conversation watermark (advancing it from the
-        subset's own length would regress the watermark and skip un-extracted
-        tail turns on the next normal feed).
+        "extract before removal" snapshot, so it does not read or advance the
+        conversation watermark (advancing it from the subset's own length would
+        regress the watermark and skip un-extracted tail turns on the next
+        normal feed). It still honors the clear-exclusion coverage set so a
+        later summarization flush cannot restore turns a clear already consumed.
         """
         metrics: dict[str, Any] = {}
         response: Any = None
         model_name: str | None = None
         success = False
         attempted = False
+        watermark_key = (thread_id, user_id, agent_name)
+        fence_generation = expected_clear_generation
         try:
-            watermark_key = (thread_id, user_id, agent_name)
+            if fence_generation is None:
+                try:
+                    fence_generation = self.peek_clear_generation(agent_name, user_id=user_id)
+                except Exception:
+                    fence_generation = None
             if bypass_watermark:
-                # Emergency flush: extract the carried subset in full.
+                # Emergency flush: extract the carried subset in full, except
+                # turns already covered by a clear.
                 feed_messages = messages
             else:
                 feed_messages = self._feed_after_watermark(watermark_key, messages)
+            feed_messages = self._feed_after_clear_exclusion(watermark_key, feed_messages)
             if not feed_messages:
-                logger.debug("Memory update skipped: no new messages since watermark (thread=%s)", thread_id)
+                logger.debug("Memory update skipped: no remaining messages to extract (thread=%s)", thread_id)
                 return True
             if expected_clear_generation is not None:
                 current_generation = self.peek_clear_generation(agent_name, user_id=user_id)
@@ -1889,7 +2164,13 @@ class MemoryUpdater:
                         expected_clear_generation,
                         current_generation,
                     )
-                    self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark, sequence=sequence)
+                    self._mark_feed_consumed(
+                        watermark_key,
+                        messages,
+                        bypass_watermark=bypass_watermark,
+                        sequence=sequence,
+                        exclude_cleared=True,
+                    )
                     return False
             # Re-detect signals on the post-watermark feed so extraction hints
             # reference only turns the LLM will actually see. The admission-time
@@ -1965,19 +2246,69 @@ class MemoryUpdater:
                 expected_clear_generation=expected_clear_generation,
             )
             if outcome is _CommitOutcome.PERSISTED:
+                # Publish extracted coverage first so a concurrent clear's
+                # promote can see it. If a clear already landed (promote
+                # scanned too early), this completion path still registers
+                # exclusion -- later emergency flushes must not restore
+                # the just-written, then-cleared turns.
                 self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark, sequence=sequence)
+                newer_clear = self._peek_newer_clear(
+                    fence_generation,
+                    agent_name,
+                    user_id,
+                    on_peek_error="Failed to re-check clear generation after persist; leaving exclusion to a later promote",
+                )
+                if newer_clear is not None:
+                    logger.info(
+                        "Registering clear exclusion after persist because a newer clear completed (user_id=%s agent_name=%s expected=%s current=%s)",
+                        user_id,
+                        agent_name,
+                        fence_generation,
+                        newer_clear,
+                    )
+                    self._mark_feed_consumed(
+                        watermark_key,
+                        messages,
+                        bypass_watermark=bypass_watermark,
+                        sequence=sequence,
+                        exclude_cleared=True,
+                    )
                 success = True
             elif outcome is _CommitOutcome.CONSUMED:
-                self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark, sequence=sequence)
+                self._mark_feed_consumed(
+                    watermark_key,
+                    messages,
+                    bypass_watermark=bypass_watermark,
+                    sequence=sequence,
+                    exclude_cleared=True,
+                )
                 success = False
             else:
                 success = False
             return success
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
+            self._consume_feed_if_stale_clear(
+                watermark_key,
+                messages,
+                fence_generation=fence_generation,
+                agent_name=agent_name,
+                user_id=user_id,
+                bypass_watermark=bypass_watermark,
+                sequence=sequence,
+            )
             return False
         except Exception as e:
             logger.exception("Memory update failed: %s", e)
+            self._consume_feed_if_stale_clear(
+                watermark_key,
+                messages,
+                fence_generation=fence_generation,
+                agent_name=agent_name,
+                user_id=user_id,
+                bypass_watermark=bypass_watermark,
+                sequence=sequence,
+            )
             return False
         finally:
             # Emit metrics even when _finalize_update (or invoke) raises, so the

@@ -22,6 +22,7 @@ directly and catch ``NotImplementedError`` for unsupported backends -- no more
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import threading
@@ -238,6 +239,25 @@ class DeerMem(MemoryManager):
         except QueueFull as e:
             logger.warning("Memory update rejected under backpressure (thread=%s): %s", thread_id, e)
 
+    async def aadd(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        """Offload enqueue (including the uncached manifest peek) off the event loop."""
+        await asyncio.to_thread(
+            self.add,
+            thread_id,
+            messages,
+            agent_name=agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+        )
+
     def add_nowait(
         self,
         thread_id: str,
@@ -269,6 +289,23 @@ class DeerMem(MemoryManager):
             )
         except QueueFull as e:
             logger.warning("Memory emergency flush rejected under backpressure (thread=%s): %s", thread_id, e)
+
+    async def aadd_nowait(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        """Offload the summarization emergency flush off the event loop."""
+        await asyncio.to_thread(
+            self.add_nowait,
+            thread_id,
+            messages,
+            agent_name=agent_name,
+            user_id=user_id,
+        )
 
     def _prepare_update(
         self,
@@ -487,6 +524,10 @@ class DeerMem(MemoryManager):
         else:
             memory_data = _call_backend(lambda: self._updater.clear_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
         self.cancel_by_agent(agent_name, user_id=user_id)
+        if agent_name is None:
+            self._updater.promote_clear_exclusions(user_id=user_id, all_agents=True)
+        else:
+            self._updater.promote_clear_exclusions(user_id=user_id, agent_name=_resolve_agent_name(agent_name))
         return _compat_document(memory_data)
 
     def import_memory(

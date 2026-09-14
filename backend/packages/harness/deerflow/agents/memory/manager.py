@@ -524,6 +524,16 @@ class MemoryManager(BaseModel):
     ) -> None:
         return self.add(thread_id, messages, agent_name=agent_name, user_id=user_id, trace_id=trace_id)
 
+    async def aadd_nowait(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        return self.add_nowait(thread_id, messages, agent_name=agent_name, user_id=user_id)
+
     async def aget_context(
         self,
         user_id: str | None,

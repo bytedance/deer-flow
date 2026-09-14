@@ -1087,3 +1087,438 @@ def test_transactional_custom_storage_serializes_clear_and_stale_write() -> None
     clearer.clear_all(user_id="alice")
     worker.join()
     assert writer.load("researcher", user_id="alice")["facts"] == []
+
+
+def test_llm_timeout_during_clear_consumes_pre_clear_snapshot(tmp_path: Path) -> None:
+    """A clear that lands while the memory LLM is in flight must still consume
+    the snapshot when that call fails. Otherwise the next full conversation
+    re-extracts the cleared turns against the new generation.
+    """
+    invoke_started = threading.Event()
+    release_invoke = threading.Event()
+
+    def timeout_invoke(prompt, config=None):
+        invoke_started.set()
+        assert release_invoke.wait(timeout=5), "test did not release the in-flight LLM call in time"
+        raise TimeoutError("memory LLM timed out")
+
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(side_effect=timeout_invoke)
+    manager = _manager(tmp_path, host_llm)
+    conversation = _queue_conversation()
+
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    worker = threading.Thread(target=lambda: manager._queue.flush(skip_inter_item_delay=True))
+    worker.start()
+    assert invoke_started.wait(timeout=5), "in-flight LLM call never started"
+
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    release_invoke.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+
+    host_llm.invoke.reset_mock()
+    host_llm.invoke.side_effect = None
+    host_llm.invoke.return_value = MagicMock(content=_extraction_json("User likes Python"))
+
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_invalid_json_during_clear_consumes_pre_clear_snapshot(tmp_path: Path) -> None:
+    invoke_started = threading.Event()
+    release_invoke = threading.Event()
+
+    def invalid_json_invoke(prompt, config=None):
+        invoke_started.set()
+        assert release_invoke.wait(timeout=5), "test did not release the in-flight LLM call in time"
+        return MagicMock(content="not-json")
+
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(side_effect=invalid_json_invoke)
+    manager = _manager(tmp_path, host_llm)
+    conversation = _queue_conversation()
+
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    worker = threading.Thread(target=lambda: manager._queue.flush(skip_inter_item_delay=True))
+    worker.start()
+    assert invoke_started.wait(timeout=5), "in-flight LLM call never started"
+
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    release_invoke.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+
+    host_llm.invoke.reset_mock()
+    host_llm.invoke.side_effect = None
+    host_llm.invoke.return_value = MagicMock(content=_extraction_json("User likes Python"))
+
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_llm_failure_without_clear_leaves_snapshot_retryable(tmp_path: Path) -> None:
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(side_effect=[MagicMock(content="not-json"), MagicMock(content=_extraction_json("User likes Python"))])
+    manager = _manager(tmp_path, host_llm)
+    conversation = _queue_conversation()
+
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    assert host_llm.invoke.call_count == 2
+    facts = {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert "User likes Python" in facts
+
+
+def test_same_generation_delayed_snapshot_does_not_restore_after_clear(tmp_path: Path) -> None:
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User prefers typed Python")))
+    manager = _manager(tmp_path, host_llm)
+    turn_a = _queue_conversation()
+    turn_b = _queue_conversation(
+        human="Also remember that I prefer typed Python.",
+        ai="Noted, I will keep that preference.",
+    )
+    full_conversation = [*turn_a, *turn_b]
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=full_conversation, agent_name="researcher", user_id="alice")
+        queued_messages = list(manager._queue._items[0].messages)
+        with manager._queue._lock:
+            manager._queue._enqueue_locked(
+                thread_id="thread-1",
+                messages=turn_a,
+                agent_name="researcher",
+                user_id="alice",
+                trace_id=None,
+                signals=frozenset(),
+                bypass_watermark=False,
+                captured_clear_generation=(0, 0),
+                call_sequence=0,
+            )
+
+    assert manager._queue.pending_count == 1
+    assert manager._queue._items[0].messages == queued_messages
+
+    manager._queue.flush()
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    host_llm.invoke.reset_mock()
+
+    manager.add(thread_id="thread-1", messages=full_conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_emergency_flush_after_clear_does_not_restore_pre_clear_facts(tmp_path: Path) -> None:
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    conversation = _queue_conversation()
+
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+    assert {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]} == {"User likes Python"}
+
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+    host_llm.invoke.reset_mock()
+
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+    host_llm.invoke.assert_not_called()
+
+    manager.add_nowait(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_emergency_flush_after_clear_still_extracts_post_clear_turns(tmp_path: Path) -> None:
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    pre_clear = _queue_conversation()
+    post_clear = _queue_conversation(
+        human="Also remember that I prefer typed Python.",
+        ai="Noted, I will keep that preference.",
+    )
+    full_conversation = [*pre_clear, *post_clear]
+
+    manager.add(thread_id="thread-1", messages=pre_clear, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+
+    host_llm.invoke.reset_mock()
+    prompts: list[str] = []
+
+    def invoke_post_clear(prompt, config=None):
+        prompts.append(str(prompt))
+        return MagicMock(content=_extraction_json("User prefers typed Python"))
+
+    host_llm.invoke.side_effect = invoke_post_clear
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add_nowait(thread_id="thread-1", messages=full_conversation, agent_name="researcher", user_id="alice")
+    assert manager._queue.pending_count == 1
+    queued_contents = [getattr(message, "content", None) for message in manager._queue._items[0].messages]
+    assert queued_contents == [
+        "Remember that I like Python.",
+        "I'll keep that preference in mind.",
+        "Also remember that I prefer typed Python.",
+        "Noted, I will keep that preference.",
+    ]
+    manager._queue.flush()
+
+    assert host_llm.invoke.call_count == 1, prompts
+    assert "Remember that I like Python." not in prompts[0]
+    facts = {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert "User likes Python" not in facts
+    assert "User prefers typed Python" in facts
+
+
+def test_emergency_flush_of_cleared_prefix_does_not_restore_facts(tmp_path: Path) -> None:
+    """Summarization that keeps B and only submits A must not rewrite A's facts."""
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    turn_a = _queue_conversation()
+    turn_b = _queue_conversation(human="Also remember I like Rust.", ai="Noted about Rust.")
+    conversation = [*turn_a, *turn_b]
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    manager._queue.flush()
+    assert {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]} == {"User likes Python"}
+
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+    host_llm.invoke.reset_mock()
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add_nowait(thread_id="thread-1", messages=turn_a, agent_name="researcher", user_id="alice")
+        assert manager._queue.pending_count == 1
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_queued_then_cleared_prefix_flush_does_not_restore_facts(tmp_path: Path) -> None:
+    """A+B still in the debounce queue when cleared: later prefix A must stay excluded."""
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    turn_a = _queue_conversation()
+    turn_b = _queue_conversation(human="Also remember I like Rust.", ai="Noted about Rust.")
+    conversation = [*turn_a, *turn_b]
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+        assert manager._queue.pending_count == 1
+
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    host_llm.invoke.reset_mock()
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add_nowait(thread_id="thread-1", messages=turn_a, agent_name="researcher", user_id="alice")
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_later_summary_subset_does_not_retreat_exclusion_and_restore_tail(tmp_path: Path) -> None:
+    """A later emergency A must not shrink exclusion from B back to A."""
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    turn_a = _queue_conversation()
+    turn_b = _queue_conversation(human="Also remember I like Rust.", ai="Noted about Rust.")
+    conversation = [*turn_a, *turn_b]
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    manager._queue.flush()
+    assert {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]} == {"User likes Python"}
+
+    host_llm.invoke.reset_mock()
+    host_llm.invoke.return_value = MagicMock(content=_extraction_json("User likes Rust"))
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+        manager.add_nowait(thread_id="thread-1", messages=turn_a, agent_name="researcher", user_id="alice")
+        assert manager._queue.pending_count == 2
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add_nowait(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+        assert manager._queue.pending_count == 1
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_emergency_only_add_nowait_then_later_clear_does_not_restore(tmp_path: Path) -> None:
+    """add_nowait persist, then a later clear, must not restore via regular add.
+
+    Emergency extraction does not write a watermark. Clear still has to
+    promote that coverage so the next ordinary add of the same pre-clear
+    turns (plus a new one) cannot rewrite the cleared preference.
+    """
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    turn_a = [
+        HumanMessage(content="Remember that I like Python.", id="human-python"),
+        AIMessage(content="I'll keep that preference in mind.", id="ai-python"),
+    ]
+    turn_b = [
+        HumanMessage(content="Also remember I like Rust.", id="human-rust"),
+        AIMessage(content="Noted about Rust.", id="ai-rust"),
+    ]
+
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add_nowait(thread_id="thread-1", messages=turn_a, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+    assert {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]} == {"User likes Python"}
+    assert manager._updater._watermarks == {}
+    assert ("thread-1", "alice", "researcher") in manager._updater._extracted_coverages
+
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+    prompts: list[str] = []
+
+    def invoke_rust(prompt: Any, config: Any = None) -> MagicMock:
+        prompts.append(str(prompt))
+        return MagicMock(content=_extraction_json("User likes Rust"))
+
+    host_llm.invoke.reset_mock()
+    host_llm.invoke.side_effect = invoke_rust
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add(thread_id="thread-1", messages=turn_a + turn_b, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    assert host_llm.invoke.call_count == 1, prompts
+    assert "Remember that I like Python." not in prompts[0]
+    assert "Also remember I like Rust." in prompts[0]
+    facts = {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert "User likes Python" not in facts
+    assert "User likes Rust" in facts
+
+    host_llm.invoke.reset_mock()
+    prompts.clear()
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add_nowait(thread_id="thread-1", messages=turn_a, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+    host_llm.invoke.assert_not_called()
+    facts = {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert "User likes Python" not in facts
+
+
+def test_persist_then_clear_before_coverage_does_not_restore_via_add_nowait(tmp_path: Path) -> None:
+    """Facts persisted, then clear+promote before coverage publish.
+
+    Ordinary re-send skips via the watermark; add_nowait must not restore
+    the Python preference because the persist path itself registers exclusion.
+    """
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    conversation = [
+        HumanMessage(content="Remember that I like Python.", id="human-python"),
+        AIMessage(content="I'll keep that preference in mind.", id="ai-python"),
+    ]
+    original_finalize = manager._updater._finalize_update
+
+    def persist_then_clear(*args: Any, **kwargs: Any) -> Any:
+        outcome = original_finalize(*args, **kwargs)
+        manager.clear_memory(agent_name="researcher", user_id="alice")
+        return outcome
+
+    manager._updater._finalize_update = persist_then_clear  # type: ignore[method-assign]
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+    host_llm.invoke.reset_mock()
+
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+    host_llm.invoke.assert_not_called()
+
+    manager.add_nowait(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_duplicate_assistant_content_without_ids_does_not_drop_new_user_turn(tmp_path: Path) -> None:
+    """No-id content fallback: a repeated assistant reply must not discard the new user turn."""
+    remember = "I will remember your preference."
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    pre_clear = [
+        HumanMessage(content="I like Python", id=""),
+        AIMessage(content=remember, id=""),
+    ]
+    manager.add(thread_id="thread-1", messages=pre_clear, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+
+    prompts: list[str] = []
+
+    def invoke_rust(prompt: Any, config: Any = None) -> MagicMock:
+        prompts.append(str(prompt))
+        return MagicMock(content=_extraction_json("User likes Rust"))
+
+    host_llm.invoke.reset_mock()
+    host_llm.invoke.side_effect = invoke_rust
+    post_clear = [
+        HumanMessage(content="I like Rust", id=""),
+        AIMessage(content=remember, id=""),
+    ]
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add_nowait(thread_id="thread-1", messages=post_clear, agent_name="researcher", user_id="alice")
+    manager._queue.flush()
+
+    assert host_llm.invoke.call_count == 1, prompts
+    assert "I like Rust" in prompts[0]
+    assert "I like Python" not in prompts[0]
+    facts = {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert "User likes Python" not in facts
+    assert "User likes Rust" in facts

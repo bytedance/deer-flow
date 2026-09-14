@@ -37,6 +37,40 @@ A later clear bumps the generation in the same locked commit as the wipe.
 User-wide `clear_all` raises that generation before per-agent wipes so an
 in-flight writer cannot rebase onto an emptied agent.
 Extraction drops before the LLM call, and again at commit, when a newer clear exists.
+A generation-fenced drop still advances the conversation watermark and the clear-exclusion
+coverage set. If the LLM call times out, raises, or returns illegal JSON after a newer clear
+landed, the failed feed is still consumed when the captured generation is stale; ordinary
+retryable failures are not consumed.
+Same-key queue merges refuse an incoming snapshot whose call-arrival sequence is older than
+the queued item, even when both peeks share a generation: otherwise a delayed shorter feed
+can overwrite a newer snapshot before the watermark ever sees it.
+The extraction watermark and the clear-exclusion coverage set are distinct. Emergency
+(summarization) flushes set `bypass_watermark` so they can re-feed a subset about to be
+removed without regressing extraction progress; they still drop any message whose
+identity is in the clear-exclusion set. That set is the whole cleared prefix -- every
+identity from a cancelled snapshot or from extracted coverage -- not only the tail
+message. Coverage is merged by union and never shrinks: a later emergency subset
+cannot replace a wider prefix, and call-arrival sequence does not decide which
+identities stay. Emergency flushes still publish extracted coverage without
+advancing the extraction watermark, so a later `clear_memory` can promote
+emergency-only threads. `promote_clear_exclusions` scans published coverage, not
+only keys that already have a watermark. `clear_memory` unions matching extracted
+coverage into that set so a later `add_nowait` cannot restore already-extracted,
+then-cleared turns. A persist that finishes, then sees a newer clear, also
+registers exclusion on that completion path: promote only copies coverage that is
+already published, so a clear that lands between persist and publish cannot be the
+only writer of the exclusion set. If a
+summarization flush carries only an older prefix that does not include the previous
+tail, those prefix identities are still dropped; messages that are not in the set
+remain eligible. Content-based identities (no message id) are membership-only --
+they are not a prefix-cut boundary, because a later turn can repeat the same
+assistant wording.
+DeerMem's `aadd` / `aadd_nowait` offload enqueue (including the uncached manifest peek) with
+`asyncio.to_thread`. The lead summarization path fires `memory_flush_hook.as_async`
+(`amemory_flush_hook`) from `acompact_state`. That async hook also offloads
+`get_memory_manager()` (backend scan + construction) with `asyncio.to_thread`,
+matching `MemoryMiddleware.aafter_agent()`, so a cold start cannot `os.stat` on
+the Gateway event loop.
 
 Focused updater tests live in `backend/tests/test_memory_updater.py`.
 Backend-specific tests use `backend/tests/test_<backend>_memory_backend.py`.
@@ -91,6 +125,9 @@ A visible newer clear consumes the pre-clear snapshot and starts a fresh fence.
 An incoming peek older than the queued context cannot inherit the newer token.
 That refused add still unions its signals onto the queued snapshot.
 If consuming the refused snapshot fails, the queued fence stays as-is.
+Same-generation merges also keep the already-queued snapshot when the incoming
+call-arrival sequence is older; they union signals and do not consume the
+incoming feed as a clear.
 
 `memory.mode: tool` registers the four memory tools.
 The model chooses when to search or change facts.
@@ -205,8 +242,9 @@ The rejection counter and high-rejection warning expose this condition.
 
 The enqueue token is the commit fence.
 Direct `update_memory` callers without a queue token fence from the pre-LLM snapshot.
-A generation-fenced drop still advances the conversation watermark.
-The next turn must not replay the same pre-clear messages against the newer generation.
+A generation-fenced drop still advances the conversation watermark and the
+clear-exclusion coverage set. The next turn must not replay the same pre-clear
+messages against the newer generation, including emergency (bypass) flushes.
 Manual `create_memory_fact` retries a concurrent clear: it re-reads the fence each attempt and stores the new fact on the emptied document instead of raising `MemoryClearGenerationConflict`.
 
 #### Capacity and review
