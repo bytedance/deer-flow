@@ -582,6 +582,13 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **models:** Stop every Claude model after the first from losing its
+  credential when the Claude Code OAuth token is handed off through
+  `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`. Every `ClaudeChatModel` instance
+  loaded credentials again, but a descriptor can be drained only once, so the
+  title, summarization, and subagent models — and every later run — had no
+  credential and failed with `TypeError: Could not resolve authentication
+  method`. The token is now read once per process and reused.
 - **models:** Stop the lead agent from failing to build whenever a model with
   `supports_reasoning_effort: true` also gets a `reasoning_effort` from its
   profile — at the top level, in `when_thinking_enabled` or
