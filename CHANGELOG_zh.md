@@ -926,6 +926,16 @@
 
 ### 安全
 
+- **技能：** 修复公共技能审查门禁中文件可绕过 SkillScan 的缺口。审查分析器此前只把解码为
+  文本的文件交给 SkillScan，可执行二进制文件和嵌套压缩包从未被检查；豁免了任意层级
+  `evals/fixtures/` 目录下的所有文件；重复的压缩包成员或仅大小写不同的文件名会在扫描前静默
+  覆盖先前的文件。现在 SkillScan 会逐字节接收每个文件，仅 eval fixture 的 `SKILL.md` 样本
+  仍被豁免，路径冲突会将审查标记为不完整。SkillScan 此前还会跳过含有 NUL 或非 UTF-8 字节
+  的代码文件，注释中的一个字节就能让反弹 shell 躲过审查门禁，NUL 字节也会让安装时的静态
+  分析被跳过。此类文件现在会报告 `package-undecodable-script` 并照常分析，`CRITICAL`
+  命中仍会拦截。SkillScan 的 Mach-O 检测遗漏了安装器会拦截的 32 位小端和 fat 变体；安装器、
+  导出校验与 SkillScan 现在共用同一份代码文件与可执行文件魔数定义。审查快照为二进制文件
+  新增 `content_base64` 字段。([#5431])
 - **提示词注入：** 新增输入净化中间件防御提示词注入，输入护栏中伪造的框架标签会
   被拦截，系统上下文以 `SystemMessage` 注入以隔离角色。([#3662]、[#4155]、[#3661])
 - **提示词注入：** 对渲染进模型 prompt 的不可信内容进行 HTML 转义——记忆事实与摘
@@ -2173,3 +2183,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5418]: https://github.com/bytedance/deer-flow/pull/5418
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
 [#5427]: https://github.com/bytedance/deer-flow/pull/5427
+[#5431]: https://github.com/bytedance/deer-flow/pull/5431
