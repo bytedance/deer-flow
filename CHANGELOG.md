@@ -582,6 +582,15 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **sandbox:** Stop remote `glob` and `grep` from reporting "no matches" when
+  their output was cut off. BoxLite, Tenki, E2B, and OpenSandbox cap the
+  search's raw output and then filter it in Python (ignored directories such as
+  `node_modules`, the pattern or `glob` scope), but they reported `truncated`
+  only when `max_results` was reached. When the capped lines were all filtered
+  out, a search with real matches past the cap came back empty and complete.
+  The search now passes one line beyond its cap so a cut-off result is reported
+  as truncated, and the `glob` and `grep` tools say an empty truncated result is
+  incomplete instead of "No matches found". ([#5427])
 - **sandbox:** Stop host paths reaching the model when output joins them with
   `:`, as `$PATH` and `$PYTHONPATH` do. The matched path ran on through the
   rest of the list, so every later entry under the same root was left
@@ -2832,3 +2841,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
 [#5418]: https://github.com/bytedance/deer-flow/pull/5418
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
+[#5427]: https://github.com/bytedance/deer-flow/pull/5427

@@ -394,12 +394,12 @@ class TenkiSandbox(Sandbox):
         search = f"find -H {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null"
         r = self._sh(remote_search_command(search, resolved, limit=hard_limit))
         # A missing root or a failed find must not read as "no files matched" (#5376).
-        output = parse_remote_search_output(r.stdout_text, resolved, tool="find")
+        output = parse_remote_search_output(r.stdout_text, resolved, tool="find", limit=hard_limit)
 
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in output.splitlines():
+        for entry in output.text.splitlines():
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
@@ -412,7 +412,7 @@ class TenkiSandbox(Sandbox):
                 matches.append(self._virtual_path(entry))
                 if len(matches) >= max_results:
                     return matches, True
-        return matches, False
+        return matches, output.truncated
 
     def grep(
         self,
@@ -445,13 +445,13 @@ class TenkiSandbox(Sandbox):
         search = "grep " + " ".join(flags) + f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
         r = self._sh(remote_search_command(search, resolved, limit=total_cap))
         # A missing root, a missing grep or an unreadable tree must not read as "no matches" (#5376).
-        output = parse_remote_search_output(r.stdout_text, resolved, tool="grep")
+        output = parse_remote_search_output(r.stdout_text, resolved, tool="grep", limit=total_cap)
 
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
-        truncated = False
-        for raw in output.splitlines():
+        truncated = output.truncated
+        for raw in output.text.splitlines():
             try:
                 file_path, line_no_str, line_text = raw.split(":", 2)
             except ValueError:
