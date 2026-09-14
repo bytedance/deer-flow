@@ -80,11 +80,12 @@ def test_extract_article_re_raises_unexpected_exception(monkeypatch):
     assert calls == [True]
 
 
-def test_probe_short_circuits_when_packages_are_present(probe_dir, monkeypatch):
+def test_probe_ready_when_packages_present_and_loadable(probe_dir, monkeypatch):
     _plant_packages(probe_dir)
+    monkeypatch.setattr(readability_module, "_node_dependencies_loadable", lambda: True)
 
     def _fail(*args, **kwargs):
-        raise AssertionError("npm must not be probed or invoked when the packages already exist")
+        raise AssertionError("the request-time probe must never spawn npm — installing is scripts/setup_readability_js.py's job")
 
     monkeypatch.setattr(readability_module.shutil, "which", _fail)
     monkeypatch.setattr(readability_module.subprocess, "run", _fail)
@@ -92,110 +93,58 @@ def test_probe_short_circuits_when_packages_are_present(probe_dir, monkeypatch):
     assert readability_module._readability_js_ready() is True
 
 
-def test_probe_partial_node_modules_is_not_mistaken_for_ready(probe_dir, monkeypatch):
-    """An npm run killed mid-install leaves a bare node_modules behind; the
-    probe must not cache that as ready."""
-    (probe_dir / "node_modules").mkdir()
-    runs = []
-
-    def _fake_run(cmd, **kwargs):
-        runs.append(cmd)
-        _plant_packages(probe_dir)
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
-
-    monkeypatch.setattr(readability_module.shutil, "which", lambda name: "npm")
-    monkeypatch.setattr(readability_module.subprocess, "run", _fake_run)
-
-    assert readability_module._readability_js_ready() is True
-    assert len(runs) == 1  # the partial tree triggered a real install first
-
-
-def test_probe_missing_npm_is_cached_permanently(probe_dir, monkeypatch):
-    which_calls = []
-    monkeypatch.setattr(readability_module.shutil, "which", lambda name: which_calls.append(name))
+def test_probe_not_ready_when_packages_missing(probe_dir, monkeypatch):
+    load_checks = []
+    monkeypatch.setattr(
+        readability_module,
+        "_node_dependencies_loadable",
+        lambda: load_checks.append(1),
+    )
 
     assert readability_module._readability_js_ready() is False
     assert readability_module._readability_js_ready() is False
-    # A missing npm is deterministic: one probe, then the settled False.
-    assert which_calls == ["npm"]
+    # Directory absence settles False without even trying to load: there is
+    # nothing to require, and the setup step is the repair path.
+    assert load_checks == []
 
 
-def test_probe_failed_install_is_cached_permanently(probe_dir, monkeypatch):
-    runs = []
-
-    def _fake_run(cmd, **kwargs):
-        runs.append(cmd)
-        # npm emits UTF-8 (box-drawing progress, typographic quotes); the
-        # probe must decode bytes with replacement, not the strict locale
-        # codec, or Windows ANSI code pages crash the first fetch.
-        return subprocess.CompletedProcess(cmd, returncode=1, stdout=b"\xe2\x94\x80", stderr=b"\xe2\x94\x80 npm failed \xe2\x80\x9d")
-
-    monkeypatch.setattr(readability_module.shutil, "which", lambda name: "C:/fake/npm.cmd")
-    monkeypatch.setattr(readability_module.subprocess, "run", _fake_run)
+def test_probe_not_ready_when_packages_cannot_load(probe_dir, monkeypatch):
+    """npm creates package directories before extracting their contents, so a
+    timeout mid-extraction leaves both dirs present but unloadable; the probe
+    must settle False instead of trusting the tree."""
+    _plant_packages(probe_dir)
+    monkeypatch.setattr(readability_module, "_node_dependencies_loadable", lambda: False)
 
     assert readability_module._readability_js_ready() is False
     assert readability_module._readability_js_ready() is False
-    # Deterministic failure: one install attempt, then the settled False.
-    assert runs == [["C:/fake/npm.cmd", "install", "--no-audit", "--no-fund"]]
 
 
-def test_probe_transient_failure_retries_on_a_later_call(probe_dir, monkeypatch):
-    runs = []
-
-    def _fake_run(cmd, **kwargs):
-        runs.append(cmd)
-        if len(runs) == 1:
-            raise subprocess.TimeoutExpired(cmd, timeout=300)
-        _plant_packages(probe_dir)
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
-
-    monkeypatch.setattr(readability_module.shutil, "which", lambda name: "npm")
-    monkeypatch.setattr(readability_module.subprocess, "run", _fake_run)
-
-    # A timeout is transient: not cached, retried on the next call.
-    assert readability_module._readability_js_ready() is False
-    assert readability_module._readability_js_ready() is True
-    assert len(runs) == 2
-
-
-def test_probe_success_bootstraps_node_modules(probe_dir, monkeypatch):
-    def _fake_run(cmd, **kwargs):
-        _plant_packages(probe_dir)
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
-
-    monkeypatch.setattr(readability_module.shutil, "which", lambda name: "npm")
-    monkeypatch.setattr(readability_module.subprocess, "run", _fake_run)
-
-    assert readability_module._readability_js_ready() is True
-
-
-def test_probe_waiter_never_blocks_on_inflight_bootstrap(probe_dir, monkeypatch):
-    """A bootstrap in flight must not park other callers' worker threads:
+def test_probe_waiter_never_blocks_on_inflight_verification(probe_dir, monkeypatch):
+    """A verification in flight must not park other callers' worker threads:
     async fetches share the default executor, so a waiter that blocks on the
-    bootstrap lock for the length of an npm install starves the pool."""
-    bootstrap_started = threading.Event()
-    release_bootstrap = threading.Event()
+    probe lock starves the pool."""
+    verification_started = threading.Event()
+    release_verification = threading.Event()
 
-    def _fake_run(cmd, **kwargs):
-        bootstrap_started.set()
-        release_bootstrap.wait(timeout=30)
-        _plant_packages(probe_dir)
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
+    def _slow_loadable():
+        verification_started.set()
+        release_verification.wait(timeout=30)
+        return True
 
-    monkeypatch.setattr(readability_module.shutil, "which", lambda name: "npm")
-    monkeypatch.setattr(readability_module.subprocess, "run", _fake_run)
+    monkeypatch.setattr(readability_module, "_node_dependencies_loadable", _slow_loadable)
+    _plant_packages(probe_dir)
 
-    installer = threading.Thread(target=readability_module._readability_js_ready)
-    installer.start()
-    assert bootstrap_started.wait(timeout=30)
+    verifier = threading.Thread(target=readability_module._readability_js_ready)
+    verifier.start()
+    assert verification_started.wait(timeout=30)
 
-    # The waiter degrades immediately instead of queueing behind the install.
+    # The waiter degrades immediately instead of queueing behind the check.
     started = time.perf_counter()
     assert readability_module._readability_js_ready() is False
     assert time.perf_counter() - started < 10
 
-    release_bootstrap.set()
-    installer.join(timeout=30)
-    assert not installer.is_alive()
-    # Once the install lands, later callers see the settled True.
+    release_verification.set()
+    verifier.join(timeout=30)
+    assert not verifier.is_alive()
+    # Once the verification lands, later callers see the settled True.
     assert readability_module._readability_js_ready() is True

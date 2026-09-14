@@ -4,6 +4,10 @@ BACKEND_SANDBOX_HOME := $(abspath $(CURDIR)/sandbox)
 
 install:
 	uv sync --locked
+	@uv run python scripts/setup_readability_js.py || echo "warning: Readability.js dependencies not installed; web fetch falls back to pure-Python extraction (run scripts/setup_readability_js.py)" >&2
+
+setup-readability-js:
+	uv run python scripts/setup_readability_js.py
 
 dev:
 	mkdir -p "$(DEER_FLOW_HOME)" "$(BACKEND_SANDBOX_HOME)"

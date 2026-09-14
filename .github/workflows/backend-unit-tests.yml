@@ -105,6 +105,12 @@ jobs:
         working-directory: backend
         run: uv sync --group dev --extra postgres
 
+      # The link-resolution suite exercises real Readability.js extraction;
+      # request-time code only checks readiness, so CI installs explicitly.
+      - name: Install Readability.js npm dependencies
+        working-directory: backend
+        run: uv run python scripts/setup_readability_js.py
+
       - name: Run unit tests of backend (shard ${{ matrix.shard }} of 4)
         working-directory: backend
         env:
