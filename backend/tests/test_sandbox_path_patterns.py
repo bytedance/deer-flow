@@ -10,7 +10,9 @@ The move itself was cleared by a differential against the *real* pre-extraction
 expressions, run once on the parent commit. That run cannot be committed: after
 this lands there is no old inline expression left to diff against, only the
 frozen copies below. So the committed guard is the weaker snapshot, and its
-red-ness rests on those literals — not on the length of ``_BASES``.
+red-ness rests on those literals — not on the length of ``_BASES``. The tail has
+changed exactly once since then (it now stops at ``:``); the snapshot names that
+delta instead of re-freezing the literals, so any other drift still goes red.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import pytest
 from deerflow.sandbox import path_patterns as path_patterns_module
 from deerflow.sandbox.local import local_sandbox as local_sandbox_module
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
-from deerflow.sandbox.path_patterns import build_output_mask_pattern
+from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail
 from deerflow.sandbox.tools import _compiled_mask_patterns
 
 
@@ -36,6 +38,18 @@ def _legacy_tools_pattern(base: str) -> re.Pattern[str]:
 def _legacy_local_pattern(base: str) -> re.Pattern[str]:
     """The expression ``_reverse_output_patterns`` inlined before the extraction."""
     return re.compile(re.escape(base) + r"(?=/|$|[^\w./-])" + r"(?:[/\\][^\s\"';&|<>()]*)?")
+
+
+# The only intentional change to either expression since the extraction: the
+# tail also stops at ``:``, so a ``:``-joined path list ($PATH, $PYTHONPATH)
+# cannot swallow a second host path into the first match's tail.
+_LEGACY_TAIL = r"(?:[/\\][^\s\"';&|<>()]*)?"
+_CURRENT_TAIL = r"(?:[/\\][^\s\"';&|<>():]*)?"
+
+
+def _with_current_tail(legacy: str) -> str:
+    assert legacy.endswith(_LEGACY_TAIL)
+    return legacy.removesuffix(_LEGACY_TAIL) + _CURRENT_TAIL
 
 
 _BASES = [
@@ -55,13 +69,14 @@ _BASES = [
 
 @pytest.mark.parametrize("base", _BASES)
 def test_helper_reproduces_the_pre_extraction_expressions(base: str) -> None:
-    """Byte-identical to what each call site built inline, for both separator modes.
+    """Byte-identical to what each call site built inline, for both separator modes,
+    apart from the one named tail change.
 
     This is the anchor for the move itself: edit the helper in a way that changes
     either site's regex and this goes red.
     """
-    assert build_output_mask_pattern(base, separator_agnostic=True).pattern == _legacy_tools_pattern(base).pattern
-    assert build_output_mask_pattern(base).pattern == _legacy_local_pattern(base).pattern
+    assert build_output_mask_pattern(base, separator_agnostic=True).pattern == _with_current_tail(_legacy_tools_pattern(base).pattern)
+    assert build_output_mask_pattern(base).pattern == _with_current_tail(_legacy_local_pattern(base).pattern)
 
 
 def test_separator_agnostic_is_the_only_difference_between_the_two_modes() -> None:
@@ -135,6 +150,72 @@ def test_direct_replacer_normalizes_nested_tail_to_virtual_posix_style() -> None
     )
 
 
+def _regex_mask(output: str, base: str, virtual: str) -> str:
+    """The static-source splice ``mask_local_paths_in_output`` applies per pattern."""
+
+    def replace(match: re.Match[str]) -> str:
+        relative = normalize_mask_tail(match.group(0)[len(base) :])
+        return f"{virtual}/{relative}" if relative else virtual
+
+    return build_output_mask_pattern(base, separator_agnostic=True).sub(replace, output)
+
+
+def _scanner_mask(output: str, base: str, virtual: str) -> str:
+    return path_patterns_module.replace_output_path_matches(output, base, virtual, separator_agnostic=True)
+
+
+_MASKERS = [pytest.param(_regex_mask, id="regex"), pytest.param(_scanner_mask, id="scanner")]
+
+
+@pytest.mark.parametrize("mask", _MASKERS)
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (
+            "PATH=/host/ws/.venv/bin:/host/ws/node_modules/.bin:/host/ws/bin:/usr/bin",
+            "PATH=/mnt/ws/.venv/bin:/mnt/ws/node_modules/.bin:/mnt/ws/bin:/usr/bin",
+        ),
+        ("PYTHONPATH=/host/ws/a:/host/ws/b", "PYTHONPATH=/mnt/ws/a:/mnt/ws/b"),
+        ("/host/ws:/host/ws/lib", "/mnt/ws:/mnt/ws/lib"),
+    ],
+)
+def test_tail_stops_at_colon_so_a_path_list_masks_every_entry(mask, output: str, expected: str) -> None:
+    """A ``:``-joined list must not hide a second host path inside the first tail.
+
+    Once a match consumes the rest of the list, scanning resumes after it, so
+    every later entry under the same base reaches the model as a raw host path.
+    (``;``, the Windows list separator, already ended the tail.)
+    """
+    assert mask(output, "/host/ws", "/mnt/ws") == expected
+
+
+@pytest.mark.parametrize("mask", _MASKERS)
+@pytest.mark.parametrize(
+    "tail",
+    ["/pkg/app.py:12:def main():", "/logs/10:00:00.log", "/a.py:3: /b.py:4:"],
+)
+def test_colon_inside_a_single_path_leaves_the_rendered_output_unchanged(mask, tail: str) -> None:
+    """``grep -n`` lines and ``:`` in file names only shorten the match: the rest
+    of the text is copied through verbatim right after the virtual prefix."""
+    assert mask(f"/host/ws{tail}", "/host/ws", "/mnt/ws") == f"/mnt/ws{tail}"
+
+
+def test_local_sandbox_reverse_mask_handles_a_colon_joined_path_list(tmp_path: Path) -> None:
+    """The callable replacement path: ``_reverse_resolve_path`` receives each
+    entry separately instead of the whole list as one fake path."""
+    local = tmp_path / "workspace"
+    local.mkdir()
+    sandbox = LocalSandbox(
+        id="local",
+        path_mappings=[PathMapping(container_path="/mnt/user-data/workspace", local_path=str(local))],
+    )
+    resolved = str(local.resolve())
+
+    output = sandbox._reverse_resolve_paths_in_output(f"{resolved}/.venv/bin:{resolved}/bin")
+
+    assert output == "/mnt/user-data/workspace/.venv/bin:/mnt/user-data/workspace/bin"
+
+
 def test_separator_agnostic_replacer_avoids_normalization_without_backslashes() -> None:
     class ReplaceTrackingString(str):
         def __init__(self, value: str) -> None:
@@ -161,6 +242,9 @@ def test_separator_agnostic_replacer_avoids_normalization_without_backslashes() 
 
 
 def test_local_sandbox_reverse_mask_routes_through_the_direct_helper(tmp_path: Path, monkeypatch) -> None:
+    """And it must stay separator-agnostic: forward resolution spells Windows
+    host paths with forward slashes, so a revert to separator-exact matching
+    would reintroduce the host-path leak with no POSIX-visible signal."""
     local = tmp_path / "skills"
     local.mkdir()
     sandbox = LocalSandbox(
@@ -169,17 +253,17 @@ def test_local_sandbox_reverse_mask_routes_through_the_direct_helper(tmp_path: P
     )
 
     resolved = str(Path(local).resolve())
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, dict]] = []
     original = path_patterns_module.replace_output_path_matches
 
     def recording_replacer(output, base, replacement, **kwargs):
-        calls.append((output, base))
+        calls.append((output, base, kwargs))
         return original(output, base, replacement, **kwargs)
 
     monkeypatch.setattr(local_sandbox_module, "replace_output_path_matches", recording_replacer)
 
     assert sandbox._reverse_resolve_paths_in_output(f"read {resolved}/SKILL.md") == "read /mnt/skills/SKILL.md"
-    assert calls == [(f"read {resolved}/SKILL.md", resolved)]
+    assert calls == [(f"read {resolved}/SKILL.md", resolved, {"separator_agnostic": True})]
 
 
 def test_tools_mask_patterns_route_through_the_helper(tmp_path: Path) -> None:

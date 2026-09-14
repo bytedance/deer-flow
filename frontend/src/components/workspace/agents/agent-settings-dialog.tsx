@@ -48,7 +48,7 @@ interface AgentSettingsDialogProps {
 }
 
 /**
- * Edits a custom agent's model behavior (issue #4336): default model plus the
+ * Edits a custom agent's display name and model behavior: default model plus the
  * per-agent temperature / max_tokens overrides and thinking / reasoning
  * defaults. Persists through `PUT /api/agents/{name}`; changes take effect on
  * the agent's next run.
@@ -62,6 +62,7 @@ export function AgentSettingsDialog({
   const { models } = useModels();
   const { subagents } = useSubagents();
   const updateAgent = useUpdateAgent();
+  const [displayName, setDisplayName] = useState(agent.display_name ?? "");
 
   const [model, setModel] = useState(agent.model ?? DEFAULT_MODEL_VALUE);
   const [temperature, setTemperature] = useState(
@@ -117,6 +118,10 @@ export function AgentSettingsDialog({
   }, [selectableSubagents, selectedSubagents]);
 
   async function handleSave() {
+    if ([...displayName.trim()].length > 100) {
+      toast.error(t.agents.settingsDisplayNameTooLong);
+      return;
+    }
     const parsedSettings = parseAgentModelSettingsDraft({
       temperature,
       maxTokens,
@@ -134,6 +139,7 @@ export function AgentSettingsDialog({
       await updateAgent.mutateAsync({
         name: agent.name,
         request: {
+          display_name: displayName.trim() || null,
           model: model === DEFAULT_MODEL_VALUE ? null : model,
           model_settings: parsedSettings.modelSettings,
           thinking_enabled: supportsThinking
@@ -165,6 +171,25 @@ export function AgentSettingsDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-1">
+          <div className="space-y-1.5">
+            <label htmlFor="agent-display-name" className="text-sm font-medium">
+              {t.agents.settingsDisplayName}
+            </label>
+            <Input
+              id="agent-display-name"
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
+              placeholder={agent.name}
+              aria-describedby="agent-display-name-hint"
+            />
+            <p
+              id="agent-display-name-hint"
+              className="text-muted-foreground text-xs"
+            >
+              {t.agents.settingsDisplayNameHint} ({agent.name}){" · "}
+              {[...displayName.trim()].length}/100
+            </p>
+          </div>
           {/* Default model */}
           <div className="space-y-1.5">
             <span className="text-sm font-medium">

@@ -397,6 +397,51 @@
 
 ### 修复
 
+- **沙箱：** 远程 `glob` 与 `grep` 的输出被截断时，不再报告"没有匹配"。BoxLite、Tenki、E2B 与
+  OpenSandbox 会先限制搜索的原始输出行数，再在 Python 中过滤（`node_modules` 等忽略目录、匹配模式或 `glob`
+  范围），但只有达到 `max_results` 时才报告 `truncated`。若被截取的行全部被过滤掉，截断位置之后仍有
+  真实匹配的搜索会返回空结果且显示为完整。现在搜索会多输出一行以判断是否被截断，`glob` 和 `grep`
+  工具对被截断的空结果会说明结果不完整，而不是显示 "No matches found"。([#5427])
+- **沙箱：** 当输出用 `:` 连接主机路径（如 `$PATH`、`$PYTHONPATH`）时，主机路径不再暴露给模型。
+  匹配的路径会一直延伸到列表末尾，导致同一根目录下之后的条目都未被遮蔽；多余的遮蔽轮次每次
+  恰好补回一个条目，因此短列表掩盖了这一泄露。现在遮蔽时匹配的路径在 `:` 处结束。
+  挂载目录内指向所有挂载之外的符号链接，在命令输出和 `glob` 结果中改为显示其挂载路径，而不是目标的主机路径。([#5418])
+- **沙箱：** BoxLite `grep` 不再忽略 `glob` 的目录部分。此前只比较文件名，`src/*.js`
+  会匹配整棵目录树中的所有 `.js` 文件。现在 glob 作用于相对搜索根目录的路径，与 `glob()`
+  及其他 provider 的范围一致。([#5419])
+- **模型：** 通过 `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` 传递 Claude Code OAuth
+  token 时，第一个之后的 Claude 模型不再丢失凭据。每个 `ClaudeChatModel` 实例都会重新加载凭据，
+  但文件描述符只能读取一次，导致标题、摘要、subagent 模型以及之后的每次运行都没有凭据，并以
+  `TypeError: Could not resolve authentication method` 失败。现在 token 在每个进程中只读取一次并复用。([#5411])
+- **模型：** 当 `supports_reasoning_effort: true` 的模型同时从 profile 获得
+  `reasoning_effort`（顶层、`when_thinking_enabled` 或 `when_thinking_disabled`
+  中，或由 `extra_body.thinking` 的关闭路径注入）时，lead agent 不再构建失败。lead
+  agent 的常规构建总会转发请求的 effort（即使未设置），导致该参数两次传给 provider 构造函数，抛出
+  `TypeError: got multiple values for keyword argument 'reasoning_effort'`。现在请求值
+  按每个 agent 的 `model_settings` 方式叠加：替换 profile 顶层的值，未设置时保留该值，
+  最终值仍由 thinking 模式相关设置决定。Codex 保留自己的级别校验。([#5403])
+- **运行时：** 带 `Idempotency-Key` 的 run 重试在 SQL run 存储上不再返回 500。HTTP
+  准入不会传入 `user_id`，SQL 存储会把请求用户写入该行，但进程内的 run 记录仍为
+  `None`。同一 key 的重试若落到另一个 Gateway worker，或在已完成的 run 被清理后回到
+  同一 worker，就会比较两边的拥有者，把自己的 run 误判为其他用户的并抛错。同一不一致
+  还让 HTTP run 被按拥有者过滤的历史读取漏掉，并跳过了 MCP `background_tasks` 投影，
+  因此这类 run 的 `values` 事件现在会包含 `background_tasks`。`RunManager` 现在按
+  SQL 存储的方式用请求用户补全缺省的拥有者，各存储记录的拥有者保持一致。([#5401])
+- **运行时：** 跨 worker 的幂等 run 复用不再让复用方 worker 永久阻塞该线程。此前复用会
+  把从存储中读取的行注册为本地 run 记录，但只有拥有该 run 的 worker 才会结束并清理自己的
+  记录，因此这份副本会一直停留在准入时的 `pending`/`running` 状态：该 worker 上此线程后续
+  所有 `reject` 准入都返回 409，直到重启；读取该 run 时持续返回过期状态；若拥有方崩溃，
+  孤儿回收也会跳过这个 run。发往该 worker 的取消请求还会走本地拥有方路径，把拥有方仍在
+  运行的行标记为 `interrupted`。现在复用方 worker 返回不注册到本地的 store-only 句柄，
+  取消请求也按非拥有方的约定处理。([#5393])
+- **Skills：** 切换 skill 启用状态时不再把解析后的密钥写入 `extensions_config.json`。
+  此前 Gateway 的 skill 开关与 `DeerFlowClient.update_skill` 通过
+  `ExtensionsConfig.from_file()` 读取配置（该方法会把所有 `$VAR` 值替换为环境变量的
+  实际值），再把模型整体写回，于是 `"$GITHUB_TOKEN"` 引用会被持久化为明文令牌，未设置
+  的变量则被永久写成 `""`。`DeerFlowClient.update_mcp_config` 对 `mcpServers` 以外的
+  所有键也存在同样问题。现在这些写入方直接修改磁盘上的原始 JSON，并按运行时的加载方式
+  校验候选配置后再写入，占位符与手写结构保持不变；MCP 路由也复用同一个原始读取函数。
+  已被旧版本改写过的文件仍保留明文值，请恢复 `$VAR` 引用并轮换已暴露的凭据。([#5357])
 - **Gateway：** `disable_clarification` 与 `github_token` 现在与 `non_interactive`
   一样，仅对内部认证的调用方生效。此前这两个键无论调用方身份都会从 `body.context`
   透传，而且不会从被逐字复制进 run config 的自由格式 `body.config` 中清除，因此任何
@@ -887,6 +932,15 @@
   要、`SOUL.md`、子智能体描述、技能元数据，以及记忆更新 prompt 中的会话块——并中
   和 `web_capture` 工具结果中的提示词注入标签。([#4028]、[#4119]、[#4137]、[#4157]
   、[#4162]、[#4099]、[#4060]、[#4097]、[#4128])
+- **提示词注入：** 修复两处输入净化绕过。`hide_from_ui` 与人类消息上的
+  `name="summary"` 会让 `is_genuine_user_message` 认定该消息由框架写入，从而完全跳
+  过净化；现在携带这两者的不可信 run 输入与线程状态写入会在服务端被标记并照常净化，
+  调用方再也无法把原样的 `<system-reminder>` 放到 user-input 边界标记之外——而主智能
+  体 prompt 正是把边界外的内容声明为可信的框架数据。标记本身会被保留，因此仅用
+  `hide_from_ui` 来不显示在对话记录中的消息——引用的会话上下文、sidecar 上下文、保存
+  智能体命令、HumanInputCard 回复——行为不变，受信任的内部启动路径也不受影响。净化范围也从"仅最新一轮"扩大到*每一条*真实用户消息：该变换只作用于单次请
+  求，因此仅处理最后一轮只能让载荷在一次模型调用中失效，下一轮起就会被原样回放。
+  ([#5375])
 - **机密：** 从技能环境中清除继承来的密钥环境变量（`MYSQL_PWD`、`REDISCLI_AUTH`
   、缩写形式的 `*_PASS` 与 Postgres 的 `PGPASSFILE`）；请求作用域的密钥对斜杠激
   活与自主调用的技能都会绑定。([#4018]、[#4026]、[#3871]、[#3938])
@@ -938,6 +992,13 @@
 - **沙箱：** 沙箱子进程环境会清除 `SSH_AUTH_SOCK`——继承宿主机 ssh-agent socket
   会让沙箱内代码用智能体持有的所有密钥签名与认证——除非技能通过 required-secrets
   显式声明。([#5145])
+- **Artifact：** XML 产物现在与 HTML、SVG 一样以下载附件形式返回。
+  `GET /api/threads/{id}/artifacts/{path}` 此前会在应用源内联渲染 `.xml`、`.xsl`、
+  `.rdf` 文件（以及宿主 MIME 数据库映射为 `+xml` 的 `.rss` 等类型），被 prompt
+  注入的智能体写出带 XHTML 命名空间 `<script>` 的 XML 后，用户从聊天链接打开即可
+  以其会话调用 API。所有 XML MIME 类型（`text/xml`、`application/xml`、`text/xsl`
+  及任意 `+xml` 子类型）现均视为主动内容，`.skill` 归档成员同样适用；Artifact
+  面板仍通过 Range 请求预览 XML。([#5353])
 
 ### 文档
 
@@ -2102,3 +2163,13 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
 [#5321]: https://github.com/bytedance/deer-flow/pull/5321
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
+[#5353]: https://github.com/bytedance/deer-flow/pull/5353
+[#5357]: https://github.com/bytedance/deer-flow/pull/5357
+[#5375]: https://github.com/bytedance/deer-flow/pull/5375
+[#5393]: https://github.com/bytedance/deer-flow/pull/5393
+[#5401]: https://github.com/bytedance/deer-flow/pull/5401
+[#5403]: https://github.com/bytedance/deer-flow/pull/5403
+[#5411]: https://github.com/bytedance/deer-flow/pull/5411
+[#5418]: https://github.com/bytedance/deer-flow/pull/5418
+[#5419]: https://github.com/bytedance/deer-flow/pull/5419
+[#5427]: https://github.com/bytedance/deer-flow/pull/5427

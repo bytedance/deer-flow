@@ -15,6 +15,14 @@ likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
 
+Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
+Python (`os.name == "nt"`), it checks `pnpm.cmd` before the generic `pnpm`
+lookup, which uses `PATH`/`PATHEXT` and may select an `.exe` or `.bat` in the
+same or an earlier PATH directory. If neither is found, it falls back to
+Corepack, checking `corepack.cmd` before `corepack`. POSIX Python (including
+MSYS/Cygwin Python) keeps the generic name first for each tool; the gate is
+based on Python's `os.name`, not the invoking shell.
+
 ## Public Skill Review Waivers
 
 `review_changed_public_skills.py` keeps the analyzer strict and applies narrow

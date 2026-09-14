@@ -355,28 +355,40 @@ class LocalSandbox(Sandbox):
         normalized_path = path.replace("\\", "/")
         path_str = os.path.realpath(normalized_path)
 
+        container_path = self._container_path_for_local(path_str)
+        if container_path is None:
+            # A symlink under a mount can resolve outside every mount. Its own
+            # spelling still names a path inside the mount, so translate that
+            # rather than hand the model the link target's host path. ``normpath``
+            # keeps ``mount/../x`` from passing as inside the mount.
+            container_path = self._container_path_for_local(os.path.normpath(normalized_path))
+        if container_path is not None:
+            return container_path
+
+        # No mapping found, return original path
+        return path_str
+
+    def _container_path_for_local(self, local_path: str) -> str | None:
+        """Translate a native-separated host path under a mount, or return ``None``."""
         # Try each mapping (longest local path first for more specific matches)
         for mapping in self._mappings_by_local_specificity:
             local_path_resolved = self._resolved_local_paths[mapping]
             # ``Path.resolve()`` always renders with the native separator
-            # (backslash on Windows), regardless of the forward-slash
-            # normalization above, so the containment check must compare with
+            # (backslash on Windows), regardless of the caller's forward-slash
+            # normalization, so the containment check must compare with
             # ``os.sep`` here too -- mirroring ``_is_read_only_path`` -- instead
             # of a hardcoded "/". A hardcoded "/" can never match a
             # backslash-joined nested path on Windows, so every nested path
-            # silently fell through to the "no mapping found" branch below and
+            # silently fell through to the "no mapping found" fallback and
             # leaked the raw host path (real username, full directory tree).
-            if path_str == local_path_resolved or path_str.startswith(local_path_resolved + os.sep):
+            if local_path == local_path_resolved or local_path.startswith(local_path_resolved + os.sep):
                 # Replace the local path prefix with container path. Container
                 # paths are always POSIX-style, so the extracted relative
                 # portion (native-separated on Windows) is normalized to
                 # forward slashes before being spliced in.
-                relative = path_str[len(local_path_resolved) :].lstrip(os.sep).replace(os.sep, "/")
-                resolved = f"{mapping.container_path}/{relative}" if relative else mapping.container_path
-                return resolved
-
-        # No mapping found, return original path
-        return path_str
+                relative = local_path[len(local_path_resolved) :].lstrip(os.sep).replace(os.sep, "/")
+                return f"{mapping.container_path}/{relative}" if relative else mapping.container_path
+        return None
 
     def _reverse_resolve_paths_in_output(self, output: str) -> str:
         """
@@ -391,12 +403,19 @@ class LocalSandbox(Sandbox):
         # Scan directly instead of compiling one regex per thread root. Python's
         # global regex caches outlive an evicted LocalSandbox and otherwise keep
         # high-cardinality thread paths resident.
+        #
+        # The base is resolved with native separators, but forward resolution
+        # emits forward-slash spellings in commands and file content (see
+        # ``_resolve_paths_in_command``), so matching must accept both
+        # separators or the model sees raw host paths that no container path
+        # maps back to.
         result = output
         for mapping in self._mappings_by_local_specificity:
             result = replace_output_path_matches(
                 result,
                 self._resolved_local_paths[mapping],
                 self._reverse_resolve_path,
+                separator_agnostic=True,
             )
 
         return result

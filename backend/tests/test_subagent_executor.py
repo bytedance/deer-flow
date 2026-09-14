@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from packaging.version import Version
 
+from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 from deerflow.sandbox.lease import SandboxLeaseManager
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import SubagentCapacityRejected
@@ -547,6 +548,135 @@ class TestAgentConstruction:
         assert isinstance(messages[0], SystemMessage)
         assert base_config.system_prompt in messages[0].content
         assert isinstance(messages[1], HumanMessage)
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_inherits_background_without_execution_evidence(self, classes, base_config):
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+        from deerflow.subagents.context_snapshot import ParentContextSnapshot
+        from deerflow.subagents.executor import _harvest_bash_executions, _harvest_tool_receipts
+
+        parent_state = {
+            "messages": [
+                SystemMessage(content="Parent authority"),
+                HumanMessage(content="Preserve offline operation"),
+                AIMessage(content="", tool_calls=[{"id": "parent-bash", "name": "bash", "args": {"command": "pytest"}}]),
+                ToolMessage(content="all passed", tool_call_id="parent-bash", name="bash"),
+            ],
+            "summary_text": "Do not add a database server",
+        }
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], context_snapshot=ParentContextSnapshot.from_state(parent_state))
+        state, tools, setup = await executor._build_initial_state("Implement the migration")
+        assert len(state["messages"]) == 3
+        assert base_config.system_prompt in state["messages"][0].content
+        assert "Parent authority" not in str(state)
+        assert "Preserve offline operation" in str(state)
+        assert "Do not add a database server" in str(state)
+        assert state["messages"][-1].content == "Implement the migration"
+        assert all(isinstance(message, (SystemMessage, HumanMessage)) for message in state["messages"])
+        assert not _harvest_bash_executions(state)
+        assert not _harvest_tool_receipts(state)
+        assert "summary_text" not in state and "delegations" not in state and "skill_context" not in state
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("inherit", [False, True])
+    @pytest.mark.parametrize("history_format", ["plain", "output_text"])
+    async def test_snapshot_real_graph_writes_from_background_with_child_only_receipts(self, classes, base_config, tmp_path, inherit, history_format):
+        """Real LangGraph/tool execution; the deterministic model observes its input.
+
+        Use the production receipt middleware with the real executor lifecycle.
+        Other runtime middleware needs sandbox infrastructure and is covered by
+        its own integration tests, so only graph assembly is substituted here.
+        """
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+        from langchain_core.tools import tool
+
+        from deerflow.subagents.context_snapshot import ParentContextSnapshot
+
+        parent = {
+            "messages": [
+                AIMessage(content=[{"type": "output_text", "text": "The implementation must use SQLite."}]) if history_format == "output_text" else HumanMessage(content="The implementation must use SQLite."),
+                AIMessage(content="Parent investigation", tool_calls=[{"name": "bash", "args": {"command": "pytest"}, "id": "parent-only"}]),
+                ToolMessage(content="parent tests passed [r1]", name="bash", tool_call_id="parent-only"),
+                HumanMessage(content="PRIVATE_PARENT_MEMORY", additional_kwargs={"hide_from_ui": True}),
+                HumanMessage(content="PRIVATE_PARENT_PLAN", name="todo_reminder", additional_kwargs={"hide_from_ui": True}),
+                HumanMessage(content=[{"type": "image", "data": b"PRIVATE_BINARY_IMAGE"}, {"type": "file", "data": b"PRIVATE_BINARY_FILE"}, {"type": "text", "text": "Text beside unavailable media"}]),
+                HumanMessage(
+                    content="Clarified user requirement",
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        "human_input_response": {"version": 1, "kind": "human_input_response", "source": "ask_clarification", "request_id": "clarification:parent", "response_kind": "text", "value": "Clarified user requirement"},
+                    },
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "task", "args": {"prompt": "PENDING_PARENT_TASK"}, "id": "pending-task"},
+                        {"name": "write_file", "args": {"path": "pending-parent.txt", "content": "PENDING_PARENT_WRITE"}, "id": "pending-write"},
+                        {"name": "bash", "args": {"command": "PENDING_PARENT_CHECK"}, "id": "pending-check"},
+                    ],
+                ),
+            ],
+            "summary_text": "Preserve offline operation.",
+        }
+        observed = []
+        bound = []
+        output = tmp_path / "decision.txt"
+
+        @tool
+        def save_decision(decision: str) -> str:
+            """Save the implementation decision."""
+            output.write_text(decision)
+            return str(output)
+
+        class RecordingModel(GenericFakeChatModel):
+            def bind_tools(self, tools, **kwargs):
+                bound.append([tool.name for tool in tools])
+                return self
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                observed.append(messages)
+                return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+        def responses():
+            context = str(observed[-1])
+            decision = "SQLite; offline" if "SQLite" in context and "Preserve offline operation" in context else "Missing context"
+            yield AIMessage(content="Write the decision", tool_calls=[{"name": "save_decision", "args": {"decision": decision}, "id": "child-call"}])
+            yield AIMessage(content=f"Saved the decision to {output} [r1]")
+
+        executor = classes["SubagentExecutor"](
+            config=base_config,
+            tools=[save_decision],
+            context_snapshot=ParentContextSnapshot.from_state(parent) if inherit else None,
+            acceptance_criteria=["tests_passed:pytest"],
+        )
+        parent["messages"][0].content = "Changed parent requirement"
+        parent["summary_text"] = "Changed parent summary"
+
+        def build_graph(tools, **kwargs):
+            return create_agent(model=RecordingModel(messages=responses()), tools=tools, middleware=[ToolReceiptMiddleware()], checkpointer=False)
+
+        with patch.object(executor, "_create_agent", side_effect=build_graph):
+            result = await executor._aexecute("Save the agreed database decision.")
+
+        assert result.status == classes["SubagentStatus"].COMPLETED, result.error
+        assert output.read_text() == ("SQLite; offline" if inherit else "Missing context")
+        assert bound and all(names == ["save_decision"] for names in bound)
+        assert all(not isinstance(message, (AIMessage, ToolMessage)) for message in observed[0])
+        assert "Changed parent" not in str(observed)
+        assert "PRIVATE_PARENT" not in str(observed)
+        assert "PENDING_PARENT" not in str(observed)
+        assert "PRIVATE_BINARY" not in str(observed)
+        assert ("Historical media omitted" in str(observed)) is inherit
+        assert ("Text beside unavailable media" in str(observed)) is inherit
+        assert ("parent tests passed" in str(observed)) is inherit
+        assert ("Clarified user requirement" in str(observed)) is inherit
+        assert result.tool_receipts and {receipt["tool_call_id"] for receipt in result.tool_receipts} == {"child-call"}
+        assert not result.bash_executions
+        assert "parent-only" not in str(result.ai_messages)
+        assert parent["messages"][0].content == "Changed parent requirement"
 
     @pytest.mark.anyio
     async def test_build_initial_state_seeds_current_upload_snapshot(

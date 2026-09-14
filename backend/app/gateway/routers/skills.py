@@ -5,26 +5,30 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import BinaryIO, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from starlette.datastructures import FormData, Headers, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
+from app.gateway.skill_export import ExportClientDisconnected, SkillExportManifestResponse, SkillExportResponse, export_http_error, run_export_work
 from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_skills_system_prompt_cache_async, refresh_user_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
-    SkillStateConfig,
     atomic_write_extensions_config,
     extensions_config_file_lock,
     extensions_config_write_lock,
     get_extensions_config,
+    read_raw_extensions_config,
     reload_extensions_config,
+    set_raw_skill_enabled,
+    validate_raw_extensions_config,
 )
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
+from deerflow.skills.export import SkillExportError, build_skill_export, export_manifest
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
@@ -388,6 +392,47 @@ async def list_custom_skills(config: AppConfig = Depends(get_config)) -> SkillsL
         raise HTTPException(status_code=500, detail=f"Failed to list custom skills: {str(e)}")
 
 
+@router.get("/skills/custom/{skill_name}/export-manifest", response_model=SkillExportManifestResponse, response_model_exclude_unset=True, summary="Preview Custom Skill Export")
+async def preview_custom_skill_export(skill_name: str, request: Request, response: Response, config: AppConfig = Depends(get_config)) -> SkillExportManifestResponse | Response:
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    try:
+        result, lease = await run_export_work(lambda cancel: export_manifest(_get_user_skill_storage(config), skill_name, cancel), request)
+    except ExportClientDisconnected:
+        return Response(status_code=204)
+    except SkillExportError as error:
+        raise export_http_error(error) from error
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(500, detail={"code": "skill_export_failed", "message": "Could not prepare the skill export."}) from None
+    try:
+        response.headers["Cache-Control"] = "private, no-store"
+        return SkillExportManifestResponse.model_validate(result)
+    finally:
+        lease.release()
+
+
+@router.get("/skills/custom/{skill_name}/export", summary="Download Custom Skill Archive")
+async def download_custom_skill_export(
+    skill_name: str,
+    request: Request,
+    expected_revision: str = Query(..., pattern=r"^[a-f0-9]{64}$"),
+    config: AppConfig = Depends(get_config),
+) -> Response:
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    try:
+        archive, lease = await run_export_work(lambda cancel: build_skill_export(_get_user_skill_storage(config), skill_name, expected_revision, cancel), request)
+    except ExportClientDisconnected:
+        return Response(status_code=204)
+    except SkillExportError as error:
+        raise export_http_error(error) from error
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(500, detail={"code": "skill_export_failed", "message": "Could not prepare the skill export."}) from None
+    return SkillExportResponse(archive, skill_name, lease)
+
+
 @router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")
 async def get_custom_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
@@ -610,13 +655,18 @@ def _write_extensions_skill_state(
     with projection_update:
         with extensions_config_write_lock, extensions_config_file_lock(config_path):
             # The projection lock is cross-process, but the singleton cache is
-            # not. Existing files are therefore re-read under the lock; a new
-            # file starts from a deep snapshot of the cached defaults.
-            extensions_config = ExtensionsConfig.from_file(config_path) if config_path.exists() else get_extensions_config().model_copy(deep=True)
-            extensions_config.skills[skill_name] = SkillStateConfig(enabled=enabled)
+            # not. Existing files are therefore re-read under the lock, raw, so
+            # $VAR placeholders are not persisted as resolved secrets. A new
+            # file starts from the cached skill states only: the cached model
+            # holds resolved values and must never be serialized.
+            if config_path.exists():
+                raw_config = read_raw_extensions_config(config_path)
+            else:
+                raw_config = {"skills": {name: {"enabled": state.enabled} for name, state in get_extensions_config().skills.items()}}
+            set_raw_skill_enabled(raw_config, skill_name, enabled)
 
-            config_data = extensions_config.to_file_dict()
-            atomic_write_extensions_config(config_path, config_data)
+            validate_raw_extensions_config(raw_config)
+            atomic_write_extensions_config(config_path, raw_config)
 
             logger.info(f"Skills configuration updated and saved to: {config_path}")
             reload_extensions_config()

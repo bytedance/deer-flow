@@ -31,10 +31,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
 
+# Exact matches only; ``_is_active_content_mime_type`` also treats every
+# ``+xml`` subtype as active content.
 ACTIVE_CONTENT_MIME_TYPES = {
     "text/html",
     "application/xhtml+xml",
     "image/svg+xml",
+    "text/xml",
+    "application/xml",
+    "text/xsl",
 }
 
 MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
@@ -212,6 +217,21 @@ def _slice_byte_range(content: bytes, range_header: str | None) -> tuple[bytes, 
     return ranged_content, 206, headers
 
 
+def _is_active_content_mime_type(mime_type: str | None) -> bool:
+    """Return whether a browser can run script when rendering *mime_type* inline.
+
+    Beyond HTML, this covers every WHATWG XML MIME type (``text/xml``,
+    ``application/xml``, or a ``+xml`` subtype) plus ``text/xsl``, which Blink
+    also renders as XML: any XML document can carry an XHTML-namespaced
+    ``<script>``, so ``report.xml`` or ``feed.rss`` is as dangerous as
+    ``page.html`` when opened in the application origin.
+    """
+    if mime_type is None:
+        return False
+    mime_type = mime_type.lower()
+    return mime_type in ACTIVE_CONTENT_MIME_TYPES or mime_type.endswith("+xml")
+
+
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
     """Check if file is text by examining content for null bytes."""
     try:
@@ -307,7 +327,7 @@ def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tupl
         raise HTTPException(status_code=400, detail=f"Path is not a file: {path}")
     mime_type, _ = mimetypes.guess_type(actual_path)
     # Active content / explicit download is streamed by FileResponse — no read here.
-    if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
+    if download or _is_active_content_mime_type(mime_type):
         return ("file", mime_type)
     if mime_type and mime_type.startswith("text/"):
         return ("inline_file", mime_type)
@@ -361,7 +381,7 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
 
     Returns:
         The file content as a FileResponse with appropriate content type:
-        - Active content (HTML/XHTML/SVG): Served as download attachment
+        - Active content (HTML and XML documents, including XHTML/SVG): Served as download attachment
         - Text files: Plain text with proper MIME type
         - Binary files: Inline display with download option
 
@@ -373,13 +393,13 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
 
     Query Parameters:
         download (bool): If true, forces attachment download for file types that are
-            otherwise returned inline or as plain text. Active HTML/XHTML/SVG content
-            is always downloaded regardless of this flag.
+            otherwise returned inline or as plain text. Active HTML/XML content
+            (including XHTML and SVG) is always downloaded regardless of this flag.
 
     Example:
         - Get text file inline: `/api/threads/abc123/artifacts/mnt/user-data/outputs/notes.txt`
         - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
-        - Active web content such as `.html`, `.xhtml`, and `.svg` artifacts is always downloaded
+        - Active web content such as `.html`, `.xhtml`, `.svg`, and `.xml` artifacts is always downloaded
     """
     # Trusted internal callers may act on behalf of a thread's owner via the
     # owner-user-id header (honored only after the internal token validates).
@@ -407,7 +427,7 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         # Add cache headers to avoid repeated ZIP extraction (cache for 5 minutes)
         cache_headers = {"Cache-Control": "private, max-age=300"}
         download_name = Path(internal_path).name or actual_skill_path.stem
-        if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
+        if download or _is_active_content_mime_type(mime_type):
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=_build_attachment_headers(download_name, cache_headers))
 
         # Archive members are already bounded during extraction. Preserve byte

@@ -6,6 +6,7 @@ each middleware declares it instead.
 """
 
 import importlib
+from types import SimpleNamespace
 
 import pytest
 from deerflow_extension_api import ReleasePolicyProvider, canonical_hash, canonical_json, collect_release_policies
@@ -171,6 +172,12 @@ def _make_summarization_middleware():
     )
 
 
+def _make_durable_context_middleware():
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    return DurableContextMiddleware()
+
+
 def _make_tool_output_budget_middleware():
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
@@ -219,6 +226,7 @@ _MIDDLEWARE_DECLARATIONS = [
     ("deerflow.agents.middlewares.deferred_tool_filter_middleware", "DeferredToolFilterMiddleware", _make_deferred_tool_filter_middleware),
     ("deerflow.agents.middlewares.safety_finish_reason_middleware", "SafetyFinishReasonMiddleware", _make_safety_finish_reason_middleware),
     ("deerflow.agents.middlewares.summarization_middleware", "DeerFlowSummarizationMiddleware", _make_summarization_middleware),
+    ("deerflow.agents.middlewares.durable_context_middleware", "DurableContextMiddleware", _make_durable_context_middleware),
     ("deerflow.agents.middlewares.tool_output_budget_middleware", "ToolOutputBudgetMiddleware", _make_tool_output_budget_middleware),
     ("deerflow.agents.middlewares.skill_activation_middleware", "SkillActivationMiddleware", _make_skill_activation_middleware),
     ("deerflow.agents.middlewares.system_message_coalescing_middleware", "SystemMessageCoalescingMiddleware", _make_system_message_coalescing_middleware),
@@ -253,3 +261,65 @@ def test_middleware_release_policy_parameters_are_canonically_serialisable(impor
     params = middleware.release_policy_parameters()
     assert isinstance(params, dict)
     canonical_hash(params)
+
+
+def _middleware_fingerprint(middleware):
+    from deerflow.agents.assembly_descriptor import build_assembly_descriptor
+
+    return build_assembly_descriptor(
+        namespace="test",
+        agent_name="continuity",
+        requested_model="static",
+        effective_model="static",
+        model_config=SimpleNamespace(),
+        thinking_enabled=False,
+        reasoning_effort=None,
+        rendered_base_prompt="same prompt",
+        tools=[],
+        middlewares=[middleware],
+        deferred_names=frozenset(),
+        enabled_skills=[],
+        effective_policies={},
+    ).fingerprint
+
+
+def _continuity_summarizer(config):
+    from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+
+    return DeerFlowSummarizationMiddleware(model=_StaticChatModel(), trigger=("messages", 4), keep=("messages", 2), task_continuity_config=config)
+
+
+@pytest.mark.parametrize("field,value", [("enabled", False), ("max_batches", 1), ("max_records_per_batch", 1), ("max_record_chars", 1000)])
+def test_each_continuity_policy_field_changes_assembly_identity(field, value):
+    from deerflow.config.task_continuity_config import TaskContinuityConfig
+
+    original = _continuity_summarizer(TaskContinuityConfig(enabled=True))
+    changed = _continuity_summarizer(TaskContinuityConfig(**{"enabled": True, field: value}))
+    assert original.release_policy_parameters() != changed.release_policy_parameters()
+    assert _middleware_fingerprint(original) != _middleware_fingerprint(changed)
+
+
+def test_disabled_continuity_retention_does_not_change_assembly_identity():
+    from deerflow.config.task_continuity_config import TaskContinuityConfig
+
+    omitted = _continuity_summarizer(None)
+    disabled = _continuity_summarizer(TaskContinuityConfig(enabled=False, max_batches=1, max_records_per_batch=1, max_record_chars=1000))
+    assert omitted.release_policy_parameters() == disabled.release_policy_parameters()
+    assert _middleware_fingerprint(omitted) == _middleware_fingerprint(disabled)
+
+
+@pytest.mark.parametrize("kwargs", [{"task_continuity_enabled": True}, {"skills_container_path": "/other-skills"}, {"skill_file_read_tool_names": ["custom_read"]}])
+def test_durable_context_behavior_changes_assembly_identity(kwargs):
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    original = DurableContextMiddleware()
+    changed = DurableContextMiddleware(**kwargs)
+    assert _middleware_fingerprint(original) != _middleware_fingerprint(changed)
+
+
+def test_equivalent_durable_context_configuration_has_identical_identity():
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    first = DurableContextMiddleware(skills_container_path="/skills/./", skill_file_read_tool_names=["read_b", "read_a", "read_a"])
+    second = DurableContextMiddleware(skills_container_path="/skills", skill_file_read_tool_names=["read_a", "read_b"])
+    assert _middleware_fingerprint(first) == _middleware_fingerprint(second)

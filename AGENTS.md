@@ -77,7 +77,7 @@ Third-party extensions are loaded from a top-level `plugins:` list in `config.ya
 kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
 middleware, task lifecycle, system-model observers, Gateway services, and FastAPI HTTP
 routers; the [reference extension](examples/deerflow-extension-example/) demonstrates all
-five. Manage them with `deerflow extensions install/list/enable/disable/remove` or the root
+five. Manage them with `deerflow extensions install/upgrade/list/enable/disable/remove` or the root
 `make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
 hooks and extension code execute with Gateway privileges, so only trusted operator sources
 belong in this path. The manager transaction, accepted source forms, lock discipline, and
@@ -125,6 +125,7 @@ make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
 make extension-install SOURCE=...  # Install and enable a trusted Python extension
+make extension-upgrade SOURCE=...  # Replace an installed extension and keep its config
 make extension-list                # List configured Python extensions
 make extension-enable NAME=...     # Enable an installed extension (restart required)
 make extension-disable NAME=...    # Disable without uninstalling (restart required)
@@ -166,7 +167,10 @@ cd frontend && pnpm test      # Unit tests
 Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
 (`pnpm`) = per-module work.**
 
-Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. Diagnostic scripts resolve the runner and frontend directory to absolute paths before changing the child process working directory, so they remain independent of the caller's current directory. The runner preserves direct `pnpm`/`pnpm.cmd` priority, falls back to `corepack pnpm`, and is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
+Host pnpm calls use `scripts/pnpm.py`: native Windows tries `pnpm.cmd` before
+`pnpm`; POSIX reverses the order. Its Corepack fallback applies the same ordering
+to `corepack.cmd` and `corepack`. The runner operates from `frontend/` so
+Corepack honors its pinned package-manager version.
 
 ### Prerequisites before `make dev`
 

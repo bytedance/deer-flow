@@ -23,13 +23,30 @@ from deerflow.skills.types import SecretRequirement, Skill, SkillCategory
 _SLASH_SOURCE_OWNER_TOKEN = "test-slash-source-owner"
 
 
+def _echo_env_probe(name: str) -> str:
+    """Render an env-var echo probe in the syntax of the shell LocalSandbox picks.
+
+    The POSIX `$NAME` form expands under neither PowerShell nor cmd.exe, so on
+    Windows hosts the probe must use the resolved shell's own expansion syntax;
+    otherwise the variable echoes empty and the negative checks below silently
+    stop measuring anything (an unset PowerShell variable prints as a blank
+    line, which would let even a leaked secret pass).
+    """
+    shell = LocalSandbox._get_shell()
+    if LocalSandbox._is_powershell(shell):
+        return f"echo [$env:{name}]"
+    if LocalSandbox._is_cmd_shell(shell):
+        return f"echo [%{name}%]"
+    return f"echo [${name}]"
+
+
 class TestLocalSandboxEnvInjection:
     """LocalSandbox.execute_command(env=...) injects per-call env into the subprocess."""
 
     def test_injected_env_visible_to_command(self):
         sandbox = LocalSandbox(id="local")
         out = sandbox.execute_command(
-            "echo $DEERFLOW_TEST_SECRET",
+            _echo_env_probe("DEERFLOW_TEST_SECRET"),
             env={"DEERFLOW_TEST_SECRET": "s3cret-value"},
         )
         assert "s3cret-value" in out
@@ -38,14 +55,14 @@ class TestLocalSandboxEnvInjection:
         """env=None preserves the legacy inherited-os.environ behaviour."""
         monkeypatch.setenv("DEERFLOW_INHERITED_VAR", "inherited-value")
         sandbox = LocalSandbox(id="local")
-        out = sandbox.execute_command("echo $DEERFLOW_INHERITED_VAR")
+        out = sandbox.execute_command(_echo_env_probe("DEERFLOW_INHERITED_VAR"))
         assert "inherited-value" in out
 
     def test_injected_env_is_per_call_only(self):
         """Injected env must not leak into a subsequent call that does not pass it."""
         sandbox = LocalSandbox(id="local")
-        sandbox.execute_command("true", env={"DEERFLOW_EPHEMERAL": "leaky"})
-        out = sandbox.execute_command("echo [$DEERFLOW_EPHEMERAL]")
+        sandbox.execute_command(_echo_env_probe("DEERFLOW_EPHEMERAL"), env={"DEERFLOW_EPHEMERAL": "leaky"})
+        out = sandbox.execute_command(_echo_env_probe("DEERFLOW_EPHEMERAL"))
         assert "leaky" not in out
 
     def test_platform_secret_scrubbed_from_inherited_env(self, monkeypatch):
@@ -54,14 +71,14 @@ class TestLocalSandboxEnvInjection:
         is security theatre — a skill script could simply read $OPENAI_API_KEY."""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-platform-should-not-leak")
         sandbox = LocalSandbox(id="local")
-        out = sandbox.execute_command("echo [$OPENAI_API_KEY]")
+        out = sandbox.execute_command(_echo_env_probe("OPENAI_API_KEY"))
         assert "sk-platform-should-not-leak" not in out
 
     def test_benign_env_still_inherited_after_scrub(self, monkeypatch):
         """Scrubbing platform secrets must not strip harmless vars that skills rely on."""
         monkeypatch.setenv("DEERFLOW_PLAIN_VAR", "harmless-value")
         sandbox = LocalSandbox(id="local")
-        out = sandbox.execute_command("echo [$DEERFLOW_PLAIN_VAR]")
+        out = sandbox.execute_command(_echo_env_probe("DEERFLOW_PLAIN_VAR"))
         assert "harmless-value" in out
 
     def test_injected_secret_survives_scrub(self, monkeypatch):
@@ -69,7 +86,7 @@ class TestLocalSandboxEnvInjection:
         pattern — injection happens after scrubbing the inherited environment."""
         sandbox = LocalSandbox(id="local")
         out = sandbox.execute_command(
-            "echo [$INJECTED_API_KEY]",
+            _echo_env_probe("INJECTED_API_KEY"),
             env={"INJECTED_API_KEY": "scoped-value"},
         )
         assert "scoped-value" in out
@@ -247,6 +264,7 @@ class TestEnvPolicy:
         from deerflow.sandbox.env_policy import build_sandbox_env
 
         monkeypatch.setenv("MYSQL_URL", "mysql://user:pw@host/db")
+        monkeypatch.setenv("PWD", "/repo")  # POSIX hosts set PWD themselves; plant it so the survival check runs on Windows too
         monkeypatch.setenv("MYSQL_PWD", "prod-db-password")
         monkeypatch.setenv("REDISCLI_AUTH", "prod-redis-auth")
         env = build_sandbox_env()

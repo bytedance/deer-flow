@@ -110,13 +110,14 @@ async def test_update_skill_writes_from_snapshot_without_mutating_singleton(tmp_
     assert "demo-skill" not in shared_config.skills
     config_text = await asyncio.to_thread(config_path.read_text, encoding="utf-8")
     written = json.loads(config_text)
-    assert written["skills"] == {
-        "existing-skill": {"enabled": True},
-        "demo-skill": {"enabled": False},
+    # A new file is seeded with the cached skill states only. The cached model
+    # holds $VAR-resolved values, so none of its other fields are serialized.
+    assert written == {
+        "skills": {
+            "existing-skill": {"enabled": True},
+            "demo-skill": {"enabled": False},
+        }
     }
-    # to_file_dict() serializes the full shape, so unrelated top-level keys survive.
-    assert written["mcpServers"] == {}
-    assert "middlewares" in written
 
 
 async def test_update_skill_persists_state_when_source_omits_skills(tmp_path: Path, monkeypatch) -> None:
