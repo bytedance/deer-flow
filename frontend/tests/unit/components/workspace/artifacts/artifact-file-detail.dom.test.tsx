@@ -109,6 +109,9 @@ describe("ArtifactFileDetail browser-preview iframe", () => {
     expect(frame.getAttribute("src")).toBe(
       `/backend/api/threads/${THREAD_ID}/artifacts/mnt/user-data/outputs/report.pdf`,
     );
+    // Untitled frames have no accessible name (the sibling preview iframe
+    // keeps "Artifact preview"); dropping this regressed WCAG frame titles.
+    expect(frame.getAttribute("title")).toBe("report.pdf");
   });
 
   it("keeps the empty sandbox for images and other passive binaries", () => {

@@ -466,7 +466,9 @@ test.describe("Artifact preview stability", () => {
     // Gateway adds X-Content-Type-Options: nosniff, so the response cannot be
     // reinterpreted as active markup. Non-PDF previewable binaries (images,
     // audio, video) keep the sandbox.
-    const urlOfArtifactIframe = artifactsPanel.locator("iframe:not([title])");
+    const urlOfArtifactIframe = artifactsPanel.locator(
+      'iframe[title="report.pdf"]',
+    );
     await expect(urlOfArtifactIframe).toBeVisible();
     await expect(urlOfArtifactIframe).not.toHaveAttribute("sandbox", "");
   });

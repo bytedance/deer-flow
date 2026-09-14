@@ -720,6 +720,9 @@ export function ArtifactFileDetail({
               // serves it as an attachment.
               sandbox={getFileExtension(filepath) === "pdf" ? undefined : ""}
               src={urlOfArtifact({ filepath, threadId, isMock })}
+              // Accessible name for the frame (WCAG frame titles); the PDF
+              // branch must not be located by a bare ``iframe:not([title])``.
+              title={getFileName(filepath)}
             />
           )}
           {!isCodeFile && !canPreviewInBrowser && (

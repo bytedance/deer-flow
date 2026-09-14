@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from deerflow_extension_api import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
 from fastapi import FastAPI, Request, Response
@@ -203,7 +203,8 @@ async def _run_startup_trash_sweep(app: FastAPI, startup_config) -> None:
     scheduler (§15.9). Sweeps every user (``user_id=None``) with the
     configured retention window, including the full reconciliation. A sweep
     failure is logged and never blocks gateway readiness; the lifespan runs
-    this as a background task and awaits it (bounded) on shutdown.
+    this as a background task and awaits it (bounded) on shutdown, cancelling
+    it when the budget runs out.
     """
     try:
         from deerflow.config.paths import get_paths
@@ -227,6 +228,35 @@ async def _run_startup_trash_sweep(app: FastAPI, startup_config) -> None:
             )
     except Exception:
         logger.warning("Trash retention sweep skipped", exc_info=True)
+
+
+async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
+    """Bounded shutdown wait for the background startup sweep (§8.3).
+
+    Waits ``_SHUTDOWN_HOOK_TIMEOUT_SECONDS`` for an in-flight sweep and
+    cancels it when the budget runs out. The shield keeps that wait bounded
+    without killing the sweep, so an overrun must be cancelled here: the
+    all-users reconciliation reads through the document repo and the DB
+    engine, and leaving it running would have it walk rows and files while
+    the teardown below disposes both underneath it.
+    """
+    task = getattr(app.state, "startup_trash_sweep_task", None)
+    if task is None or task.done():
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+    except TimeoutError:
+        # Cancellation lands at the sweep's next await; ``_run_startup_trash_sweep``
+        # only catches ``Exception``, so ``CancelledError`` propagates.
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        logger.warning(
+            "Startup trash sweep exceeded %.1fs during shutdown; cancelled and proceeding with worker exit.",
+            _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.exception("Startup trash sweep failed during shutdown")
 
 
 @asynccontextmanager
@@ -349,7 +379,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # available. The per-user reconciliation walks every row and file, so
         # it is scheduled as a background task: gateway readiness never waits
         # on it, a failure is logged by the task itself, and shutdown awaits
-        # the in-flight sweep before the runtime is torn down.
+        # the in-flight sweep (bounded, cancelled on overrun) before the
+        # runtime is torn down.
         app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
 
         try:
@@ -483,20 +514,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         yield
 
-        startup_trash_sweep_task = getattr(app.state, "startup_trash_sweep_task", None)
-        if startup_trash_sweep_task is not None and not startup_trash_sweep_task.done():
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(startup_trash_sweep_task),
-                    timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                logger.warning(
-                    "Startup trash sweep exceeded %.1fs during shutdown; proceeding with worker exit.",
-                    _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-                )
-            except Exception:
-                logger.exception("Startup trash sweep failed during shutdown")
+        await _shutdown_startup_trash_sweep(app)
 
         try:
             await auth.close_oidc_service()

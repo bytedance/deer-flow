@@ -9,6 +9,7 @@ detects but never deletes, empty-parent rmdir).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import UTC, datetime, timedelta
@@ -484,3 +485,42 @@ class TestStartupSweep:
         app = FastAPI()
         app.state.project_document_repo = None
         await _run_startup_trash_sweep(app, SimpleNamespace(projects=None))
+
+    async def test_shutdown_hook_cancels_a_sweep_that_overruns_the_budget(self, env, monkeypatch, caplog):
+        """A sweep still running at the shutdown deadline stops there.
+
+        The shield keeps the shutdown wait bounded without killing the sweep,
+        so an overrun must be cancelled explicitly: an all-users
+        reconciliation left running keeps reading rows and files while the
+        repo and DB engine are disposed underneath it.
+        """
+        from fastapi import FastAPI
+
+        import app.gateway.app as gateway_app
+        import deerflow.projects.trash as trash_mod
+
+        started = asyncio.Event()
+        observed_cancel = asyncio.Event()
+
+        async def overrunning(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                observed_cancel.set()
+                raise
+
+        monkeypatch.setattr(trash_mod, "run_trash_retention_sweep", overrunning)
+        monkeypatch.setattr(gateway_app, "_SHUTDOWN_HOOK_TIMEOUT_SECONDS", 0.05)
+        app = FastAPI()
+        app.state.project_document_repo = env.docs
+        task = asyncio.create_task(gateway_app._run_startup_trash_sweep(app, SimpleNamespace(projects=None)))
+        app.state.startup_trash_sweep_task = task
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        with caplog.at_level(logging.WARNING):
+            await gateway_app._shutdown_startup_trash_sweep(app)
+
+        assert observed_cancel.is_set()
+        assert task.cancelled()
+        assert any("Startup trash sweep exceeded" in record.message for record in caplog.records)
