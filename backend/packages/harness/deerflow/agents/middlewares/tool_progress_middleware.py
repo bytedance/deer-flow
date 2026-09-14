@@ -565,9 +565,6 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
     # ------------------------------------------------------------------
     # wrap_model_call: drain pending hints and inject before model sees messages
 
-    def _augment_request(self, request: ModelRequest) -> ModelRequest:
-        return self._inject_hints(request, self._drain_pending(request.runtime))
-
     def _inject_hints(self, request: ModelRequest, hints: list[str]) -> ModelRequest:
         if not hints:
             return request

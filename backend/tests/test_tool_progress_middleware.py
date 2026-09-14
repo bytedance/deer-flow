@@ -893,8 +893,8 @@ def test_no_hint_when_inject_assessment_disabled():
     assert hints == []
 
 
-def test_augment_request_deduplicates_identical_hints():
-    """L2: _augment_request must deduplicate identical hint strings via dict.fromkeys.
+def test_inject_hints_deduplicates_identical_hints():
+    """L2: _inject_hints must deduplicate identical hint strings via dict.fromkeys.
 
     If the same hint text appears multiple times in the queue (e.g. two successive
     no_results errors produce identical hint strings), only one copy should be
