@@ -200,7 +200,12 @@ class Sandbox(ABC):
 
     @abstractmethod
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
-        """Find paths that match a glob pattern under a root directory."""
+        """Find paths that match a glob pattern under a root directory.
+
+        Returns the matches and ``truncated``, which is true whenever the
+        matches may be incomplete: ``max_results`` was reached, or the search
+        stopped at an output cap before filtering.
+        """
         pass
 
     @abstractmethod
@@ -214,7 +219,11 @@ class Sandbox(ABC):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        """Search for matches inside a text file or files under a directory."""
+        """Search for matches inside a text file or files under a directory.
+
+        Returns the matches and ``truncated``, with the same meaning as in
+        :meth:`glob`.
+        """
         pass
 
     @abstractmethod

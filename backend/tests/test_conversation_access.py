@@ -22,13 +22,14 @@ from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import EditReplayVisibility
 
 
-def _setup(*, user_id="alice", permissions=("runs:read",), enabled=True):
+def _setup(*, user_id="alice", permissions=("runs:read",), enabled=True, tool_output=None):
     from app.gateway.conversation_access import prepare_conversation_reader
 
     config = AppConfig.model_validate(
         {
             "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
             "tools": [{"name": "read_conversation", "group": "conversation", "use": "deerflow.tools.conversation:read_conversation"}] if enabled else [],
+            **({"tool_output": tool_output} if tool_output is not None else {}),
         }
     )
     user = SimpleNamespace(id=user_id, system_role="admin")

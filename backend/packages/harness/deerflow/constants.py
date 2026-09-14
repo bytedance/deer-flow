@@ -6,6 +6,8 @@ DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 # must not initialize the tool/subagent packages while importing this key.
 CONVERSATION_READER_CONTEXT_KEY = "__conversation_reader"
 CONVERSATION_TOOL_USE = "deerflow.tools.conversation:read_conversation"
+# The Gateway sizes reader pages by this tool's tool-output budget entry.
+CONVERSATION_TOOL_NAME = "read_conversation"
 
 # Hidden subdirectory (under a thread's outputs dir) that holds the browser
 # tools' per-step screenshots. These are transient live-progress frames, not

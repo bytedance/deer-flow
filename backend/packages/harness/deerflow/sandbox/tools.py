@@ -604,6 +604,10 @@ def _resolve_local_read_path(path: str, thread_data: ThreadDataState | None) -> 
 
 def _format_glob_results(root_path: str, matches: list[str], truncated: bool) -> str:
     if not matches:
+        # A remote search can hit its output cap before any path survives the
+        # Python-side filters; that is not evidence that nothing matches.
+        if truncated:
+            return f"Search under {root_path} stopped at its result limit with no files matched in the part it covered; results are incomplete. Narrow the path or pattern."
         return f"No files matched under {root_path}"
 
     lines = [f"Found {len(matches)} paths under {root_path}"]
@@ -617,6 +621,8 @@ def _format_glob_results(root_path: str, matches: list[str], truncated: bool) ->
 
 def _format_grep_results(root_path: str, matches: list[GrepMatch], truncated: bool) -> str:
     if not matches:
+        if truncated:
+            return f"Search under {root_path} stopped at its result limit with no matches in the part it covered; results are incomplete. Narrow the path or add a glob filter."
         return f"No matches found under {root_path}"
 
     lines = [f"Found {len(matches)} matches under {root_path}"]
