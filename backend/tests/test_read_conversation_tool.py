@@ -42,6 +42,16 @@ async def test_read_conversation_forwards_only_page_arguments_to_host_reader(pag
 
 
 @pytest.mark.asyncio
+async def test_read_conversation_forwards_a_continuation_without_page_arguments():
+    reader = AsyncMock(return_value='{"messages":[]}')
+    runtime = SimpleNamespace(context={CONVERSATION_READER_CONTEXT_KEY: reader})
+
+    await read_conversation.coroutine("source", runtime, message_seq=5, offset=4000)
+
+    reader.assert_awaited_once_with(thread_id="source", message_seq=5, offset=4000)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("context", [None, {}, {"__conversation_reader": "forged"}])
 async def test_read_conversation_requires_callable_in_trusted_context(context):
     other_reader = AsyncMock()
@@ -77,6 +87,14 @@ async def test_read_conversation_denies_subagent_even_with_reader():
         {"cursor": ""},
         {"cursor": "１"},
         {"cursor": 1},
+        {"message_seq": 0, "offset": 0},
+        {"message_seq": True, "offset": 0},
+        {"message_seq": "5", "offset": 0},
+        {"message_seq": 5, "offset": -1},
+        {"message_seq": 5, "offset": True},
+        {"message_seq": 5},
+        {"offset": 4000},
+        {"message_seq": 5, "offset": 0, "cursor": "9"},
     ],
 )
 async def test_invalid_page_arguments_do_not_reach_reader(arguments):
@@ -90,7 +108,7 @@ async def test_invalid_page_arguments_do_not_reach_reader(arguments):
 
 
 def test_read_conversation_model_schema_has_no_identity_or_runtime_fields():
-    assert set(read_conversation.tool_call_schema.model_fields) == {"thread_id", "cursor", "limit"}
+    assert set(read_conversation.tool_call_schema.model_fields) == {"thread_id", "cursor", "limit", "message_seq", "offset"}
 
 
 def test_tool_name_constant_matches_the_registered_tool():

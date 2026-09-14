@@ -8,8 +8,8 @@ current run's explicit references and user permissions. Do not import Gateway
 routers into the harness or recover this capability from persisted messages.
 Reads use live visible history; expiry/deletion does not erase destination copies.
 The Gateway sizes pages to the `CONVERSATION_TOOL_NAME` tool-output budget so
-results stay inline. Truncated results ask the agent to request missing material;
-keep that guidance separate from permission enforcement.
+results stay inline. Cut messages carry a `message_seq`/`offset` continuation that
+the same host reader serves; keep reading guidance separate from permission enforcement.
 
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`
