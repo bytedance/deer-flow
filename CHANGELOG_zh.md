@@ -930,7 +930,7 @@
   分析被跳过。此类文件现在会报告 `package-undecodable-script` 并照常分析，`CRITICAL`
   命中仍会拦截。SkillScan 的 Mach-O 检测遗漏了安装器会拦截的 32 位小端和 fat 变体；安装器、
   导出校验与 SkillScan 现在共用同一份代码文件与可执行文件魔数定义。审查快照为二进制文件
-  新增 `content_base64` 字段。
+  新增 `content_base64` 字段。([#5431])
 - **提示词注入：** 新增输入净化中间件防御提示词注入，输入护栏中伪造的框架标签会
   被拦截，系统上下文以 `SystemMessage` 注入以隔离角色。([#3662]、[#4155]、[#3661])
 - **提示词注入：** 对渲染进模型 prompt 的不可信内容进行 HTML 转义——记忆事实与摘
@@ -2177,3 +2177,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
 [#5418]: https://github.com/bytedance/deer-flow/pull/5418
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
+[#5431]: https://github.com/bytedance/deer-flow/pull/5431

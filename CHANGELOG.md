@@ -1500,7 +1500,7 @@ This section accumulates work toward the **2.1.0** milestone
   keep blocking. SkillScan's Mach-O detection missed 32-bit little-endian and
   fat variants that the installer blocks; the installer, export guard, and
   SkillScan now share one code-file and executable-magic definition. Review
-  snapshots gain a `content_base64` field for binary files.
+  snapshots gain a `content_base64` field for binary files. ([#5431])
 - **prompt-injection:** New input-sanitization middleware defends against
   prompt-injection, forged framework tags in the input guardrail are blocked,
   and system context is injected as a `SystemMessage` for role isolation. ([#3662],
@@ -2847,3 +2847,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
 [#5418]: https://github.com/bytedance/deer-flow/pull/5418
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
+[#5431]: https://github.com/bytedance/deer-flow/pull/5431
