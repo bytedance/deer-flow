@@ -17,6 +17,13 @@ from deerflow.agents.thread_state import _SKILL_DESCRIPTION_MAX_CHARS, SkillEntr
 _SKILL_FILE_NAME = "SKILL.md"
 _FRONT_MATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 SKILL_CONTEXT_ENTRY_KEY = "skill_context_entry"
+# Stamped instead of SKILL_CONTEXT_ENTRY_KEY when the read SKILL.md belongs to
+# a skill whose action-scoped ``skill:activate`` decision is denied: the file
+# content was served (Layer 1 visibility allows it) but the skill must not
+# activate — no durable skill_context entry, tool policy, or secret binding.
+# extract_skills uses it to skip the entry without the "missing skill read
+# metadata" warning that an unstamped read would otherwise produce.
+SKILL_CONTEXT_DENIED_KEY = "skill_context_denied"
 logger = logging.getLogger(__name__)
 
 
@@ -156,6 +163,11 @@ def extract_skills(
         tool_call_id = str(message.tool_call_id) if message.tool_call_id else ""
         expected_path = skill_paths_by_id.get(tool_call_id)
         if expected_path is None:
+            continue
+        if (message.additional_kwargs or {}).get(SKILL_CONTEXT_DENIED_KEY):
+            # The skill:activate decision denied this read's skill — the
+            # middleware stamped the denial instead of entry metadata on
+            # purpose, so this is not the "missing metadata" bug shape.
             continue
         metadata = read_skill_entry_metadata(message.additional_kwargs)
         if metadata is None:
