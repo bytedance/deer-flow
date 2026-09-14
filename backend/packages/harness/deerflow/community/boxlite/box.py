@@ -362,7 +362,8 @@ class BoxliteBox(Sandbox):
         # A missing root, a missing grep or an unreadable tree must not read as "no matches" (#5376).
         output = parse_remote_search_output(r.stdout, resolved, tool="grep")
 
-        include = glob.split("/")[-1] if glob else None
+        root = resolved.rstrip("/") or "/"
+        root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
         truncated = False
         for raw in output.splitlines():
@@ -376,8 +377,15 @@ class BoxliteBox(Sandbox):
                 continue
             if should_ignore_path(file_path):
                 continue
-            if include and not path_matches(include, posixpath.basename(file_path)):
-                continue
+            if glob is not None:
+                # Match the caller's real directory scope: a pattern like
+                # "src/*.js" must not broaden to every *.js in the tree. Same
+                # helper, same relative-to-root semantics as glob() above.
+                if file_path != root and not file_path.startswith(root_prefix):
+                    continue
+                rel_path = posixpath.basename(file_path) if file_path == root else file_path[len(root) :].lstrip("/")
+                if not path_matches(glob, rel_path):
+                    continue
             matches.append(GrepMatch(path=file_path, line_number=line_number, line=truncate_line(line_text)))
             if len(matches) >= max_results:
                 truncated = True
