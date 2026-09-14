@@ -523,15 +523,10 @@ class LocalSandbox(Sandbox):
         timed_out = False
         if os.name == "nt":
             if self._is_powershell(shell):
-                # PowerShell 5.1 defaults console output to the legacy OEM
-                # codepage (e.g. GBK on zh-CN), which the UTF-8 pipe reader
-                # then garbles for CJK output. Force UTF-8 on both directions
-                # of the console before running the user command.
-                utf8_preamble = (
-                    "[Console]::InputEncoding=[System.Text.Encoding]::UTF8;"
-                    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
-                    "$OutputEncoding=[System.Text.Encoding]::UTF8;"
-                )
+                # Pair PowerShell's output encoding with the pipe decoder.
+                # Console setters can fail without an attached console; guard
+                # them independently so setup errors do not pollute tool output.
+                utf8_preamble = "try{[Console]::InputEncoding=[System.Text.Encoding]::UTF8}catch{};try{[Console]::OutputEncoding=[System.Text.Encoding]::UTF8}catch{};$OutputEncoding=[System.Text.Encoding]::UTF8;"
                 args = [shell, "-NoProfile", "-Command", utf8_preamble + resolved_command]
             elif self._is_cmd_shell(shell):
                 args = [shell, "/c", resolved_command]
@@ -545,7 +540,10 @@ class LocalSandbox(Sandbox):
                             "MSYS2_ARG_CONV_EXCL": exclusions,
                         }
 
-            stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
+            if self._is_powershell(shell):
+                stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env, encoding="utf-8")
+            else:
+                stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
         else:
             args = [shell, "-c", resolved_command]
             stdout, stderr, returncode, timed_out = self._run_posix_command(args, timeout, sandbox_env)
@@ -572,8 +570,10 @@ class LocalSandbox(Sandbox):
         args: list[str],
         timeout: float,
         env: dict[str, str] | None = None,
+        *,
+        encoding: str | None = None,
     ) -> tuple[str, str, int, bool]:
-        """Run a Windows command with bounded capture and process-tree timeout."""
+        """Run with bounded capture, a process-tree timeout, and locale decoding unless overridden."""
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
@@ -603,7 +603,8 @@ class LocalSandbox(Sandbox):
                     # The write fd may already be closed by the exception cleanup above.
                     pass
 
-        encoding = locale.getpreferredencoding(False)
+        if encoding is None:
+            encoding = locale.getpreferredencoding(False)
         stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(
             stdout_read_fd,
             "deerflow-bash-stdout-drain",
