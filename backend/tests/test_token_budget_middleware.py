@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -125,6 +126,16 @@ class TestTokenBudgetLifecycle:
         assert next_key != key
         assert mw._cumulative_usage[next_key].total == 200
         assert not mw._warned.get(next_key)
+
+    def test_active_invocation_keeps_its_key_when_the_anchor_map_is_full(self):
+        mw = TokenBudgetMiddleware(TokenBudgetConfig(enabled=True, max_tokens=1000))
+        mw._fallback_run_ids.maxsize = 3
+        active = SimpleNamespace(context={}, control=object())
+        key = mw._get_run_id(active)
+
+        for _ in range(5):
+            mw._get_run_id(SimpleNamespace(context={}, control=object()))
+            assert mw._get_run_id(active) == key
 
     @pytest.mark.asyncio
     async def test_valid_run_id_preserves_usage_warnings_and_stop_reason(self):

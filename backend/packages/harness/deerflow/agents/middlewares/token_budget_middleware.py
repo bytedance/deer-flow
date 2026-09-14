@@ -135,7 +135,9 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         # Same anchor as LoopDetectionMiddleware: ``id(runtime)`` changes from
         # one graph node to the next, ``Runtime.control`` does not. The key is a
         # generated token rather than the address, which can be reused once the
-        # object is collected.
+        # object is collected. Unlike loop detection, ``execution_info.run_id``
+        # is skipped on purpose: without a context run_id the budget is per
+        # invocation, not per RunnableConfig run.
         control = getattr(runtime, "control", None)
         anchor = control if control is not None else runtime
         with self._lock:
@@ -143,6 +145,8 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
             if entry is None or entry[0] is not anchor:
                 entry = (anchor, f"__invocation__:{uuid.uuid4().hex}")
                 self._fallback_run_ids[id(anchor)] = entry
+            # Least recently used goes first, so a full map never evicts an active invocation.
+            self._fallback_run_ids.move_to_end(id(anchor))
             return entry[1]
 
     def _release_fallback_run_id(self, runtime: Runtime) -> None:
