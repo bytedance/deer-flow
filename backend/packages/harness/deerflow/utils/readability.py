@@ -1,10 +1,15 @@
 import logging
+import os
 import re
+import shutil
 import subprocess
+import threading
 from html import escape, unescape
 from html.parser import HTMLParser
+from pathlib import Path
 from urllib.parse import urljoin, urlparse, uses_relative
 
+import readabilipy
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 from readabilipy import simple_json_from_html_string
@@ -149,12 +154,70 @@ class _DestinationRewriter(HTMLParser):
         return "".join(parts)
 
 
+_READABILITY_JS_DIR = Path(readabilipy.__file__).resolve().parent / "javascript"
+_READABILITY_NPM_INSTALL_TIMEOUT_SECONDS = 300
+_readability_js_state: bool | None = None  # None = not probed yet
+_readability_js_bootstrap_lock = threading.Lock()
+
+
+def _readability_js_ready() -> bool:
+    """Ensure readabilipy's Readability.js dependencies are usable, probing
+    once per process.
+
+    readabilipy probes npm with a bare ``npm`` name, which Windows
+    CreateProcess never resolves to ``npm.cmd``, so its one-time bootstrap
+    always fails there and every Windows host silently degrades to
+    pure-Python extraction (link hrefs dropped from fetched pages). Resolve
+    npm the way the rest of the codebase does (``shutil.which``, as in the
+    lark-cli installer) and install the packages readabilipy expects into
+    its javascript directory. When this returns False, extraction stays on
+    the pure-Python path for the life of the process rather than re-running
+    a slow npm install on every fetch.
+    """
+    global _readability_js_state
+    if _readability_js_state is not None:
+        return _readability_js_state
+    with _readability_js_bootstrap_lock:
+        if _readability_js_state is not None:
+            return _readability_js_state
+        if (_READABILITY_JS_DIR / "node_modules").exists():
+            _readability_js_state = True
+            return True
+        npm = shutil.which("npm")
+        if npm is None:
+            logger.warning("npm is unavailable; Readability.js extraction uses pure-Python mode")
+            _readability_js_state = False
+            return False
+        try:
+            result = subprocess.run(
+                [npm, "install", "--no-audit", "--no-fund"],
+                cwd=_READABILITY_JS_DIR,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=_READABILITY_NPM_INSTALL_TIMEOUT_SECONDS,
+                env={**os.environ, "npm_config_update_notifier": "false"},
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            logger.warning("Bootstrapping Readability.js npm dependencies failed; using pure-Python extraction", exc_info=True)
+            _readability_js_state = False
+            return False
+        if result.returncode != 0:
+            logger.warning("npm install for Readability.js dependencies failed: %s", result.stderr.strip()[:500])
+            _readability_js_state = False
+            return False
+        _readability_js_state = (_READABILITY_JS_DIR / "node_modules").exists()
+        if not _readability_js_state:
+            logger.warning("Readability.js npm dependencies are still missing after install; using pure-Python extraction")
+        return _readability_js_state
+
+
 class ReadabilityExtractor:
     def extract_article(self, html: str, *, url: str | None = None) -> Article:
         if url:
             html = _resolve_html_urls(html, url)
         try:
-            article = simple_json_from_html_string(html, use_readability=True)
+            article = simple_json_from_html_string(html, use_readability=_readability_js_ready())
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
             stderr = getattr(exc, "stderr", None)
             if isinstance(stderr, bytes):
