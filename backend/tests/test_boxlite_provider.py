@@ -1427,3 +1427,39 @@ def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeyp
     found, _ = box.glob(str(tmp_path), "**/*.py")
     assert [os.path.basename(path) for path in found] == ["app.py"]
     assert box.glob(str(tmp_path), "*.md") == ([], False)
+
+
+@_RS_POSIX
+def test_grep_glob_keeps_its_directory_prefix(tmp_path, monkeypatch) -> None:
+    # grep has no portable --include, so the glob is applied in Python. Matching
+    # only its basename broadened "src/*.js" to every *.js in the tree; the scope
+    # must follow the same relative-to-root semantics as glob() (Tenki, E2B).
+    for rel in ("src/a.js", "src/deep/b.js", "vendor/c.js"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("const needle = 1;\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    def grep_scope(glob: str) -> list[str]:
+        matches, _ = box.grep(str(tmp_path), "needle", glob=glob)
+        return sorted(os.path.relpath(m.path, tmp_path) for m in matches)
+
+    def glob_scope(glob: str) -> list[str]:
+        found, _ = box.glob(str(tmp_path), glob)
+        return sorted(os.path.relpath(path, tmp_path) for path in found)
+
+    assert grep_scope("src/*.js") == ["src/a.js"]
+    for glob in ("src/*.js", "src/**/*.js", "**/*.js", "*.js"):
+        assert grep_scope(glob) == glob_scope(glob), glob
+
+
+@_RS_POSIX
+def test_grep_single_file_path_with_matching_glob(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("needle here\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, truncated = box.grep(str(target), "needle", glob="*.txt")
+
+    assert [m.path for m in matches] == [str(target)]
+    assert truncated is False
+    assert box.grep(str(target), "needle", glob="*.md") == ([], False)

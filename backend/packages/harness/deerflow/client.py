@@ -30,7 +30,7 @@ from typing import Any, Literal
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middlewares
@@ -954,6 +954,10 @@ class DeerFlowClient:
         # Cross-mode handoff: ids already streamed via LangGraph ``messages``
         # mode so the ``values`` path skips re-synthesis of the same message.
         streamed_ids: set[str] = set()
+        # AI messages whose tool calls arrived as streamed fragments. The
+        # arguments only parse once the message is complete, so their
+        # tool_calls event is emitted from the values snapshot instead.
+        pending_tool_call_ids: set[str] = set()
         # The same message id carries identical cumulative ``usage_metadata``
         # in both the final ``messages`` chunk and the values snapshot —
         # count it only on whichever arrives first.
@@ -1046,7 +1050,12 @@ class DeerFlowClient:
                         )
                         sent_additional_kwargs = bool(additional_kwargs_delta)
 
-                    if msg_chunk.tool_calls:
+                    # A chunk without an id can't be matched to its values
+                    # snapshot, so it keeps the per-chunk event below.
+                    if isinstance(msg_chunk, AIMessageChunk) and msg_chunk.tool_call_chunks and msg_id:
+                        streamed_ids.add(msg_id)
+                        pending_tool_call_ids.add(msg_id)
+                    elif msg_chunk.tool_calls:
                         if msg_id:
                             streamed_ids.add(msg_id)
                         additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
@@ -1079,7 +1088,10 @@ class DeerFlowClient:
                         _account_usage(msg_id, getattr(msg, "usage_metadata", None))
                         additional_kwargs = self._serialize_additional_kwargs(msg)
                         additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
-                        if additional_kwargs_delta:
+                        if msg_id in pending_tool_call_ids and msg.tool_calls:
+                            pending_tool_call_ids.discard(msg_id)
+                            yield self._ai_tool_calls_event(msg_id, msg.tool_calls, additional_kwargs_delta)
+                        elif additional_kwargs_delta:
                             # Metadata-only follow-up: ``messages-tuple`` has no
                             # dedicated attribution event, so clients should
                             # merge this empty-content AI event by message id

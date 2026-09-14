@@ -25,6 +25,20 @@ preference hints for requests that should prefer a specific MCP server or tool.
 See [MCP Server Configuration](MCP_SERVER.md#routing-hints) for the schema,
 example, and soft-vs-hard routing boundary.
 
+### Recursion Limits
+
+Gateway runs use the top-level `recursion_limit` as their LangGraph super-step
+budget when the request does not include an explicit value. It defaults to
+`100`; raise it for deployments whose normal tasks need longer agent loops.
+Valid request values take precedence, while invalid values fall back to the
+configured default. `max_recursion_limit` (default `1000`) caps both sources to
+limit runaway LLM cost. Both settings are read per run, so changes apply to the
+next request without a Gateway restart.
+
+These settings apply to Gateway API runs. IM channel runs and embedded
+`DeerFlowClient` runs retain their own defaults and can be overridden through
+their channel/client-specific configuration or per-call options.
+
 ### Models
 
 Configure the LLM models available to the agent:
@@ -72,6 +86,7 @@ models:
 - `CodexChatModel` loads Codex CLI auth from `~/.codex/auth.json`
 - The Codex Responses endpoint currently rejects `max_tokens` and `max_output_tokens`, so `CodexChatModel` does not expose a request-level token cap
 - `ClaudeChatModel` accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, or plaintext `~/.claude/.credentials.json`
+- A `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` handoff is drained on first use and the token is kept for the life of the process, so every `ClaudeChatModel` instance reuses it
 - On macOS, DeerFlow does not probe Keychain automatically. Use `scripts/export_claude_code_oauth.py` to export Claude Code auth explicitly when needed
 
 To use OpenAI's `/v1/responses` endpoint with LangChain, keep using `langchain_openai:ChatOpenAI` and set:
@@ -493,6 +508,24 @@ For Docker Compose deployments, run Browserless as a service and point `base_url
 at the service name (e.g. `http://browserless:3000`) instead of `localhost`. See
 the [Browserless project](https://github.com/browserless/browserless) for full
 deployment and configuration options.
+
+### Reading Referenced Conversations
+
+Enable the read-only Gateway tool through the existing tools list:
+
+```yaml
+tools:
+  - name: read_conversation
+    group: conversation
+    use: deerflow.tools.conversation:read_conversation
+```
+
+It is off by default. A run must explicitly submit `conversation_references`
+and have `runs:read` permission before the lead agent receives this tool.
+Custom agents must also permit the `conversation` tool group where they restrict
+groups. References are limited to owned threads and the current run; they do not
+enable history discovery, memory extraction or cross-user access. See the
+[request contract and limits](API.md#referencing-a-previous-conversation).
 
 ### Sandbox
 

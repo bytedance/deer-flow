@@ -18,12 +18,12 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import DEFAULT_KEEP
 from deerflow.config.task_continuity_config import TaskContinuityConfig
 from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
-from deerflow.utils.messages import is_real_user_message
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -578,10 +578,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # rescue no longer covers it (see _preserve_dynamic_context_reminders), so
         # lock its id here and rescue by exact id. This keeps the current request
         # without "moving cutoff" — which would also retain early AI/Tool turns and
-        # never compress a first-turn long analysis.
+        # never compress a first-turn long analysis. A Human Input Card reply is
+        # hidden from the UI but is still the user's current request.
         latest_user_id: str | None = None
         for msg in reversed(messages):
-            if is_real_user_message(msg):
+            if is_genuine_user_message(msg):
                 latest_user_id = msg.id
                 break
 

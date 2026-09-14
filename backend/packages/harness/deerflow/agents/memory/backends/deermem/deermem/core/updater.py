@@ -472,6 +472,72 @@ def _fact_content_key(content: Any) -> str | None:
     return stripped.casefold()
 
 
+_FACT_CJK_RANGE = "\u3400-\u4dbf\u4e00-\u9fff\U00020000-\U0002fa1f"
+_FACT_TOKEN_RE = re.compile(rf"[a-zA-Z0-9_]+|[{_FACT_CJK_RANGE}]+(?:\s+[{_FACT_CJK_RANGE}]+)*")
+_FACT_SIMILARITY_TOKEN_BUDGET = 128
+
+
+def _fact_content_tokens(content: str) -> list[str]:
+    """Deterministic, network-free tokenization for fact similarity.
+
+    Latin words and CJK bigrams coexist in mixed-script text. Whitespace
+    between CJK runs is ignored, retaining adjacent-character order even
+    for spaced Chinese text, without joining across Latin words/punctuation.
+    """
+    lowered = content.strip().lower()
+    if not lowered:
+        return []
+    tokens: list[str] = []
+    for match in _FACT_TOKEN_RE.finditer(lowered):
+        run = match.group()
+        if run[0].isascii():
+            tokens.append(run)
+        else:
+            run = "".join(run.split())
+            tokens.extend([run] if len(run) == 1 else (run[index : index + 2] for index in range(len(run) - 1)))
+    return tokens or lowered.split()
+
+
+def _fact_content_similarity(left: str, right: str) -> float:
+    """Bounded token-Jaccard similarity over case-folded token sets."""
+    left_set = set(_fact_content_tokens(left)[:_FACT_SIMILARITY_TOKEN_BUDGET])
+    right_set = set(_fact_content_tokens(right)[:_FACT_SIMILARITY_TOKEN_BUDGET])
+    if not left_set or not right_set:
+        return 0.0
+    return len(left_set & right_set) / len(left_set | right_set)
+
+
+def _find_dedup_merge_target(
+    content: str,
+    category: str,
+    facts: list[dict[str, Any]],
+    *,
+    threshold: float,
+) -> dict[str, Any] | None:
+    """Return the most similar same-category fact at/above the similarity
+    threshold, or ``None`` (write-side near-duplicate gate, issue #5252).
+
+    Deterministic and offline: bounded token-Jaccard similarity. Only
+    candidate facts whose content is a non-empty string participate;
+    category mismatch never merges.
+    """
+    best_target: dict[str, Any] | None = None
+    best_similarity = 0.0
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        candidate_content = fact.get("content")
+        if not isinstance(candidate_content, str) or not candidate_content.strip():
+            continue
+        if fact.get("category", "context") != category:
+            continue
+        similarity = _fact_content_similarity(content, candidate_content)
+        if similarity >= threshold and similarity > best_similarity:
+            best_target = fact
+            best_similarity = similarity
+    return best_target
+
+
 def _raise_if_duplicate_fact_content(memory_data: dict[str, Any], content_key: str | None) -> None:
     """Reject a candidate fact whose normalized content already exists.
 
@@ -2049,6 +2115,13 @@ class MemoryUpdater:
         # persisted-fact count.
         passed_threshold = 0
         replacement_fact_keys: dict[int, str] = {}
+        # A correction must keep its proposed content, not inherit an older
+        # paraphrase. Also avoid strengthening any proposed removal target,
+        # including stale targets retained by candidate guards or the cap.
+        # This only excludes dedup matches; removal validation remains below.
+        removal_proposals = [removal for key in ("factsToRemove", "staleFactsToRemove") for removal in (update_data.get(key) if isinstance(update_data.get(key), list) else []) if isinstance(removal, dict)]
+        removal_target_ids = {removal["id"] for removal in removal_proposals if isinstance(removal.get("id"), str)}
+        replacement_indices = {index for removal in removal_proposals if isinstance(index := removal.get("replacementFactIndex"), int) and not isinstance(index, bool) and index >= 0}
         for fact_index, fact in enumerate(new_facts):
             confidence = fact.get("confidence", 0.5)
             if confidence >= config.fact_confidence_threshold:
@@ -2075,6 +2148,41 @@ class MemoryUpdater:
             replacement_fact_keys[fact_index] = fact_key
             if fact_key in existing_fact_keys:
                 continue
+
+            # Write-side near-duplicate gate (issue #5252): a proposed new fact
+            # that paraphrases an existing same-category fact merges into it
+            # instead of being appended. The existing id/content/createdAt stay
+            # authoritative; source follows only a confidence increase, never
+            # an unconfirmed lower-confidence restatement.
+            if config.fact_dedup_enabled and fact_index not in replacement_indices:
+                merge_target = _find_dedup_merge_target(
+                    normalized_content,
+                    fact.get("category", "context"),
+                    [candidate for candidate in current_memory.get("facts", []) if candidate.get("id") not in removal_target_ids],
+                    threshold=config.fact_dedup_similarity_threshold,
+                )
+                if merge_target is not None:
+                    try:
+                        existing_confidence = float(merge_target.get("confidence"))
+                        if not math.isfinite(existing_confidence):
+                            raise ValueError
+                    except (TypeError, ValueError):
+                        existing_confidence = 0.0
+                    if confidence > existing_confidence:
+                        merge_target["confidence"] = confidence
+                        merge_target["source"] = thread_id or "unknown"
+                    if metrics is not None:
+                        metrics["facts_merged_dedup"] = metrics.get("facts_merged_dedup", 0) + 1
+                    # New proposals have no durable ID yet. Log their batch
+                    # index, not personal fact text; this is a proposed write,
+                    # not a claim that persistence has already succeeded.
+                    logger.info(
+                        "Near-duplicate fact merge proposed: target_id=%s proposal_index=%d confidence_raised=%s",
+                        merge_target.get("id"),
+                        fact_index,
+                        confidence > existing_confidence,
+                    )
+                    continue
 
             fact_entry = {
                 "id": f"fact_{uuid.uuid4().hex[:8]}",

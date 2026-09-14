@@ -12,9 +12,10 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from deerflow.persistence.bootstrap import _get_alembic_config, _get_head_revision
+from deerflow.persistence.bootstrap import _MIGRATIONS_DIR, _get_alembic_config
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 
@@ -83,8 +84,10 @@ async def _schema(engine):
         )
 
 
-async def test_occurrence_revision_is_single_head():
-    assert _get_head_revision() == REVISION
+async def test_occurrence_revision_is_in_single_head_chain():
+    script = ScriptDirectory(str(_MIGRATIONS_DIR))
+    assert len(script.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
 
 
 async def test_upgrade_preserves_legacy_rows_and_allocates_from_one(migration_database):
