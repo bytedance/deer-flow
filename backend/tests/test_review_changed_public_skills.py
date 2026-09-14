@@ -5,6 +5,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 import review_changed_public_skills as runner
+from _host_path_helpers import posix_path
 from skill_review_waivers import EMPTY_MANIFEST, WaiverManifest
 
 
@@ -302,9 +303,7 @@ def test_main_exits_nonzero_when_review_cli_reports_error(tmp_path: Path, monkey
             "never",
         ]
         assert kwargs["cwd"] == tmp_path
-        # PYTHONPATH entries use the host-native separator (backslashes on
-        # Windows), so compare the segment path separator-agnostically.
-        assert "backend/packages/harness" in kwargs["env"]["PYTHONPATH"].replace("\\", "/")
+        assert "backend/packages/harness" in posix_path(kwargs["env"]["PYTHONPATH"])
         assert kwargs["capture_output"] is True
         assert kwargs["text"] is True
         assert kwargs["check"] is False
