@@ -273,6 +273,29 @@ def _docker_bridge_gateway_ip() -> str | None:
     return candidate
 
 
+def _docker_server_is_desktop() -> bool:
+    """Detect Desktop from the daemon, including a Linux DooD Gateway."""
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{json .OperatingSystem}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("Could not identify the Docker server platform; Desktop synthetic DNS answers remain disabled: %s", exc)
+        return False
+    if result.returncode != 0:
+        logger.warning("Could not identify the Docker server platform; Desktop synthetic DNS answers remain disabled: %s", (result.stderr or "").strip())
+        return False
+    raw = (result.stdout or "").strip()
+    try:
+        operating_system = json.loads(raw)
+    except json.JSONDecodeError:
+        operating_system = raw
+    return isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
+
+
 def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | None = None) -> str:
     """Choose the host interface for legacy Docker ``-p`` sandbox publishing.
 
@@ -323,6 +346,10 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
         return "[::1]"
     if _is_loopback_sandbox_host(host):
         logger.debug("Docker sandbox bind: 127.0.0.1 (loopback default)")
+        return "127.0.0.1"
+
+    if _docker_server_is_desktop():
+        logger.debug("Docker sandbox bind: 127.0.0.1 (Docker Desktop host loopback)")
         return "127.0.0.1"
 
     resolved = _resolve_sandbox_host_address(host)
@@ -730,25 +757,7 @@ class LocalContainerBackend(SandboxBackend):
 
     def _docker_server_is_desktop(self) -> bool:
         """Detect Desktop from the daemon, including a Linux DooD Gateway."""
-        try:
-            result = subprocess.run(
-                ["docker", "info", "--format", "{{json .OperatingSystem}}"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            logger.warning("Could not identify the Docker server platform; Desktop synthetic DNS answers remain disabled: %s", exc)
-            return False
-        if result.returncode != 0:
-            logger.warning("Could not identify the Docker server platform; Desktop synthetic DNS answers remain disabled: %s", (result.stderr or "").strip())
-            return False
-        raw = (result.stdout or "").strip()
-        try:
-            operating_system = json.loads(raw)
-        except json.JSONDecodeError:
-            operating_system = raw
-        return isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
+        return _docker_server_is_desktop()
 
     def _docker_has_managed_sandboxes(self) -> bool:
         """Keep using Docker while this prefix still has managed sandboxes.

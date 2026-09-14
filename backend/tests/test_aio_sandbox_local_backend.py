@@ -652,6 +652,10 @@ def test_resolve_docker_bind_host_follows_host_gateway_mapping_for_dood(monkeypa
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
     monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
+    monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: "192.168.64.1",
     )
@@ -659,10 +663,42 @@ def test_resolve_docker_bind_host_follows_host_gateway_mapping_for_dood(monkeypa
     assert _resolve_docker_bind_host() == "192.168.64.1"
 
 
+def test_resolve_docker_bind_host_uses_loopback_on_docker_desktop(monkeypatch):
+    """Docker Desktop cannot bind to internal VM gateway IPs, so default to 127.0.0.1."""
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: "192.168.65.254",
+    )
+
+    assert _resolve_docker_bind_host() == "127.0.0.1"
+
+
+def test_resolve_docker_bind_host_explicit_override_precedes_desktop_detection(monkeypatch):
+    """Explicit DEER_FLOW_SANDBOX_BIND_HOST takes precedence even on Docker Desktop."""
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "192.0.2.10")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: True,
+    )
+
+    assert _resolve_docker_bind_host() == "192.0.2.10"
+
+
 def test_resolve_docker_bind_host_brackets_ipv6_host_gateway(monkeypatch):
     """An IPv6 host-gateway mapping binds the bracketed IPv6 address."""
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: "[fd00::1]",
@@ -716,6 +752,10 @@ def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_when_resolution
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
     monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
+    monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: None,
     )
@@ -730,6 +770,10 @@ def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_when_resolution
 def test_resolve_docker_bind_host_falls_back_to_static_bridge_gateway(monkeypatch):
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: None,
