@@ -588,7 +588,7 @@ This section accumulates work toward the **2.1.0** milestone
   loaded credentials again, but a descriptor can be drained only once, so the
   title, summarization, and subagent models — and every later run — had no
   credential and failed with `TypeError: Could not resolve authentication
-  method`. The token is now read once per process and reused.
+  method`. The token is now read once per process and reused. ([#5411])
 - **models:** Stop the lead agent from failing to build whenever a model with
   `supports_reasoning_effort: true` also gets a `reasoning_effort` from its
   profile — at the top level, in `when_thinking_enabled` or
@@ -2803,3 +2803,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5393]: https://github.com/bytedance/deer-flow/pull/5393
 [#5401]: https://github.com/bytedance/deer-flow/pull/5401
 [#5403]: https://github.com/bytedance/deer-flow/pull/5403
+[#5411]: https://github.com/bytedance/deer-flow/pull/5411
