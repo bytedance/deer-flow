@@ -1,5 +1,13 @@
 ### Gateway API (`app/gateway/`)
 
+`conversation_access.py` binds an opt-in read-only tool to a run request's
+explicit `conversation_references` and effective `runs:read` permission. Never
+derive grants from message contents or checkpoints. The callback travels through
+`RunContext`, not serialized config; the worker owns its context injection and
+terminal cleanup. `conversation_reader.py` shares the existing HTTP transcript
+visibility/pagination logic without a Request dependency; ownership remains a
+caller responsibility. The tool additionally excludes non-text/internal content.
+
 FastAPI listens on port 8001; health: `GET /health` (liveness) and `GET /health/ready` (readiness; concurrently probes the ORM engine behind `database:` plus the effective LangGraph checkpointer/Store backend - the legacy `checkpointer:` section, otherwise derived from `database:`, resolved from the startup config snapshot recorded on `app.state` - beneath a single bounded deadline, with connection-opening probes serialized behind a strict per-process gate, 503 while either is unreachable or the startup backend cannot be resolved, `not_configured` for process-local backends such as `backend=memory`). Set `GATEWAY_ENABLE_DOCS=false` to disable the default `/docs`, `/redoc`, and `/openapi.json` endpoints.
 
 `build_run_config()` resolves the default LangGraph super-step budget from the
