@@ -29,6 +29,12 @@ def test_parse_marker_1_empty_is_missing_path() -> None:
         parse_remote_list_dir_output(stdout, "/dir", pipeline_exit_code=0)
 
 
+def test_parse_marker_1_with_entries_is_incomplete_failure() -> None:
+    stdout = "/dir/visible.txt\n\n__DF_FIND_STATUS__:1\n"
+    with pytest.raises(OSError, match="results would be incomplete"):
+        parse_remote_list_dir_output(stdout, "/dir", pipeline_exit_code=1)
+
+
 def test_parse_marker_0_returns_listing_and_keeps_trailing_space() -> None:
     stdout = "/dir/notes.txt \n/dir/sub\n\n__DF_FIND_STATUS__:0\n"
     assert parse_remote_list_dir_output(stdout, "/dir", pipeline_exit_code=0) == [
@@ -131,6 +137,18 @@ def test_list_dir_command_surfaces_find_127_not_head_0(tmp_path) -> None:
     )
     assert proc.returncode == 127
     with pytest.raises(OSError, match="exited with code 127"):
+        parse_remote_list_dir_output(proc.stdout, "/dir", pipeline_exit_code=proc.returncode)
+
+
+@_POSIX_SH
+def test_list_dir_command_surfaces_partial_find_failure(tmp_path) -> None:
+    fake_bin = _write_fake_find(tmp_path, '#!/bin/sh\nprintf "/dir/visible.txt\\n"\nexit 1\n')
+    proc = _run_list_dir_script(
+        remote_list_dir_command("/dir", 2),
+        env=_env_with_bin(str(fake_bin)),
+    )
+    assert proc.returncode == 1
+    with pytest.raises(OSError, match="results would be incomplete"):
         parse_remote_list_dir_output(proc.stdout, "/dir", pipeline_exit_code=proc.returncode)
 
 

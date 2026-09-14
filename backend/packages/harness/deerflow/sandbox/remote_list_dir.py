@@ -17,8 +17,8 @@ import shlex
 
 _STATUS_PREFIX = "__DF_FIND_STATUS__:"
 _LIST_LIMIT = 500
-# 0 = ok, 1 = find reported a missing start point / tree error, 141 = SIGPIPE
-# from head truncating a large listing.
+# 0 = ok, 1 = missing start point or tree error, 141 = SIGPIPE from head
+# truncating a large listing. Status 1 needs output-aware classification below.
 _FIND_OK = (0, 1, 141)
 
 
@@ -51,7 +51,7 @@ def parse_remote_list_dir_output(
     """Parse listing stdout, preferring the find-status marker over pipeline status.
 
     Raises:
-        OSError: Command/client failure (missing binary, invocation error, ...).
+        OSError: Command/client failure or an incomplete traversal.
         FileNotFoundError: ``find`` ran and produced no entries (missing path).
     """
     # find delimits records with "\n" only. splitlines() would also split on
@@ -78,10 +78,18 @@ def parse_remote_list_dir_output(
         if pipeline_exit_code is not None and pipeline_exit_code not in _FIND_OK:
             raise OSError(f"Failed to list_dir {resolved}: command exited with code {pipeline_exit_code}")
         raise OSError(f"Failed to list_dir {resolved}: find status marker missing")
+
+    entries = [line for line in lines if line]
+    if find_status == 1:
+        if entries:
+            raise OSError(
+                f"Failed to list_dir {resolved}: find exited with code 1, usually because some files or directories "
+                "could not be read; results would be incomplete, so list a narrower path"
+            )
+        raise FileNotFoundError(resolved)
     if find_status not in _FIND_OK:
         raise OSError(f"Failed to list_dir {resolved}: command exited with code {find_status}")
 
-    entries = [line for line in lines if line]
     if not entries:
         raise FileNotFoundError(resolved)
     return entries
