@@ -512,42 +512,50 @@ class AioSandbox(Sandbox):
     def _run_bash_exec(self, command: str, env: dict[str, str]) -> str:
         """Single bash.exec invocation in an explicitly released fresh session."""
         with self._lock:
-            session_id = str(uuid.uuid4())
-            session_created = False
-            try:
-                self._client.bash.create_session(session_id=session_id)
-                session_created = True
-                result = self._client.bash.exec(
-                    command=command,
-                    session_id=session_id,
-                    env=env,
-                    hard_timeout=self._DEFAULT_HARD_TIMEOUT,
-                )
-                data = result.data if result else None
-                stdout = (data.stdout or "") if data else ""
-                stderr = (data.stderr or "") if data else ""
-                exit_code = getattr(data, "exit_code", None) if data else None
-                output = stdout
-                if stderr:
-                    output += f"\nStd Error:\n{stderr}" if output else stderr
-                if exit_code not in (0, None):
-                    # Mirror LocalSandbox: keep the actual shell status in the
-                    # output text (acceptance-checklist evidence).
-                    output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
-                return output if output else "(no output)"
-            except ApiError as e:
-                if e.status_code == 404:
-                    self._bash_exec_unsupported = True
-                    logger.error("Sandbox %s does not support bash.exec (/v1/bash/exec returned 404); env-bearing commands are unavailable until the sandbox image is upgraded to all-in-one-sandbox >= 1.9.3", self.id)
-                    return _BASH_EXEC_UNSUPPORTED_ERROR
-                logger.error(f"Failed to execute command with injected env in sandbox: {e}")
-                return f"Error: {e}"
-            except Exception as e:
-                logger.error(f"Failed to execute command with injected env in sandbox: {e}")
-                return f"Error: {e}"
-            finally:
-                if session_created:
-                    self._cleanup_bash_session_best_effort(self._client, session_id)
+            for attempt in range(2):
+                session_id = str(uuid.uuid4())
+                session_created = False
+                try:
+                    self._client.bash.create_session(session_id=session_id)
+                    session_created = True
+                    result = self._client.bash.exec(
+                        command=command,
+                        session_id=session_id,
+                        env=env,
+                        hard_timeout=self._DEFAULT_HARD_TIMEOUT,
+                    )
+                    data = result.data if result else None
+                    stdout = (data.stdout or "") if data else ""
+                    stderr = (data.stderr or "") if data else ""
+                    exit_code = getattr(data, "exit_code", None) if data else None
+                    output = stdout
+                    if stderr:
+                        output += f"\nStd Error:\n{stderr}" if output else stderr
+                    if exit_code not in (0, None):
+                        # Mirror LocalSandbox: keep the actual shell status in the
+                        # output text (acceptance-checklist evidence).
+                        output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
+                    return output if output else "(no output)"
+                except ApiError as e:
+                    if self._is_missing_shell_session_error(e):
+                        if attempt == 0:
+                            logger.warning("Transient bash.exec session disappeared; retrying once")
+                            continue
+                        logger.error("Failed to execute command with injected env: bash.exec session disappeared after retry")
+                        return "Error: bash.exec session disappeared after retry"
+                    if e.status_code == 404:
+                        self._bash_exec_unsupported = True
+                        logger.error("Sandbox %s does not support bash.exec (/v1/bash/exec returned 404); env-bearing commands are unavailable until the sandbox image is upgraded to all-in-one-sandbox >= 1.9.3", self.id)
+                        return _BASH_EXEC_UNSUPPORTED_ERROR
+                    logger.error(f"Failed to execute command with injected env in sandbox: {e}")
+                    return f"Error: {e}"
+                except Exception as e:
+                    logger.error(f"Failed to execute command with injected env in sandbox: {e}")
+                    return f"Error: {e}"
+                finally:
+                    if session_created:
+                        self._cleanup_bash_session_best_effort(self._client, session_id)
+            return "Error: bash.exec session disappeared after retry"
 
     def read_file(
         self,

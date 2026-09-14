@@ -612,6 +612,19 @@ def test_provisioner_discover_marks_insufficient_shell_capacity_for_replacement(
     assert info.requires_replacement is True
 
 
+def test_provisioner_create_reports_version_skew_when_capacity_is_missing(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002", max_shell_sessions=13)
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+
+    def mock_post(url: str, *, json: dict, headers=None, timeout: int):
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    with pytest.raises(RuntimeError, match="version skew"):
+        backend._provisioner_create(None, "abc123")
+
+
 def test_provisioner_discover_returns_none_on_request_exception(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 

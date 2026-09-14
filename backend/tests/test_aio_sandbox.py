@@ -755,6 +755,31 @@ class TestBashExecUnsupportedFailFast:
         assert second == "ok"
         assert sandbox._client.bash.exec.call_count == 2
 
+    def test_bash_exec_missing_session_retries_without_latching_unsupported(self, sandbox):
+        """A transient loss after explicit creation must retry once and keep the
+        capability enabled for subsequent env-bearing commands."""
+        from agent_sandbox.core.api_error import ApiError
+
+        missing = ApiError(status_code=404, body={"message": "Session not found: transient"})
+        sandbox._client.bash.exec = MagicMock(side_effect=[missing, SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None))])
+
+        assert sandbox.execute_command("cmd", env={"TOK": "v"}) == "ok"
+        assert sandbox._bash_exec_unsupported is False
+        assert sandbox._client.bash.exec.call_count == 2
+        assert sandbox._client.bash.create_session.call_count == 2
+
+    def test_bash_exec_repeated_missing_session_does_not_latch_capability_gap(self, sandbox):
+        from agent_sandbox.core.api_error import ApiError
+
+        missing = ApiError(status_code=404, body={"message": "Session not found"})
+        sandbox._client.bash.exec = MagicMock(side_effect=missing)
+
+        out = sandbox.execute_command("cmd", env={"TOK": "v"})
+
+        assert out == "Error: bash.exec session disappeared after retry"
+        assert sandbox._bash_exec_unsupported is False
+        assert sandbox._client.bash.exec.call_count == 2
+
 
 class TestListDirSerialization:
     """Verify that list_dir also acquires the lock."""

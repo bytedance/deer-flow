@@ -98,6 +98,27 @@ def test_provisioner_replaces_existing_sandbox_with_insufficient_shell_capacity(
     assert env["MAX_SHELL_SESSIONS"] == "13"
 
 
+def test_list_sandboxes_skips_invalid_capacity_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    def invalid_capacity(_sandbox_id: str) -> int:
+        raise RuntimeError("invalid capacity")
+
+    monkeypatch.setattr(
+        provisioner_module,
+        "_get_pod_shell_capacity",
+        invalid_capacity,
+    )
+
+    response = provisioner_module.list_sandboxes()
+
+    assert response == {"sandboxes": [], "count": 0}
+
+
 class _RecordingCoreV1:
     def __init__(
         self,

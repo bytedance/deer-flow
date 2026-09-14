@@ -1374,10 +1374,12 @@ def list_sandboxes():
             continue
         try:
             shell_capacity = _get_pod_shell_capacity(sid)
-        except ApiException as exc:
-            if exc.status == 404:
+        except (ApiException, RuntimeError) as exc:
+            if isinstance(exc, ApiException) and exc.status == 404:
                 continue
-            raise HTTPException(status_code=500, detail=f"Failed to inspect sandbox Pod: {exc.reason}") from exc
+            reason = getattr(exc, "reason", str(exc))
+            logger.warning("Skipping sandbox %s while inspecting shell capacity: %s", sid, reason)
+            continue
         sandboxes.append(
             SandboxResponse(
                 sandbox_id=sid,

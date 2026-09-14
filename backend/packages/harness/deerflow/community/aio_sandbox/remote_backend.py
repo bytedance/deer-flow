@@ -317,6 +317,8 @@ class RemoteSandboxBackend(SandboxBackend):
             )
             resp.raise_for_status()
             data = resp.json()
+            if self._max_shell_sessions is not None and "max_shell_sessions" not in data:
+                raise RuntimeError("Provisioner did not report max_shell_sessions; Gateway/provisioner version skew prevents shell-capacity validation")
             if self._requires_shell_capacity_replacement(data):
                 raise RuntimeError(f"Provisioner returned sandbox {sandbox_id} with insufficient shell-session capacity")
             logger.info(f"Provisioner created sandbox {sandbox_id}: sandbox_url={data['sandbox_url']}")
