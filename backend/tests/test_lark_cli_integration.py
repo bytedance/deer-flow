@@ -21,6 +21,7 @@ from uuid import uuid4
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
+from _windows_acl_helpers import _windows_acl_owner_sid, _windows_acl_protected, _windows_acl_sids
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
@@ -90,63 +91,6 @@ def _bootstrap_credential_dirs(monkeypatch, tmp_path, *, config: bool = True, da
     if data:
         data_dir.mkdir(parents=True)
     return config_dir, data_dir
-
-
-def _windows_acl_env() -> dict[str, str]:
-    """Return a PowerShell environment with a clean, ordered ``PSModulePath``.
-
-    The Codex runtime prepends a bundled PowerShell module path that shadows the
-    stock ``Microsoft.PowerShell.Security`` module, which makes ``Get-Acl`` fail
-    to autoload under ``-NoProfile``. Use the stock Windows PowerShell module path
-    so ACL inspection is reliable on any host.
-    """
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
-    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
-    modules = f"{system_root}\\system32\\WindowsPowerShell\\v1.0\\Modules;{program_files}\\WindowsPowerShell\\Modules"
-    return {**os.environ, "PSModulePath": modules}
-
-
-def _windows_acl_sids(path: Path) -> set[str]:
-    """Return the SIDs granted on *path* (Windows-only, PowerShell resolver).
-
-    ``icacls`` displays localized account names rather than raw SIDs, so we
-    translate each ACE IdentityReference back to a SID before asserting.
-    """
-    cmd = "(Get-Acl -LiteralPath '" + str(path) + "').Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }"
-    out = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", cmd],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_windows_acl_env(),
-    )
-    return {line.strip() for line in out.stdout.splitlines() if line.strip()}
-
-
-def _windows_acl_protected(path: Path) -> bool:
-    """Return whether *path*'s DACL is protected from inheritance (Windows-only)."""
-    cmd = "(Get-Acl -LiteralPath '" + str(path) + "').AreAccessRulesProtected"
-    out = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", cmd],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_windows_acl_env(),
-    )
-    return out.stdout.strip() == "True"
-
-
-def _windows_acl_owner_sid(path: Path) -> str:
-    """Return *path*'s object owner as a raw SID (Windows-only)."""
-    cmd = "$acl = Get-Acl -LiteralPath $env:DEER_FLOW_TEST_ACL_PATH; $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value"
-    out = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", cmd],
-        capture_output=True,
-        text=True,
-        check=True,
-        env={**_windows_acl_env(), "DEER_FLOW_TEST_ACL_PATH": str(path)},
-    )
-    return out.stdout.strip()
 
 
 class _FakeWindowsHandle:
@@ -407,6 +351,8 @@ def test_managed_sandbox_runtime_rejects_any_symlink_in_prestaged_tree(monkeypat
 def test_managed_sandbox_runtime_rejects_non_executable_prestaged_binary(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
     source = tmp_path / "pre-staged"
+    # On Windows chmod() cannot clear the exec bit, so rejection there comes
+    # from the non-magic payload content rather than the 0o644 mode below.
     for arch in ("amd64", "arm64"):
         binary = source / f"linux-{arch}" / "lark-cli"
         binary.parent.mkdir(parents=True)
@@ -418,6 +364,41 @@ def test_managed_sandbox_runtime_rejects_non_executable_prestaged_binary(monkeyp
     launcher.write_text("#!/bin/sh\n", encoding="utf-8")
     launcher.chmod(0o755)
     monkeypatch.setenv(lark_cli.LARK_CLI_SANDBOX_RUNTIME_SOURCE_ENV, str(source))
+
+    with pytest.raises(ValueError, match="executable"):
+        lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
+
+    assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
+
+
+def test_managed_sandbox_runtime_rejects_launcher_without_shebang_on_windows(monkeypatch, tmp_path) -> None:
+    """The Windows content gate must reject a launcher without a shebang.
+
+    ``test_managed_sandbox_runtime_rejects_non_executable_prestaged_binary``
+    stages a launcher WITH a shebang, so on Windows its rejection always comes
+    from the per-arch binary content and this branch is only exercised
+    positively. Monkeypatching ``lark_cli.os`` with the Windows stub runs the
+    Windows branch on POSIX CI too; ``candidate.open()`` is a pathlib method,
+    so the stub is safe here.
+    """
+    _patch_paths(monkeypatch, tmp_path / "home")
+    source = tmp_path / "pre-staged"
+    for arch in ("amd64", "arm64"):
+        binary = source / f"linux-{arch}" / "lark-cli"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\x7fELF" + f"{arch}-binary".encode())
+        binary.chmod(0o755)
+    launcher = source / "bin" / "lark-cli"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("echo not-a-launcher\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setenv(lark_cli.LARK_CLI_SANDBOX_RUNTIME_SOURCE_ENV, str(source))
+    windows_os = _windows_os_stub()
+    # The installer also touches a few host-neutral os helpers; only os.name
+    # must read "nt" to drive the validation branch under test.
+    windows_os.getenv = os.getenv
+    windows_os.getpid = os.getpid
+    monkeypatch.setattr(lark_cli, "os", windows_os)
 
     with pytest.raises(ValueError, match="executable"):
         lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")

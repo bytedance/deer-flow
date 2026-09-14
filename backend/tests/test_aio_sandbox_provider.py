@@ -11,9 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# Shared with the lark-cli integration suite, which owns the Windows ACL resolvers.
-from test_lark_cli_integration import _windows_acl_owner_sid, _windows_acl_sids
+from _windows_acl_helpers import _windows_acl_owner_sid, _windows_acl_sids
 
 from deerflow.config.paths import Paths, join_host_path
 from deerflow.config.sandbox_config import SandboxConfig
