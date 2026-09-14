@@ -1,6 +1,11 @@
 from unittest.mock import MagicMock
 
+import pytest
+from langchain.agents import create_agent
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import tool as as_tool
+from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 from deerflow.config.token_budget_config import TokenBudgetConfig
@@ -78,6 +83,68 @@ class TestTokenBudgetTracking:
         assert result is None
         assert len(mw._pending_warnings["test-run"]) == 1
         assert "TOKEN BUDGET WARNING" in mw._pending_warnings["test-run"][0]
+
+
+class TestTokenBudgetLifecycle:
+    @pytest.mark.parametrize("context", [None, {}, {"run_id": None}, {"run_id": ""}, {"run_id": 0}, {"run_id": []}])
+    @pytest.mark.parametrize("async_hooks", [False, True])
+    @pytest.mark.asyncio
+    async def test_missing_or_invalid_run_id_clears_invocation_state(self, context, async_hooks):
+        mw = TokenBudgetMiddleware(TokenBudgetConfig(enabled=True, max_tokens=1000))
+        runtime = _make_runtime()
+        runtime.context = context
+        state = _make_state_with_usage(total=850)
+        if async_hooks:
+            await mw.abefore_agent({"messages": []}, runtime)
+            await mw.aafter_model(state, runtime)
+        else:
+            mw.before_agent({"messages": []}, runtime)
+            mw.after_model(state, runtime)
+
+        # Missing identities are invocation-local, never shared under None or "".
+        key = str(id(runtime))
+        assert mw._get_run_id(runtime) == key
+        assert mw._cumulative_usage[key].total == 850
+        assert mw._warned[key]
+        assert mw._pending_warnings[key]
+        assert mw._seen_messages[key]
+
+        if async_hooks:
+            await mw.aafter_agent(state, runtime)
+        else:
+            mw.after_agent(state, runtime)
+        for values in (mw._cumulative_usage, mw._warned, mw._pending_warnings, mw._seen_messages):
+            assert key not in values
+
+        # Reusing even the same runtime object starts a fresh invocation budget.
+        mw.before_agent(state, runtime)
+        follow_up = _make_state_with_usage(total=200)
+        follow_up["messages"][0].id = "next-msg"
+        assert mw.after_model(follow_up, runtime) is None
+        assert mw._cumulative_usage[key].total == 200
+        assert not mw._warned.get(key)
+
+    @pytest.mark.asyncio
+    async def test_valid_run_id_preserves_usage_warnings_and_stop_reason(self):
+        mw = TokenBudgetMiddleware(TokenBudgetConfig(enabled=True, max_tokens=1000))
+        runtime = _make_runtime(run_id="goal-run")
+        mw.after_model(_make_state_with_usage(total=850), runtime)
+        state = _make_state_with_usage(total=1100)
+        assert mw.after_model(state, runtime) is not None
+        await mw.aafter_agent(state, runtime)
+
+        assert "goal-run" not in mw._seen_messages
+        assert mw._cumulative_usage["goal-run"].total == 1100
+        assert mw._warned["goal-run"]
+        assert len(mw._pending_warnings["goal-run"]) == 1
+        assert mw.consume_stop_reason("goal-run") == "token_capped"
+
+        # Continuations may get another Runtime object with the same run identity.
+        continuation = _make_runtime(run_id="goal-run")
+        await mw.abefore_agent(state, continuation)
+        await mw.aafter_model(state, continuation)
+        assert mw._cumulative_usage["goal-run"].total == 1100
+        assert len(mw._pending_warnings["goal-run"]) == 1
 
 
 class TestTokenBudgetWarning:
@@ -196,3 +263,55 @@ class TestIndependentDimensions:
 
         assert result is not None
         assert "output token" in result["messages"][0].content
+
+
+class _ToolCallingFakeModel(FakeMessagesListChatModel):
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        return self
+
+
+class TestTokenBudgetAgentGraph:
+    def test_goal_continuation_shares_the_run_budget(self):
+        """A hidden goal continuation re-enters the graph under the same run_id; it must not get a fresh budget."""
+        executed: list[str] = []
+
+        @as_tool
+        def bash(command: str) -> str:
+            """Run a fake shell command."""
+            executed.append(command)
+            return "ok"
+
+        def call(command: str, tokens: int = 4000) -> AIMessage:
+            return AIMessage(
+                content="",
+                id=f"ai-{command}",
+                tool_calls=[{"name": "bash", "id": f"call-{command}", "args": {"command": command}}],
+                usage_metadata={"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens},
+            )
+
+        model = _ToolCallingFakeModel(
+            responses=[
+                call("a"),
+                call("b"),
+                AIMessage(content="first answer", id="ai-answer-1", usage_metadata={"input_tokens": 1000, "output_tokens": 0, "total_tokens": 1000}),
+                call("c"),
+                call("d"),
+                AIMessage(content="second answer", id="ai-answer-2", usage_metadata={"input_tokens": 1000, "output_tokens": 0, "total_tokens": 1000}),
+            ]
+        )
+        mw = TokenBudgetMiddleware(TokenBudgetConfig(enabled=True, max_tokens=10_000))
+        graph = create_agent(model=model, tools=[bash], middleware=[mw], checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "goal-thread"}}
+
+        # User turn: 9k of 10k.
+        graph.invoke({"messages": [HumanMessage("research")]}, config=config, context={"thread_id": "goal-thread", "run_id": "run-1"})
+        assert executed == ["a", "b"]
+
+        # Goal continuation in the same run: the next 4k call crosses the cap.
+        result = graph.invoke({"messages": [HumanMessage("keep going")]}, config=config, context={"thread_id": "goal-thread", "run_id": "run-1"})
+        assert executed == ["a", "b"]
+        assert "TOKEN BUDGET EXCEEDED" in result["messages"][-1].content
+
+        # A later user run still starts with a fresh budget.
+        graph.invoke({"messages": [HumanMessage("next question")]}, config=config, context={"thread_id": "goal-thread", "run_id": "run-2"})
+        assert executed == ["a", "b", "d"]
