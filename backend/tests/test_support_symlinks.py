@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from _pytest.outcomes import Skipped
 from support.symlinks import symlink_or_skip
 
 
@@ -26,5 +25,5 @@ def test_skips_when_symlink_creation_is_denied(tmp_path: Path, monkeypatch: pyte
 
     monkeypatch.setattr(Path, "symlink_to", _denied)
 
-    with pytest.raises(Skipped):
+    with pytest.raises(pytest.skip.Exception):
         symlink_or_skip(tmp_path / "link.txt", tmp_path / "real.txt")
