@@ -1519,6 +1519,37 @@ def test_owner_scoped_global_run_routes_are_redacted():
     assert neutralize("/api/runtime/threads/x") == "/api/runtime/threads/x"
 
 
+def test_owner_scoped_project_routes_are_redacted():
+    """Round 25: the project routes (``GET /api/projects/{project_id}`` et
+    al., ``routers/projects.py`` — ``ProjectRepository.get`` returns None
+    unless the row's user matches the caller) expose an internal
+    owner-only identifier to anonymous readers, the same class the thread
+    and run phrases redact. The nginx ``api/langgraph/`` alias, every
+    ``/api/projects/{id}`` subpath, the frontend
+    ``/workspace/projects/{id}`` route, and the escape families all
+    classify; mid-word lookalikes and non-canonical ids stay public via
+    the existing boundary rules."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    project_id = "0f9e8d7c6b5a4321f0e1d2c3b4a59687"
+    assert neutralize(f"/api/projects/{project_id}") == "[private artifact omitted]"
+    assert neutralize(f"/api/projects/{project_id}/threads listed") == "[private artifact omitted] listed"
+    assert neutralize(f"/api/langgraph/projects/{project_id}/threads exported") == "[private artifact omitted] exported"
+    # Escape-family parity with the thread/run routes (round 8/12 contract).
+    assert neutralize(f"&#47;api&#47;projects&#47;{project_id}") == "[private artifact omitted]"
+    assert neutralize(f"%2Fapi%2Fprojects%2F{project_id}%2Fthreads") == "[private artifact omitted]"
+    # The frontend route: rooted, a Markdown destination, and a copied URL.
+    assert neutralize(f"/workspace/projects/{project_id}") == "[private artifact omitted]"
+    assert neutralize(f"[p](/workspace/projects/{project_id})") == "p [private artifact omitted]"
+    assert neutralize(f"https://host.example/api/projects/{project_id}") == "https://host.example/[private artifact omitted]"
+    # Boundary guards: the foo.api shield, a longer route word, and
+    # non-canonical workspace ids (not uuid4 hex / wrong length).
+    assert neutralize(f"x-api/projects/{project_id}") == f"x-api/projects/{project_id}"
+    assert neutralize("/api/projectiles/x") == "/api/projectiles/x"
+    assert neutralize("/workspace/projects/not-a-uuid") == "/workspace/projects/not-a-uuid"
+    assert neutralize("/workspace/projects/0f9e8d7c6b5a4321f0e1d2c3b4a596") == "/workspace/projects/0f9e8d7c6b5a4321f0e1d2c3b4a596"
+
+
 async def test_snapshot_neutralizes_entity_and_unicode_escaped_private_references():
     """Message-level regression for both round-8 separator-encoding forms."""
     private_text = " ".join(
@@ -3015,6 +3046,35 @@ def test_tab_prefixed_quote_line_in_item_does_not_extend_the_segment():
     # A space-then-tab prefix reaches the same gap.
     out = strip("- y`z\n \t> <think>TABBED</think>y`z")
     assert "TABBED" not in out
+
+
+def test_space_indented_marker_line_in_item_does_not_extend_the_segment():
+    """Round-24 (willem 09-14 11:50): the round-23 flush fired only when
+    the leading whitespace carried a tab, but the renderer resolves 4+
+    leading spaces against the item's content column the same way — a
+    nested blockquote/list marker at 0-3 relative columns interrupts the
+    paragraph while the space-only quote/list grammars (anchored at the
+    raw line) never see it, so the line was absorbed as lazy continuation
+    and a code span paired across the renderer's block boundary."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    # The reported quote shape at four spaces.
+    out = strip("- y`z\n    > <think>REASONING</think>y`z")
+    assert "REASONING" not in out
+
+    # The nested-list sibling at five spaces.
+    out = strip("- y`z\n     - <think>RLIST</think>y`z")
+    assert "RLIST" not in out
+
+    # A span pairing across the nested quote's lines.
+    out = strip("- a`b\n    > <think>R1</think>\n    > c`d")
+    assert "R1" not in out
+
+    # Six spaces: the marker sits past the content column either way.
+    out = strip("- y`z\n      - <think>R6</think>y`z")
+    assert "R6" not in out
 
 
 def test_fence_info_string_is_not_protected():

@@ -78,11 +78,6 @@ _CONTAINER_LIST_MARKER_RE = re.compile(r"(?:[-+*]|\d{1,9}[.)])[ \t]+")
 # content column this walk does not model — such math conservatively runs
 # to the message end instead of closing on a guessed shape).
 _CONTAINER_MATH_QUOTE_PREFIX_RE = re.compile(r"[ \t]{0,3}(?:>[ \t]?)*")
-# Leading whitespace containing a tab: the renderer resolves it against
-# the container's content column (CommonMark tab expansion), so under an
-# open quote/list segment such a line can be a nested block the
-# space-only quote/list grammars never match.
-_TABBED_LEADING_WS_RE = re.compile(r"[ \t]*\t")
 _THEMATIC_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 _SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 # CommonMark type-1 start: the tag name must be followed by a space, a
@@ -1320,16 +1315,16 @@ def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, in
             indented_start = start
             indented_end = line_end
             continue
-        if saw_quotelike and _TABBED_LEADING_WS_RE.match(content) is not None:
-            # Fail-closed flush: the renderer resolves a tab inside the
-            # leading whitespace against the item's content column, so the
-            # line can open a nested blockquote this space-only quote/list
-            # grammar never sees; absorbing it as lazy continuation let a
-            # code span pair across the renderer's block boundary and
-            # publish the reasoning it serves as prose. Document-level
-            # indented-code protection is already suppressed under
-            # ``saw_quotelike``, so the only cost is over-stripping shapes
-            # the renderer may keep as one paragraph — the accepted
+        if saw_quotelike and _indent_columns(content) >= 4:
+            # Fail-closed flush: the renderer resolves leading whitespace —
+            # a tab, or four-plus spaces — against the item's content
+            # column, so the line can open a nested blockquote or list this
+            # space-only quote/list grammar never sees; absorbing it as lazy
+            # continuation let a code span pair across the renderer's block
+            # boundary and publish the reasoning it serves as prose.
+            # Document-level indented-code protection is already suppressed
+            # under ``saw_quotelike``, so the only cost is over-stripping
+            # shapes the renderer may keep as one paragraph — the accepted
             # asymmetry.
             flush_segment()
         if segment_start is None:
@@ -2016,6 +2011,15 @@ _CORE_API_THREAD_REFERENCE_RE = re.compile(r"api/(?:langgraph/)?threads/[^/?#\s]
 # routes — including the ``api/langgraph/`` nginx alias, for every
 # ``/api/runs/{id}`` subpath, not just the two mounted today.
 _CORE_API_RUN_REFERENCE_RE = re.compile(r"api/(?:langgraph/)?runs/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
+# Round 25: the project routes are owner-scoped the same way
+# (``GET /api/projects/{project_id}`` et al., ``routers/projects.py`` —
+# ``ProjectRepository.get`` returns None unless the row's user matches the
+# contextvar user), so a raw project URL in message text exposes an
+# internal owner-only identifier the anonymous reader cannot resolve —
+# the same class the thread and run phrases redact. The nginx
+# ``api/langgraph/`` alias and every ``/api/projects/{id}`` subpath
+# (``/threads`` is mounted today) classify like the native form.
+_CORE_API_PROJECT_REFERENCE_RE = re.compile(r"api/(?:langgraph/)?projects/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
 _CORE_MNT_USER_DATA_RE = re.compile(r"mnt/user-data(?![\w.\-])", re.IGNORECASE)
 _AGENT_NAME_ROUTE_SEGMENT = AGENT_NAME_PATTERN.pattern.removeprefix("^").removesuffix("$")
 _THREAD_ID_ROUTE_SEGMENT = THREAD_ID_PATTERN.removeprefix("^").removesuffix("$")
@@ -2026,6 +2030,13 @@ _WORKSPACE_THREAD_PATTERN = (
     rf"(?P<thread_id>(?>{_THREAD_ID_ROUTE_SEGMENT}))_*"
 )
 _CORE_WORKSPACE_THREAD_RE = re.compile(_WORKSPACE_THREAD_PATTERN, re.IGNORECASE)
+# Round 25: the frontend's project page is the same owner-scoped surface
+# (``frontend/src/app/workspace/projects/[id]/page.tsx``); project ids are
+# ``uuid4().hex`` (``persistence/projects/sql.py``), so the canonical
+# grammar is exactly 32 hex digits — no reserved-word guard is needed
+# (the directory has only ``[id]``, no ``/new`` sibling).
+_WORKSPACE_PROJECT_PATTERN = r"/workspace/projects/[0-9a-f]{32}_*"
+_CORE_WORKSPACE_PROJECT_RE = re.compile(_WORKSPACE_PROJECT_PATTERN, re.IGNORECASE)
 _WORKSPACE_TEXT_TOKEN_RE = re.compile(r"[^\s<>\"]+")
 _WORKSPACE_HTTP_RE = re.compile(r"https?://", re.IGNORECASE)
 _WORKSPACE_LITERAL_HTTP_AUTHORITY_RE = re.compile(r"https?://[^/?#\s<>\"]+", re.IGNORECASE)
@@ -2037,6 +2048,7 @@ _WORKSPACE_REFERENCE_TRAILING_PUNCTUATION = _REFERENCE_TRAILING_PUNCTUATION.repl
 _REFERENCE_CUT_TRAILING_PUNCTUATION = _REFERENCE_TRAILING_PUNCTUATION.replace("_", "")
 _API_THREAD_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/(?:langgraph/)?threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
 _API_RUN_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/(?:langgraph/)?runs/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
+_API_PROJECT_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/(?:langgraph/)?projects/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
 _MNT_USER_DATA_RE = re.compile(r"(?<![\w.\-])mnt/user-data(?![\w.\-])", re.IGNORECASE)
 
 
@@ -2176,21 +2188,22 @@ def _workspace_private_source_extent(path: str) -> tuple[int, bool] | None:
     extents: list[tuple[int, bool]] = []
     for resolve_dots in (True, False):
         shadow, spans = _normalize_workspace_path_with_offsets(path, resolve_dots=resolve_dots)
-        match = _CORE_WORKSPACE_THREAD_RE.match(shadow)
-        if match is None or not _workspace_route_boundary_ok(shadow, match.end()):
-            continue
-        # Once the canonical id has consumed all 64 allowed characters, a
-        # following underscore is ambiguous: it may be invalid route data or
-        # a Markdown delimiter that is absent from the rendered route.  The
-        # anonymous-share boundary is intentionally fail-closed here.  Do not
-        # reconstruct the frontend's full Markdown parser just to distinguish
-        # those cases; redact the complete route-like run either way.
-        end = _workspace_route_end(shadow, match.end())
-        opaque_tail_reached_end = match.end() < len(shadow) and shadow[match.end()] in "/?#" and end == len(shadow)
-        while end > match.end() and shadow[end - 1] in _WORKSPACE_REFERENCE_TRAILING_PUNCTUATION:
-            end -= 1
-        if end:
-            extents.append(((end if spans is None else spans[end - 1][1] + 1), opaque_tail_reached_end))
+        for core in (_CORE_WORKSPACE_THREAD_RE, _CORE_WORKSPACE_PROJECT_RE):
+            match = core.match(shadow)
+            if match is None or not _workspace_route_boundary_ok(shadow, match.end()):
+                continue
+            # Once the canonical id has consumed all 64 allowed characters, a
+            # following underscore is ambiguous: it may be invalid route data or
+            # a Markdown delimiter that is absent from the rendered route.  The
+            # anonymous-share boundary is intentionally fail-closed here.  Do not
+            # reconstruct the frontend's full Markdown parser just to distinguish
+            # those cases; redact the complete route-like run either way.
+            end = _workspace_route_end(shadow, match.end())
+            opaque_tail_reached_end = match.end() < len(shadow) and shadow[match.end()] in "/?#" and end == len(shadow)
+            while end > match.end() and shadow[end - 1] in _WORKSPACE_REFERENCE_TRAILING_PUNCTUATION:
+                end -= 1
+            if end:
+                extents.append(((end if spans is None else spans[end - 1][1] + 1), opaque_tail_reached_end))
     if not extents:
         return None
     return max(end for end, _ in extents), any(reached for _, reached in extents)
@@ -2272,7 +2285,7 @@ def _is_private_reference(value: str, *, include_workspace: bool = True) -> bool
                 break
             fed = candidate
         shadow, fed_spans = _collapse_separators_with_offsets(fed, resolve_dots=resolve_dots)
-        for core in (_CORE_API_THREAD_REFERENCE_RE, _CORE_API_RUN_REFERENCE_RE, _CORE_MNT_USER_DATA_RE):
+        for core in (_CORE_API_THREAD_REFERENCE_RE, _CORE_API_RUN_REFERENCE_RE, _CORE_API_PROJECT_REFERENCE_RE, _CORE_MNT_USER_DATA_RE):
             for match in core.finditer(shadow):
                 if _boundary_ok(fed, fed_spans, match.start()):
                     return True
@@ -2333,7 +2346,7 @@ def _starts_with_private_reference(window: str) -> bool:
     # (a protocol-relative ``//mnt/…`` strips to the phrase and classifies
     # like the absolute form).
     decoded = _trim_reference_punctuation(decoded).lstrip("/").lower()
-    return _MNT_USER_DATA_RE.match(decoded) is not None or _API_THREAD_REFERENCE_RE.match(decoded) is not None or _API_RUN_REFERENCE_RE.match(decoded) is not None
+    return _MNT_USER_DATA_RE.match(decoded) is not None or _API_THREAD_REFERENCE_RE.match(decoded) is not None or _API_RUN_REFERENCE_RE.match(decoded) is not None or _API_PROJECT_REFERENCE_RE.match(decoded) is not None
 
 
 # Probe windows may contain a URL scheme (``https://…`` tail); its ``//``
@@ -2379,19 +2392,23 @@ def _private_reference_segments(
     # rescans the token tail every time and is quadratic on joined lists.
     api_matches = [m for m in _CORE_API_THREAD_REFERENCE_RE.finditer(value) if _boundary_ok(fed_text, fed_spans, offset + m.start())]
     run_matches = [m for m in _CORE_API_RUN_REFERENCE_RE.finditer(value) if _boundary_ok(fed_text, fed_spans, offset + m.start())]
+    project_matches = [m for m in _CORE_API_PROJECT_REFERENCE_RE.finditer(value) if _boundary_ok(fed_text, fed_spans, offset + m.start())]
     mnt_matches = [m for m in _CORE_MNT_USER_DATA_RE.finditer(value) if _boundary_ok(fed_text, fed_spans, offset + m.start())]
     api_index = 0
     run_index = 0
+    project_index = 0
     mnt_index = 0
     pos = 0
     n = len(value)
 
     def next_match(start: int) -> tuple[int, int] | None:
-        nonlocal api_index, run_index, mnt_index
+        nonlocal api_index, run_index, project_index, mnt_index
         while api_index < len(api_matches) and api_matches[api_index].start() < start:
             api_index += 1
         while run_index < len(run_matches) and run_matches[run_index].start() < start:
             run_index += 1
+        while project_index < len(project_matches) and project_matches[project_index].start() < start:
+            project_index += 1
         while mnt_index < len(mnt_matches) and mnt_matches[mnt_index].start() < start:
             mnt_index += 1
         options: list[tuple[int, int]] = []
@@ -2399,6 +2416,8 @@ def _private_reference_segments(
             options.append((api_matches[api_index].start(), api_matches[api_index].end()))
         if run_index < len(run_matches):
             options.append((run_matches[run_index].start(), run_matches[run_index].end()))
+        if project_index < len(project_matches):
+            options.append((project_matches[project_index].start(), project_matches[project_index].end()))
         if mnt_index < len(mnt_matches):
             options.append((mnt_matches[mnt_index].start(), mnt_matches[mnt_index].end()))
         return min(options) if options else None

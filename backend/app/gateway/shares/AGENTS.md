@@ -51,9 +51,10 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   item indentation is not modeled, so possible code is over-stripped rather
   than reasoning leaked.
   Owner-only references are replaced in messages and titles, both at create
-  and public-read time. They cover `/mnt/user-data`; every `/api/threads/{id}`
-  route and subpath (plus nginx's `/api/langgraph/threads/…` alias); and rooted
-  `/workspace/chats/{id}` or `/workspace/agents/{agent}/chats/{id}` routes,
+  and public-read time. They cover `/mnt/user-data`; every `/api/threads/{id}`,
+  `/api/runs/{id}`, and `/api/projects/{id}` route and subpath (plus nginx's
+  `/api/langgraph/…` alias); and rooted `/workspace/chats/{id}`,
+  `/workspace/agents/{agent}/chats/{id}`, or `/workspace/projects/{id}` routes,
   including copied HTTP(S) URLs. Classification uses a bounded normalized
   shadow for percent, JSON slash, HTML-entity, and Unicode escapes while cuts
   retain exact source coordinates; every HTML5 alias for the admitted
@@ -62,8 +63,9 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   the identity span map instead of materializing per-character tuples.
   Workspace routes require a literal root or
   literal HTTP(S) scheme/authority; encoded anchors, protocol-relative/UNC,
-  relative-dot, and Windows-drive forms stay public. Only canonical agent and
-  thread-id grammars match; lowercase `/new` stays public, and identifier
+  relative-dot, and Windows-drive forms stay public. Only canonical agent,
+  thread, and project-id grammars match (project ids are uuid4 hex, 32
+  digits); lowercase `/new` stays public, and identifier
   suffixes cannot validate a prefix. Thread ids are capped at 64 characters;
   if that canonical prefix is followed by a terminal underscore run at an
   otherwise valid route boundary, the public-share boundary redacts the
