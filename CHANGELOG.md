@@ -582,6 +582,15 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **sandbox:** Stop remote `glob` and `grep` from reporting "no matches" when
+  their output was cut off. BoxLite, Tenki, E2B, and OpenSandbox cap the
+  search's raw output and then filter it in Python (ignored directories such as
+  `node_modules`, the pattern or `glob` scope), but they reported `truncated`
+  only when `max_results` was reached. When the capped lines were all filtered
+  out, a search with real matches past the cap came back empty and complete.
+  The search now passes one line beyond its cap so a cut-off result is reported
+  as truncated, and the `glob` and `grep` tools say an empty truncated result is
+  incomplete instead of "No matches found".
 - **sandbox:** Stop BoxLite `grep` from ignoring the directory part of `glob`.
   It compared only file names, so `src/*.js` matched every `.js` file in the
   tree. The glob now applies to the path relative to the search root, the same
