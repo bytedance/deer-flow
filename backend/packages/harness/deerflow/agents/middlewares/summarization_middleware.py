@@ -11,7 +11,7 @@ from typing import Any, Literal, Protocol, override, runtime_checkable
 from deerflow_extension_api import CompactionEvent, canonical_hash
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, get_buffer_string, trim_messages
+from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string, trim_messages
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -767,11 +767,14 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         *,
         latest_user_id: str | None = None,
     ) -> tuple[list[AnyMessage], list[AnyMessage]]:
-        """Keep tagged dynamic-context reminders and the current user request out of compression.
+        """Keep system messages, tagged dynamic-context reminders and the current user request out of compression.
 
-        Only tagged reminders (date ``SystemMessage`` + optional ``__memory`` peer,
-        both carrying ``dynamic_context_reminder=True``) and the latest real user
-        message are rescued. The untagged ``__user`` peer is deliberately NOT
+        Only system messages, tagged reminders (date ``SystemMessage`` + optional
+        ``__memory`` peer, both carrying ``dynamic_context_reminder=True``) and the
+        latest real user message are rescued. A subagent keeps its whole system
+        prompt as the leading ``SystemMessage`` in state (``create_agent`` is built
+        with ``system_prompt=None``), so compressing it would leave every later
+        call without its instructions. The untagged ``__user`` peer is deliberately NOT
         rescued by ID-swap prefix: it is a stale historical request that must be
         allowed to compress — the source of cross-turn prompt contamination. The
         *current* request is instead identified by ``latest_user_id``, so a
@@ -781,7 +784,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         rescued: list[AnyMessage] = []
         remaining: list[AnyMessage] = []
         for msg in messages_to_summarize:
-            if is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id):
+            if isinstance(msg, SystemMessage) or is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id):
                 rescued.append(msg)
             else:
                 remaining.append(msg)
