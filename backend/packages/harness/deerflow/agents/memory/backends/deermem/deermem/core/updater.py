@@ -1747,12 +1747,12 @@ class MemoryUpdater:
 
         Uses key presence (not value truthiness) so a stored ``None`` identity
         still counts as a live entry for LRU ordering. The paired sequence
-        (see ``_watermark_set``) is ordering-only bookkeeping and is not
+        (see ``_store_identity_locked``) is ordering-only bookkeeping and is not
         returned here; feed slicing only ever needs the identity.
 
         Guarded by ``_watermark_lock`` (see ``__init__``): ``move_to_end``
         mutates the dict's ordering, so it must not interleave with a
-        concurrent ``_watermark_set`` on another thread.
+        concurrent ``_store_identity_locked`` on another thread.
         """
         with self._watermark_lock:
             if key not in self._watermarks:
@@ -1815,8 +1815,10 @@ class MemoryUpdater:
         the next turn does not re-extract the same pre-clear messages against
         the post-clear generation.
 
-        ``sequence`` is forwarded to ``_watermark_set`` so a stale, delayed
+        ``sequence`` is forwarded to ``_store_identity_locked`` so a stale, delayed
         caller cannot undo a further-advanced watermark (see that method).
+        Production writes go through that locked helper; ``_watermark_set`` is
+        a test-seeding seam that wraps the same store.
 
         ``exclude_cleared`` unions every identity in ``messages`` into the
         clear-exclusion coverage set. Emergency flushes skip the extraction
@@ -1847,6 +1849,10 @@ class MemoryUpdater:
         """Store ``value`` for ``key``, evicting the least-recently-used entry
         when the bounded LRU cache exceeds ``config.watermark_max_keys``.
 
+        Production watermark writes go through ``_store_identity_locked``
+        (called from ``_mark_feed_consumed`` under ``_watermark_lock``). This
+        method is a test-seeding seam that wraps the same locked store.
+
         A dropped key is safe: the next turn for that thread finds no watermark
         and re-extracts one batch (the documented restart behavior). ``0`` =
         unbounded (no eviction).
@@ -1865,13 +1871,15 @@ class MemoryUpdater:
         like before this ordering was introduced.
 
         The read (check) and write are one critical section under
-        ``_watermark_lock``: two threads can call this concurrently for the
-        same key (a clear's cancel path on the request thread racing an
-        in-flight extraction's commit on a worker thread). Without a lock,
-        both could read the same stale "no conflict yet" snapshot before
-        either writes, and the lower-sequence writer would still land last and
-        overwrite the higher-sequence one -- a stale value would win even
-        though the sequence comparison above is individually correct.
+        ``_watermark_lock``: production races (a clear's cancel path on the
+        request thread vs an in-flight extraction's commit on a worker thread)
+        go through ``_mark_feed_consumed`` -> ``_store_identity_locked``. This
+        wrapper takes the same lock so test seeders cannot interleave with
+        those writers. Without a lock, both could read the same stale "no
+        conflict yet" snapshot before either writes, and the lower-sequence
+        writer would still land last and overwrite the higher-sequence one --
+        a stale value would win even though the sequence comparison above is
+        individually correct.
         """
         with self._watermark_lock:
             self._store_identity_locked(self._watermarks, key, value, sequence)
@@ -1885,7 +1893,12 @@ class MemoryUpdater:
         value: tuple[str, ...] | None,
         sequence: int | None,
     ) -> None:
-        """Write ``(sequence, value)`` into ``store``. Caller holds ``_watermark_lock``."""
+        """Write ``(sequence, value)`` into ``store``. Caller holds ``_watermark_lock``.
+
+        If ``store`` already holds a higher ``sequence`` for ``key``, this is a
+        stale delayed completion and the write is skipped so the watermark
+        cannot move backward.
+        """
         existing = store.get(key)
         if existing is not None and existing[0] is not None and sequence is not None and sequence < existing[0]:
             logger.info(
@@ -2123,7 +2136,7 @@ class MemoryUpdater:
         messages. The watermark stores the identity of the last-extracted
         message (content/id based, in-memory only) so it stays correct when
         summarization removes the conversation front; a restart loses it and
-        re-extracts one batch.         ``bypass_watermark`` is set by the emergency
+        re-extracts one batch. ``bypass_watermark`` is set by the emergency
         (summarization) flush path: the subset it carries is a one-shot
         "extract before removal" snapshot, so it does not read or advance the
         conversation watermark (advancing it from the subset's own length would
