@@ -101,7 +101,10 @@ def test_archive_download_contains_only_presented_files(tmp_path, monkeypatch) -
     outputs = tmp_path / "outputs"
     (outputs / "reports").mkdir(parents=True)
     (outputs / "reports" / "summary.txt").write_text("summary", encoding="utf-8")
-    (outputs / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    # Written as bytes on purpose: text mode translates "\n" to "\r\n" on
+    # Windows, so the archive would legitimately contain CRLF bytes while the
+    # assertion below compares against this literal LF spelling.
+    (outputs / "data.csv").write_bytes(b"a,b\n1,2\n")
     (outputs / "not-presented.txt").write_text("secret", encoding="utf-8")
     paths = [
         "/mnt/user-data/outputs/reports/summary.txt",
@@ -451,6 +454,12 @@ def test_archive_rejects_internal_output_names(
         )
 
 
+# The swap the test performs is os.replace() while the archive still holds the
+# source file open. Windows refuses that rename with WinError 5, so the race is
+# only reproducible on POSIX; the same-size content change covered by
+# test_archive_rejects_same_size_content_change_with_restored_mtime still runs
+# on Windows and exercises the same mid-read revalidation.
+@pytest.mark.skipif(os.name == "nt", reason="os.replace() cannot rename over a file the archive still holds open on Windows (WinError 5)")
 def test_archive_rejects_a_path_replaced_during_read(tmp_path, monkeypatch) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

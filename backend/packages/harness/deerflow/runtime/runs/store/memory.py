@@ -8,7 +8,14 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from deerflow.runtime.runs.store.base import LeaseRenewal, RunIdempotencyConflict, RunStore, StatusFinalization
+from deerflow.runtime.runs.store.base import (
+    LeaseRenewal,
+    RunIdempotencyConflict,
+    RunStore,
+    StatusFinalization,
+    run_is_before_cursor,
+    run_sort_key,
+)
 
 
 class MemoryRunStore(RunStore):
@@ -87,15 +94,35 @@ class MemoryRunStore(RunStore):
             return None
         return run
 
-    async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
+    async def list_by_thread(
+        self,
+        thread_id,
+        *,
+        user_id=None,
+        limit=100,
+        before_created_at=None,
+        before_run_id=None,
+    ):
         # Use the thread index for an O(runs-in-thread) lookup instead of
         # scanning every run. ``self._runs.get`` is defense-in-depth: it drops a
         # stale id still in the index but already gone from ``_runs``.
         run_ids = self._runs_by_thread.get(thread_id)
         if not run_ids:
             return []
-        results = [run for run_id in run_ids if (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)]
-        results.sort(key=lambda r: r["created_at"], reverse=True)
+        results = [
+            run
+            for run_id in run_ids
+            if (run := self._runs.get(run_id)) is not None
+            and run.get("operation_kind", "run") == "run"
+            and (user_id is None or run.get("user_id") == user_id)
+            and run_is_before_cursor(
+                run.get("created_at"),
+                run["run_id"],
+                before_created_at=before_created_at,
+                before_run_id=before_run_id,
+            )
+        ]
+        results.sort(key=lambda r: run_sort_key(r.get("created_at"), r["run_id"]), reverse=True)
         return results[:limit]
 
     async def list_successful_regenerate_sources(self, thread_id, *, user_id=None):

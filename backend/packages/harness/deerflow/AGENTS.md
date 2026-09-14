@@ -53,7 +53,7 @@ drift.
 **Agent Conversation**:
 - `chat(message, thread_id)` — synchronous, accumulates streaming deltas per message-id and returns the final AI text
 - `stream(message, thread_id)` — subscribes to LangGraph `stream_mode=["values", "messages", "custom"]` and yields `StreamEvent`:
-  - `"values"` — full state snapshot (title, messages, artifacts); AI text already delivered via `messages` mode is **not** re-synthesized here to avoid duplicate deliveries; serialized `ToolMessage` entries preserve a non-`None` native `artifact`
+  - `"values"` — state snapshot (title, messages, artifacts, summary_text); `summary_text` is the current summary or `None` when absent and is forwarded on every snapshot, including unchanged summaries and resets. AI text already delivered via `messages` mode is **not** re-synthesized here to avoid duplicate deliveries; serialized `ToolMessage` entries preserve a non-`None` native `artifact`
   - `"messages-tuple"` — per-chunk update: for AI text this is a **delta** (concat per `id` to rebuild the full message); tool calls and tool results are emitted once each, and tool results preserve a non-`None` native `artifact`
   - `"custom"` — forwarded from `StreamWriter`; DeerFlow-built-in custom events are dual-emitted through `deerflow.utils.custom_events`, so `astream_events(version="v2")` consumers also receive one `on_custom_event` with `name=payload["type"]` and the unchanged payload as `data`
   - `"end"` — stream finished (carries cumulative `usage` counted once per message id)

@@ -175,7 +175,15 @@ class Sandbox(ABC):
             max_depth: The maximum depth to traverse. Default is 2.
 
         Returns:
-            The contents of the directory.
+            The contents of the directory. An existing empty directory may
+            return an empty list. A missing path must not.
+
+        Raises:
+            FileNotFoundError: If ``path`` does not exist or is not a directory.
+            OSError: If the listing cannot be performed (command/client failure).
+                Both local and remote implementations must raise rather than
+                return ``[]`` for failure or a missing path: ``ls_tool``
+                renders an empty list as ``(empty)``.
         """
         pass
 

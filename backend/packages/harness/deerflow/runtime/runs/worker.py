@@ -81,6 +81,7 @@ from deerflow.runtime.user_context import get_current_user, get_effective_user_i
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
 from deerflow.workspace_changes.types import WorkspaceSnapshot
@@ -1087,7 +1088,11 @@ async def run_agent(
         from deerflow.extensions import bind_agent_build_extensions
 
         with bind_agent_build_extensions(extensions):
-            agent = _agent_graph(agent_factory(**agent_factory_kwargs))
+            # Assemble off-loop: agent construction re-enters
+            # get_available_tools(), which may block on MCP cache
+            # initialization — it must not stall the calling event loop
+            # (issue #5172).
+            agent = _agent_graph(await run_assembly(agent_factory, **agent_factory_kwargs))
 
         accessor = CheckpointStateAccessor.bind(
             agent,
@@ -1200,7 +1205,10 @@ async def run_agent(
                                     broke_on_abort = True
                                     logger.info("Run %s abort requested — stopping", run_id)
                                     break
-                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                                if single_mode != "custom":
+                                    # Custom frames carry task_* events whose payload can hold a delegated
+                                    # subagent's messages; see the multi-mode branch below.
+                                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                                 sse_event = _lg_mode_to_sse_event(single_mode)
                                 single_payload = serialize(chunk, mode=single_mode)
                                 if single_mode == "values" and seq_stamper is not None:
@@ -1240,10 +1248,12 @@ async def run_agent(
                             if mode is None:
                                 continue
 
-                            if not namespace:
+                            if not namespace and mode != "custom":
                                 # Only root-graph frames may decide the parent run's error
                                 # fallback: a delegated subagent's marked fallback is the
-                                # executor's to map (task_failed), not this run's.
+                                # executor's to map (task_failed), not this run's. That
+                                # includes the child messages task_running custom events
+                                # carry, which are root frames too.
                                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                             await _publish_stream_item(
                                 bridge=bridge,

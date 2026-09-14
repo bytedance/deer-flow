@@ -12,6 +12,8 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
+from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -324,10 +326,16 @@ class OpenSandboxSandbox(Sandbox):
         if depth < 0:
             raise ValueError("max_depth must be non-negative")
         resolved = self._resolve_path(path)
-        execution = self._run(f"find {shlex.quote(resolved)} -maxdepth {depth} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        # splitlines() already removed the terminators; do NOT strip entries —
-        # a filename that legitimately ends in whitespace would be corrupted.
-        return [line for line in execution_stdout(execution).splitlines() if line]
+        execution = self._run(remote_list_dir_command(resolved, depth))
+        error = getattr(execution, "error", None)
+        if error is not None:
+            detail = f"{getattr(error, 'name', type(error).__name__)}: {getattr(error, 'value', error)}"
+            raise OSError(f"Failed to list_dir {resolved}: {detail}")
+        return parse_remote_list_dir_output(
+            execution_stdout(execution),
+            resolved,
+            pipeline_exit_code=getattr(execution, "exit_code", None),
+        )
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
         if max_results <= 0:
@@ -336,12 +344,16 @@ class OpenSandboxSandbox(Sandbox):
         types = ("f", "d") if include_dirs else ("f",)
         type_expr = " -o ".join(f"-type {entry_type}" for entry_type in types)
         hard_limit = max(max_results * 4, max_results + 50)
-        execution = self._run(f"find {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null | head -{hard_limit}")
+        # -H follows a symlinked search root, as list_dir does.
+        search = f"find -H {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null"
+        execution = self._run(remote_search_command(search, resolved, limit=hard_limit))
+        # A missing root or a failed find must not read as "no files matched" (#5376).
+        output = parse_remote_search_output(execution_stdout(execution), resolved, tool="find")
 
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in execution_stdout(execution).splitlines():
+        for entry in output.splitlines():
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)) or should_ignore_path(entry):
                 continue
@@ -381,14 +393,18 @@ class OpenSandboxSandbox(Sandbox):
         arguments = f" -e {shlex.quote(pattern)} {shlex.quote(resolved)} 2>/dev/null"
         primary = "grep " + " ".join(flags) + arguments
         fallback = "grep " + " ".join(portable_flags) + arguments
-        command = f'{{ {primary}; status=$?; [ "$status" -eq 2 ] && {fallback}; }} | head -{hard_limit}'
-        execution = self._run(command)
+        # Retry without --include/-m only when the primary grep errors (BusyBox
+        # lacks them). Keep the primary's status otherwise, so a missing grep
+        # (127) is not reported as "no matches" (#5376).
+        search = f'{primary}; status=$?; if [ "$status" -eq 2 ]; then {fallback}; status=$?; fi; (exit "$status")'
+        execution = self._run(remote_search_command(search, resolved, limit=hard_limit))
+        output = parse_remote_search_output(execution_stdout(execution), resolved, tool="grep")
 
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
         seen_positions: set[tuple[str, int]] = set()
-        for raw in execution_stdout(execution).splitlines():
+        for raw in output.splitlines():
             try:
                 file_path, line_number_text, line = raw.split(":", 2)
                 line_number = int(line_number_text)

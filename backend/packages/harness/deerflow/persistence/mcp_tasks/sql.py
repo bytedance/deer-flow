@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.mcp.tasks import ATTENTION_TASK_STATUSES, POLLABLE_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.utils.time import coerce_iso
 
 _POLLABLE_STATUS_VALUES = tuple(status.value for status in POLLABLE_TASK_STATUSES)
@@ -98,6 +99,7 @@ class McpTaskRepository:
     @staticmethod
     def _row_to_dict(row: McpTaskRow) -> dict[str, Any]:
         data = row.to_dict()
+        data.pop("thread_incarnation", None)
         for key in _TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -152,6 +154,19 @@ class McpTaskRepository:
         )
         _record_event_if_changed(row, tracking_degraded=False, now=now)
         async with self._sf() as session:
+            matching_thread = select(ThreadMetaRow.incarnation).where(
+                ThreadMetaRow.thread_id == thread_id,
+                or_(ThreadMetaRow.user_id == user_id, ThreadMetaRow.user_id.is_(None)),
+            )
+            if session.get_bind().dialect.name == "sqlite":
+                # Keep lookup and write in one SQLite statement. A preliminary
+                # read would leave a delete/recreate window before the INSERT.
+                row.thread_incarnation = matching_thread.scalar_subquery()
+            else:
+                # FOR SHARE also conflicts with the FOR NO KEY UPDATE lock taken
+                # by an older writer's plain owner UPDATE. KEY SHARE would not,
+                # leaving a mixed-version ownership race before this INSERT.
+                row.thread_incarnation = (await session.execute(matching_thread.with_for_update(read=True))).scalar_one_or_none()
             session.add(row)
             try:
                 await session.commit()

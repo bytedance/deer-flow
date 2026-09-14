@@ -80,6 +80,7 @@ describe("scheduled tasks api", () => {
     const payload: ScheduledTaskPayload = {
       context_mode: "fresh_thread_per_run",
       thread_id: null,
+      assistant_id: "research-bot",
       title: "Daily summary",
       prompt: "Summarize thread",
       schedule_type: "cron",

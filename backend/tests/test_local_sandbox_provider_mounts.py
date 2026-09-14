@@ -330,6 +330,31 @@ class TestSymlinkEscapes:
         assert "/mnt/data/nested/linked-dir/" in entries
         assert "/mnt/data/dir-link" not in entries
 
+    def test_list_dir_raises_when_path_is_missing(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/data/missing")
+
+    def test_list_dir_empty_directory_returns_empty(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        assert sandbox.list_dir("/mnt/data") == []
+
     def test_write_file_blocks_symlink_into_nested_read_only_mount(self, tmp_path):
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()

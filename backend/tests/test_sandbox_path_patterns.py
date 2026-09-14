@@ -110,6 +110,31 @@ def test_direct_replacer_matches_the_shared_boundary_and_tail_contract() -> None
     assert replacer("root /host/skills, done", "/host/skills", "/mnt/skills", separator_agnostic=True) == "root /mnt/skills, done"
 
 
+def test_direct_replacer_normalizes_nested_tail_to_virtual_posix_style() -> None:
+    # The tail is sliced from the original output, so a Windows-spelled nested
+    # path kept its backslashes and was spliced into the POSIX-style virtual
+    # path as e.g. /mnt/skills/pkg\\a.md. Virtual paths are always POSIX, so
+    # nested tails must be normalized the same way depth-1 tails already are.
+    assert (
+        path_patterns_module.replace_output_path_matches(
+            "see \\host\\skills\\pkg\\a.md",
+            "/host/skills",
+            "/mnt/skills",
+            separator_agnostic=True,
+        )
+        == "see /mnt/skills/pkg/a.md"
+    )
+    assert (
+        path_patterns_module.replace_output_path_matches(
+            "see C:\\host\\skills\\pkg\\a.md",
+            "C:\\host\\skills",
+            "/mnt/skills",
+            separator_agnostic=True,
+        )
+        == "see /mnt/skills/pkg/a.md"
+    )
+
+
 def test_separator_agnostic_replacer_avoids_normalization_without_backslashes() -> None:
     class ReplaceTrackingString(str):
         def __init__(self, value: str) -> None:
@@ -136,6 +161,9 @@ def test_separator_agnostic_replacer_avoids_normalization_without_backslashes() 
 
 
 def test_local_sandbox_reverse_mask_routes_through_the_direct_helper(tmp_path: Path, monkeypatch) -> None:
+    """And it must stay separator-agnostic: forward resolution spells Windows
+    host paths with forward slashes, so a revert to separator-exact matching
+    would reintroduce the host-path leak with no POSIX-visible signal."""
     local = tmp_path / "skills"
     local.mkdir()
     sandbox = LocalSandbox(
@@ -144,17 +172,17 @@ def test_local_sandbox_reverse_mask_routes_through_the_direct_helper(tmp_path: P
     )
 
     resolved = str(Path(local).resolve())
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, dict]] = []
     original = path_patterns_module.replace_output_path_matches
 
     def recording_replacer(output, base, replacement, **kwargs):
-        calls.append((output, base))
+        calls.append((output, base, kwargs))
         return original(output, base, replacement, **kwargs)
 
     monkeypatch.setattr(local_sandbox_module, "replace_output_path_matches", recording_replacer)
 
     assert sandbox._reverse_resolve_paths_in_output(f"read {resolved}/SKILL.md") == "read /mnt/skills/SKILL.md"
-    assert calls == [(f"read {resolved}/SKILL.md", resolved)]
+    assert calls == [(f"read {resolved}/SKILL.md", resolved, {"separator_agnostic": True})]
 
 
 def test_tools_mask_patterns_route_through_the_helper(tmp_path: Path) -> None:
