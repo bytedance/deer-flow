@@ -223,6 +223,7 @@ async def test_postgres_once_recovery_uses_occurrence_order_despite_clock_skew(p
     kwargs = {"error": "interrupted: recovery"}
     if recovery_method == "reconcile_stuck_once_tasks":
         kwargs["now"] = now + timedelta(minutes=1)
+        kwargs["owner_worker_id"] = "scheduler-recovery"
     count = await getattr(task_repo, recovery_method)(**kwargs)
 
     task = await task_repo.get_internal("task-once")
