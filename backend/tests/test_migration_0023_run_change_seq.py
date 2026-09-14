@@ -17,7 +17,7 @@ PREVIOUS = "0022_scheduled_occurrence_seq"
 
 
 async def test_changed_run_revision_is_single_head():
-    assert _get_head_revision() == REVISION
+    assert _get_head_revision() == "0023_user_preferences"
 
 
 async def test_upgrade_exposes_legacy_runs_and_allocates_new_positions(tmp_path):
