@@ -676,6 +676,37 @@ def test_factory_skip_memory_flush_omits_hook(monkeypatch):
     assert middleware._before_summarization_hooks == []
 
 
+def test_memory_opt_out_compaction_never_queues_durable_memory(monkeypatch):
+    """A real compaction remains memory-silent when the caller opts out."""
+    manager = MagicMock()
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.summarization_middleware.create_chat_model",
+        lambda **_kw: _StaticChatModel(),
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.summarization_hook.get_memory_config",
+        lambda: MemoryConfig(enabled=True),
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.summarization_hook.get_memory_manager",
+        lambda: manager,
+    )
+    app_config = SimpleNamespace(
+        summarization=SummarizationConfig(enabled=True),
+        memory=MemoryConfig(enabled=True),
+    )
+
+    middleware = create_summarization_middleware(
+        app_config=app_config,
+        keep=("messages", 2),
+        skip_memory_flush=True,
+    )
+
+    assert middleware is not None
+    assert middleware.compact_state({"messages": _messages()}, _runtime(agent_name="stateless-worker"), force=True) is not None
+    manager.add_nowait.assert_not_called()
+
+
 def test_new_messages_block_escapes_breakout() -> None:
     """A user turn that closes ``</new_messages>`` and forges an authority
     section must be neutralized before it lands in the summary prompt.
@@ -1458,6 +1489,51 @@ def test_current_request_survives_and_stale_peer_compresses() -> None:
     summarized_contents = [m.content for m in ev.messages_to_summarize]
     assert any("metric A" in c for c in summarized_contents)
     # Compression is non-empty (guards the no-op regression).
+    assert len(ev.messages_to_summarize) > 0
+
+
+def test_human_input_card_reply_survives_as_current_request() -> None:
+    """A Human Input Card reply is the current request, so it survives compaction.
+
+    The frontend sends the answer as a hidden HumanMessage carrying
+    ``human_input_response``. It must be rescued like a visible request instead
+    of the older request that triggered the clarification.
+    """
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append], keep=("messages", 6))
+
+    request = HumanMessage(content="Research topic X and write a report", id="request")
+    reply = HumanMessage(
+        content="Only Europe, and only 2025 data",
+        id="card-reply",
+        additional_kwargs={
+            "hide_from_ui": True,
+            "human_input_response": {
+                "version": 1,
+                "kind": "human_input_response",
+                "source": "ask_clarification",
+                "request_id": "clarify-1",
+                "response_kind": "text",
+                "value": "Only Europe, and only 2025 data",
+            },
+        },
+    )
+    messages = [
+        request,
+        AIMessage(content="", id="ai-clarify", tool_calls=[{"id": "clarify-1", "name": "ask_clarification", "args": {"question": "Which region?"}}]),
+        ToolMessage(content="Which region?", tool_call_id="clarify-1", id="tool-clarify"),
+        reply,
+    ]
+    for k in range(1, 6):
+        messages.append(AIMessage(content=f"ai{k}", id=f"ai{k}", tool_calls=[{"id": f"tc{k}", "name": "web_search", "args": {}}]))
+        messages.append(ToolMessage(content=f"r{k}", tool_call_id=f"tc{k}", id=f"tool{k}"))
+
+    middleware.before_model({"messages": messages}, _runtime())
+
+    assert len(captured) == 1
+    ev = captured[0]
+    assert reply.id in [m.id for m in ev.preserved_messages]
+    assert reply.id not in [m.id for m in ev.messages_to_summarize]
     assert len(ev.messages_to_summarize) > 0
 
 

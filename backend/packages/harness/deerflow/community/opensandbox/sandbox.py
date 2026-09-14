@@ -348,12 +348,12 @@ class OpenSandboxSandbox(Sandbox):
         search = f"find -H {shlex.quote(resolved)} \\( {type_expr} \\) -print 2>/dev/null"
         execution = self._run(remote_search_command(search, resolved, limit=hard_limit))
         # A missing root or a failed find must not read as "no files matched" (#5376).
-        output = parse_remote_search_output(execution_stdout(execution), resolved, tool="find")
+        output = parse_remote_search_output(execution_stdout(execution), resolved, tool="find", limit=hard_limit)
 
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in output.splitlines():
+        for entry in output.text.splitlines():
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)) or should_ignore_path(entry):
                 continue
@@ -362,7 +362,7 @@ class OpenSandboxSandbox(Sandbox):
                 matches.append(entry)
                 if len(matches) >= max_results:
                     return matches, True
-        return matches, False
+        return matches, output.truncated
 
     def grep(
         self,
@@ -398,13 +398,13 @@ class OpenSandboxSandbox(Sandbox):
         # (127) is not reported as "no matches" (#5376).
         search = f'{primary}; status=$?; if [ "$status" -eq 2 ]; then {fallback}; status=$?; fi; (exit "$status")'
         execution = self._run(remote_search_command(search, resolved, limit=hard_limit))
-        output = parse_remote_search_output(execution_stdout(execution), resolved, tool="grep")
+        output = parse_remote_search_output(execution_stdout(execution), resolved, tool="grep", limit=hard_limit)
 
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
         seen_positions: set[tuple[str, int]] = set()
-        for raw in output.splitlines():
+        for raw in output.text.splitlines():
             try:
                 file_path, line_number_text, line = raw.split(":", 2)
                 line_number = int(line_number_text)
@@ -425,7 +425,7 @@ class OpenSandboxSandbox(Sandbox):
             matches.append(GrepMatch(path=file_path, line_number=line_number, line=truncate_line(line)))
             if len(matches) >= max_results:
                 return matches, True
-        return matches, False
+        return matches, output.truncated
 
     def ping(self, timeout: float = 10) -> bool:
         if self.is_closed:

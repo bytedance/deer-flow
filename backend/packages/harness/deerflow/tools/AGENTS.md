@@ -1,5 +1,16 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+`conversation.py` supplies the optional `read_conversation` tool. Ordinary lead
+assembly opts in only with a host reader; default, bootstrap, embedded and
+subagent assembly withhold it. The tool requires the worker-owned
+`__conversation_reader` capability and rejects subagents. Hosts enforce the
+current run's explicit references and user permissions. Do not import Gateway
+routers into the harness or recover this capability from persisted messages.
+Reads use live visible history; expiry/deletion does not erase destination copies.
+The Gateway sizes pages to the `CONVERSATION_TOOL_NAME` tool-output budget so
+results stay inline. Truncated results ask the agent to request missing material;
+keep that guidance separate from permission enforcement.
+
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`
 2. **MCP tools** - From enabled MCP servers (lazy initialized, cached with resolved-path + content-signature invalidation)

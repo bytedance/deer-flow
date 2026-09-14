@@ -509,6 +509,30 @@ at the service name (e.g. `http://browserless:3000`) instead of `localhost`. See
 the [Browserless project](https://github.com/browserless/browserless) for full
 deployment and configuration options.
 
+### Reading Referenced Conversations
+
+Enable the read-only Gateway tool through the existing tools list:
+
+```yaml
+tools:
+  - name: read_conversation
+    group: conversation
+    use: deerflow.tools.conversation:read_conversation
+```
+
+It is off by default. A run must explicitly submit `conversation_references`
+and have `runs:read` permission before the lead agent receives this tool.
+Custom agents must also permit the `conversation` tool group where they restrict
+groups. References are limited to owned threads and the current run; they do not
+enable history discovery, memory extraction or cross-user access. See the
+[request contract and limits](API.md#referencing-a-previous-conversation).
+
+Reader pages are sized to stay within the `tool_output` budget for
+`read_conversation` (12,000 serialized characters by default), so they are not
+externalized to `.tool-results`. To allow larger pages, raise
+`tool_output.tool_overrides.read_conversation`; a page still holds at most
+20,000 text characters.
+
 ### Sandbox
 
 DeerFlow supports multiple sandbox execution modes. Configure your preferred mode in `config.yaml`:

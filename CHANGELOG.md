@@ -582,6 +582,26 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **sandbox:** Stop remote `glob` and `grep` from reporting "no matches" when
+  their output was cut off. BoxLite, Tenki, E2B, and OpenSandbox cap the
+  search's raw output and then filter it in Python (ignored directories such as
+  `node_modules`, the pattern or `glob` scope), but they reported `truncated`
+  only when `max_results` was reached. When the capped lines were all filtered
+  out, a search with real matches past the cap came back empty and complete.
+  The search now passes one line beyond its cap so a cut-off result is reported
+  as truncated, and the `glob` and `grep` tools say an empty truncated result is
+  incomplete instead of "No matches found". ([#5427])
+- **sandbox:** Stop host paths reaching the model when output joins them with
+  `:`, as `$PATH` and `$PYTHONPATH` do. The matched path ran on through the
+  rest of the list, so every later entry under the same root was left
+  unmasked; extra masking passes recovered one entry each, which hid the leak
+  for short lists. Masking now ends a matched path at `:`. A symlink inside a
+  mount whose target lies outside every mount is now shown by its mount path
+  instead of the target's host path in command output and `glob` results. ([#5418])
+- **sandbox:** Stop BoxLite `grep` from ignoring the directory part of `glob`.
+  It compared only file names, so `src/*.js` matched every `.js` file in the
+  tree. The glob now applies to the path relative to the search root, the same
+  scope as `glob()` and the other providers. ([#5419])
 - **models:** Stop every Claude model after the first from losing its
   credential when the Claude Code OAuth token is handed off through
   `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`. Every `ClaudeChatModel` instance
@@ -1475,6 +1495,21 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Security
 
+- **skills:** Close gaps that let files skip SkillScan in the public skill
+  review gate. The review analyzer passed SkillScan only files it had decoded
+  as text, so executable binaries and nested archives were never checked; it
+  exempted every file anywhere under an `evals/fixtures/` directory; and a
+  duplicate archive member or a case-folded name silently overwrote an earlier
+  file before scanning. SkillScan now receives every file byte for byte, only
+  eval fixture `SKILL.md` samples stay exempt, and path collisions mark the
+  review incomplete. SkillScan also skipped code files containing a NUL or
+  non-UTF-8 byte, so one byte in a comment hid a reverse shell from the review
+  gate, and a NUL byte skipped static analysis at install. Such files now raise
+  `package-undecodable-script` and are still analyzed, so `CRITICAL` matches
+  keep blocking. SkillScan's Mach-O detection missed 32-bit little-endian and
+  fat variants that the installer blocks; the installer, export guard, and
+  SkillScan now share one code-file and executable-magic definition. Review
+  snapshots gain a `content_base64` field for binary files. ([#5431])
 - **prompt-injection:** New input-sanitization middleware defends against
   prompt-injection, forged framework tags in the input guardrail are blocked,
   and system context is injected as a `SystemMessage` for role isolation. ([#3662],
@@ -2819,3 +2854,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5401]: https://github.com/bytedance/deer-flow/pull/5401
 [#5403]: https://github.com/bytedance/deer-flow/pull/5403
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
+[#5418]: https://github.com/bytedance/deer-flow/pull/5418
+[#5419]: https://github.com/bytedance/deer-flow/pull/5419
+[#5427]: https://github.com/bytedance/deer-flow/pull/5427
+[#5431]: https://github.com/bytedance/deer-flow/pull/5431
+
