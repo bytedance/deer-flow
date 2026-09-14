@@ -3,6 +3,7 @@
 import asyncio
 
 import pytest
+from support.skill_export_platform import requires_safe_capture
 
 from app.gateway.skill_export import SkillExportResponse, run_export_work
 from deerflow.skills.export import build_skill_export, export_manifest
@@ -19,6 +20,7 @@ def storage(tmp_path):
 
 
 @pytest.mark.asyncio
+@requires_safe_capture
 async def test_export_worker_and_response_are_off_loop(storage):
     manifest, lease = await run_export_work(lambda cancel: export_manifest(storage, "demo", cancel))
     lease.release()

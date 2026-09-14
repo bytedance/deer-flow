@@ -36,10 +36,15 @@ export async function fetchThreadScheduledTasks(
 
 export async function fetchScheduledTaskRuns(
   taskId: string,
+  page?: { limit: number; offset: number; signal?: AbortSignal },
 ): Promise<ScheduledTaskRun[]> {
-  const response = await fetch(
-    scheduledTasksUrl(`/${encodeURIComponent(taskId)}/runs`),
-  );
+  const url = scheduledTasksUrl(`/${encodeURIComponent(taskId)}/runs`);
+  const response = page
+    ? await fetch(
+        `${url}?${new URLSearchParams({ limit: String(page.limit), offset: String(page.offset) })}`,
+        { signal: page.signal },
+      )
+    : await fetch(url);
   if (!response.ok) {
     await throwGatewayApiError(
       response,

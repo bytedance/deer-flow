@@ -1461,6 +1461,51 @@ def test_current_request_survives_and_stale_peer_compresses() -> None:
     assert len(ev.messages_to_summarize) > 0
 
 
+def test_human_input_card_reply_survives_as_current_request() -> None:
+    """A Human Input Card reply is the current request, so it survives compaction.
+
+    The frontend sends the answer as a hidden HumanMessage carrying
+    ``human_input_response``. It must be rescued like a visible request instead
+    of the older request that triggered the clarification.
+    """
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append], keep=("messages", 6))
+
+    request = HumanMessage(content="Research topic X and write a report", id="request")
+    reply = HumanMessage(
+        content="Only Europe, and only 2025 data",
+        id="card-reply",
+        additional_kwargs={
+            "hide_from_ui": True,
+            "human_input_response": {
+                "version": 1,
+                "kind": "human_input_response",
+                "source": "ask_clarification",
+                "request_id": "clarify-1",
+                "response_kind": "text",
+                "value": "Only Europe, and only 2025 data",
+            },
+        },
+    )
+    messages = [
+        request,
+        AIMessage(content="", id="ai-clarify", tool_calls=[{"id": "clarify-1", "name": "ask_clarification", "args": {"question": "Which region?"}}]),
+        ToolMessage(content="Which region?", tool_call_id="clarify-1", id="tool-clarify"),
+        reply,
+    ]
+    for k in range(1, 6):
+        messages.append(AIMessage(content=f"ai{k}", id=f"ai{k}", tool_calls=[{"id": f"tc{k}", "name": "web_search", "args": {}}]))
+        messages.append(ToolMessage(content=f"r{k}", tool_call_id=f"tc{k}", id=f"tool{k}"))
+
+    middleware.before_model({"messages": messages}, _runtime())
+
+    assert len(captured) == 1
+    ev = captured[0]
+    assert reply.id in [m.id for m in ev.preserved_messages]
+    assert reply.id not in [m.id for m in ev.messages_to_summarize]
+    assert len(ev.messages_to_summarize) > 0
+
+
 def test_first_turn_long_analysis_preserves_current_request() -> None:
     """First-turn long analysis: the current request (X__user peer) stays preserved even outside the keep window, and early AI/Tool turns still compress."""
     captured: list[SummarizationEvent] = []

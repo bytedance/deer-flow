@@ -44,6 +44,14 @@ Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
+The dedicated `run-history.ts` hook replaces the unpaged runs hook. Show counts
+only after a successful history read, never during initial loading or errors.
+Scheduled run history uses task/page query keys and the existing live offset API.
+Fetch 51 rows to display 50 plus a next-page sentinel; never append pages. Only
+page zero polls or refreshes on focus/reconnect. Task switches reset to page zero,
+and consumed AbortSignals cancel obsolete reads. Live offsets are not snapshots;
+explicit mutations or navigation may observe newly inserted runs.
+
 ## Architecture
 
 ```
@@ -74,6 +82,12 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 More specific `AGENTS.md` files under `src/` contain the frontend sections split from this file.
 
 ## Code Style
+
+Custom Agent `display_name` is an optional Unicode UI label, edited in
+`AgentSettingsDialog`. Use it with a fallback to `name` for gallery/chat text;
+keep `name` for React identity, URLs, requests, and runtime `agent_name`.
+The 100-code-point budget uses `[...value.trim()].length`, matching Pydantic;
+do not use HTML `maxLength`, which counts UTF-16 code units instead.
 
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.
@@ -158,3 +172,12 @@ Custom skill export is admin-only and disabled in static demos. The lazy
 or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob download;
 HTTP 409 requires explicit preview refresh. Keep file lists paginated and diagnostics
 localized. Browser handoff does not prove the file was saved to disk.
+
+Sidebar rows request deletion through `ThreadDeleteDialogProvider`, hosted in
+`WorkspaceSidebar` outside the virtualized flat/project lists. Keep the selected
+thread snapshot and retry UI alive when a partial deletion removes its row.
+Focus Cancel on open and after a failed deletion has re-enabled the actions;
+block dismissal while deletion is pending. Show the error message when available,
+with a localized fallback, and log the rejection for debugging. The shared
+delete helper accepts remote 404 (not 403) before retrying local cleanup, and
+`onDeleted` runs only after both deletion steps succeed.

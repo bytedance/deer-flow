@@ -224,6 +224,17 @@ This section accumulates work toward the **2.1.0** milestone
   `use_previous_response_id` chaining cannot resume the original server-side
   history. Controlled by `read_before_write.elide_blocked_payloads` (default
   on) and `read_before_write.elide_min_chars` (default 2000).
+- **agents:** `ToolOutputBudgetMiddleware` now also elides the `content` of a
+  successful `write_file` call from model-bound requests once the same path
+  was read or modified again later in the conversation. After a successful
+  write the file on disk is the source of truth, and the read-before-write
+  gate forces a `read_file` before the next modification, so the historical
+  copy was redundant with that read and long report-writing runs carried every
+  section twice. The newest `tool_output.keep_recent_writes` successful writes
+  (default 1) always stay visible, `str_replace` payloads are never touched,
+  and stored history, receipts, and the run journal keep the original
+  arguments. Controlled by `tool_output.elide_superseded_writes` (default on)
+  and `tool_output.superseded_write_min_chars` (default 2000).
 
 #### Memory
 
@@ -251,6 +262,9 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Skills
 
+- **skills:** The built-in image-generation skill can use OpenAI-compatible
+  Images APIs for generation and reference-image editing, with configurable
+  endpoint, model, size, and output format.
 - **skills:** Native SkillScan (phase 1) statically analyzes skill packages at
   load, and `describe_skill` enables deferred discovery so the model fetches a
   skill's schema on demand instead of loading all skills up front. ([#3033],
@@ -591,6 +605,67 @@ This section accumulates work toward the **2.1.0** milestone
   uploads directory (not just the current request), so a later `notes.docx`
   cannot overwrite an earlier `notes.md`, and a later `a.pdf` cannot 
   collapse `a.docx` → `a.md`. ([#4981], related [#3750])
+- **sandbox:** Stop host paths reaching the model when output joins them with
+  `:`, as `$PATH` and `$PYTHONPATH` do. The matched path ran on through the
+  rest of the list, so every later entry under the same root was left
+  unmasked; extra masking passes recovered one entry each, which hid the leak
+  for short lists. Masking now ends a matched path at `:`. A symlink inside a
+  mount whose target lies outside every mount is now shown by its mount path
+  instead of the target's host path in command output and `glob` results. ([#5418])
+- **sandbox:** Stop BoxLite `grep` from ignoring the directory part of `glob`.
+  It compared only file names, so `src/*.js` matched every `.js` file in the
+  tree. The glob now applies to the path relative to the search root, the same
+  scope as `glob()` and the other providers. ([#5419])
+- **models:** Stop every Claude model after the first from losing its
+  credential when the Claude Code OAuth token is handed off through
+  `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`. Every `ClaudeChatModel` instance
+  loaded credentials again, but a descriptor can be drained only once, so the
+  title, summarization, and subagent models — and every later run — had no
+  credential and failed with `TypeError: Could not resolve authentication
+  method`. The token is now read once per process and reused. ([#5411])
+- **models:** Stop the lead agent from failing to build whenever a model with
+  `supports_reasoning_effort: true` also gets a `reasoning_effort` from its
+  profile — at the top level, in `when_thinking_enabled` or
+  `when_thinking_disabled`, or from the `extra_body.thinking` disable path. The
+  regular lead-agent build forwards the requested effort even when unset, so
+  the key reached the provider constructor twice and raised `TypeError: got
+  multiple values for keyword argument 'reasoning_effort'`. The requested value now
+  layers like per-agent `model_settings`: it replaces a top-level profile
+  value, an unset request keeps that value, and the thinking-mode settings still
+  decide the final one. Codex keeps its own level check. ([#5403])
+- **runtime:** Stop a keyed run retry from failing with 500 on the SQL run
+  store. HTTP admissions do not pass a `user_id`; the SQL store stamps the
+  request user on the row, but the process-local run record kept `None`. A
+  retry with the same `Idempotency-Key` that reached another Gateway worker, or
+  the same worker after the finished run was cleaned up, compared the two
+  owners, took its own run for another user's, and raised. The same mismatch
+  dropped HTTP runs from owner-scoped history reads and skipped the MCP
+  `background_tasks` projection for them, so `values` events for these runs now
+  include `background_tasks`. `RunManager` now resolves an omitted owner from
+  the request user the way the SQL store does, so every store records the same
+  owner. ([#5401])
+- **runtime:** Stop a cross-worker idempotent run reuse from permanently
+  blocking the thread on the reusing worker. The reuse registered the hydrated
+  store row as a local run record, but only the owning worker finalizes and
+  cleans up its records, so the copy kept its admission-time `pending`/`running`
+  status forever: every later `reject` admission for that thread on the worker
+  returned 409 until a restart, its run reads kept reporting the stale status,
+  and orphan reconciliation skipped the run if the owner crashed. A cancel sent
+  to that worker also took the local-owner path and marked the owner's
+  still-running row `interrupted`. The reusing worker now returns a detached
+  store-only handle instead, so cancel follows the non-owner contract.
+  ([#5393])
+- **skills:** Stop writing resolved secrets into `extensions_config.json` when a
+  skill is toggled. The Gateway skill toggle and `DeerFlowClient.update_skill`
+  loaded the file through `ExtensionsConfig.from_file()`, which replaces every
+  `$VAR` value with the environment value, and wrote that model back — so a
+  `"$GITHUB_TOKEN"` reference was persisted as the plaintext token and an unset
+  variable was permanently replaced with `""`. `DeerFlowClient.update_mcp_config`
+  did the same for every key other than `mcpServers`. These writers now edit the
+  raw on-disk JSON and validate the candidate the way the runtime loads it, so
+  placeholders and hand-written structure survive; the MCP router shares the same
+  raw loader. Files rewritten by an earlier toggle keep their plaintext values:
+  restore the `$VAR` references and rotate the exposed credentials. ([#5357])
 - **gateway:** Honor `disable_clarification` and `github_token` only for
   internally-authenticated callers, the way `non_interactive` already was.
   Both keys were forwarded from `body.context` regardless of the caller and
@@ -1443,6 +1518,20 @@ This section accumulates work toward the **2.1.0** milestone
   and the conversation block in the memory-update prompt - and neutralize
   prompt-injection tags in `web_capture` tool results. ([#4028], [#4119], [#4137],
   [#4157], [#4162], [#4099], [#4060], [#4097], [#4128])
+- **prompt-injection:** Close two input-sanitization bypasses. `hide_from_ui` and
+  a human `name="summary"` tell `is_genuine_user_message` that the framework
+  authored a message, which skips sanitization entirely. Untrusted run input and
+  thread-state writes carrying either marker are now marked server-side and
+  sanitized regardless, so a caller can no longer land a raw `<system-reminder>`
+  outside the user-input boundary markers that the lead-agent prompt declares
+  trusted framework data. The markers themselves are preserved, so messages that
+  use `hide_from_ui` only to stay out of the transcript — quoted conversation
+  context, sidecar context, the agent save command, HumanInputCard replies — keep
+  doing that, and trusted internal launchers are unaffected. Sanitization also
+  covers every genuine user message instead of only the newest: the
+  transformation is request-scoped, so a last-turn-only scan neutralized a
+  payload for exactly one model call and then replayed it verbatim from the next
+  turn on. ([#5375])
 - **secrets:** Scrub inherited secret environment variables (`MYSQL_PWD`,
   `REDISCLI_AUTH`, abbreviated `*_PASS`, and Postgres `PGPASSFILE`) from the
   skill environment; request-scoped secrets are bound for both slash-activated
@@ -1515,6 +1604,16 @@ This section accumulates work toward the **2.1.0** milestone
   environment — inheriting the host ssh-agent socket lets sandboxed code
   sign and authenticate with every key the agent holds — unless a skill
   explicitly declares it via required-secrets. ([#5145])
+- **artifacts:** Serve XML artifacts as download attachments like HTML and
+  SVG. `GET /api/threads/{id}/artifacts/{path}` rendered `.xml`, `.xsl`, and
+  `.rdf` files — and `+xml` types such as `.rss` wherever the host MIME
+  database maps them — inline in the application origin, so an XML document
+  with an XHTML-namespaced `<script>`, written by a prompt-injected agent and
+  opened from a chat link, could call the API with the viewer's session.
+  Every XML MIME type (`text/xml`, `application/xml`, `text/xsl`, any `+xml`
+  subtype) is now treated as active content, including `.skill` archive
+  members; the artifacts panel keeps previewing XML through its ranged fetch.
+  ([#5353])
 
 ### Documentation
 
@@ -2749,3 +2848,12 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5287]: https://github.com/bytedance/deer-flow/pull/5287
 [#5321]: https://github.com/bytedance/deer-flow/pull/5321
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
+[#5353]: https://github.com/bytedance/deer-flow/pull/5353
+[#5357]: https://github.com/bytedance/deer-flow/pull/5357
+[#5375]: https://github.com/bytedance/deer-flow/pull/5375
+[#5393]: https://github.com/bytedance/deer-flow/pull/5393
+[#5401]: https://github.com/bytedance/deer-flow/pull/5401
+[#5403]: https://github.com/bytedance/deer-flow/pull/5403
+[#5411]: https://github.com/bytedance/deer-flow/pull/5411
+[#5418]: https://github.com/bytedance/deer-flow/pull/5418
+[#5419]: https://github.com/bytedance/deer-flow/pull/5419
