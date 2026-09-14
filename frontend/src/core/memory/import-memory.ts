@@ -31,9 +31,10 @@ function normalizeContextSection(value: unknown): ContextSection {
   }
 
   return {
+    ...value,
     summary: typeof value.summary === "string" ? value.summary : "",
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
-  };
+  } as ContextSection;
 }
 
 function generateLegacyFactId(index: number): string {
@@ -89,8 +90,16 @@ function normalizeMemoryFact(value: unknown, index: number): MemoryFact | null {
 
 /**
  * Normalize and validate memory JSON (unknown → UserMemory | null).
- * Legacy fact metadata is defaulted. Unrecoverable facts can either reject a
- * user-initiated import or be dropped on the background API read path.
+ *
+ * Normalization is additive: only contract-owned fields are validated and
+ * defaulted, while every unrecognized field (top-level, section, and per-fact)
+ * passes through untouched. The frontend must never narrow the backend-owned
+ * memory document — dropping an unknown key here silently breaks lossless
+ * export/import and any backend-driven field (e.g. `revision`, `display`).
+ *
+ * The envelope (string `version`/`lastUpdated`, record `user`/`history`, array
+ * `facts`) is strict on both call paths. Unrecoverable facts can either reject
+ * a user-initiated import or be dropped on the background API read path.
  */
 export function normalizeMemoryPayload(
   value: unknown,
@@ -123,21 +132,28 @@ export function normalizeMemoryPayload(
     facts.push(fact);
   }
 
-  const normalizedUser = Object.fromEntries(
-    USER_SECTION_KEYS.map((key) => [key, normalizeContextSection(user[key])]),
-  ) as unknown as UserMemory["user"];
-  const normalizedHistory = Object.fromEntries(
-    HISTORY_SECTION_KEYS.map((key) => [
-      key,
-      normalizeContextSection(history[key]),
-    ]),
-  ) as unknown as UserMemory["history"];
+  const normalizedUser = {
+    ...user,
+    ...Object.fromEntries(
+      USER_SECTION_KEYS.map((key) => [key, normalizeContextSection(user[key])]),
+    ),
+  } as unknown as UserMemory["user"];
+  const normalizedHistory = {
+    ...history,
+    ...Object.fromEntries(
+      HISTORY_SECTION_KEYS.map((key) => [
+        key,
+        normalizeContextSection(history[key]),
+      ]),
+    ),
+  } as unknown as UserMemory["history"];
 
   return {
+    ...value,
     version: value.version,
     lastUpdated: value.lastUpdated,
     user: normalizedUser,
     history: normalizedHistory,
     facts,
-  };
+  } as unknown as UserMemory;
 }

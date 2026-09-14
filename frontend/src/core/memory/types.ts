@@ -5,6 +5,7 @@ export interface MemoryFact {
   confidence: number;
   createdAt: string;
   source: string;
+  [key: string]: unknown;
 }
 
 export interface MemoryFactInput {
@@ -21,6 +22,7 @@ export interface MemoryFactPatchInput {
 
 export interface UserMemory {
   version: string;
+  revision?: number;
   lastUpdated: string;
   user: {
     workContext: {

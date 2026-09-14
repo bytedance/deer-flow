@@ -176,4 +176,55 @@ describe("legacy memory import compatibility (TDD)", () => {
 
     expect(normalizeMemoryPayload(invalid)).toBeNull();
   });
+
+  it("preserves unknown fields on the strict import path", () => {
+    const futureExport = {
+      version: "1.0",
+      revision: 4,
+      lastUpdated: "2026-07-01T00:00:00Z",
+      display: { title: "Memory export" },
+      data: { future: true },
+      user: {
+        workContext: {
+          summary: "Works on DeerFlow",
+          updatedAt: "2026-06-01T00:00:00Z",
+          confidence: 0.8,
+        },
+        providerState: { loaded: true },
+      },
+      history: {
+        timeline: { entries: ["2026-06"] },
+      },
+      facts: [
+        {
+          content: "User prefers conclusions first.",
+          category: "cognitive",
+          topics: ["communication"],
+        },
+      ],
+    };
+
+    const result = normalizeMemoryPayload(futureExport);
+
+    expect(result).not.toBeNull();
+    expect(result!.revision).toBe(4);
+    expect(result).toMatchObject({
+      display: { title: "Memory export" },
+      data: { future: true },
+    });
+    expect(result!.user).toMatchObject({
+      providerState: { loaded: true },
+      workContext: { confidence: 0.8 },
+    });
+    expect(result!.history).toMatchObject({
+      timeline: { entries: ["2026-06"] },
+    });
+    expect(result!.facts[0]).toMatchObject({
+      topics: ["communication"],
+    });
+    expect(result!.user.cognitiveStyle).toEqual({
+      summary: "",
+      updatedAt: "",
+    });
+  });
 });

@@ -148,4 +148,47 @@ test.describe("Memory settings import validation", () => {
       confirmDialog.getByRole("button", { name: "Import" }),
     ).toBeEnabled();
   });
+
+  test("round-trips unknown fields through the import request", async ({
+    page,
+  }) => {
+    const memoryWithExtensions = {
+      ...LEGACY_MEMORY_WITHOUT_COGNITIVE_STYLE,
+      revision: 4,
+      display: { title: "Memory export" },
+      data: { future: true },
+    };
+    const importedPayloads: unknown[] = [];
+    await page.route(/\/api\/memory\/import$/, async (route) => {
+      if (route.request().method() === "POST") {
+        importedPayloads.push(route.request().postDataJSON());
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(memoryWithExtensions),
+        });
+        return;
+      }
+      await route.fallback();
+    });
+
+    const settingsDialog = await openMemorySettings(page);
+    await selectMemoryFile(
+      settingsDialog,
+      "with-extensions.json",
+      memoryWithExtensions,
+    );
+
+    const confirmDialog = page.getByRole("dialog", { name: "Import memory?" });
+    await expect(confirmDialog).toBeVisible();
+    await confirmDialog.getByRole("button", { name: "Import" }).click();
+
+    await expect.poll(() => importedPayloads.length).toBe(1);
+    expect(importedPayloads[0]).toMatchObject({
+      revision: 4,
+      display: { title: "Memory export" },
+      data: { future: true },
+      user: { cognitiveStyle: { summary: "", updatedAt: "" } },
+    });
+  });
 });
