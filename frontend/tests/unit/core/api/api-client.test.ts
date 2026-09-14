@@ -546,9 +546,25 @@ test("recovers a join stream gap from durable state and resumes after the retain
   const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
     const path = url.toString();
     if (path.endsWith("/runs/run-1")) {
-      return new Response(JSON.stringify({ status: "running" }), {
-        status: 200,
-      });
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [
+                {
+                  id: "human-2",
+                  type: "human",
+                  content: "Second question",
+                },
+              ],
+            },
+          },
+        }),
+        {
+          status: 200,
+        },
+      );
     }
     if (path.includes("/runs/run-1/stream")) {
       recoveryRequests.push(init ?? {});
@@ -560,7 +576,11 @@ test("recovers a join stream gap from durable state and resumes after the retain
     if (path.includes("/threads/thread-1/state")) {
       return new Response(
         JSON.stringify({
-          values: { messages: [{ type: "ai", content: "durable" }] },
+          values: {
+            messages: [
+              { id: "human-1", type: "human", content: "First question" },
+            ],
+          },
           next: [],
           tasks: [],
           metadata: {},
@@ -592,12 +612,26 @@ test("recovers a join stream gap from durable state and resumes after the retain
 
   expect(received).toEqual([
     {
+      event: "values",
+      data: {
+        messages: [
+          { id: "human-1", type: "human", content: "First question" },
+          { id: "human-2", type: "human", content: "Second question" },
+        ],
+      },
+    },
+    {
       event: "custom",
       data: { type: "stream_replay_gap", ...gap },
     },
     {
       event: "values",
-      data: { messages: [{ type: "ai", content: "durable" }] },
+      data: {
+        messages: [
+          { id: "human-1", type: "human", content: "First question" },
+          { id: "human-2", type: "human", content: "Second question" },
+        ],
+      },
     },
     { event: "end", data: null },
   ]);

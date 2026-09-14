@@ -118,6 +118,7 @@ async function loadReconnectInputSnapshot(
   threadId: string,
   runId: string,
   run?: Awaited<ReturnType<LangGraphClient["runs"]["get"]>>,
+  durableValues?: unknown,
   signal?: AbortSignal,
 ): Promise<ReconnectInputSnapshot | undefined> {
   try {
@@ -136,18 +137,18 @@ async function loadReconnectInputSnapshot(
       return undefined;
     }
 
-    const state = await client.threads.getState(threadId, undefined, {
-      signal,
-    });
-
-    const durableValues =
-      typeof state.values === "object" && state.values !== null
-        ? state.values
+    const resolvedDurableValues =
+      durableValues ??
+      (await client.threads.getState(threadId, undefined, { signal })).values;
+    const normalizedDurableValues =
+      typeof resolvedDurableValues === "object" &&
+      resolvedDurableValues !== null
+        ? resolvedDurableValues
         : {};
     const durableMessages = Array.isArray(
-      Reflect.get(durableValues, "messages"),
+      Reflect.get(normalizedDurableValues, "messages"),
     )
-      ? (Reflect.get(durableValues, "messages") as unknown[])
+      ? (Reflect.get(normalizedDurableValues, "messages") as unknown[])
       : [];
     const seenIds = new Set(
       durableMessages.flatMap((message) => {
@@ -171,8 +172,11 @@ async function loadReconnectInputSnapshot(
         return true;
       }),
     ];
-    return { ...durableValues, messages } as ReconnectInputSnapshot;
-  } catch {
+    return { ...normalizedDurableValues, messages } as ReconnectInputSnapshot;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw error;
+    }
     return undefined;
   }
 }
@@ -385,6 +389,9 @@ async function* recoverStreamReplayGaps({
     const durableState = await client.threads
       .getState(threadId, undefined, { signal })
       .catch((error: unknown) => {
+        if (error instanceof Error && error.name === "AbortError") {
+          throw error;
+        }
         throw new StreamReplayGapError(gap, recoveryAttempts, error);
       });
     if (durableState.values != null) {
@@ -397,6 +404,7 @@ async function* recoverStreamReplayGaps({
             threadId,
             runId,
             reconnectRun,
+            durableState.values,
             signal,
           )
         : undefined;
@@ -523,6 +531,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
         threadId,
         runId,
         reconnectRun,
+        undefined,
         reconnectSignal,
       );
       if (reconnectSnapshot) {
