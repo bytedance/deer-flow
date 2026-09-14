@@ -47,7 +47,7 @@ async def read_conversation(
         thread_id: The referenced conversation's thread ID.
         runtime: Injected tool runtime containing the host reader.
         cursor: The positive sequence cursor returned by the previous page; omit for the newest page.
-        limit: Maximum messages to return, from 1 to 50.
+        limit: Maximum messages per page read, from 1 to 50; ignored when continuing a message.
         message_seq: With offset, continue one cut message; copy both from its continuation.
         offset: Character offset from the same continuation.
 

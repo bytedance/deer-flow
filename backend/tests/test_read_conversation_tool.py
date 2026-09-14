@@ -111,6 +111,11 @@ def test_read_conversation_model_schema_has_no_identity_or_runtime_fields():
     assert set(read_conversation.tool_call_schema.model_fields) == {"thread_id", "cursor", "limit", "message_seq", "offset"}
 
 
+def test_limit_description_says_continuations_ignore_it():
+    # A continuation returns one message part, so the model must not expect limit to apply there.
+    assert "ignored when continuing a message" in read_conversation.tool_call_schema.model_fields["limit"].description
+
+
 def test_tool_name_constant_matches_the_registered_tool():
     # The Gateway sizes pages by this name's tool-output budget; a rename must move both.
     from deerflow.constants import CONVERSATION_TOOL_NAME
