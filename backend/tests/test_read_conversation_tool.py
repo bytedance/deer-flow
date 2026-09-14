@@ -93,6 +93,13 @@ def test_read_conversation_model_schema_has_no_identity_or_runtime_fields():
     assert set(read_conversation.tool_call_schema.model_fields) == {"thread_id", "cursor", "limit"}
 
 
+def test_tool_name_constant_matches_the_registered_tool():
+    # The Gateway sizes pages by this name's tool-output budget; a rename must move both.
+    from deerflow.constants import CONVERSATION_TOOL_NAME
+
+    assert read_conversation.name == CONVERSATION_TOOL_NAME
+
+
 @pytest.mark.parametrize("name", ["read_conversation", "renamed_reader"])
 def test_conversation_reader_is_not_loaded_by_default(monkeypatch, name):
     monkeypatch.setattr("deerflow.tools.tools.resolve_variable", lambda *_: pytest.fail("disabled reader must not be imported"))

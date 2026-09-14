@@ -310,6 +310,75 @@ async def test_goal_worker_stands_down_for_non_continuable_blocker(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_goal_worker_stands_down_after_the_run_hit_its_token_budget(monkeypatch):
+    checkpointer = InMemorySaver()
+    thread_id = "token-capped-goal-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    bridge = _CollectingBridge()
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        return GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="Tests have not passed yet.",
+            evidence_summary="Implementation is incomplete.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-capped",
+        model_name="test-model",
+        app_config=None,
+        run_stop_reason="token_capped",
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert latest_goal["continuation_count"] == 0
+    assert latest_goal["last_evaluation"]["blocker"] == "goal_not_met_yet"
+    assert latest_goal["last_evaluation"]["stand_down_reason"] == "token_capped"
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_clears_a_satisfied_goal_even_after_the_run_hit_its_token_budget(monkeypatch):
+    checkpointer = InMemorySaver()
+    thread_id = "token-capped-done-goal-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    bridge = _CollectingBridge()
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        return GoalEvaluation(
+            satisfied=True,
+            blocker="none",
+            reason="The visible conversation says the task is done.",
+            evidence_summary="Done.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-capped-done",
+        model_name="test-model",
+        app_config=None,
+        run_stop_reason="token_capped",
+    )
+
+    # The satisfied branch runs before the token-cap stand-down: the goal is cleared, not stood down.
+    assert continuation is None
+    assert await read_thread_goal(checkpointer, thread_id) is None
+
+
+@pytest.mark.asyncio
 async def test_goal_worker_stands_down_when_no_progress_repeats(monkeypatch):
     checkpointer = InMemorySaver()
     thread_id = "no-progress-goal-thread"
@@ -680,6 +749,97 @@ async def test_run_agent_does_not_stream_continuation_after_abort(monkeypatch):
     assert len(fake_agent.inputs) == 1
     assert fake_agent.inputs[0] == {"messages": [HumanMessage(content="start")]}
     assert record.status == RunStatus.interrupted
+
+
+@pytest.mark.asyncio
+async def test_run_agent_passes_the_run_stop_reason_to_the_goal_loop(monkeypatch):
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.inputs = []
+            self.metadata = {}
+            self.checkpointer = None
+            self.store = None
+            self.interrupt_before_nodes = []
+            self.interrupt_after_nodes = []
+
+        def astream(self, input_payload, **kwargs):
+            self.inputs.append(input_payload)
+            # TokenBudgetMiddleware stamps the cap into the run's runtime context.
+            kwargs["config"]["configurable"]["__pregel_runtime"].context["stop_reason"] = "token_capped"
+
+            async def _gen():
+                yield {"messages": []}
+
+            return _gen()
+
+    class FakeRunManager:
+        async def try_start(self, _run_id):
+            record.status = RunStatus.running
+            return RunStartOutcome.started
+
+        async def set_status(self, _run_id, status, **_kwargs):
+            record.status = status
+
+        async def set_status_if_not_cancelled(self, _run_id, status, **kwargs):
+            await self.set_status(_run_id, status, **kwargs)
+            return None
+
+        async def update_model_name(self, *_args, **_kwargs):
+            return None
+
+        async def update_run_completion(self, *_args, **_kwargs):
+            return None
+
+        async def wait_for_prior_finalizing(self, *_args, **_kwargs):
+            return None
+
+        async def set_finalizing(self, _run_id, finalizing):
+            record.finalizing = finalizing
+
+        async def cleanup(self, *_args, **_kwargs):
+            return None
+
+    class FakeBridge:
+        async def publish(self, *_args, **_kwargs):
+            return None
+
+        async def publish_end(self, *_args, **_kwargs):
+            return None
+
+        async def cleanup(self, *_args, **_kwargs):
+            return None
+
+    stop_reasons = []
+
+    async def fake_prepare(**kwargs):
+        stop_reasons.append(kwargs.get("run_stop_reason"))
+        return None
+
+    monkeypatch.setattr(worker, "_prepare_goal_continuation_input", fake_prepare)
+
+    fake_agent = FakeAgent()
+    record = RunRecord(
+        run_id="run-token-capped",
+        thread_id="thread-token-capped",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name="test-model",
+    )
+    record.abort_event = asyncio.Event()
+
+    await worker.run_agent(
+        FakeBridge(),
+        FakeRunManager(),
+        record,
+        ctx=worker.RunContext(checkpointer=None),
+        agent_factory=lambda config: fake_agent,
+        graph_input={"messages": [HumanMessage(content="start")]},
+        config={"configurable": {"thread_id": "thread-token-capped"}},
+    )
+
+    assert stop_reasons == ["token_capped"]
+    assert len(fake_agent.inputs) == 1
 
 
 @pytest.mark.asyncio
