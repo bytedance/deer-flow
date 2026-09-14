@@ -93,9 +93,10 @@ function normalizeMemoryFact(value: unknown, index: number): MemoryFact | null {
  *
  * Normalization is additive: only contract-owned fields are validated and
  * defaulted, while every unrecognized field (top-level, section, and per-fact)
- * passes through untouched. The frontend must never narrow the backend-owned
- * memory document — dropping an unknown key here silently breaks lossless
- * export/import and any backend-driven field (e.g. `revision`, `display`).
+ * passes through untouched. The frontend must never be narrower than the
+ * Gateway contract — `MemoryResponse` declares fields such as the top-level
+ * `revision`, and rebuilding from a whitelist here would silently drop them
+ * from every response passing through `readMemoryResponse()`.
  *
  * The envelope (string `version`/`lastUpdated`, record `user`/`history`, array
  * `facts`) is strict on both call paths. Unrecoverable facts can either reject
