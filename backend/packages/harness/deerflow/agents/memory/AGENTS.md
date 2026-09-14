@@ -325,9 +325,15 @@ runs by default.
   `retrieval_diversity_weight` demotes near-duplicate facts. Defaults preserve
   legacy ordering. Relevance is distinct-query-token IDF coverage; repeated
   content cannot replace missing terms or saturate a partial match.
+- DeerMem injection builds IDF once from the selected user/agent fact scope,
+  before guaranteed/regular partitioning, using the same bounded tokenizer as
+  search. No IDF work runs without an active lexical query. Category-filtered
+  search uses its filtered corpus; budgets and separate diversity pools can
+  still produce different final selections. No IDF cache crosses calls/scopes.
 - The current-turn query flows from `DynamicContextMiddleware` (bounded,
   user-message text) through the optional `query` keyword on
   `MemoryManager.get_context` / `aget_context`. Shared signature inspection
-  omits `query` for old/uninspectable backends; backend errors never cause retries.
+  omits `query` when it is `None` or the backend is old/uninspectable, preserving
+  forwarding wrappers' absent-hint contract; backend errors never cause retries.
 - Ranking must be deterministic, network-free, and mutation-free: caller-owned
   fact dicts are read-only inputs.

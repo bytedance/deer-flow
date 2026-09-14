@@ -476,6 +476,7 @@ def format_memory_for_injection(
     query: str | None = None,
     relevance_weight: float | None = None,
     diversity_weight: float | None = None,
+    idf: dict[str, float] | None = None,
 ) -> str:
     """Format memory data for injection into system prompt.
 
@@ -508,6 +509,9 @@ def format_memory_for_injection(
         diversity_weight: Optional greedy-MMR similarity penalty that demotes
             near-duplicate facts during query-aware ranking. Ignored when
             ``query`` is ``None``.
+        idf: Optional scope-wide query-term weights, shared by both budget
+            pools. DeerMem supplies the same corpus IDF as unfiltered search;
+            direct callers that omit it retain uniform term weights.
 
     Returns:
         Formatted memory string for system prompt injection.
@@ -608,7 +612,7 @@ def format_memory_for_injection(
             relevance_ordered = bool(query and query.strip() and relevance_weight is not None)
             scores = {}
             if relevance_ordered:
-                scores = {id(fact): score for score, fact in score_facts(valid_facts, query, relevance_weight=relevance_weight)}
+                scores = {id(fact): score for score, fact in score_facts(valid_facts, query, relevance_weight=relevance_weight, idf=idf)}
 
             def _rank_pool(pool: list[dict[str, Any]]) -> Iterable[dict[str, Any]]:
                 if not relevance_ordered:

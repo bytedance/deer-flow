@@ -52,6 +52,8 @@ def context_query_kwargs(get_context: Callable[..., str], query: str | None) -> 
     Older plugins need no signature change. An uninspectable callable keeps
     the old call contract; backend TypeErrors must never trigger a retry.
     """
+    if query is None:
+        return {}
     try:
         parameters = inspect.signature(get_context).parameters.values()
     except (TypeError, ValueError):

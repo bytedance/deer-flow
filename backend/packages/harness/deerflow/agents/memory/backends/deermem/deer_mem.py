@@ -323,6 +323,13 @@ class DeerMem(MemoryManager):
         injection_agent = None if self.mode == "tool" else _resolve_agent_name(agent_name)
         memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=injection_agent, user_id=user_id))
         relevance_enabled = self._config.retrieval_relevance_enabled and bool(query and query.strip())
+        corpus_idf = None
+        if relevance_enabled and self._config.retrieval_relevance_weight > 0:
+            # Use the selected user/agent corpus, before budget-pool partitioning,
+            # with the same bounded tokenizer and IDF as unfiltered search.
+            facts = memory_data.get("facts", [])
+            if isinstance(facts, list) and facts:
+                corpus_idf = build_idf([tokenize(fact["content"]) for fact in facts if isinstance(fact, dict) and isinstance(fact.get("content"), str)])
         return format_memory_for_injection(
             memory_data,
             max_tokens=self._config.max_injection_tokens,
@@ -332,6 +339,7 @@ class DeerMem(MemoryManager):
             query=query if relevance_enabled else None,
             relevance_weight=self._config.retrieval_relevance_weight if relevance_enabled else None,
             diversity_weight=self._config.retrieval_diversity_weight if relevance_enabled else None,
+            idf=corpus_idf,
         )
 
     def search(

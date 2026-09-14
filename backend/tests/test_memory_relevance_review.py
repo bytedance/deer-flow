@@ -1,6 +1,7 @@
 """Regression coverage for PR 5251's backend compatibility and IDF review."""
 
 import asyncio
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -131,3 +132,76 @@ def test_partial_matches_cannot_saturate_from_repetition_or_containment(query, p
 def test_rare_query_terms_keep_more_weight_than_common_terms():
     idf = build_idf([tokenize(text) for text in ["python database migration", "python coding", "python testing", "python packaging"]])
     assert lexical_relevance("python database migration", "database", idf=idf) > lexical_relevance("python database migration", "python", idf=idf)
+
+
+def test_absent_query_keeps_forwarding_wrapper_legacy_contract(monkeypatch):
+    calls = []
+    inner = _LegacyBackend()
+
+    class ForwardingBackend(_LegacyBackend):
+        def get_context(self, user_id, **kwargs):
+            calls.append(kwargs.copy())
+            return inner.get_context(user_id, **kwargs)
+
+    manager = ForwardingBackend()
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+    config = SimpleNamespace(memory=SimpleNamespace(enabled=True, injection_enabled=True))
+    assert "memory:u:a:None" in _get_memory_context("a", app_config=config, user_id="u")
+    assert asyncio.run(manager.aget_context("u", agent_name="a", thread_id="t")) == "memory:u:a:t"
+    assert calls == [{"agent_name": "a"}, {"agent_name": "a", "thread_id": "t"}]
+
+
+def _idf_scope(common):
+    contents = ["python conventions", "migration conventions"] + [f"{common} background {index}" for index in range(8)]
+    return {"facts": [{"id": f"fact_{index}", "content": content, "category": "preference" if index < 2 else "context", "confidence": 0.7} for index, content in enumerate(contents)]}
+
+
+@pytest.mark.parametrize("guaranteed", [[], ["preference"]])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_search_and_injection_share_scope_idf_without_cross_scope_leakage(guaranteed, reverse):
+    scopes = {("u1", "a"): _idf_scope("python"), ("u2", "a"): _idf_scope("migration"), ("u1", "b"): _idf_scope("migration")}
+    if reverse:
+        for data in scopes.values():
+            data["facts"].reverse()
+    original = deepcopy(scopes)
+    manager = DeerMem(backend_config={"retrieval_relevance_enabled": True, "retrieval_relevance_weight": 1.0, "token_counting": "char", "guaranteed_categories": guaranteed})
+    manager._updater = SimpleNamespace(get_memory_data=lambda agent_name=None, *, user_id=None: scopes[(user_id, agent_name)])
+    # Return to the first scope to detect accidental reuse of another user's IDF.
+    for user, agent in [("u1", "a"), ("u2", "a"), ("u1", "b"), ("u1", "a")]:
+        search = manager.search("python migration", top_k=10, user_id=user, agent_name=agent)
+        context = manager.get_context(user, agent_name=agent, query="python migration")
+        expected, other = ("migration conventions", "python conventions") if (user, agent) == ("u1", "a") else ("python conventions", "migration conventions")
+        assert search[0]["content"] == expected
+        assert context.index(expected) < context.index(other)
+    assert scopes == original
+
+
+@pytest.mark.parametrize("enabled,query,weight", [(False, "python migration", 1.0), (True, None, 1.0), (True, "", 1.0), (True, "  ", 1.0), (True, "python migration", 0.0)])
+def test_inactive_relevance_does_not_build_injection_idf(monkeypatch, enabled, query, weight):
+    def unexpected_idf(corpus):
+        pytest.fail("IDF must not be built when lexical relevance is unused")
+
+    monkeypatch.setattr("deerflow.agents.memory.backends.deermem.deer_mem.build_idf", unexpected_idf)
+    manager = DeerMem(backend_config={"retrieval_relevance_enabled": enabled, "retrieval_relevance_weight": weight, "token_counting": "char"})
+    manager._updater = SimpleNamespace(get_memory_data=lambda agent_name=None, *, user_id=None: _idf_scope("python"))
+    assert manager.get_context("u", agent_name="a", query=query) == manager.get_context("u", agent_name="a")
+
+
+def test_large_scope_idf_is_bounded_and_keeps_rare_fact_within_budget(monkeypatch):
+    from deerflow.agents.memory.backends.deermem.deermem.core.prompt import _count_tokens
+
+    corpora = []
+
+    def observed_idf(corpus):
+        corpora.append((len(corpus), max(map(len, corpus))))
+        return build_idf(corpus)
+
+    monkeypatch.setattr("deerflow.agents.memory.backends.deermem.deer_mem.build_idf", observed_idf)
+    facts = [{"id": f"fact_{i}", "content": "python background " * 1000, "category": "context", "confidence": 0.7} for i in range(499)]
+    facts.append({"id": "fact_rare", "content": "migration conventions", "category": "context", "confidence": 0.7})
+    manager = DeerMem(backend_config={"retrieval_relevance_enabled": True, "retrieval_relevance_weight": 1.0, "token_counting": "char", "max_injection_tokens": 100, "guaranteed_categories": []})
+    manager._updater = SimpleNamespace(get_memory_data=lambda agent_name=None, *, user_id=None: {"facts": facts})
+    context = manager.get_context("u", agent_name="a", query="python migration")
+    assert "migration conventions" in context
+    assert _count_tokens(context, use_tiktoken=False) <= 100
+    assert corpora == [(500, 128)]

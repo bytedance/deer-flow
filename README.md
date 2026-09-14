@@ -1546,7 +1546,10 @@ Lexical relevance measures IDF-weighted coverage of distinct query terms, so
 repeated partial matches cannot tie a complete match merely by saturating the
 score. Older custom memory backends can keep their existing `get_context`
 signature: prompt injection and the inherited async wrapper pass `query` only
-when that callable supports the keyword.
+when that callable supports the keyword and the hint is not `None`.
+Search and automatic injection use the same IDF weighting for the same
+user/agent candidate scope. Category-filtered search and injection's separate
+guaranteed/regular token budgets can still yield different final selections.
 
 Memory injection follows the configured operation mode. In `middleware` mode, DeerMem injects the user-global summaries and the selected agent's facts. Custom-agent bootstrap conversations use that agent's fact bucket as well, so setup details do not leak into the default agent's memory. In `tool` mode, the automatic `<memory>` block contains only the global `user` and `history` summaries; agent facts are retrieved explicitly through `memory_search`, avoiding duplicate automatic and tool-returned fact context. Setting `memory.injection_enabled: false` still disables the entire block in either mode.
 
