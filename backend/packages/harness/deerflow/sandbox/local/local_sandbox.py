@@ -523,7 +523,16 @@ class LocalSandbox(Sandbox):
         timed_out = False
         if os.name == "nt":
             if self._is_powershell(shell):
-                args = [shell, "-NoProfile", "-Command", resolved_command]
+                # PowerShell 5.1 defaults console output to the legacy OEM
+                # codepage (e.g. GBK on zh-CN), which the UTF-8 pipe reader
+                # then garbles for CJK output. Force UTF-8 on both directions
+                # of the console before running the user command.
+                utf8_preamble = (
+                    "[Console]::InputEncoding=[System.Text.Encoding]::UTF8;"
+                    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+                    "$OutputEncoding=[System.Text.Encoding]::UTF8;"
+                )
+                args = [shell, "-NoProfile", "-Command", utf8_preamble + resolved_command]
             elif self._is_cmd_shell(shell):
                 args = [shell, "/c", resolved_command]
             else:

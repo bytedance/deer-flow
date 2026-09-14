@@ -204,12 +204,41 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
                 r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
                 "-NoProfile",
                 "-Command",
-                "Write-Output hello",
+                "[Console]::InputEncoding=[System.Text.Encoding]::UTF8;"
+                "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+                "$OutputEncoding=[System.Text.Encoding]::UTF8;Write-Output hello",
             ],
             600,
             {"PATH": r"C:\Windows"},
         )
     ]
+
+
+def test_execute_command_forces_utf8_console_for_powershell_cjk_output(monkeypatch):
+    """PowerShell 5.1 defaults console output to the OEM codepage (GBK on
+    zh-CN); without the UTF-8 preamble, CJK output is garbled by the UTF-8
+    pipe reader even though decoding never raises (errors=replace)."""
+    calls: list[tuple[list[str], float, dict[str, str]]] = []
+
+    def fake_run(args, timeout, env):
+        calls.append((args, timeout, env))
+        return "你好", "", 0, False
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Windows"})
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "pwsh"))
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+
+    output = LocalSandbox("t").execute_command("Write-Output 你好")
+
+    assert output == "你好"
+    cmd = calls[0][0][3]
+    assert cmd.startswith(
+        "[Console]::InputEncoding=[System.Text.Encoding]::UTF8;"
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+        "$OutputEncoding=[System.Text.Encoding]::UTF8;"
+    )
+    assert cmd.endswith("Write-Output 你好")
 
 
 def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows(monkeypatch):
