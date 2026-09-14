@@ -312,7 +312,7 @@ def _scan_with_skillscan(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     with tempfile.TemporaryDirectory(prefix="skill-review-") as tmp:
         root = Path(tmp)
         for entry in files:
-            data = _snapshot_entry_bytes(entry)
+            data = _snapshot_entry_bytes(entry, truncated=bool(snapshot.get("truncated")))
             if data is None:
                 continue
             target = root / str(entry["path"])
@@ -353,12 +353,18 @@ def _scan_with_skillscan(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     return findings
 
 
-def _snapshot_entry_bytes(entry: dict[str, Any]) -> bytes | None:
+def _snapshot_entry_bytes(entry: dict[str, Any], *, truncated: bool) -> bytes | None:
     if entry.get("kind") == "text":
-        return str(entry.get("content") or "").encode("utf-8")
-    encoded = entry.get("content_base64")
-    # Oversized entries carry no bytes; the reader already marked the snapshot truncated.
-    return base64.b64decode(encoded) if isinstance(encoded, str) else None
+        content = entry.get("content")
+        data = content.encode("utf-8") if isinstance(content, str) else None
+    else:
+        encoded = entry.get("content_base64")
+        data = base64.b64decode(encoded) if isinstance(encoded, str) else None
+    # Oversized entries carry no bytes, and truncation already marks the review
+    # incomplete. Any other bytes-less entry would silently skip the scan.
+    if data is not None or truncated:
+        return data
+    raise ValueError(f"Snapshot entry has no content to scan: {entry.get('path')}")
 
 
 def _valid_skill_name(name: str) -> bool:

@@ -247,6 +247,38 @@ def test_skillscan_fails_closed_when_snapshot_paths_collide_on_disk(tmp_path, sh
     assert facts["analyzer_errors"] == [{"code": "skillscan_failed", "path": None, "message": "FileExistsError"}]
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"path": "scripts/tool", "kind": "binary", "size": 8, "sha256": ""},
+        {"path": "scripts/run.sh", "kind": "text", "size": 8, "sha256": ""},
+    ],
+    ids=["binary-without-base64", "text-without-content"],
+)
+def test_skillscan_fails_closed_on_snapshot_entries_without_bytes(tmp_path, entry):
+    _write(tmp_path / "SKILL.md", _valid_skill())
+    snapshot = LocalDirectoryReader(tmp_path).read()
+    snapshot["files"].append(entry)
+
+    facts = analyze_skill_package(snapshot)
+
+    assert facts["completeness"]["not_assessed"] == ["skillscan"]
+    assert facts["analyzer_errors"] == [{"code": "skillscan_failed", "path": None, "message": "ValueError"}]
+
+
+def test_skillscan_skips_oversized_entries_of_a_truncated_snapshot(tmp_path):
+    _write(tmp_path / "SKILL.md", _valid_skill())
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "tool").write_bytes(b"\x7fELF" + b"\x00" * 4096)
+
+    snapshot = LocalDirectoryReader(tmp_path, limits=PackageLimits(max_file_bytes=1024)).read()
+    facts = analyze_skill_package(snapshot)
+
+    assert next(entry for entry in snapshot["files"] if entry["path"] == "scripts/tool")["content"] is None
+    assert facts["completeness"]["not_assessed"] == ["full_package"]
+    assert facts["analyzer_errors"] == []
+
+
 def test_cli_fail_on_error_blocks_executable_binary(tmp_path, capsys):
     _write(tmp_path / "SKILL.md", _valid_skill())
     (tmp_path / "scripts").mkdir()

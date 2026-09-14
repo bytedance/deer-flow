@@ -244,6 +244,10 @@ def scan_skill_dir(skill_dir: Path) -> ScanResult:
                 continue
             evidence = "NUL byte" if b"\x00" in file_bytes[:_TEXT_PROBE_BYTES] else "invalid UTF-8"
             findings.append(_finding("package-undecodable-script", file=rel_path, evidence=evidence))
+            # A decoded executable is string-table noise that reads as secrets
+            # and URLs; its CRITICAL executable finding already blocks it.
+            if is_executable_binary_prefix(file_bytes[:8]):
+                continue
 
         try:
             findings.extend(_scan_text_file(rel_path, text))
