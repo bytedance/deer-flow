@@ -3,6 +3,17 @@
 import pytest
 
 
+def _posix(path: str) -> str:
+    """Normalize a host-native path spelling for comparison.
+
+    The provisioner deliberately preserves the host filesystem style
+    (``join_host_path`` and ``os.path.normpath``), so on a Windows host the
+    hostPath strings it builds use backslashes; the assertions below match
+    on POSIX-style segments.
+    """
+    return path.replace("\\", "/")
+
+
 def _thread_skill_mounts(
     provisioner_module,
     skills_container_path="/mnt/skills",
@@ -39,7 +50,7 @@ class TestBuildVolumes:
         pub = volumes[0]
         assert pub.name == "skills-public"
         assert pub.host_path is not None
-        assert pub.host_path.path.endswith("/skills_view/public")
+        assert _posix(pub.host_path.path).endswith("/skills_view/public")
         assert pub.host_path.type == "Directory"
         assert pub.persistent_volume_claim is None
 
@@ -50,7 +61,7 @@ class TestBuildVolumes:
         custom = volumes[1]
         assert custom.name == "skills-custom"
         assert custom.host_path is not None
-        assert "users/user-7/skills_view/custom" in custom.host_path.path
+        assert "users/user-7/skills_view/custom" in _posix(custom.host_path.path)
         assert custom.host_path.type == "Directory"
 
     def test_hostpath_skills_legacy_volume(self, provisioner_module):
@@ -63,7 +74,7 @@ class TestBuildVolumes:
         legacy = volumes[2]
         assert legacy.name == "skills-legacy"
         assert legacy.host_path is not None
-        assert "users/default/skills_view/legacy" in legacy.host_path.path
+        assert "users/default/skills_view/legacy" in _posix(legacy.host_path.path)
         assert legacy.host_path.type == "Directory"
 
     def test_hostpath_without_legacy_flag_still_has_empty_capable_mount(self, provisioner_module):
@@ -149,7 +160,7 @@ class TestBuildVolumes:
         assert len(volumes) == 5
         extra_vol = volumes[-1]
         assert extra_vol.name == "extra-0"
-        assert extra_vol.host_path.path == "/state/users/alice/integrations/lark-cli/config"
+        assert _posix(extra_vol.host_path.path) == "/state/users/alice/integrations/lark-cli/config"
         assert extra_vol.host_path.type == "DirectoryOrCreate"
 
     def test_extra_mount_uses_userdata_pvc_when_configured(self, provisioner_module):

@@ -302,7 +302,9 @@ def test_main_exits_nonzero_when_review_cli_reports_error(tmp_path: Path, monkey
             "never",
         ]
         assert kwargs["cwd"] == tmp_path
-        assert "backend/packages/harness" in kwargs["env"]["PYTHONPATH"]
+        # PYTHONPATH entries use the host-native separator (backslashes on
+        # Windows), so compare the segment path separator-agnostically.
+        assert "backend/packages/harness" in kwargs["env"]["PYTHONPATH"].replace("\\", "/")
         assert kwargs["capture_output"] is True
         assert kwargs["text"] is True
         assert kwargs["check"] is False
