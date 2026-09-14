@@ -1022,7 +1022,7 @@ def test_remote_backend_forwards_shell_capacity_to_provisioner(monkeypatch):
             return None
 
         def json(self):
-            return {"sandbox_url": "http://sandbox.local"}
+            return {"sandbox_url": "http://sandbox.local", "max_shell_sessions": 13}
 
     def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})

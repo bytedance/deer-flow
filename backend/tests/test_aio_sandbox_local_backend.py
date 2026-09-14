@@ -1176,6 +1176,73 @@ def test_discover_returns_none_when_runtime_check_times_out(monkeypatch):
     assert backend.discover("sandbox-timeout") is None
 
 
+def test_discover_replaces_container_with_insufficient_shell_capacity(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._environment["MAX_SHELL_SESSIONS"] = "13"
+    container_name = "sandbox-existing"
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            container_name: _ContainerInspection(
+                created_at=1.0,
+                host_port=18080,
+                labels={
+                    "deerflow.role": "sandbox",
+                    "deerflow.sandbox_id": "existing",
+                    "deerflow.network_mode": "open",
+                },
+                image="sandbox:latest",
+                networks=frozenset({"bridge"}),
+                max_shell_sessions=10,
+            )
+        },
+    )
+
+    info = backend.discover("existing")
+
+    assert info is not None
+    assert info.requires_replacement is True
+    assert info.sandbox_url == ""
+
+
+def test_list_running_marks_insufficient_shell_capacity_for_fenced_replacement(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._environment["MAX_SHELL_SESSIONS"] = "13"
+    container_name = "sandbox-existing"
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[:2] == ["docker", "ps"]
+        return SimpleNamespace(stdout=f"{container_name}\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            container_name: _ContainerInspection(
+                created_at=1.0,
+                host_port=18080,
+                labels={
+                    "deerflow.role": "sandbox",
+                    "deerflow.sandbox_id": "existing",
+                    "deerflow.network_mode": "open",
+                },
+                image="sandbox:latest",
+                networks=frozenset({"bridge"}),
+                max_shell_sessions=10,
+            )
+        },
+    )
+
+    infos = backend.list_running()
+
+    assert len(infos) == 1
+    assert infos[0].requires_replacement is True
+    assert infos[0].sandbox_url == ""
+
+
 def test_restricted_discovery_uses_proxy_relay_port(monkeypatch):
     backend = _backend_for_inspect_tests()
     backend._network_mode = "allowlist"

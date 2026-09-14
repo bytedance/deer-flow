@@ -848,11 +848,17 @@ the container limit to `max_running + 1`; the extra slot leaves room for the lea
 agent's shell. This applies to both locally created containers and provisioner
 Pods. Lower concurrency keeps the image's own default unchanged.
 
+The separate `bash.exec` API uses its own `AIO_BASH_MAX_SESSIONS` pool rather
+than `MAX_SHELL_SESSIONS`. DeerFlow nevertheless creates and closes an explicit
+transient bash session around every env-bearing command, so request-scoped
+secrets and completed command sessions are not retained.
+
 You may set `sandbox.environment.MAX_SHELL_SESSIONS` explicitly. It must be a
 positive integer at least as large as `subagent_runtime.max_running + 1`, or the
 provider fails at startup with the conflicting values. The setting is applied
-when a sandbox is created, so destroy and recreate an existing warm container or
-Pod after changing it.
+when a sandbox is created. Persisted local containers and provisioner Pods report
+their effective value; DeerFlow replaces one whose capacity is below the current
+requirement instead of reusing it.
 
 ### Building a Custom AIO Sandbox Image
 

@@ -96,6 +96,33 @@ def test_provisioner_list_returns_sandbox_infos_and_filters_invalid_entries(monk
     assert infos[0].sandbox_url == "http://k3s:31001"
 
 
+def test_provisioner_list_marks_insufficient_shell_capacity_for_replacement(monkeypatch):
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002",
+        max_shell_sessions=13,
+    )
+
+    def mock_get(url: str, timeout: int, headers=None):
+        return _StubResponse(
+            payload={
+                "sandboxes": [
+                    {
+                        "sandbox_id": "abc123",
+                        "sandbox_url": "http://k3s:31001",
+                        "max_shell_sessions": 10,
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    infos = backend._provisioner_list()
+
+    assert len(infos) == 1
+    assert infos[0].requires_replacement is True
+
+
 def test_provisioner_list_sends_auth_header_when_api_key_set(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
     captured: list[dict] = []
@@ -560,6 +587,29 @@ def test_provisioner_discover_returns_info_on_success(monkeypatch):
     assert info is not None
     assert info.sandbox_id == "abc123"
     assert info.sandbox_url == "http://k3s:31001"
+
+
+def test_provisioner_discover_marks_insufficient_shell_capacity_for_replacement(monkeypatch):
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002",
+        max_shell_sessions=13,
+    )
+
+    def mock_get(url: str, timeout: int, headers=None):
+        return _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://k3s:31001",
+                "max_shell_sessions": 10,
+            }
+        )
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    info = backend._provisioner_discover("abc123")
+
+    assert info is not None
+    assert info.requires_replacement is True
 
 
 def test_provisioner_discover_returns_none_on_request_exception(monkeypatch):

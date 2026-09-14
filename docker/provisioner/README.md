@@ -167,7 +167,9 @@ The provisioner is configured via environment variables (set in [docker-compose-
 For new sandbox requests, the Gateway also sends the effective AIO shell-session
 capacity derived from `subagent_runtime.max_running`. The provisioner writes it
 to the sandbox Pod as `MAX_SHELL_SESSIONS`; requests from older Gateways omit the
-field and retain the image default.
+field and retain the image default. Discovery responses report the effective
+capacity, and an idempotent create request replaces an existing Pod when its
+persisted capacity is lower than the requested value.
 
 ### Custom sandbox image
 

@@ -54,6 +54,7 @@ _RESERVED_SANDBOX_MOUNT_PATHS = (
 _LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
 _LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
 _LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
+_AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 
 
 def _normalize_skills_container_path(container_path: str) -> str:
@@ -168,6 +169,15 @@ class RemoteSandboxBackend(SandboxBackend):
     def _auth_headers(self) -> dict[str, str]:
         return {"X-API-Key": self._api_key} if self._api_key else {}
 
+    def _requires_shell_capacity_replacement(self, payload: dict[str, object]) -> bool:
+        if self._max_shell_sessions is None:
+            return False
+        reported = payload.get("max_shell_sessions", _AIO_DEFAULT_MAX_SHELL_SESSIONS)
+        try:
+            return int(reported) < self._max_shell_sessions
+        except (TypeError, ValueError):
+            return True
+
     # ── SandboxBackend interface ──────────────────────────────────────────
 
     def create(
@@ -250,7 +260,13 @@ class RemoteSandboxBackend(SandboxBackend):
                 sandbox_id = sandbox.get("sandbox_id")
                 sandbox_url = sandbox.get("sandbox_url")
                 if isinstance(sandbox_id, str) and sandbox_id and isinstance(sandbox_url, str) and sandbox_url:
-                    infos.append(SandboxInfo(sandbox_id=sandbox_id, sandbox_url=sandbox_url))
+                    infos.append(
+                        SandboxInfo(
+                            sandbox_id=sandbox_id,
+                            sandbox_url=sandbox_url,
+                            requires_replacement=self._requires_shell_capacity_replacement(sandbox),
+                        )
+                    )
 
             logger.info("Provisioner list_running: %d sandbox(es) found", len(infos))
             return infos
@@ -301,6 +317,8 @@ class RemoteSandboxBackend(SandboxBackend):
             )
             resp.raise_for_status()
             data = resp.json()
+            if self._requires_shell_capacity_replacement(data):
+                raise RuntimeError(f"Provisioner returned sandbox {sandbox_id} with insufficient shell-session capacity")
             logger.info(f"Provisioner created sandbox {sandbox_id}: sandbox_url={data['sandbox_url']}")
             return SandboxInfo(
                 sandbox_id=sandbox_id,
@@ -359,6 +377,7 @@ class RemoteSandboxBackend(SandboxBackend):
             return SandboxInfo(
                 sandbox_id=sandbox_id,
                 sandbox_url=data["sandbox_url"],
+                requires_replacement=self._requires_shell_capacity_replacement(data),
             )
         except requests.RequestException as exc:
             logger.debug(f"Provisioner discover failed for {sandbox_id}: {exc}")

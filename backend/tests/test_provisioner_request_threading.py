@@ -75,6 +75,29 @@ def test_provisioner_threads_shell_capacity_into_sandbox_pod(
     assert env["MAX_SHELL_SESSIONS"] == "13"
 
 
+def test_provisioner_replaces_existing_sandbox_with_insufficient_shell_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    monkeypatch.setattr(provisioner_module.time, "sleep", lambda _seconds: None)
+
+    response = provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-existing",
+            thread_id="thread-1",
+            max_shell_sessions=13,
+        )
+    )
+
+    assert response.max_shell_sessions == 13
+    assert fake_core_v1.created_pods == ["sandbox-existing"]
+    pod = fake_core_v1.created_pod_specs["sandbox-existing"]
+    env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+    assert env["MAX_SHELL_SESSIONS"] == "13"
+
+
 class _RecordingCoreV1:
     def __init__(
         self,
@@ -86,6 +109,10 @@ class _RecordingCoreV1:
         self.event_loop_thread_id = event_loop_thread_id
         self.thread_ids: list[int] = []
         self.service_sandboxes: set[str] = {"sandbox-existing"}
+        self.pod_shell_capacities: dict[str, int] = {
+            "sandbox-existing": 10,
+            "sandbox-listed": 10,
+        }
         self.ready_after_service_reads = ready_after_service_reads or {}
         self.service_read_failures = service_read_failures or {}
         self.service_read_counts: dict[str, int] = {}
@@ -119,13 +146,29 @@ class _RecordingCoreV1:
 
     def read_namespaced_pod(self, _name: str, _namespace: str):
         self._record_k8s_call()
-        return SimpleNamespace(status=SimpleNamespace(phase="Running"))
+        sandbox_id = _name[len("sandbox-") :]
+        capacity = self.pod_shell_capacities.get(sandbox_id)
+        if capacity is None:
+            raise ApiException(status=404)
+        return SimpleNamespace(
+            status=SimpleNamespace(phase="Running"),
+            spec=SimpleNamespace(
+                containers=[
+                    SimpleNamespace(
+                        name="sandbox",
+                        env=[SimpleNamespace(name="MAX_SHELL_SESSIONS", value=str(capacity))],
+                    )
+                ]
+            ),
+        )
 
     def create_namespaced_pod(self, _namespace: str, pod) -> None:
         self._record_k8s_call()
         sandbox_id = pod.metadata.labels["sandbox-id"]
         self.created_pods.append(sandbox_id)
         self.created_pod_specs[sandbox_id] = pod
+        env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+        self.pod_shell_capacities[sandbox_id] = int(env.get("MAX_SHELL_SESSIONS", "10"))
 
     def create_namespaced_service(self, _namespace: str, service) -> None:
         self._record_k8s_call()
@@ -135,9 +178,11 @@ class _RecordingCoreV1:
 
     def delete_namespaced_service(self, _name: str, _namespace: str) -> None:
         self._record_k8s_call()
+        self.service_sandboxes.discard(_sandbox_id_from_service_name(_name))
 
     def delete_namespaced_pod(self, _name: str, _namespace: str) -> None:
         self._record_k8s_call()
+        self.pod_shell_capacities.pop(_name[len("sandbox-") :], None)
 
     def list_namespaced_service(self, _namespace: str, *, label_selector: str):
         self._record_k8s_call()

@@ -109,6 +109,7 @@ SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 DEFAULT_USER_ID = "default"
 DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+DEFAULT_MAX_SHELL_SESSIONS = 10
 MAX_EXTRA_MOUNTS = 10
 ALLOWED_EXTRA_MOUNT_PATHS = {
     "/mnt/acp-workspace",
@@ -492,6 +493,7 @@ class SandboxResponse(BaseModel):
     sandbox_id: str
     sandbox_url: str
     status: str
+    max_shell_sessions: int | None = None
 
 
 # ── K8s resource helpers ─────────────────────────────────────────────────
@@ -1144,6 +1146,24 @@ def _get_pod_phase(sandbox_id: str) -> str:
         return "NotFound"
 
 
+def _get_pod_shell_capacity(sandbox_id: str) -> int:
+    """Return the effective AIO shell capacity persisted in the sandbox Pod."""
+    pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
+    containers = getattr(getattr(pod, "spec", None), "containers", None) or []
+    sandbox_container = next((container for container in containers if getattr(container, "name", None) == "sandbox"), None)
+    for env_var in getattr(sandbox_container, "env", None) or []:
+        if getattr(env_var, "name", None) != "MAX_SHELL_SESSIONS":
+            continue
+        try:
+            value = int(env_var.value)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Persisted sandbox has an invalid MAX_SHELL_SESSIONS value") from exc
+        if value <= 0:
+            raise RuntimeError("Persisted sandbox has an invalid MAX_SHELL_SESSIONS value")
+        return value
+    return DEFAULT_MAX_SHELL_SESSIONS
+
+
 # ── API endpoints ────────────────────────────────────────────────────────
 
 
@@ -1201,11 +1221,33 @@ def create_sandbox(req: CreateSandboxRequest):
     # ── Fast path: sandbox already exists ────────────────────────────
     existing_url = _sandbox_access_url(sandbox_id, tolerate_read_errors=True)
     if existing_url:
-        return SandboxResponse(
-            sandbox_id=sandbox_id,
-            sandbox_url=existing_url,
-            status=_get_pod_phase(sandbox_id),
-        )
+        try:
+            existing_shell_capacity = _get_pod_shell_capacity(sandbox_id)
+        except (ApiException, RuntimeError) as exc:
+            raise HTTPException(status_code=500, detail=f"Could not verify existing sandbox shell capacity: {exc}") from exc
+        if max_shell_sessions is not None and existing_shell_capacity < max_shell_sessions:
+            logger.info(
+                "Replacing sandbox '%s': persisted MAX_SHELL_SESSIONS=%s is below requested %s",
+                sandbox_id,
+                existing_shell_capacity,
+                max_shell_sessions,
+            )
+            destroy_sandbox(sandbox_id)
+            for _ in range(20):
+                pod_absent = _get_pod_phase(sandbox_id) == "NotFound"
+                service_absent = _sandbox_access_url(sandbox_id, tolerate_read_errors=True) is None
+                if pod_absent and service_absent:
+                    break
+                time.sleep(0.5)
+            else:
+                raise HTTPException(status_code=500, detail="Incompatible sandbox did not terminate in time")
+        else:
+            return SandboxResponse(
+                sandbox_id=sandbox_id,
+                sandbox_url=existing_url,
+                status=_get_pod_phase(sandbox_id),
+                max_shell_sessions=existing_shell_capacity,
+            )
 
     # ── Create Pod ───────────────────────────────────────────────────
     try:
@@ -1252,10 +1294,20 @@ def create_sandbox(req: CreateSandboxRequest):
     if not sandbox_url:
         raise HTTPException(status_code=500, detail="Service access URL was not available in time")
 
+    # A concurrent creator can win the 409 race with a lower-capacity Pod.
+    # Never claim that the requested value was applied without reading it back.
+    try:
+        actual_shell_capacity = _get_pod_shell_capacity(sandbox_id)
+    except (ApiException, RuntimeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not verify created sandbox shell capacity: {exc}") from exc
+    if max_shell_sessions is not None and actual_shell_capacity < max_shell_sessions:
+        raise HTTPException(status_code=409, detail="Existing sandbox shell capacity is below the requested value")
+
     return SandboxResponse(
         sandbox_id=sandbox_id,
         sandbox_url=sandbox_url,
         status=_get_pod_phase(sandbox_id),
+        max_shell_sessions=actual_shell_capacity,
     )
 
 
@@ -1297,6 +1349,7 @@ def get_sandbox(sandbox_id: str):
         sandbox_id=sandbox_id,
         sandbox_url=sandbox_url,
         status=_get_pod_phase(sandbox_id),
+        max_shell_sessions=_get_pod_shell_capacity(sandbox_id),
     )
 
 
@@ -1319,11 +1372,18 @@ def list_sandboxes():
         sandbox_url = _url_from_service(svc, sid)
         if not sandbox_url:
             continue
+        try:
+            shell_capacity = _get_pod_shell_capacity(sid)
+        except ApiException as exc:
+            if exc.status == 404:
+                continue
+            raise HTTPException(status_code=500, detail=f"Failed to inspect sandbox Pod: {exc.reason}") from exc
         sandboxes.append(
             SandboxResponse(
                 sandbox_id=sid,
                 sandbox_url=sandbox_url,
                 status=_get_pod_phase(sid),
+                max_shell_sessions=shell_capacity,
             )
         )
 
