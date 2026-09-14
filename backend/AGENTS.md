@@ -392,7 +392,9 @@ requests per stage before retrieval. Run-context scrubbing must remove both
 server-owned scope metadata and every internal-only runtime key (including
 `github_token`, `disable_clarification`, and `non_interactive`) from untrusted
 `context` and `configurable` sections; see the subsystem guides for the
-remaining boundaries.
+remaining boundaries. Because admitted knowledge scopes are persisted in a
+canonical message form, idempotency checks must also accept legacy raw run
+inputs from records written before scope admission.
 
 ## Code Style
 

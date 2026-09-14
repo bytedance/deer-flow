@@ -1104,7 +1104,8 @@ every snapshot, intersects it with the operator's dataset allowlist, propagates
 the execution-only scope to native and durable subagents, and removes it from
 model inputs and external traces. Client-supplied internal runtime controls
 and credentials are also stripped from run context before execution or
-checkpoint persistence.
+checkpoint persistence. Idempotent retries accept both canonical snapshots and
+legacy raw run inputs, preserving retry compatibility across upgrades.
 The `knowledge_base` block is provider-neutral and only controls whether the
 knowledge capability and selector are enabled. RAGFlow connection, dataset
 allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,

@@ -1968,6 +1968,11 @@ async def start_run(
                 if record.idempotency_reused:
                     stored = record.kwargs or {}
                     stored_input = stored.get("input")
+                    # New runs persist the admitted, canonical message snapshot
+                    # so a scope display cannot be rewritten through the run
+                    # record. Accept the raw request as well for records written
+                    # by older Gateway versions, while comparing canonical
+                    # retries to the same representation as the stored record.
                     if (
                         (stored_input != body.input and stored_input != run_record_input)
                         or record.assistant_id != body.assistant_id
