@@ -172,6 +172,28 @@ class TestTokenBudgetWarning:
         assert sent[2].name == "budget_warning"
         assert "TOKEN BUDGET WARNING" in sent[2].content
 
+    def test_warning_survives_a_failed_model_call(self):
+        """A call that raises is retried by LLMErrorHandlingMiddleware through this wrap; the warning must still be sent."""
+        config = TokenBudgetConfig(max_tokens=100000, warn_threshold=0.8, enabled=True)
+        mw = TokenBudgetMiddleware.from_config(config)
+        runtime = _make_runtime()
+        mw._apply(_make_state_with_usage(total=85000), runtime)
+
+        request = _make_request([AIMessage(content="hi")], runtime)
+        sent = []
+
+        def flaky_handler(req):
+            sent.append(req.messages)
+            if len(sent) == 1:
+                raise RuntimeError("503 Service Unavailable")
+            return MagicMock()
+
+        with pytest.raises(RuntimeError):
+            mw.wrap_model_call(request, flaky_handler)
+        mw.wrap_model_call(request, flaky_handler)
+
+        assert [any(getattr(message, "name", None) == "budget_warning" for message in messages) for messages in sent] == [True, True]
+
     def test_warn_only_once_per_run(self):
         config = TokenBudgetConfig(max_tokens=100000, warn_threshold=0.8, enabled=True)
         mw = TokenBudgetMiddleware.from_config(config)

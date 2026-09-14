@@ -1271,6 +1271,32 @@ async def test_awrap_tool_call_malformed_meta_passthrough():
 
 
 @pytest.mark.anyio
+async def test_hint_survives_a_failed_model_call():
+    """A call that raises is retried by LLMErrorHandlingMiddleware through this wrap; the hint must still be sent."""
+    mw = _make_mw(stagnation_threshold=2, warn_escalation_count=5)
+    rt = _make_runtime()
+    req = _make_tool_request(runtime=rt)
+    error_msg = _make_error_message()
+    mw.wrap_tool_call(req, lambda r: error_msg)
+    mw.wrap_tool_call(req, lambda r: error_msg)
+
+    model_req = _make_model_request([], rt)
+    sent: list = []
+
+    async def flaky_handler(r):
+        sent.append(r.messages)
+        if len(sent) == 1:
+            raise RuntimeError("503 Service Unavailable")
+        return MagicMock()
+
+    with pytest.raises(RuntimeError):
+        await mw.awrap_model_call(model_req, flaky_handler)
+    await mw.awrap_model_call(model_req, flaky_handler)
+
+    assert [any(isinstance(m, HumanMessage) and "PROGRESS HINT" in m.content for m in messages) for messages in sent] == [True, True]
+
+
+@pytest.mark.anyio
 async def test_awrap_model_call_drains_and_injects_hints():
     mw = _make_mw(stagnation_threshold=2, warn_escalation_count=5)
     rt = _make_runtime()

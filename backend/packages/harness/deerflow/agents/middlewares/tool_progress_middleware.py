@@ -455,6 +455,23 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             return self._pending.pop(key, [])
 
+    def _restore_pending(self, runtime: Runtime, hints: list[str]) -> None:
+        """Requeue hints taken for a model call that raised.
+
+        LLMErrorHandlingMiddleware sits outside this middleware and retries a
+        failed call by running this wrap again, so the retry must still find
+        the hints.
+        """
+        if not hints:
+            return
+        key = self._pending_key(runtime)
+        with self._lock:
+            if key[0] not in self._phase_states:
+                return
+            queue = self._pending[key]
+            queue[:0] = hints
+            del queue[_MAX_PENDING_PER_RUN:]
+
     def _clear_stale_pending(self, runtime: Runtime) -> None:
         thread_id, current_run = self._pending_key(runtime)
         with self._lock:
@@ -549,7 +566,9 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
     # wrap_model_call: drain pending hints and inject before model sees messages
 
     def _augment_request(self, request: ModelRequest) -> ModelRequest:
-        hints = self._drain_pending(request.runtime)
+        return self._inject_hints(request, self._drain_pending(request.runtime))
+
+    def _inject_hints(self, request: ModelRequest, hints: list[str]) -> ModelRequest:
         if not hints:
             return request
         deduped = list(dict.fromkeys(hints))
@@ -570,7 +589,12 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        return handler(self._augment_request(request))
+        hints = self._drain_pending(request.runtime)
+        try:
+            return handler(self._inject_hints(request, hints))
+        except Exception:
+            self._restore_pending(request.runtime, hints)
+            raise
 
     @override
     async def awrap_model_call(
@@ -578,7 +602,12 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        return await handler(self._augment_request(request))
+        hints = self._drain_pending(request.runtime)
+        try:
+            return await handler(self._inject_hints(request, hints))
+        except Exception:
+            self._restore_pending(request.runtime, hints)
+            raise
 
     # ------------------------------------------------------------------
     # before_agent: clean up stale pending hints from previous runs
