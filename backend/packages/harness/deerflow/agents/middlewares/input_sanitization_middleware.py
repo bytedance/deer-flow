@@ -112,6 +112,13 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         # pre-declaring acceptance criteria as met).
         "report_contract",
         "acceptance_criteria",
+        # Project context blocks (projects/context.py, Projects Phase 2):
+        # rendered request-scoped into model input carrying user-managed
+        # project identity/instructions and the bounded shelf index. Forging
+        # either in untrusted input mimics the run's pinned project
+        # configuration or fabricates shelf entries/tool-callable IDs.
+        "project",
+        "documents",
         # Common prompt-injection tag patterns
         "system",
         "instruction",

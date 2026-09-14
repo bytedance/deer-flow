@@ -84,6 +84,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
   - [Embedded Python Client](#embedded-python-client)
+  - [Projects](#projects)
   - [Scheduled Tasks](#scheduled-tasks)
   - [Terminal Workbench (TUI)](#terminal-workbench-tui)
   - [Documentation](#documentation)
@@ -1626,7 +1627,10 @@ The HTTP Gateway accepts `values`, `messages-tuple`, `updates`, `debug`, `tasks`
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
 
-## Project membership
+## Projects
+
+Projects group related conversations under a shared name, instructions, and
+document shelf.
 
 A conversation joins a project at creation time (when a project is selected) or
 later through the move menu. Runs never modify membership: submitting a message
@@ -1641,6 +1645,65 @@ Projects require the current database tables and columns. A database stamped
 startup if the project schema is missing. Follow the
 [offline database recovery procedure](docs/database-forward-revision-recovery.md)
 before starting this build against that database.
+
+### Project instructions
+
+Each project stores free-form instructions — background, conventions, and
+constraints that apply to every conversation in the project — editable on the
+project page's Instructions tab with a live byte counter. When a run starts on
+a member thread, the Gateway pins the project's current state once and renders
+the instructions as a bounded, request-scoped `<project>` block for that run
+only: the block never enters the system prompt or persisted history, and every
+new run sees the latest saved instructions. Instructions are capped at
+`projects.instructions_max_bytes` UTF-8 bytes (default 8192, range 256–262144);
+multi-byte characters count as their UTF-8 byte length. Oversized instructions
+are rejected with a `422` at write time and are never silently truncated.
+
+### Document shelf
+
+Each project has a document shelf for files the whole project shares, managed
+from the project page's Documents section:
+
+- **Upload** a file (button or drag-drop, one file per request). Shelf size
+  limits reuse `uploads.max_file_size` (default 50 MiB); re-uploading identical
+  content returns the existing entry instead of creating a duplicate.
+- **List** entries with name, size, modified time, and provenance (uploaded vs.
+  saved from a conversation), and preview or download any entry.
+- **Save to project** from a thread file: the read-only conversation-files
+  browser below the shelf lists member threads' uploads and outputs, each with
+  a Save to project action.
+- **Attach to thread**: copy a shelf file into a thread's uploads through the
+  normal ingestion pipeline, so the conversation can work with it directly.
+
+Runs on member threads also receive a bounded `<documents>` index rendered per
+run from the pinned snapshot (capped by `projects.shelf_index_max_entries` and
+`projects.shelf_index_max_bytes`), and the agent can page the shelf and read
+documents with the `list_project_documents` and `read_project_document` tools.
+
+### Archive read semantics
+
+Archiving a project freezes writes but keeps reads. Threads in an archived
+project still run and still receive the project's instructions and shelf index,
+and the shelf remains fully readable: listing, preview/download, the
+conversation-files browser, and attach-to-thread all keep working. Uploads,
+save-to-project, and moving individual shelf files to trash require an active
+project, and a trashed document cannot be restored into an archived one.
+Deleting an archived project remains allowed and moves its whole shelf to
+trash.
+
+### Trash
+
+Deleting a shelf document moves it to trash instead of erasing it: the entry
+keeps its bytes and a snapshot of its origin project for
+`projects.trash_retention_days` (default 30) before the retention sweep may
+purge it permanently. The `/workspace/trash` page — reachable from the project
+page's Documents section and the sidebar Projects header — lists trashed
+documents with their origin project and remaining retention, with per-entry
+Restore and Delete permanently actions plus an Empty trash action that purges
+everything past the retention window. Restore returns the document to its
+origin project, or to a project you pick when the origin is gone or archived;
+if the target already holds an identical active file, the entries merge.
+Deleting a project moves its entire shelf to trash in the same step.
 
 ## Scheduled Tasks
 
