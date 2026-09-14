@@ -12,7 +12,12 @@ from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
-from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES, ScheduledTaskRow
+from deerflow.persistence.scheduled_tasks.model import (
+    ACTIVE_RUN_STATUSES,
+    TERMINAL_RUN_STATUSES,
+    ScheduledTaskRow,
+    ScheduledTaskRunStatus,
+)
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
 
@@ -224,17 +229,18 @@ class ScheduledTaskRunRepository:
             await session.refresh(row)
             return self._row_to_dict(row)
 
-    async def list_by_task(self, task_id: str, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        stmt = (
-            select(ScheduledTaskRunRow)
-            .where(ScheduledTaskRunRow.task_id == task_id)
-            .order_by(
-                ScheduledTaskRunRow.created_at.desc(),
-                ScheduledTaskRunRow.id.desc(),
-            )
-            .limit(limit)
-            .offset(offset)
-        )
+    async def list_by_task(
+        self,
+        task_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        status: ScheduledTaskRunStatus | None = None,
+    ) -> list[dict[str, Any]]:
+        stmt = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id)
+        if status is not None:
+            stmt = stmt.where(ScheduledTaskRunRow.status == status)
+        stmt = stmt.order_by(ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc()).limit(limit).offset(offset)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
