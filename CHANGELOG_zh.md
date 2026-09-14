@@ -397,6 +397,10 @@
 
 ### 修复
 
+- **模型：** 通过 `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` 传递 Claude Code OAuth
+  token 时，第一个之后的 Claude 模型不再丢失凭据。每个 `ClaudeChatModel` 实例都会重新加载凭据，
+  但文件描述符只能读取一次，导致标题、摘要、subagent 模型以及之后的每次运行都没有凭据，并以
+  `TypeError: Could not resolve authentication method` 失败。现在 token 在每个进程中只读取一次并复用。([#5411])
 - **模型：** 当 `supports_reasoning_effort: true` 的模型同时从 profile 获得
   `reasoning_effort`（顶层、`when_thinking_enabled` 或 `when_thinking_disabled`
   中，或由 `extra_body.thinking` 的关闭路径注入）时，lead agent 不再构建失败。lead
@@ -916,6 +920,15 @@
   要、`SOUL.md`、子智能体描述、技能元数据，以及记忆更新 prompt 中的会话块——并中
   和 `web_capture` 工具结果中的提示词注入标签。([#4028]、[#4119]、[#4137]、[#4157]
   、[#4162]、[#4099]、[#4060]、[#4097]、[#4128])
+- **提示词注入：** 修复两处输入净化绕过。`hide_from_ui` 与人类消息上的
+  `name="summary"` 会让 `is_genuine_user_message` 认定该消息由框架写入，从而完全跳
+  过净化；现在携带这两者的不可信 run 输入与线程状态写入会在服务端被标记并照常净化，
+  调用方再也无法把原样的 `<system-reminder>` 放到 user-input 边界标记之外——而主智能
+  体 prompt 正是把边界外的内容声明为可信的框架数据。标记本身会被保留，因此仅用
+  `hide_from_ui` 来不显示在对话记录中的消息——引用的会话上下文、sidecar 上下文、保存
+  智能体命令、HumanInputCard 回复——行为不变，受信任的内部启动路径也不受影响。净化范围也从"仅最新一轮"扩大到*每一条*真实用户消息：该变换只作用于单次请
+  求，因此仅处理最后一轮只能让载荷在一次模型调用中失效，下一轮起就会被原样回放。
+  ([#5375])
 - **机密：** 从技能环境中清除继承来的密钥环境变量（`MYSQL_PWD`、`REDISCLI_AUTH`
   、缩写形式的 `*_PASS` 与 Postgres 的 `PGPASSFILE`）；请求作用域的密钥对斜杠激
   活与自主调用的技能都会绑定。([#4018]、[#4026]、[#3871]、[#3938])
@@ -2140,6 +2153,8 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5338]: https://github.com/bytedance/deer-flow/pull/5338
 [#5353]: https://github.com/bytedance/deer-flow/pull/5353
 [#5357]: https://github.com/bytedance/deer-flow/pull/5357
+[#5375]: https://github.com/bytedance/deer-flow/pull/5375
 [#5393]: https://github.com/bytedance/deer-flow/pull/5393
 [#5401]: https://github.com/bytedance/deer-flow/pull/5401
 [#5403]: https://github.com/bytedance/deer-flow/pull/5403
+[#5411]: https://github.com/bytedance/deer-flow/pull/5411
