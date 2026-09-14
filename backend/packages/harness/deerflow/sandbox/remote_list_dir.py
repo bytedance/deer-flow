@@ -82,10 +82,7 @@ def parse_remote_list_dir_output(
     entries = [line for line in lines if line]
     if find_status == 1:
         if entries:
-            raise OSError(
-                f"Failed to list_dir {resolved}: find exited with code 1, usually because some files or directories "
-                "could not be read; results would be incomplete, so list a narrower path"
-            )
+            raise OSError(f"Failed to list_dir {resolved}: find exited with code 1, usually because some files or directories could not be read; results would be incomplete, so list a narrower path")
         raise FileNotFoundError(resolved)
     if find_status not in _FIND_OK:
         raise OSError(f"Failed to list_dir {resolved}: command exited with code {find_status}")
