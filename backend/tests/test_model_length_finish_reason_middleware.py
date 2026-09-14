@@ -3,8 +3,10 @@
 import logging
 from unittest.mock import MagicMock
 
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import (
     MODEL_LENGTH_CAPPED_STOP_REASON,
     ModelLengthFinishReasonMiddleware,
@@ -114,7 +116,15 @@ def test_finish_reason_length_drops_potentially_truncated_tool_calls():
     mw = ModelLengthFinishReasonMiddleware()
     runtime = _runtime()
     msg = AIMessage(
-        content="partial answer",
+        content=[
+            {"type": "text", "text": "partial answer"},
+            {
+                "type": "tool_use",
+                "id": "call_write_1",
+                "name": "write_file",
+                "input": {"path": "/mnt/user-data/outputs/report.md"},
+            },
+        ],
         additional_kwargs={
             "tool_calls": [
                 {
@@ -140,11 +150,74 @@ def test_finish_reason_length_drops_potentially_truncated_tool_calls():
     replacement = result["messages"][0]
     assert replacement.tool_calls == []
     assert replacement.invalid_tool_calls == []
-    assert replacement.content == "partial answer"
+    assert replacement.content == [{"type": "text", "text": "partial answer"}]
     assert "tool_calls" not in replacement.additional_kwargs
     assert replacement.additional_kwargs["model_length_termination"]["suppressed_tool_call_count"] == 1
     assert replacement.additional_kwargs["model_length_termination"]["suppressed_tool_call_names"] == ["write_file"]
     assert runtime.context["stop_reason"] == MODEL_LENGTH_CAPPED_STOP_REASON
+
+
+def test_anthropic_content_only_tool_use_is_removed_before_next_request():
+    mw = ModelLengthFinishReasonMiddleware()
+    runtime = _runtime()
+    msg = AIMessage(
+        content=[
+            {
+                "type": "tool_use",
+                "id": "call_write_1",
+                "name": "write_file",
+                "input": {"path": "/mnt/user-data/outputs/report.md"},
+            }
+        ],
+        response_metadata={"stop_reason": "max_tokens"},
+    )
+
+    result = mw._apply({"messages": [msg]}, runtime)
+
+    assert result is not None
+    replacement = result["messages"][0]
+    assert all(block.get("type") != "tool_use" for block in replacement.content)
+    metadata = replacement.additional_kwargs["model_length_termination"]
+    assert metadata["suppressed_tool_call_count"] == 1
+    assert metadata["suppressed_tool_call_names"] == ["write_file"]
+    assert msg.content[0]["type"] == "tool_use"
+
+    messages = [HumanMessage("write a report"), replacement, HumanMessage("continue")]
+    repaired = DanglingToolCallMiddleware()._build_patched_messages(messages) or messages
+    payload = ChatAnthropic(model="claude-sonnet-4-5", api_key="test")._get_request_payload(repaired)
+    assistant_message = next(item for item in payload["messages"] if item["role"] == "assistant")
+    assert all(block.get("type") != "tool_use" for block in assistant_message["content"])
+
+
+def test_anthropic_thinking_is_preserved_when_native_tool_use_is_removed():
+    mw = ModelLengthFinishReasonMiddleware()
+    runtime = _runtime()
+    thinking_block = {
+        "type": "thinking",
+        "thinking": "Need to write the file.",
+        "signature": "signed",
+    }
+    msg = AIMessage(
+        content=[
+            thinking_block,
+            {
+                "type": "tool_use",
+                "id": "call_write_1",
+                "name": "write_file",
+                "input": {"path": "/mnt/user-data/outputs/report.md"},
+            },
+        ],
+        response_metadata={"stop_reason": "max_tokens"},
+    )
+
+    result = mw._apply({"messages": [msg]}, runtime)
+
+    assert result is not None
+    content = result["messages"][0].content
+    assert thinking_block in content
+    assert all(block.get("type") != "tool_use" for block in content)
+    assert content[-1]["type"] == "text"
+    assert "output limit" in content[-1]["text"]
 
 
 def test_finish_reason_length_suppresses_complete_tool_call_as_safety_policy():

@@ -44,6 +44,8 @@ def _tool_call_summary(message: AIMessage) -> tuple[int, list[str]]:
         function_call = additional_kwargs.get("function_call")
         if not calls and isinstance(function_call, dict):
             calls.append(function_call)
+        if not calls:
+            calls = _anthropic_tool_use_blocks(message)
 
     for call in calls:
         if not isinstance(call, dict):
@@ -55,6 +57,20 @@ def _tool_call_summary(message: AIMessage) -> tuple[int, list[str]]:
         if isinstance(name, str) and name and name not in names:
             names.append(name)
     return len(calls), names
+
+
+def _anthropic_tool_use_blocks(message: AIMessage) -> list[dict[str, Any]]:
+    """Extract native Anthropic tool-use blocks retained in message content."""
+    if not isinstance(message.content, list):
+        return []
+    return [block for block in message.content if isinstance(block, dict) and block.get("type") == "tool_use"]
+
+
+def _without_anthropic_tool_use_blocks(content: Any) -> Any:
+    """Remove native tool calls that cannot receive a matching tool result."""
+    if not isinstance(content, list):
+        return content
+    return [block for block in content if not (isinstance(block, dict) and block.get("type") == "tool_use")]
 
 
 class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
@@ -115,8 +131,10 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
             },
         )
 
-        contains_tool_call = has_tool_call_intent(last)
-        contains_visible_content = has_visible_content(last)
+        contains_tool_call = has_tool_call_intent(last) or bool(_anthropic_tool_use_blocks(last))
+        cleaned_content = _without_anthropic_tool_use_blocks(last.content) if contains_tool_call else last.content
+        content_source = last.model_copy(update={"content": cleaned_content})
+        contains_visible_content = has_visible_content(content_source)
         if not contains_tool_call and contains_visible_content:
             return None
 
@@ -135,7 +153,7 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
         }
         replacement = last.model_copy(
             update={
-                "content": (last.content if contains_visible_content else append_visible_text(last, _MODEL_LENGTH_CAPPED_CONTENT)),
+                "content": (cleaned_content if contains_visible_content else append_visible_text(content_source, _MODEL_LENGTH_CAPPED_CONTENT)),
                 "tool_calls": [],
                 "invalid_tool_calls": [],
                 "additional_kwargs": additional_kwargs,
