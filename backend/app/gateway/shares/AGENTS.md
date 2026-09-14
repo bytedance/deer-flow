@@ -2,8 +2,8 @@
 
 Read-only public sharing of conversation snapshots (#4548, design of record).
 Gated on `conversation_sharing.enabled` (off by default) and a SQL database —
-memory-only backends fail management routes with 503 and public reads with 404,
-so links nobody can durably resolve cannot be minted.
+memory-only backends fail management routes with 503 and public reads with 404
+(no links that cannot durably resolve can be minted).
 This phase is backend/API groundwork only: the Share dialog and the HTML
 `/share/{token}` page remain Phase 2 frontend work.
 
@@ -11,15 +11,15 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
 
 - `POST /api/threads/{id}/shares` enforces **strict row ownership**: the thread
   row must exist and name the caller as owner. `GET`/`DELETE` on the same
-  subtree authorize by the **share record's owner** instead (the repository
-  predicates scope by the calling user): thread ids are client-selectable, so
+  subtree authorize by the **share record's owner** instead (repository
+  predicates scope by the calling user): thread ids are client-selectable —
   after the minter's thread is deleted and the id recreated under another
-  owner, the still-public share stays listable and revocable by whoever minted
-  it — and invisible to the new owner of the reused id. The thread-row
-  `owner_check` would have locked the record away from both. The decorator's permissive
-  `owner_check` semantics (missing rows / `user_id=NULL` pass) deliberately do
-  not apply to a publishing action — any authenticated user could otherwise
-  mint public links for pre-auth shared data. Consequence: legacy `user_id=NULL`
+  owner, the share stays listable/revocable by its minter and invisible to
+  the id's new owner; a thread-row `owner_check` would have locked it away
+  from both. The decorator's permissive
+  `owner_check` (missing rows / `user_id=NULL` pass) deliberately does not apply
+  to publishing: any authenticated user could otherwise mint public links for
+  pre-auth shared data. Consequence: legacy `user_id=NULL`
   threads are unshareable by anyone; in auth-disabled deployments threads are
   owned by the synthetic `default` admin, so sharing works there.
 - The snapshot is frozen at creation through `_scan_thread_message_page` with
@@ -68,25 +68,20 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   if that canonical prefix is followed by a terminal underscore run at an
   otherwise valid route boundary, the public-share boundary redacts the
   complete route-like run without trying to reconstruct frontend Markdown
-  delimiter semantics. This intentionally over-redacts a narrow class of
-  invalid 65+ character lookalikes, including normalized percent-, entity-,
-  and Unicode-escaped underscore spellings, because confidentiality takes
-  precedence over lossless transcript fidelity. Backslashes keep their URL
+  delimiter semantics. This over-redacts a narrow class of invalid
+  65+ char lookalikes (including normalized escaped underscore spellings) —
+  confidentiality over lossless fidelity. Backslashes keep their URL
   path-separator meaning rather than being treated as Markdown escapes. An
   accepted route consumes its path/query/fragment but
   preserves a URL authority and structural prose delimiters — no
-  run/thread/user ids, tool arguments, or debug data. The scan pages arrive
-  newest-page-first with each page internally ascending; the builder flips the
-  page order only. Rows are sanitized per page, so the 2000 cap counts
-  **public messages**, not raw rows (tool output never consumes budget). At
-  exactly 2000 public messages the scan continues only to prove that no older
-  public message exists; older tool/hidden rows do not make a complete share
-  fail. A 2 MiB rendered-bytes budget bounds the total public text, counted
-  in UTF-8 encoded bytes (code points would under-count astral-plane text
-  4x) — a
-  "few huge messages" thread fails 413 like a many-messages one, because
-  every anonymous resolution deserializes and re-sanitizes the stored
-  snapshot. An independent 50k raw-scan budget is consumed inside the canonical
+  run/thread/user ids, tool arguments, or debug data. Scan pages arrive newest-first, each internally
+  ascending; the builder flips page order only. Rows are sanitized per page, so the 2000 cap counts
+  **public messages**, not raw rows (tool output never consumes budget). At exactly 2000 public messages the scan only
+  proves no older public message exists; older tool/hidden rows do not fail
+  the share. A 2 MiB rendered-bytes budget bounds the total public text, in UTF-8
+  bytes (code points would under-count astral text 4x): a "few huge
+  messages" thread fails 413 like a many-messages one, since every
+  anonymous read re-sanitizes the stored snapshot. An independent 50k raw-scan budget is consumed inside the canonical
   pager, before its visibility filters, and uses one sentinel row to prove an
   over-limit history without walking the remainder. Any bound rejecting yields **413**
   (`ShareSnapshotTooLarge`) — a share promises the complete visible
@@ -124,28 +119,24 @@ non-GET may mount under `/api/shares/`). Properties: per-request
 expiry/revocation checks with indistinguishable 404s for unknown/revoked/
 expired; all success and known 404 paths carry `Referrer-Policy: no-referrer`
 and `Cache-Control: no-store` and
-`Content-Security-Policy: frame-ancestors 'none'` (the page must not be
-framed — a real conversation embedded in a phishing page lends it
-credibility; frame-ancestors is response-header-only, so it belongs on the
-Gateway) through response or exception headers; per-IP
+`Content-Security-Policy: frame-ancestors 'none'` (must not be
+framed — a real conversation in a phishing page lends credibility;
+response-header-only, hence Gateway-side) through response or exception headers; per-IP
 resolve throttle (in-memory, per-worker — a courtesy control,
 the token is 256-bit unguessable; the bucket key uses the deployment-wide
 trusted-proxy model from `app.gateway.client_ip`, shared with the login
-limiter — the bundled Docker topology sets `AUTH_TRUSTED_PROXIES` to the
-compose-internal ranges (safe: the gateway port is unpublished, so the peer
-is always a compose container); the Helm chart ships no cluster-wide
-default (namespace peers include user-code sandbox pods, which must never
-be trusted proxies) but restricts gateway ingress to the nginx/frontend/
-provisioner pods via a NetworkPolicy, under which `gateway.trustedProxies`
-set to the pod network safely restores per-client keying; until it is set,
-every anonymous visitor shares the proxy's single bucket); and zero
+limiter — Docker sets `AUTH_TRUSTED_PROXIES` to compose-internal ranges
+(safe: the gateway port is unpublished); Helm ships no cluster-wide default
+(namespace peers include sandbox pods that must never be trusted) but
+restricts ingress via NetworkPolicy, under which `gateway.trustedProxies`
+on the pod network safely restores per-client keying; until then all
+visitors share the proxy's bucket); and zero
 thread-state access — explicit share
 records are the only gate in every mode, including auth-disabled. The
 bearer-URL response must never survive in a browser/proxy cache past
-revocation. The
-API response's `Referrer-Policy` is defense in depth only: it does not establish
-the document policy for the Phase 2 frontend `/share/{token}` page, which must
-set its own `no-referrer` policy and avoid third-party resources. A regression
+revocation. The API's
+`Referrer-Policy` is defense in depth only — the Phase 2 `/share/{token}`
+page must set its own `no-referrer` and avoid third-party resources. A regression
 test patches `get_thread_store` to raise, proving the public path never consults
 thread access under any principal.
 
@@ -170,8 +161,7 @@ Token-in-URL leakage also has repository-level log and diagnostic controls
   `$masked_referer` before writing the `combined`-format `masked_access`
   record; User-Agent and Basic-auth remote-user fields have equivalent masks.
   The matchers recognize literal and percent-encoded tokens. The regression
-  test sweeps every config, so a dropped or loosened mask — or a shipped
-  config that leaves the sweep — fails CI. nginx
+  test sweeps every config; a dropped or loosened mask fails CI. nginx
   `error_log` messages embed the full request line, severity does not redact
   them (nginx trac #2193: crit-level failures still append the request
   line), and the output cannot be format-masked — so the dedicated `^~`

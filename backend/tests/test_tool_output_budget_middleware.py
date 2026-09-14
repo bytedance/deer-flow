@@ -1,9 +1,9 @@
 """Comprehensive tests for ToolOutputBudgetMiddleware.
 
 Covers: pass-through, disk externalization, fallback truncation, UTF-8
-boundaries, Command results, model-request history patching, config
-variations, exempt tools, per-tool overrides, edge cases, and both
-sync/async code paths.
+boundaries, Command results, model-request history patching, superseded
+write_file payload elision (issue #5328), config variations, exempt tools,
+per-tool overrides, edge cases, and both sync/async code paths.
 """
 
 from __future__ import annotations
@@ -1593,3 +1593,544 @@ class TestBudgetContentNoSandboxNoProviderCall:
         assert result[1] == "externalized"
         assert called["n"] == 0
         assert (tmp_path / ".tool-results").is_dir()
+
+
+# ===========================================================================
+# Superseded write payload elision (issue #5328, step 2)
+# ===========================================================================
+
+
+def _meta_result(name: str, tool_call_id: str, content: str = "OK", *, status: str | None = "success") -> ToolMessage:
+    """A ToolMessage stamped the way ToolErrorHandlingMiddleware stamps it; ``status=None`` leaves it unstamped."""
+    msg = ToolMessage(content=content, name=name, tool_call_id=tool_call_id, status="error" if status == "error" else "success")
+    if status is not None:
+        msg.additional_kwargs["deerflow_tool_meta"] = {
+            "status": status,
+            "error_type": None,
+            "recoverable_by_model": True,
+            "recommended_next_action": "continue",
+            "source": "content_analysis",
+        }
+    return msg
+
+
+def _write(tool_call_id: str, path: str, content: str, *, append: bool = False, status: str | None = "success") -> tuple[AIMessage, ToolMessage]:
+    args = {"description": "d", "path": path, "content": content, "append": append}
+    ai = AIMessage(content="", tool_calls=[{"name": "write_file", "id": tool_call_id, "args": args}])
+    return ai, _meta_result("write_file", tool_call_id, "Error: boom" if status == "error" else "OK", status=status)
+
+
+def _read(tool_call_id: str, path: str, *, status: str | None = "success") -> tuple[AIMessage, ToolMessage]:
+    ai = AIMessage(content="", tool_calls=[{"name": "read_file", "id": tool_call_id, "args": {"path": path}}])
+    return ai, _meta_result("read_file", tool_call_id, "Error: File not found" if status == "error" else "file text", status=status)
+
+
+def _str_replace(tool_call_id: str, path: str, *, new_str: str = "n", status: str | None = "success") -> tuple[AIMessage, ToolMessage]:
+    ai = AIMessage(content="", tool_calls=[{"name": "str_replace", "id": tool_call_id, "args": {"path": path, "old_str": "o", "new_str": new_str}}])
+    return ai, _meta_result("str_replace", tool_call_id, "Error: boom" if status == "error" else "OK", status=status)
+
+
+class TestSupersededWriteElision:
+    """Model-bound requests drop the content of successful write_file calls superseded by a later read or write of the same path."""
+
+    PATH = "/mnt/user-data/outputs/report.md"
+    OTHER = "/mnt/user-data/outputs/other.md"
+
+    @staticmethod
+    def _middleware(**overrides) -> ToolOutputBudgetMiddleware:
+        return ToolOutputBudgetMiddleware(config=ToolOutputConfig(**overrides))
+
+    @staticmethod
+    def _model_request(messages) -> ModelRequest:
+        return ModelRequest(model=None, messages=list(messages), tools=[], state={"messages": list(messages)})
+
+    def _forward(self, mw: ToolOutputBudgetMiddleware, messages) -> tuple[ModelRequest, ModelRequest]:
+        """Run ``wrap_model_call`` and return ``(original request, request the handler received)``."""
+        captured: dict[str, ModelRequest] = {}
+
+        def handler(req):
+            captured["request"] = req
+            return AIMessage(content="ok")
+
+        request = self._model_request(messages)
+        mw.wrap_model_call(request, handler)
+        return request, captured["request"]
+
+    @staticmethod
+    def _content(forwarded: ModelRequest, index: int) -> str:
+        return forwarded.messages[index].tool_calls[0]["args"]["content"]
+
+    # -- policy ------------------------------------------------------------
+
+    def test_superseded_write_is_elided_and_newest_write_is_kept(self):
+        mw = self._middleware()
+        payload = "x" * 5000
+        human = HumanMessage(content="go")
+        w1, r1 = _write("call-1", self.PATH, payload)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.PATH, "y" * 5000, append=True)
+
+        request, forwarded = self._forward(mw, [human, w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is not request
+        elided = forwarded.messages[1].tool_calls[0]["args"]
+        assert elided["content"].startswith("[content elided: 5000 chars")
+        assert "read_file" in elided["content"]
+        assert payload not in elided["content"]
+        assert elided["path"] == self.PATH
+        assert elided["description"] == "d"
+        assert elided["append"] is False
+        # The newest successful write stays visible (keep_recent_writes=1).
+        assert forwarded.messages[5] is w2
+        # Untouched neighbours pass through by identity; state and stored history keep the original.
+        assert forwarded.messages[0] is human
+        assert forwarded.messages[2] is r1
+        assert forwarded.messages[3] is rd
+        assert request.messages[1] is w1
+        assert request.state["messages"][1] is w1
+        assert w1.tool_calls[0]["args"]["content"] == payload
+
+    def test_write_without_a_later_touch_of_the_path_is_kept(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.OTHER, "y" * 5000)
+        w3, r3 = _write("call-3", "/mnt/user-data/outputs/third.md", "z" * 5000)
+
+        request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    def test_newest_write_is_kept_even_when_superseded(self):
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+
+        request, forwarded = self._forward(self._middleware(), [w1, r1, rd, rr])
+        assert forwarded is request
+
+        _request, forwarded = self._forward(self._middleware(keep_recent_writes=0), [w1, r1, rd, rr])
+        assert self._content(forwarded, 0).startswith("[content elided: 5000 chars")
+
+    def test_keep_recent_counts_successful_writes_across_paths(self):
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        w3, r3 = _write("call-4", "/mnt/user-data/outputs/third.md", "tiny")
+        history = [w1, r1, rd, rr, w2, r2, w3, r3]
+
+        _request, forwarded = self._forward(self._middleware(keep_recent_writes=2), history)
+        assert self._content(forwarded, 0).startswith("[content elided")
+
+        request, forwarded = self._forward(self._middleware(keep_recent_writes=3), history)
+        assert forwarded is request
+
+    def test_later_successful_write_of_the_same_path_supersedes(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.PATH, "y" * 5000)
+        w3, r3 = _write("call-3", self.OTHER, "z" * 5000)
+
+        _request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert self._content(forwarded, 0).startswith("[content elided: 5000 chars")
+        assert forwarded.messages[2] is w2  # not superseded, and older than the newest write
+        assert forwarded.messages[4] is w3
+
+    def test_later_successful_str_replace_supersedes(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        sr, srr = _str_replace("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, sr, srr, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+        assert forwarded.messages[2] is sr
+
+    @pytest.mark.parametrize("status", ["error", "partial_success", None], ids=["error", "partial", "unstamped"])
+    def test_later_write_that_did_not_succeed_does_not_supersede(self, status):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.PATH, "y" * 5000, status=status)
+        w3, r3 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    def test_gate_blocked_later_write_does_not_supersede(self):
+        from deerflow.agents.middlewares.read_before_write_middleware import WRITE_BLOCK_KEY
+
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w2, r2 = _write("call-2", self.PATH, "y" * 5000, status="error")
+        r2.additional_kwargs[WRITE_BLOCK_KEY] = {"path": self.PATH, "tool": "write_file"}
+        w3, r3 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    @pytest.mark.parametrize("status", ["error", None], ids=["error", "unstamped"])
+    def test_read_that_did_not_succeed_does_not_supersede(self, status):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH, status=status)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_partial_read_still_supersedes(self):
+        """A truncated or ranged read still showed the model the on-disk file."""
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH, status="partial_success")
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+
+    @pytest.mark.parametrize("status", ["error", "partial_success", None], ids=["error", "partial", "unstamped"])
+    def test_write_that_did_not_succeed_is_never_a_candidate(self, status):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000, status=status)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_unanswered_write_is_never_a_candidate(self):
+        mw = self._middleware()
+        w1, _unused = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_same_turn_read_does_not_supersede(self):
+        """Parallel calls in one AIMessage run in no fixed order, so the read may predate the write."""
+        mw = self._middleware()
+        payload = "x" * 5000
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "write_file", "id": "call-1", "args": {"description": "d", "path": self.PATH, "content": payload}},
+                {"name": "read_file", "id": "call-2", "args": {"path": self.PATH}},
+            ],
+        )
+        results = [_meta_result("write_file", "call-1"), _meta_result("read_file", "call-2", "file text")]
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [ai, *results, w2, r2])
+
+        assert forwarded is request
+
+    def test_paths_are_normalized_before_matching(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", "/mnt/user-data/outputs/./report.md", "x" * 5000)
+        rd, rr = _read("call-2", "/mnt/user-data/outputs/sub/../report.md")
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+
+    def test_different_path_does_not_supersede(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.OTHER)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_str_replace_payloads_are_never_elided(self):
+        mw = self._middleware()
+        sr, srr = _str_replace("call-1", self.PATH, new_str="n" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [sr, srr, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    # -- thresholds and config ---------------------------------------------
+
+    def test_content_below_min_chars_stays_visible(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "short " * 20)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_min_chars_zero_elides_any_non_empty_content(self):
+        mw = self._middleware(superseded_write_min_chars=0)
+        w1, r1 = _write("call-1", self.PATH, "v1")
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "")
+        rd2, rr2 = _read("call-4", self.OTHER)
+        w3, r3 = _write("call-5", "/mnt/user-data/outputs/third.md", "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2, rd2, rr2, w3, r3])
+
+        assert self._content(forwarded, 0).startswith("[content elided: 2 chars")
+        assert forwarded.messages[4] is w2
+
+    def test_non_string_content_is_left_alone(self):
+        mw = self._middleware(superseded_write_min_chars=0)
+        ai = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "call-1", "args": {"path": self.PATH, "content": ["not", "a", "string"]}}])
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [ai, _meta_result("write_file", "call-1"), rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_disabled_by_config_passes_request_through(self):
+        mw = self._middleware(elide_superseded_writes=False)
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_middleware_disabled_passes_request_through(self):
+        mw = self._middleware(enabled=False)
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert forwarded is request
+
+    def test_config_defaults(self):
+        config = ToolOutputConfig()
+        assert config.elide_superseded_writes is True
+        assert config.superseded_write_min_chars == 2000
+        assert config.keep_recent_writes == 1
+
+    def test_release_policy_declares_config(self):
+        params = self._middleware(keep_recent_writes=3, superseded_write_min_chars=123).release_policy_parameters()
+        assert params["config"]["elide_superseded_writes"] is True
+        assert params["config"]["superseded_write_min_chars"] == 123
+        assert params["config"]["keep_recent_writes"] == 3
+
+    def test_from_app_config_passes_the_keys(self):
+        config = AppConfig(sandbox=SandboxConfig(use="test"), tool_output={"superseded_write_min_chars": 10, "keep_recent_writes": 0})
+        mw = ToolOutputBudgetMiddleware.from_app_config(config)
+        assert mw._config.superseded_write_min_chars == 10
+        assert mw._config.keep_recent_writes == 0
+
+    def test_config_example_documents_the_keys(self):
+        import yaml
+
+        example_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.example.yaml")
+        with open(example_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        tool_output = data["tool_output"]
+        assert tool_output["elide_superseded_writes"] is True
+        assert tool_output["superseded_write_min_chars"] == 2000
+        assert tool_output["keep_recent_writes"] == 1
+        # New user-settable keys are a schema change: the outdated-config warning must fire.
+        assert data["config_version"] >= 42
+
+    # -- surfaces, pairing, determinism, composition ------------------------
+
+    def test_rewrites_every_provider_surface_together(self):
+        mw = self._middleware()
+        payload = "y" * 5000
+        args = {"description": "d", "path": self.PATH, "content": payload}
+        ai = AIMessage(
+            content=[
+                {"type": "text", "text": "writing"},
+                {"type": "tool_use", "id": "call-1", "name": "write_file", "input": dict(args), "partial_json": json.dumps(args)},
+            ],
+            tool_calls=[{"name": "write_file", "id": "call-1", "args": dict(args)}],
+            additional_kwargs={"tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "write_file", "arguments": json.dumps(args)}}]},
+        )
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [ai, _meta_result("write_file", "call-1"), rd, rr, w2, r2])
+
+        rewritten = forwarded.messages[0]
+        structured = rewritten.tool_calls[0]["args"]
+        assert structured["content"].startswith("[content elided: 5000 chars")
+        raw = json.loads(rewritten.additional_kwargs["tool_calls"][0]["function"]["arguments"])
+        assert raw == structured
+        block = rewritten.content[1]
+        assert block["input"] == structured
+        assert "partial_json" not in block
+        assert rewritten.content[0] == {"type": "text", "text": "writing"}
+        assert payload not in json.dumps(rewritten.model_dump(), ensure_ascii=False)
+        # Original objects are untouched.
+        assert ai.content[1]["input"]["content"] == payload
+        assert payload in ai.additional_kwargs["tool_calls"][0]["function"]["arguments"]
+
+    def test_reused_call_ids_pair_per_occurrence(self):
+        """A failed write and a later successful one may share a tool-call id; the failed one must not inherit success."""
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000, status="error")
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-1", self.OTHER, "y" * 5000)
+        w3, r3 = _write("call-3", "/mnt/user-data/outputs/third.md", "tiny")
+
+        request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2, w3, r3])
+
+        assert forwarded is request
+
+    def test_elision_is_deterministic_across_model_calls(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        history = [w1, r1, rd, rr, w2, r2]
+
+        _request, first = self._forward(mw, history)
+        _request, second = self._forward(mw, history)
+
+        assert first.messages[0].tool_calls == second.messages[0].tool_calls
+
+    def test_elision_is_monotonic_as_history_grows(self):
+        """Once a write is elided, appending more history never brings its content back."""
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        history = [w1, r1, rd, rr, w2, r2]
+        _request, before = self._forward(mw, history)
+        assert self._content(before, 0).startswith("[content elided")
+
+        w3, r3 = _write("call-4", "/mnt/user-data/outputs/third.md", "z" * 5000)
+        _request, after = self._forward(mw, [*history, HumanMessage(content="more"), w3, r3])
+
+        assert after.messages[0].tool_calls == before.messages[0].tool_calls
+
+    def test_rewritten_history_drops_openai_response_chain_ids(self):
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        w1.response_metadata = {"id": "resp_write", "output_version": "responses/v1"}
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        w2.response_metadata = {"id": "resp_latest"}
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        assert "id" not in forwarded.messages[0].response_metadata
+        assert "id" not in forwarded.messages[4].response_metadata
+
+    def test_applies_alongside_historical_output_truncation(self):
+        mw = self._middleware(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        oversized = _tm("q" * 1000, name="tool", tool_call_id="tc-q")
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, oversized, w2, r2])
+
+        assert self._content(forwarded, 0).startswith("[content elided")
+        assert "omitted" in forwarded.messages[4].content
+        assert forwarded.messages[5] is w2
+
+    def test_async_model_call_elides(self):
+        import asyncio
+
+        mw = self._middleware()
+        w1, r1 = _write("call-1", self.PATH, "x" * 5000)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+        request = self._model_request([w1, r1, rd, rr, w2, r2])
+        seen: dict[str, ModelRequest] = {}
+
+        async def handler(req):
+            seen["request"] = req
+            return AIMessage(content="ok")
+
+        asyncio.run(mw.awrap_model_call(request, handler))
+
+        assert seen["request"] is not request
+        assert self._content(seen["request"], 0).startswith("[content elided")
+
+    def test_no_write_calls_in_history_is_a_cheap_no_op(self):
+        mw = self._middleware()
+        history = [HumanMessage(content="go"), AIMessage(content="", tool_calls=[{"name": "bash", "id": "call-1", "args": {"command": "ls"}}]), _meta_result("bash", "call-1", "files")]
+
+        request, forwarded = self._forward(mw, history)
+
+        assert forwarded is request
+
+    def test_chat_completions_payload_uses_the_placeholder(self):
+        """End to end against the OpenAI chat-completions message converter."""
+        from langchain_openai.chat_models.base import _convert_message_to_dict
+
+        mw = self._middleware()
+        payload = "x" * 5000
+        w1, r1 = _write("call-1", self.PATH, payload)
+        rd, rr = _read("call-2", self.PATH)
+        w2, r2 = _write("call-3", self.OTHER, "tiny")
+
+        _request, forwarded = self._forward(mw, [w1, r1, rd, rr, w2, r2])
+
+        wire = json.loads(_convert_message_to_dict(forwarded.messages[0])["tool_calls"][0]["function"]["arguments"])
+        assert wire["content"].startswith("[content elided: 5000 chars")
+        assert payload not in json.dumps(wire)
+
+    def test_unanswered_write_with_a_reused_id_is_never_treated_as_successful(self):
+        """Review on #5374: an interrupted write must not inherit the success of a later call that reused its id."""
+        mw = self._middleware()
+        draft = "d" * 5000
+        interrupted, _never_delivered = _write("reused", self.PATH, draft)
+        rd, rr = _read("call-2", self.PATH)
+        later, later_ok = _write("reused", self.OTHER, "n" * 5000)
+        last, last_ok = _write("call-4", "/mnt/user-data/outputs/last.md", "l" * 5000)
+
+        request, forwarded = self._forward(mw, [interrupted, rd, rr, later, later_ok, last, last_ok])
+
+        assert forwarded is request
+        assert interrupted.tool_calls[0]["args"]["content"] == draft
+
+    def test_duplicate_ids_in_one_turn_are_never_rewritten(self):
+        """Review on #5374: a failed sibling sharing the id of a superseded successful write must not be rewritten into it."""
+        mw = self._middleware()
+        turn = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "write_file", "id": "dup", "args": {"path": self.PATH, "content": "a" * 5000}},
+                {"name": "write_file", "id": "dup", "args": {"path": self.OTHER, "content": "b" * 5000}},
+            ],
+        )
+        results = [_meta_result("write_file", "dup"), _meta_result("write_file", "dup", "Error: boom", status="error")]
+        rd, rr = _read("call-2", self.PATH)
+        last, last_ok = _write("call-3", "/mnt/user-data/outputs/last.md", "l" * 5000)
+
+        request, forwarded = self._forward(mw, [turn, *results, rd, rr, last, last_ok])
+
+        assert forwarded is request
+        assert [call["args"]["path"] for call in turn.tool_calls] == [self.PATH, self.OTHER]
+        assert turn.tool_calls[1]["args"]["content"] == "b" * 5000
+
+    def test_unhashable_sibling_id_does_not_crash_the_model_call(self):
+        """Review on #5374 (round 3): a malformed sibling id next to an elision candidate must be skipped, not hashed."""
+        mw = self._middleware(keep_recent_writes=0)
+        payload = "x" * 5000
+        turn, ok = _write("call-1", self.PATH, payload)
+        turn.tool_calls.append({"name": "bash", "id": ["not", "a", "string"], "args": {"command": "ls"}})
+        rd, rr = _read("call-2", self.PATH)
+
+        _request, forwarded = self._forward(mw, [turn, ok, rd, rr])
+
+        assert self._content(forwarded, 0).startswith("[content elided: 5000 chars")
+        assert forwarded.messages[0].tool_calls[1] == turn.tool_calls[1]

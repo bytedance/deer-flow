@@ -725,6 +725,10 @@ export const enUS: Translations = {
 
   // Chats
   chats: {
+    deleteChat: "Delete chat",
+    deleteConfirm: (title) =>
+      `Delete “${title}”? This will delete the conversation and its files. This action cannot be undone.`,
+    deleteFailed: "Failed to delete chat. Please try again.",
     noActiveChats: "No recent chats",
     activeChats: "Recent chats",
     archivedChats: "Archived",

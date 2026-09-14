@@ -621,6 +621,56 @@ class TestStream:
         call_kwargs = agent.stream.call_args.kwargs
         assert "messages" in call_kwargs["stream_mode"]
 
+    def test_stream_emits_streamed_tool_calls_once_with_complete_args(self, client):
+        """Tool-call arguments streamed in fragments are emitted once, complete.
+
+        Each chunk only parses to a partial call (``args={}``, or no name/id), so
+        the tool_calls event comes from the values snapshot, not from the chunks.
+        """
+        call = {"name": "bash", "args": {"command": "ls -la"}, "id": "call-1"}
+        attribution = {"version": 1, "kind": "tool_batch", "shared_attribution": False, "actions": []}
+        assembled = AIMessage(content="", id="ai-1", tool_calls=[call], additional_kwargs={"token_usage_attribution": attribution})
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            id="ai-1",
+                            tool_call_chunks=[{"name": "bash", "args": "", "id": "call-1", "index": 0}],
+                        ),
+                        {},
+                    ),
+                ),
+                (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            id="ai-1",
+                            tool_call_chunks=[{"name": None, "args": '{"command": "ls -la"}', "id": None, "index": 0}],
+                        ),
+                        {},
+                    ),
+                ),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), assembled]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-tools"))
+
+        tool_call_events = _tool_call_events(events)
+        assert len(tool_call_events) == 1
+        assert tool_call_events[0].data["id"] == "ai-1"
+        assert [(tc["name"], tc["args"], tc["id"]) for tc in tool_call_events[0].data["tool_calls"]] == [("bash", {"command": "ls -la"}, "call-1")]
+        assert tool_call_events[0].data["additional_kwargs"] == {"token_usage_attribution": attribution}
+
     def test_stream_emits_additional_kwargs_updates_for_streamed_ai_messages(self, client):
         """stream() emits a follow-up AI event when attribution metadata arrives via values."""
         assembled = AIMessage(
@@ -1135,7 +1185,7 @@ class TestEnsureAgent:
             name = "test"
 
             def filter_resources(self, principal, resource_type, candidates):
-                return [name for name in candidates if name == "safe_tool"]
+                return [name for name in candidates if name in {"safe_tool", "history_read"}]
 
             def authorize(self, request):
                 # Phase 3: model:use is now checked during assembly; allow it so
@@ -1152,6 +1202,9 @@ class TestEnsureAgent:
             provider=AuthorizationProviderConfig(use="unused:Provider"),
         )
         mock_app_config.skills.deferred_discovery = True
+        from deerflow.config.task_continuity_config import TaskContinuityConfig
+
+        mock_app_config.task_continuity = TaskContinuityConfig(enabled=True)
         client._app_config = mock_app_config
 
         safe_tool = StructuredTool.from_function(lambda: "safe", name="safe_tool", description="safe")
@@ -1172,7 +1225,7 @@ class TestEnsureAgent:
         ):
             client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})
 
-        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool"]
+        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool", "history_read"]
         assert mock_build_middlewares.call_args.kwargs["authorization_provider"] is provider
 
     def test_authorization_cache_key_uses_complete_principal(self, client, mock_app_config):

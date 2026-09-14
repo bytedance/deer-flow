@@ -7,9 +7,15 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
+from support.shell import find_script_bash
 
 from deerflow.config.app_config import AppConfig
+
+# Only the upgrade-script test shells out; it needs Git Bash on Windows (the
+# WSL launcher and Store alias stubs cannot run the repo scripts).
+SCRIPT_BASH = find_script_bash()
 
 
 def _make_config_files(tmpdir: Path, user_config: dict, example_config: dict) -> Path:
@@ -126,6 +132,7 @@ def test_newer_user_version_no_warning(caplog):
         assert "outdated" not in caplog.text
 
 
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog):
     """A v26 user config must be flagged outdated and merge the new persisted field.
 
@@ -158,7 +165,7 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
 
     env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
     result = subprocess.run(
-        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        [SCRIPT_BASH, str(repo_root / "scripts" / "config-upgrade.sh")],
         env=env,
         capture_output=True,
         text=True,
@@ -196,9 +203,12 @@ def _merge_missing(target: dict, source: dict) -> None:
 
 
 def test_conversation_sharing_bumped_config_version():
-    """Sharing must advance past the already-released v37 PAT schema."""
+    """Sharing must advance past the merge parent's released v43 schema —
+    a stale `>` bound passed vacuously once main moved past it, leaving
+    v43 installs un-warned and `make config-upgrade` a no-op before the
+    sharing defaults merged (bot round, 09-14 05:00)."""
     example = _load_repo_example()
-    assert example.get("config_version", 0) > 37
+    assert example.get("config_version", 0) >= 44
     assert example["conversation_sharing"]["enabled"] is False
 
 

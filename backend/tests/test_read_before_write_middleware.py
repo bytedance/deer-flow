@@ -792,3 +792,53 @@ class TestBlockedPayloadElision:
         assert len(calls) == 1
         assert json.loads(calls[0]["arguments"])["content"].startswith("[payload elided: 5000 chars")
         assert payload not in json.dumps(sent, ensure_ascii=False)
+
+    def test_unanswered_write_with_a_reused_id_is_not_labeled_blocked(self):
+        """Review on #5374: an interrupted write must not inherit the blocked result of a later call that reused its id."""
+        mw = self._middleware()
+        draft = "d" * 5000
+        interrupted = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "reused", "args": {"description": "d", "path": "/mnt/user-data/outputs/other.md", "content": draft}}])
+        blocked_ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "b" * 5000}, tool_call_id="reused")
+        request = self._model_request([HumanMessage(content="go"), interrupted, blocked_ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        captured = self._captured(handler).messages
+        assert captured[1] is interrupted
+        assert captured[2].tool_calls[0]["args"]["content"].startswith("[payload elided: 5000 chars")
+
+    def test_duplicate_ids_in_one_turn_are_never_rewritten(self):
+        """Review on #5374: a successful sibling sharing the id of a blocked write must not be rewritten into it."""
+        from deerflow.agents.middlewares.read_before_write_middleware import WRITE_BLOCK_KEY
+
+        mw = self._middleware()
+        turn = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "write_file", "id": "dup", "args": {"description": "d", "path": self.PATH, "content": "a" * 5000}},
+                {"name": "write_file", "id": "dup", "args": {"description": "d", "path": "/mnt/user-data/outputs/other.md", "content": "b" * 5000}},
+            ],
+        )
+        blocked = ToolMessage(content="Error: blocked", tool_call_id="dup", name="write_file", status="error", additional_kwargs={WRITE_BLOCK_KEY: {"path": self.PATH, "tool": "write_file"}})
+        ok = ToolMessage(content="OK", tool_call_id="dup", name="write_file")
+        request = self._model_request([HumanMessage(content="go"), turn, blocked, ok])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        assert self._captured(handler) is request
+
+    def test_unhashable_sibling_id_does_not_crash_the_model_call(self):
+        """Review on #5374 (round 3): a malformed sibling id next to a blocked call must be skipped, not hashed."""
+        mw = self._middleware()
+        ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "x" * 5000})
+        ai.tool_calls.append({"name": "bash", "id": ["not", "a", "string"], "args": {"command": "ls"}})
+        request = self._model_request([HumanMessage(content="go"), ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        rewritten = self._captured(handler).messages[1]
+        assert rewritten.tool_calls[0]["args"]["content"].startswith("[payload elided: 5000 chars")
+        assert rewritten.tool_calls[1] == ai.tool_calls[1]
