@@ -80,6 +80,25 @@ class ConversationContext:
     # must not rewrite the queued fence. A missing token and emergency
     # (bypass) snapshots are never refreshed.
     clear_generation: tuple[int, int] | None = None
+    # Monotonic call-arrival order: the value ``_next_sequence()`` returned to
+    # ``add``/``add_nowait`` *before that call acquired the queue lock* (like
+    # ``captured_clear_generation``'s pre-lock peek). Stamping it here instead,
+    # inside ``_enqueue_locked``, would order by lock-acquisition time instead
+    # -- a caller already waiting on the lock when a clear and a newer
+    # same-key add race ahead of it must keep the sequence it had when it
+    # started, not gain a fresh, larger one for having waited.
+    #
+    # ``MemoryUpdater`` receives this value as the ``sequence=`` argument on
+    # every watermark-advancing call this context feeds (a persisted write, a
+    # generation-fenced drop, or a cancelled/refused snapshot's consume) and
+    # refuses to move its internal watermark backward: a call whose sequence
+    # is lower than the watermark's already-stored sequence is a delayed
+    # completion of older work and must not undo a more-advanced watermark
+    # another, later call already set. ``0`` is only the field default for
+    # contexts a test builds directly (bypassing ``add``/``add_nowait``); such
+    # contexts still order relative to each other and to real queue-assigned
+    # sequences (which start at ``1``), never regressing the latter.
+    sequence: int = 0
 
 
 class MemoryUpdateQueue:
@@ -104,6 +123,28 @@ class MemoryUpdateQueue:
         # (and would be lost on exit). See ``flush_sync`` step (1).
         self._processing_thread: threading.Thread | None = None
         self._reprocess_pending = False
+        # Monotonic counter for ``ConversationContext.sequence``, stamped by
+        # ``_next_sequence()`` at the *start* of ``add``/``add_nowait`` -- before
+        # the pre-lock clear-generation peek, like ``captured_clear_generation``.
+        # A dedicated lock (not ``self._lock``) because this must be callable
+        # before that lock is taken: stamping inside ``_enqueue_locked`` instead
+        # would order by lock-acquisition time, not call-arrival time, and a
+        # caller delayed behind the lock (e.g. blocked while a clear and a
+        # newer same-key add race ahead of it) would then get a *larger*
+        # sequence than the newer work it lost the race to -- letting its
+        # stale, shorter snapshot look "newest" and overwrite a watermark that
+        # already advanced past it.
+        self._sequence_lock = threading.Lock()
+        self._sequence_counter = 0
+
+    def _next_sequence(self) -> int:
+        """Return a fresh, strictly increasing call-arrival sequence number.
+
+        Must be read before ``self._lock`` is acquired (see ``__init__``).
+        """
+        with self._sequence_lock:
+            self._sequence_counter += 1
+            return self._sequence_counter
 
     def add(
         self,
@@ -129,11 +170,15 @@ class MemoryUpdateQueue:
                 reinforcement / preference / ...), used as extraction hints. Any
                 signal is admitted under backpressure.
         """
-        # Peek before the queue lock: every conversation turn enqueues here, and
-        # the file-backed peek is uncached manifest I/O. Holding ``_lock`` across
-        # that read would serialize all memory admits behind disk. A token that
-        # misses a clear landing afterwards is still dropped by the pre-LLM and
-        # commit-time checks.
+        # Sequence + peek before the queue lock: every conversation turn
+        # enqueues here, and the file-backed peek is uncached manifest I/O.
+        # Holding ``_lock`` across that read would serialize all memory admits
+        # behind disk. A token that misses a clear landing afterwards is still
+        # dropped by the pre-LLM and commit-time checks. The sequence must be
+        # stamped here too (not inside ``_enqueue_locked``) so a caller that
+        # blocks on the lock is not mistaken for arriving later than callers
+        # that acquire it first -- see ``_next_sequence``.
+        call_sequence = self._next_sequence()
         captured_clear_generation = self._capture_clear_generation(agent_name, user_id)
         with self._lock:
             self._enqueue_locked(
@@ -145,6 +190,7 @@ class MemoryUpdateQueue:
                 signals=frozenset(signals) if signals else frozenset(),
                 bypass_watermark=False,
                 captured_clear_generation=captured_clear_generation,
+                call_sequence=call_sequence,
             )
             self._reset_timer()
 
@@ -160,6 +206,7 @@ class MemoryUpdateQueue:
         signals: frozenset[str] | None = None,
     ) -> None:
         """Add a conversation and start processing immediately in the background."""
+        call_sequence = self._next_sequence()
         captured_clear_generation = self._capture_clear_generation(agent_name, user_id)
         with self._lock:
             self._enqueue_locked(
@@ -171,6 +218,7 @@ class MemoryUpdateQueue:
                 signals=frozenset(signals) if signals else frozenset(),
                 bypass_watermark=True,
                 captured_clear_generation=captured_clear_generation,
+                call_sequence=call_sequence,
             )
             self._schedule_timer(0)
 
@@ -187,7 +235,20 @@ class MemoryUpdateQueue:
         signals: frozenset[str],
         bypass_watermark: bool = False,
         captured_clear_generation: tuple[int, int],
+        call_sequence: int,
     ) -> ConversationContext:
+        """Merge/enqueue one call's snapshot. Must run under ``self._lock``.
+
+        ``call_sequence`` must come from ``_next_sequence()``, read by the
+        caller *before* this lock was acquired (see ``add``/``add_nowait``).
+        Assigning it here instead would order by lock-acquisition time, not
+        call-arrival time: a caller already blocked on this lock when a clear
+        and a newer same-key add race ahead of it must keep the (lower)
+        sequence it had when it started, not gain a fresh (higher) one for
+        having waited -- otherwise its stale, possibly shorter snapshot could
+        look "newest" and overwrite a watermark two other calls already
+        advanced past it.
+        """
         key = queue_key(thread_id, user_id, agent_name)
         # Emergency (bypass) and normal updates coexist: the match key includes
         # ``bypass_watermark`` so a summarization flush (bypass=True) never
@@ -233,6 +294,7 @@ class MemoryUpdateQueue:
                 signals=signals,
                 bypass_watermark=bypass_watermark,
                 clear_generation=captured_clear_generation,
+                sequence=call_sequence,
             )
             self._consume_pre_clear_feed(incoming)
             # Keep the queued snapshot and fence, but do not drop signals from
@@ -254,6 +316,7 @@ class MemoryUpdateQueue:
             signals=merged_signals,
             bypass_watermark=bypass_watermark,
             clear_generation=enqueued_clear_generation,
+            sequence=call_sequence,
         )
         if existing is not None:
             self._items = [c for c in self._items if not (queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark)]
@@ -288,6 +351,13 @@ class MemoryUpdateQueue:
         Returns False when the updater cannot advance the watermark. A merge
         that would refresh the queued token must keep the earlier fence on
         failure; a refused older add must leave the queued fence unchanged.
+
+        Forwards ``existing.sequence`` so the updater can refuse to move the
+        watermark backward: an in-flight extraction pulled off the queue
+        earlier (lower sequence) may still be running when a later-queued
+        snapshot (higher sequence) is dropped/consumed here. That in-flight
+        extraction's own eventual fenced-drop must not un-advance the
+        watermark this call just set.
         """
         mark = getattr(self._updater, "mark_feed_consumed", None)
         if not callable(mark):
@@ -299,6 +369,7 @@ class MemoryUpdateQueue:
                 user_id=existing.user_id,
                 agent_name=existing.agent_name,
                 bypass_watermark=existing.bypass_watermark,
+                sequence=existing.sequence,
             )
         except Exception:
             logger.warning("Failed to consume the pre-clear snapshot after a newer clear; leaving the queued fence unchanged", exc_info=True)
@@ -370,6 +441,7 @@ class MemoryUpdateQueue:
                         trace_id=context.trace_id,
                         bypass_watermark=context.bypass_watermark,
                         expected_clear_generation=context.clear_generation,
+                        sequence=context.sequence,
                     )
                     if success:
                         succeeded += 1

@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -817,7 +818,30 @@ class MemoryUpdater:
         # cache is a bounded LRU (config.watermark_max_keys) so a long-lived
         # gateway handling many threads cannot grow it without limit; a dropped
         # key re-extracts one batch on that thread's next turn.
-        self._watermarks: OrderedDict[tuple[str | None, str | None, str | None], tuple[str, ...] | None] = OrderedDict()
+        #
+        # Each entry pairs the identity with the ``sequence`` (queue arrival
+        # order, see ``ConversationContext.sequence``) that produced it, so a
+        # later call cannot move the watermark backward: a caller passing a
+        # lower ``sequence`` than what is already stored is a stale, delayed
+        # completion (e.g. an in-flight extraction that was pulled off the
+        # queue before a newer conversation snapshot was queued, cancelled by
+        # a clear, and consumed) and must not undo the more-advanced watermark
+        # a later call already set. ``sequence=None`` (direct callers that
+        # bypass the queue, e.g. tests) never triggers the guard.
+        #
+        # ``_watermark_lock`` guards every read-modify-write against this dict
+        # (get + move_to_end + set + evict). The queue's cancel/consume path
+        # (request thread, e.g. inside ``clear_memory``) and an in-flight
+        # extraction's commit (a different worker thread) can call
+        # ``_mark_feed_consumed`` concurrently for the same key; without a
+        # lock, both could read the same "not yet advanced" snapshot before
+        # either writes, and the delayed (lower-sequence) writer would still
+        # overwrite the one that should win, even though the sequence *values*
+        # are correct. This is a separate, dedicated lock (not the queue's
+        # ``MemoryUpdateQueue._lock``) so this class has no lock-ordering
+        # dependency on the queue and cannot deadlock against it.
+        self._watermark_lock = threading.Lock()
+        self._watermarks: OrderedDict[tuple[str | None, str | None, str | None], tuple[int | None, tuple[str, ...] | None]] = OrderedDict()
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
@@ -851,16 +875,24 @@ class MemoryUpdater:
         user_id: str | None = None,
         agent_name: str | None = None,
         bypass_watermark: bool = False,
+        sequence: int | None = None,
     ) -> None:
         """Advance the conversation watermark without claiming a persisted write.
 
         Used when a newer clear makes a pending pre-clear snapshot obsolete so
         the next extract does not restore those turns against the new generation.
+
+        ``sequence`` is the queue arrival order of ``messages`` (see
+        ``ConversationContext.sequence``); a call with a lower ``sequence``
+        than what is already recorded for this key is refused so a delayed
+        caller cannot move the watermark backward past a later snapshot
+        another caller already consumed or persisted.
         """
         self._mark_feed_consumed(
             (thread_id, user_id, agent_name),
             messages,
             bypass_watermark=bypass_watermark,
+            sequence=sequence,
         )
 
     def reload_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
@@ -1547,6 +1579,7 @@ class MemoryUpdater:
         *,
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
+        sequence: int | None = None,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -1566,6 +1599,7 @@ class MemoryUpdater:
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
             expected_clear_generation=expected_clear_generation,
+            sequence=sequence,
         )
 
     def _do_update_memory_sync(
@@ -1579,6 +1613,7 @@ class MemoryUpdater:
         *,
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
+        sequence: int | None = None,
     ) -> bool:
         """Pure-sync memory update; bind ``trace_id`` into the request-trace
         ContextVar for the worker thread, then delegate to the impl.
@@ -1603,6 +1638,7 @@ class MemoryUpdater:
                     trace_id=trace_id,
                     bypass_watermark=bypass_watermark,
                     expected_clear_generation=expected_clear_generation,
+                    sequence=sequence,
                 )
         return self._do_update_memory_sync_impl(
             messages=messages,
@@ -1613,18 +1649,26 @@ class MemoryUpdater:
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
             expected_clear_generation=expected_clear_generation,
+            sequence=sequence,
         )
 
     def _watermark_get(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
-        """Return the watermark for ``key``, marking it most-recently-used.
+        """Return the watermark identity for ``key``, marking it most-recently-used.
 
         Uses key presence (not value truthiness) so a stored ``None`` identity
-        still counts as a live entry for LRU ordering.
+        still counts as a live entry for LRU ordering. The paired sequence
+        (see ``_watermark_set``) is ordering-only bookkeeping and is not
+        returned here; feed slicing only ever needs the identity.
+
+        Guarded by ``_watermark_lock`` (see ``__init__``): ``move_to_end``
+        mutates the dict's ordering, so it must not interleave with a
+        concurrent ``_watermark_set`` on another thread.
         """
-        if key not in self._watermarks:
-            return None
-        self._watermarks.move_to_end(key)
-        return self._watermarks[key]
+        with self._watermark_lock:
+            if key not in self._watermarks:
+                return None
+            self._watermarks.move_to_end(key)
+            return self._watermarks[key][1]
 
     def _mark_feed_consumed(
         self,
@@ -1632,21 +1676,27 @@ class MemoryUpdater:
         messages: list[Any],
         *,
         bypass_watermark: bool,
+        sequence: int | None = None,
     ) -> None:
         """Advance the conversation watermark without claiming a persisted write.
 
         Used when a newer clear drops extracted facts. The feed is consumed so
         the next turn does not re-extract the same pre-clear messages against
         the post-clear generation.
+
+        ``sequence`` is forwarded to ``_watermark_set`` so a stale, delayed
+        caller cannot undo a further-advanced watermark (see that method).
         """
         if bypass_watermark or not messages:
             return
-        self._watermark_set(watermark_key, _message_identity(messages[-1]))
+        self._watermark_set(watermark_key, _message_identity(messages[-1]), sequence=sequence)
 
     def _watermark_set(
         self,
         key: tuple[str | None, str | None, str | None],
         value: tuple[str, ...] | None,
+        *,
+        sequence: int | None = None,
     ) -> None:
         """Store ``value`` for ``key``, evicting the least-recently-used entry
         when the bounded LRU cache exceeds ``config.watermark_max_keys``.
@@ -1654,12 +1704,44 @@ class MemoryUpdater:
         A dropped key is safe: the next turn for that thread finds no watermark
         and re-extracts one batch (the documented restart behavior). ``0`` =
         unbounded (no eviction).
+
+        ``sequence`` orders calls that raced across threads (queue arrival
+        order; see ``ConversationContext.sequence``). If the stored entry
+        already carries a ``sequence`` and the incoming one is lower, this
+        call is a stale, delayed completion -- e.g. an in-flight extraction
+        pulled off the debounce queue before a later conversation snapshot was
+        queued, then dropped/cancelled by a clear (which already advanced the
+        watermark past that later snapshot). Applying the stale write would
+        move the watermark backward and let the next turn re-feed pre-clear
+        messages against the now-current generation, restoring cleared facts.
+        A missing sequence on either side (``None``, e.g. a direct caller that
+        bypasses the queue) never triggers this guard -- it behaves exactly
+        like before this ordering was introduced.
+
+        The read (check) and write are one critical section under
+        ``_watermark_lock``: two threads can call this concurrently for the
+        same key (a clear's cancel path on the request thread racing an
+        in-flight extraction's commit on a worker thread). Without a lock,
+        both could read the same stale "no conflict yet" snapshot before
+        either writes, and the lower-sequence writer would still land last and
+        overwrite the higher-sequence one -- a stale value would win even
+        though the sequence comparison above is individually correct.
         """
-        self._watermarks[key] = value
-        self._watermarks.move_to_end(key)
-        cap = self._config.watermark_max_keys
-        if cap > 0 and len(self._watermarks) > cap:
-            self._watermarks.popitem(last=False)
+        with self._watermark_lock:
+            existing = self._watermarks.get(key)
+            if existing is not None and existing[0] is not None and sequence is not None and sequence < existing[0]:
+                logger.info(
+                    "Skipping watermark regression for %s: incoming sequence %s is older than stored sequence %s",
+                    key,
+                    sequence,
+                    existing[0],
+                )
+                return
+            self._watermarks[key] = (sequence, value)
+            self._watermarks.move_to_end(key)
+            cap = self._config.watermark_max_keys
+            if cap > 0 and len(self._watermarks) > cap:
+                self._watermarks.popitem(last=False)
 
     def _feed_after_watermark(
         self,
@@ -1694,6 +1776,7 @@ class MemoryUpdater:
         *,
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
+        sequence: int | None = None,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -1740,7 +1823,7 @@ class MemoryUpdater:
                         expected_clear_generation,
                         current_generation,
                     )
-                    self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
+                    self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark, sequence=sequence)
                     return False
             # Re-detect signals on the post-watermark feed so extraction hints
             # reference only turns the LLM will actually see. The admission-time
@@ -1816,10 +1899,10 @@ class MemoryUpdater:
                 expected_clear_generation=expected_clear_generation,
             )
             if outcome is _CommitOutcome.PERSISTED:
-                self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
+                self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark, sequence=sequence)
                 success = True
             elif outcome is _CommitOutcome.CONSUMED:
-                self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
+                self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark, sequence=sequence)
                 success = False
             else:
                 success = False
@@ -1889,6 +1972,7 @@ class MemoryUpdater:
         *,
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
+        sequence: int | None = None,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -1911,6 +1995,13 @@ class MemoryUpdater:
             expected_clear_generation: Fence token captured when the
                 conversation became pending work. A newer clear drops the
                 write. ``None`` falls back to the pre-LLM snapshot.
+            sequence: Queue arrival order of ``messages`` (see
+                ``ConversationContext.sequence``). Forwarded to the watermark
+                so a delayed completion (e.g. an in-flight extraction pulled
+                off the queue before a later snapshot was queued and
+                cancelled/consumed) cannot move the watermark backward.
+                ``None`` (direct callers that bypass the queue) never triggers
+                that guard.
 
         Returns:
             True if the update persisted. False on any failure (no content,
@@ -1935,6 +2026,7 @@ class MemoryUpdater:
                     trace_id=trace_id,
                     bypass_watermark=bypass_watermark,
                     expected_clear_generation=expected_clear_generation,
+                    sequence=sequence,
                 )
                 return future.result()
             except Exception:
@@ -1950,6 +2042,7 @@ class MemoryUpdater:
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
             expected_clear_generation=expected_clear_generation,
+            sequence=sequence,
         )
 
     def _apply_updates(

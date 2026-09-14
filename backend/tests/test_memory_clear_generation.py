@@ -482,6 +482,87 @@ def test_same_manager_clear_does_not_restore_cancelled_pending_on_next_turn(tmp_
     assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
 
 
+def test_late_in_flight_completion_does_not_regress_watermark_past_a_cancelled_newer_turn(tmp_path: Path) -> None:
+    """#5125 review (2026-09-12): a delayed, generation-fenced drop must not
+    move the watermark backward past a later turn a concurrent clear already
+    cancelled and consumed.
+
+    Sequence reproduced (matches the reviewer's report):
+      1. Turn A ("I like Python") is pulled off the debounce queue and its LLM
+         call is in flight (slow provider).
+      2. Turn A+B ("...actually I prefer Rust") is queued for the same
+         conversation while A is still running.
+      3. A clear lands: it cancels the still-queued A+B snapshot (which
+         advances the watermark *past* B, per the existing fence) and bumps
+         the clear generation.
+      4. A's in-flight LLM call returns. The commit is correctly fenced
+         (dropped) because a newer clear landed -- but marking that drop
+         "consumed" must not overwrite the watermark that step 3 already
+         advanced further, or the next turn re-feeds B's pre-clear message
+         and restores it now that no further clear is pending.
+    """
+    turn_a = _queue_conversation()
+    turn_a_plus_b = _queue_conversation(
+        human="Actually, on second thought I prefer Rust.",
+        ai="Noted, I will remember Rust instead.",
+    )
+    full_conversation = [*turn_a, *turn_a_plus_b]
+
+    invoke_started = threading.Event()
+    release_invoke = threading.Event()
+    invoke_calls: list[list[Any]] = []
+
+    def slow_invoke(prompt, config=None):
+        invoke_calls.append(prompt)
+        if len(invoke_calls) == 1:
+            # Simulate a slow provider: block until the test has finished
+            # queuing + cancelling the newer turn on another "worker".
+            invoke_started.set()
+            assert release_invoke.wait(timeout=5), "test did not release the in-flight LLM call in time"
+            return MagicMock(content=_extraction_json("User likes Python"))
+        return MagicMock(content=_extraction_json("User prefers Rust"))
+
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(side_effect=slow_invoke)
+    manager = _manager(tmp_path, host_llm)
+
+    # Step 1: turn A is pulled off the queue and blocks mid-LLM-call.
+    manager.add(thread_id="thread-1", messages=turn_a, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    worker = threading.Thread(target=lambda: manager._queue.flush(skip_inter_item_delay=True))
+    worker.start()
+    assert invoke_started.wait(timeout=5), "in-flight LLM call for turn A never started"
+
+    # Step 2: turn A+B is queued for the same conversation while A is in flight.
+    manager.add(thread_id="thread-1", messages=full_conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    assert manager._queue.pending_count == 1
+
+    # Step 3: a clear cancels the still-queued A+B snapshot (advancing the
+    # watermark past B) and bumps the clear generation.
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    assert manager._queue.pending_count == 0
+
+    # Step 4: release A's in-flight call. Its commit must be fenced, and its
+    # own (older) watermark advance must not undo step 3's.
+    release_invoke.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+    # The middleware always re-sends the full running conversation. If the
+    # watermark had regressed to turn A's tail, this would re-feed B's
+    # pre-clear "prefer Rust" message; since no further clear is pending, that
+    # extraction would succeed and restore the cleared content.
+    manager.add(thread_id="thread-1", messages=full_conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    assert len(invoke_calls) == 1, "turn B's pre-clear message must not be re-extracted after the clear"
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
 def test_queued_coalesce_after_clear_extracts_post_clear_turns(tmp_path: Path) -> None:
     host_llm = MagicMock()
     host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User prefers typed Python")))
@@ -538,6 +619,11 @@ def test_out_of_order_enqueue_does_not_restore_facts_after_clear(tmp_path: Path)
     _stop_debounce(manager_a)
 
     with manager_a._queue._lock:
+        # call_sequence=0: this simulates a caller whose add() call started
+        # (and peeked the clear generation) before manager_a's real add()
+        # above, but is only now winning the lock -- i.e. a lower sequence
+        # than that already-queued call's (1), consistent with how a real
+        # add() would have captured it pre-lock (see _next_sequence).
         manager_a._queue._enqueue_locked(
             thread_id="thread-1",
             messages=pre_clear,
@@ -547,6 +633,7 @@ def test_out_of_order_enqueue_does_not_restore_facts_after_clear(tmp_path: Path)
             signals=frozenset(),
             bypass_watermark=False,
             captured_clear_generation=(0, 0),
+            call_sequence=0,
         )
 
     assert manager_a._queue.pending_count == 1
@@ -559,6 +646,117 @@ def test_out_of_order_enqueue_does_not_restore_facts_after_clear(tmp_path: Path)
     facts = {fact["content"] for fact in manager_b.get_memory(agent_name="researcher", user_id="alice")["facts"]}
     assert "User likes Python" not in facts
     assert "User prefers typed Python" in facts
+
+
+def test_delayed_lock_acquisition_does_not_regress_watermark_across_a_clear(tmp_path: Path) -> None:
+    """#5125 review (2026-09-12 follow-up): the sequence used to order
+    watermark writes must reflect when a call *arrived* (peeked, pre-lock),
+    not when it *won the queue lock* -- those can differ, and a caller
+    delayed behind the lock while a clear and a newer turn race ahead of it
+    must keep the low sequence it started with.
+
+    Sequence reproduced:
+      1. Turn A's ``add()`` peeks the (pre-clear) generation but blocks before
+         acquiring the queue lock (e.g. a slow scheduler).
+      2. Turn A+B is queued for real (a normal ``add()`` call) while A is
+         still blocked.
+      3. A clear cancels the queued A+B snapshot -- advancing the watermark
+         past B -- and bumps the generation.
+      4. Turn D is queued post-clear, carrying the *full* running conversation
+         (A+B+D), exactly as the middleware always sends it: clearing memory
+         does not rewrite the chat transcript.
+      5. A is released and finally wins the lock. Its peek is stale, so it
+         takes the "refused older add, consume it" branch -- but that must not
+         out-rank step 3's watermark: A's own sequence was assigned back in
+         step 1, before B, the clear, or D ever happened.
+      6. Flushing D's queued (full A+B+D) snapshot must feed only D's new
+         turn -- if the watermark had regressed to A's tail in step 5, this
+         would re-feed B's pre-clear "prefer Rust" mention and, since no
+         further clear is pending, restore it.
+    """
+    turn_a = _queue_conversation()
+    turn_b = _queue_conversation(human="Actually, I prefer Rust.", ai="Noted, I will remember Rust instead.")
+    turn_d = _queue_conversation(human="What language do I use for scripting?", ai="Let me check your notes.")
+
+    def fake_invoke(prompt: Any, config: Any = None) -> Any:
+        # A minimal, content-driven fake: only extract a fact when the fed
+        # text actually mentions Rust, so any accidental re-feed of turn B is
+        # directly observable as a restored fact, regardless of exactly which
+        # other turns rode along in the same LLM call.
+        if "Rust" in str(prompt):
+            return MagicMock(content=_extraction_json("User prefers Rust"))
+        return MagicMock(content=json.dumps({"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}))
+
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(side_effect=fake_invoke)
+    manager = _manager(tmp_path, host_llm)
+
+    real_peek = manager._updater.peek_clear_generation
+    peeked_first = threading.Event()
+    release_first = threading.Event()
+    peek_count = {"n": 0}
+
+    def blocking_peek(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        peek_count["n"] += 1
+        if peek_count["n"] == 1:
+            # Capture the pre-clear value *before* blocking: a real caller's
+            # peek already returned by the time it is merely waiting on the
+            # queue lock, so the value it carries into the lock is this one,
+            # not whatever the generation has become by the time it wakes.
+            value = real_peek(agent_name, user_id=user_id)
+            peeked_first.set()
+            assert release_first.wait(timeout=5), "test did not release the delayed peek in time"
+            return value
+        return real_peek(agent_name, user_id=user_id)
+
+    manager._updater.peek_clear_generation = blocking_peek
+
+    errors: list[BaseException] = []
+
+    def enqueue_a() -> None:
+        try:
+            manager.add(thread_id="thread-1", messages=turn_a, agent_name="researcher", user_id="alice")
+        except BaseException as exc:  # noqa: BLE001 - surfaced via `errors`
+            errors.append(exc)
+
+    # Step 1: turn A peeks (pre-clear) and then blocks before the queue lock.
+    a_thread = threading.Thread(target=enqueue_a)
+    a_thread.start()
+    assert peeked_first.wait(timeout=5), "turn A's peek never started"
+
+    # Step 2: turn A+B is queued for real while A is still blocked.
+    manager.add(thread_id="thread-1", messages=[*turn_a, *turn_b], agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    assert manager._queue.pending_count == 1
+
+    # Step 3: a clear cancels the queued A+B snapshot (advancing the
+    # watermark past B) and bumps the generation.
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    assert manager._queue.pending_count == 0
+
+    # Step 4: turn D is queued post-clear, carrying the full running
+    # conversation (clearing memory does not rewrite the chat transcript).
+    full_at_d = [*turn_a, *turn_b, *turn_d]
+    manager.add(thread_id="thread-1", messages=full_at_d, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    assert manager._queue.pending_count == 1
+
+    # Step 5: release A. It wins the lock now, finds D's newer generation, and
+    # is refused -- but must not out-rank step 3's watermark.
+    release_first.set()
+    a_thread.join(timeout=5)
+    assert not a_thread.is_alive()
+    assert errors == []
+
+    # D's queued snapshot itself must be untouched by A's late, stale enqueue.
+    assert manager._queue.pending_count == 1
+    assert manager._queue._items[0].messages == full_at_d
+
+    # Step 6: flush D. It must feed only D's new turn.
+    manager._queue.flush()
+
+    facts = {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert "User prefers Rust" not in facts, "turn B's pre-clear message must not be re-extracted after the clear"
 
 
 def test_create_memory_fact_retries_after_cross_worker_clear(tmp_path: Path) -> None:

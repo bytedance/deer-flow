@@ -41,6 +41,7 @@ def test_process_queue_forwards_correction_flag_to_updater() -> None:
         trace_id=None,
         bypass_watermark=False,
         expected_clear_generation=None,
+        sequence=0,
     )
 
 
@@ -72,6 +73,7 @@ def test_process_queue_forwards_reinforcement_flag_to_updater() -> None:
         trace_id=None,
         bypass_watermark=False,
         expected_clear_generation=None,
+        sequence=0,
     )
 
 
@@ -228,8 +230,8 @@ def test_process_queue_updates_different_agents_in_same_thread_separately() -> N
     assert mock_updater.update_memory.call_count == 2
     mock_updater.update_memory.assert_has_calls(
         [
-            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, expected_clear_generation=(0, 0)),
-            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, expected_clear_generation=(0, 0)),
+            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, expected_clear_generation=(0, 0), sequence=1),
+            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, expected_clear_generation=(0, 0), sequence=2),
         ]
     )
 
@@ -251,6 +253,7 @@ def test_process_queue_forwards_trace_id_to_updater() -> None:
         trace_id="trace-memory-1",
         bypass_watermark=False,
         expected_clear_generation=None,
+        sequence=0,
     )
 
 
@@ -296,6 +299,7 @@ def test_flush_sync_drains_pending_queue_and_returns_true() -> None:
         trace_id=None,
         bypass_watermark=False,
         expected_clear_generation=None,
+        sequence=0,
     )
 
 
@@ -460,6 +464,7 @@ def test_queue_coalesce_after_newer_clear_starts_fresh_generation() -> None:
         user_id="alice",
         agent_name="researcher",
         bypass_watermark=False,
+        sequence=1,
     )
 
 
@@ -517,6 +522,7 @@ def test_queue_refuses_older_generation_overwrite_of_newer_fenced_work() -> None
                 signals=frozenset({"correction"}),
                 bypass_watermark=False,
                 captured_clear_generation=(1, 0),
+                call_sequence=2,
             )
 
     assert kept.messages == ["after clear"]
@@ -532,6 +538,7 @@ def test_queue_refuses_older_generation_overwrite_of_newer_fenced_work() -> None
         user_id="alice",
         agent_name="researcher",
         bypass_watermark=False,
+        sequence=2,
     )
 
 
@@ -593,12 +600,18 @@ def test_queue_out_of_order_lock_does_not_let_older_snapshot_inherit_newer_fence
     assert queue.pending_count == 1
     assert queue._items[0].messages == ["after clear"]
     assert queue._items[0].clear_generation == (2, 0)
+    # sequence=1, not 2: the "older" add's sequence is stamped at call-arrival
+    # (before it blocks on the peek, i.e. before the queue lock), not at
+    # lock-acquisition time -- it started first, so it must keep the lower
+    # number even though it is the *second* call to actually enter
+    # ``_enqueue_locked``. See ``MemoryUpdateQueue._next_sequence``.
     mock_updater.mark_feed_consumed.assert_called_once_with(
         ["between clears"],
         thread_id="thread-1",
         user_id="alice",
         agent_name="researcher",
         bypass_watermark=False,
+        sequence=1,
     )
 
 
@@ -627,6 +640,7 @@ def test_cancel_by_agent_drops_matching_pending_and_preserves_others() -> None:
         user_id="u1",
         agent_name="bob",
         bypass_watermark=False,
+        sequence=2,
     )
 
 

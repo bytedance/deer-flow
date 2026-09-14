@@ -16,6 +16,20 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 `agent_name=None` selects all agent buckets in that user scope.
 It does not interrupt a context after `_process_queue` removes it from `_items`.
 Dropped pending snapshots still advance the conversation watermark so a later turn cannot restore them.
+That advance is monotonic per `(thread_id, user_id, agent_name)`: each snapshot carries the
+call-arrival sequence it was assigned before it ever competed for the queue lock (not the
+sequence it would get by lock-acquisition order), and a watermark write with a lower sequence
+than what is already recorded is refused rather than rewinding it. This covers a delayed
+in-flight extraction that finishes after a newer snapshot for the same key was already queued
+and cancelled.
+The sequence counter and the watermark are both process-local, in-memory state on one
+`MemoryUpdateQueue`/`MemoryUpdater` pair -- they do not span Gateway workers. A turn sitting only
+in one worker's debounce queue (not yet flushed, cancelled, or fenced anywhere) is invisible to
+a clear that lands on a different worker; that turn's pre-clear content can still be re-fed and
+persisted once the conversation is next resent in full, because no process ever recorded that it
+should be excluded. Only the durable clear-generation fence below is cross-worker. Closing this
+queue-level gap needs the debounce queue itself to become shared/durable, a cancel broadcast to
+active workers, or per-thread sticky routing -- none of which this fix attempts.
 Broader cancellation must iterate known user scopes.
 A durable clear generation in `memory.json` fences that in-flight window and other Gateway workers.
 The queue captures the generation at enqueue, before the process-local queue lock.
