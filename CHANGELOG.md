@@ -588,7 +588,7 @@ This section accumulates work toward the **2.1.0** milestone
   unmasked; extra masking passes recovered one entry each, which hid the leak
   for short lists. Masking now ends a matched path at `:`. A symlink inside a
   mount whose target lies outside every mount is now shown by its mount path
-  instead of the target's host path in command output and `glob` results.
+  instead of the target's host path in command output and `glob` results. ([#5418])
 - **models:** Stop every Claude model after the first from losing its
   credential when the Claude Code OAuth token is handed off through
   `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`. Every `ClaudeChatModel` instance
@@ -2826,3 +2826,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5401]: https://github.com/bytedance/deer-flow/pull/5401
 [#5403]: https://github.com/bytedance/deer-flow/pull/5403
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
+[#5418]: https://github.com/bytedance/deer-flow/pull/5418
