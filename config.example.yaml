@@ -20,7 +20,17 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 43
+config_version: 44
+
+# Optional per-model request pacing (inside a models[] entry):
+# request_admission:
+#   requests_per_minute: 60
+#   group: shared-provider-account  # optional; defaults to the model config name
+#   max_wait_seconds: 300
+#   max_queue_size: 256
+# Off unless configured. Shared groups require identical settings; restart after
+# changes. Process-local RPM only, not TPM or a cluster-wide quota. See the
+# "Model request admission" section in backend/docs/CONFIGURATION.md.
 
 # ============================================================================
 # Logging

@@ -7,6 +7,7 @@
 - Supports `supports_vision` flag for image understanding models
 - Config values starting with `$` resolved as environment variables
 - Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
+- Optional `models[].request_admission` attaches a process-shared `BaseRateLimiter` at the model factory. Identical explicit groups share one FIFO across model instances, threads and event loops; implicit groups use the configured model name. Policies are immutable once registered and conflicting settings fail construction. A monotonic minimum interval spaces requests without idle-time burst credit; bounded waiters poll without occupying executor threads and unregister in `finally`. The factory strips the policy from provider kwargs and sets exposed SDK `max_retries=0` so middleware retries re-enter admission. This limits model invocations, not tokens or a distributed provider account; custom providers bypassing BaseChatModel hooks are outside the contract. Tests: `test_model_request_admission.py`.
 
 ### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)
 

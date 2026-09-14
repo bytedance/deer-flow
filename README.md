@@ -110,6 +110,12 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
 ### Configuration
 
+For providers with request-per-minute limits, optional per-model
+[`request_admission`](backend/docs/CONFIGURATION.md#model-request-admission)
+queues and spaces requests across model instances in each Gateway process.
+Profiles sharing a provider quota can share one group. It is disabled by default;
+token limits and multi-process quotas still require separate capacity planning.
+
 1. **Clone the DeerFlow repository**
 
    ```bash
