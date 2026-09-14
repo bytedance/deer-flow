@@ -63,6 +63,42 @@ def test_cut_message_is_read_to_the_end_through_continuations(tool_output, unit)
     assert last["messages"][0]["text_length"] == len(original)
 
 
+def test_budget_too_small_for_any_text_stops_instead_of_looping():
+    # Below the envelope size no text fits; a continuation at the same offset
+    # would make the agent repeat an identical, progress-free call forever.
+    async def exercise():
+        prepare, events, threads, _, _ = _setup(tool_output={"tool_overrides": {"read_conversation": 500}})
+        await threads.create("source", user_id="alice")
+        row = await _put(events, "x" * 5000)
+        reader, _ = prepare(["source"])
+        page = json.loads(await reader(thread_id="source"))
+        part = json.loads(await reader(thread_id="source", message_seq=row["seq"], offset=0))
+        return page, part
+
+    for result in asyncio.run(exercise()):
+        assert result["status"] == "output_budget_too_small"
+        assert result["messages"] == [] and result["next_cursor"] is None and result["has_more"] is False
+        assert "tool_output.tool_overrides.read_conversation" in result["notice"]
+
+
+def test_small_budget_that_fits_some_text_still_makes_progress():
+    original = "y" * 3000 + "END"
+
+    async def exercise():
+        prepare, events, threads, _, _ = _setup(tool_output={"tool_overrides": {"read_conversation": 900}})
+        await threads.create("source", user_id="alice")
+        await _put(events, original)
+        reader, _ = prepare(["source"])
+        [item] = json.loads(await reader(thread_id="source"))["messages"]
+        return item, await _follow(reader, item)
+
+    item, (text, raws) = asyncio.run(exercise())
+
+    assert text == original
+    offsets = [item["continuation"]["offset"]] + [json.loads(raw)["messages"][0].get("continuation", {}).get("offset") for raw in raws[:-1]]
+    assert all(later > earlier for earlier, later in zip(offsets, offsets[1:])) and offsets[0] > 0
+
+
 def test_complete_messages_carry_no_continuation():
     async def exercise():
         prepare, events, threads, _, _ = _setup()

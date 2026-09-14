@@ -361,7 +361,10 @@ message_seq=..., offset=...)` without a cursor returns the next part of that one
 message (at most 20,000 text characters, sized to the same budget) with its
 `offset`, `text_length` and, while text remains, a new continuation. Offsets
 refer to the source's current text: an offset past its end returns
-`invalid_request`, and a message that is no longer visible is unavailable.
+`invalid_request`, and a message that is no longer visible is unavailable. If the
+`read_conversation` budget is too small to return any text (below roughly 800
+serialized characters), the result is `output_budget_too_small` rather than a
+continuation that makes no progress.
 Results include message IDs, sequence numbers, continuation, truncation and
 unavailability. Hidden messages, reasoning blocks, raw tool
 results and subagent internals are excluded. Source data is not changed.

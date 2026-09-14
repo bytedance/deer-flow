@@ -32,6 +32,15 @@ _TRUNCATION_GUIDANCE = (
 )
 _UNAVAILABLE = {"status": "unavailable", "messages": [], "next_cursor": None, "has_more": False, "notice": "The referenced conversation or its visible history is unavailable."}
 _MAX_SEQ = 2**63 - 1
+# Returned instead of an empty part whose continuation repeats the requested
+# offset, which would make the agent loop on an identical call.
+_BUDGET_TOO_SMALL = {
+    "status": "output_budget_too_small",
+    "messages": [],
+    "next_cursor": None,
+    "has_more": False,
+    "notice": "The tool-output budget for read_conversation is too small to return any message text. Stop reading and ask the operator to raise tool_output.tool_overrides.read_conversation.",
+}
 
 
 def _source_id(reference: str, request_url: str) -> str:
@@ -198,7 +207,10 @@ def prepare_conversation_reader(
         item = part(candidate)
         room = json_room(thread_id)
         if room is not None and len(_json(item)) > room:
-            item = part(_fit_text(part(candidate, probe=True), room))
+            fitted = _fit_text(part(candidate, probe=True), room)
+            if candidate and not fitted:
+                return _json(_BUDGET_TOO_SMALL)
+            item = part(fitted)
         notice = _NOTICE + (_TRUNCATION_GUIDANCE if item["truncated"] else "")
         return _json({"status": "ok", "thread_id": thread_id, "messages": [item], "has_more": False, "next_cursor": None, "truncated": item["truncated"], "notice": notice})
 
@@ -245,6 +257,8 @@ def prepare_conversation_reader(
                 break
             if room is not None and size > room:
                 fitted = _fit_text(_item(row, role, candidate, continues_at=len(candidate)), room)
+                if not fitted:
+                    return _json(_BUDGET_TOO_SMALL)
                 item = _item(row, role, fitted, continues_at=len(fitted) if len(fitted) < len(text) else None)
                 size = len(_json(item))
             text_used += len(item["text"])
