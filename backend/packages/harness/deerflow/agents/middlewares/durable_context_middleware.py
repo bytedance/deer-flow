@@ -19,7 +19,7 @@ from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
@@ -176,6 +176,36 @@ def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_ex
     return _messages_after_pre_existing_boundary(messages, pre_existing_message_ids)
 
 
+def _run_started_with_new_human_message(messages: list[AnyMessage], run_id: str | None, pre_existing_message_ids: frozenset[str]) -> bool:
+    """Whether this run began with its own HumanMessage (a new user turn, not a resume).
+
+    Uses the same boundary rules as ``_current_run_messages``.
+    """
+    if run_id is None:
+        return False
+    for message in reversed(messages):
+        if not isinstance(message, HumanMessage):
+            continue
+        message_run_id = message.additional_kwargs.get("run_id")
+        if message_run_id is not None:
+            return message_run_id == run_id
+        message_id = _message_id(message)
+        return not pre_existing_message_ids or (message_id is not None and message_id not in pre_existing_message_ids)
+    return False
+
+
+def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing: list[dict], run_id: str) -> list[dict]:
+    """Mark delegations that an earlier run left in_progress without a result as cancelled.
+
+    A ``task`` call waits for its subagent, so an entry that is still
+    in_progress with no ToolMessage once a later user turn starts belongs to a
+    run that was stopped while the subagent ran. Nothing else will ever update
+    it, and the ledger would keep telling the model not to delegate again.
+    """
+    answered = {str(message.tool_call_id) for message in messages if isinstance(message, ToolMessage) and message.tool_call_id}
+    return [{**entry, "status": "cancelled"} for entry in existing if isinstance(entry, dict) and entry.get("status") == "in_progress" and entry.get("run_id") not in (None, run_id) and entry.get("id") not in answered]
+
+
 def _with_run_id(delegations: list[dict], run_id: str | None, existing: list[dict]) -> list[dict]:
     """Tag only new delegation ids with the current run_id."""
     if run_id is None:
@@ -243,6 +273,8 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             _with_run_id(extract_delegations(messages), run_id, existing),
             existing,
         )
+        if run_id is not None and _run_started_with_new_human_message(state["messages"], run_id, pre_existing_message_ids):
+            delegations = [*delegations, *_close_delegations_left_by_earlier_runs(state["messages"], existing, run_id)]
         if delegations:
             return {"delegations": delegations}
         return None
