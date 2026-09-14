@@ -622,6 +622,7 @@ async def test_manual_compaction_uses_checkpoint_agent_for_flush_bucket(monkeypa
 @pytest.mark.asyncio
 async def test_manual_compaction_fails_closed_without_valid_checkpoint_agent_binding(
     monkeypatch,
+    caplog,
     checkpoint_metadata,
     request_agent_name,
     expected_skip,
@@ -652,3 +653,5 @@ async def test_manual_compaction_fails_closed_without_valid_checkpoint_agent_bin
     )
 
     assert captured["skip_memory_flush"] is expected_skip
+    if checkpoint_metadata == {}:
+        assert "checkpoint carries no agent binding" in caplog.text

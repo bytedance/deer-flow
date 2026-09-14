@@ -242,6 +242,8 @@ class DeerFlowClient:
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
         self._agent_config_key: tuple | None = None
+        self._loaded_agent_config_key: tuple[str, str] | None = None
+        self._loaded_agent_config = None
 
     def reset_agent(self) -> None:
         """Force the internal agent to be recreated on the next call.
@@ -252,6 +254,8 @@ class DeerFlowClient:
         """
         self._agent = None
         self._agent_config_key = None
+        self._loaded_agent_config_key = None
+        self._loaded_agent_config = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -301,7 +305,15 @@ class DeerFlowClient:
         # authorization principal so one trusted embedded client can safely
         # serve more than one caller.
         effective_user_id = cfg.get("user_id") or get_effective_user_id()
-        agent_config = load_agent_config(self._agent_name, user_id=effective_user_id) if self._agent_name is not None else None
+        agent_config = None
+        if self._agent_name is not None:
+            loaded_config_key = (self._agent_name, effective_user_id)
+            if getattr(self, "_loaded_agent_config_key", None) == loaded_config_key:
+                agent_config = self._loaded_agent_config
+            else:
+                agent_config = load_agent_config(self._agent_name, user_id=effective_user_id)
+                self._loaded_agent_config_key = loaded_config_key
+                self._loaded_agent_config = agent_config
         memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
 
         authorization_identity = None
@@ -1321,8 +1333,7 @@ class DeerFlowClient:
             self._atomic_write_json(config_path, config_data)
             reloaded = reload_extensions_config()
 
-        self._agent = None
-        self._agent_config_key = None
+        self.reset_agent()
         return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}
 
     # ------------------------------------------------------------------
@@ -1423,8 +1434,7 @@ class DeerFlowClient:
 
             logging.getLogger(__name__).warning("Failed to invalidate skills prompt cache after update_skill: %s", exc)
 
-        self._agent = None
-        self._agent_config_key = None
+        self.reset_agent()
 
         updated = next((s for s in storage.load_skills(enabled_only=False) if s.name == name), None)
         if updated is None:

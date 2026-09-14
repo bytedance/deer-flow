@@ -1216,6 +1216,55 @@ class TestEnsureAgent:
         assert mock_build_middlewares.call_args.kwargs["memory_enabled"] is expected_memory_enabled
         assert mock_apply_prompt.call_args.kwargs["memory_enabled"] is expected_memory_enabled
 
+    def test_reuses_named_agent_config_on_cached_agent_fast_path(self, client):
+        client._agent_name = "stateful-agent"
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch(
+                "deerflow.client.load_agent_config",
+                return_value=AgentConfig(name="stateful-agent"),
+            ) as mock_load_agent_config,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        mock_load_agent_config.assert_called_once_with("stateful-agent", user_id="owner-1")
+        assert mock_create_agent.call_count == 1
+
+    def test_reset_agent_refreshes_named_agent_config(self, client):
+        client._agent_name = "custom-agent"
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch(
+                "deerflow.client.load_agent_config",
+                side_effect=[
+                    AgentConfig(name="custom-agent", memory_enabled=False),
+                    AgentConfig(name="custom-agent", memory_enabled=True),
+                ],
+            ) as mock_load_agent_config,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+            client.reset_agent()
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        assert mock_load_agent_config.call_count == 2
+
     def test_authorization_filters_framework_tools_and_reuses_provider(self, client, mock_app_config):
         from deerflow.authz.provider import AuthzDecision, AuthzReason
 

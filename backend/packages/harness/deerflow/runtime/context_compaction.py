@@ -23,6 +23,7 @@ _AGENT_CONFIG_NOT_LOADED = object()
 def _checkpoint_agent_binding(metadata: object) -> tuple[bool, str | None]:
     """Resolve the server-authored agent binding carried by a checkpoint."""
     if not isinstance(metadata, Mapping) or CHECKPOINT_AGENT_NAME_METADATA_KEY not in metadata:
+        logger.warning("Skipping memory flush: checkpoint carries no agent binding (pre-binding state)")
         return False, None
     value = metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY]
     if value == DEFAULT_AGENT_NAME_METADATA_VALUE:
