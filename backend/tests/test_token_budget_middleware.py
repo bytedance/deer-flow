@@ -102,8 +102,8 @@ class TestTokenBudgetLifecycle:
             mw.after_model(state, runtime)
 
         # Missing identities are invocation-local, never shared under None or "".
-        key = str(id(runtime))
-        assert mw._get_run_id(runtime) == key
+        key = mw._get_run_id(runtime)
+        assert key.startswith("__invocation__:")
         assert mw._cumulative_usage[key].total == 850
         assert mw._warned[key]
         assert mw._pending_warnings[key]
@@ -121,8 +121,10 @@ class TestTokenBudgetLifecycle:
         follow_up = _make_state_with_usage(total=200)
         follow_up["messages"][0].id = "next-msg"
         assert mw.after_model(follow_up, runtime) is None
-        assert mw._cumulative_usage[key].total == 200
-        assert not mw._warned.get(key)
+        next_key = mw._get_run_id(runtime)
+        assert next_key != key
+        assert mw._cumulative_usage[next_key].total == 200
+        assert not mw._warned.get(next_key)
 
     @pytest.mark.asyncio
     async def test_valid_run_id_preserves_usage_warnings_and_stop_reason(self):
@@ -226,6 +228,17 @@ class TestTokenBudgetHardStop:
         # A run that never hit the cap has no stop reason.
         assert mw.consume_stop_reason("uncapped-run") is None
 
+    def test_stop_reason_round_trips_an_explicit_none_run_id(self):
+        """A subagent whose parent run has no run_id runs with ``run_id=None``;
+        ``SubagentExecutor`` reads the reason back with that same ``None``."""
+        mw = TokenBudgetMiddleware.from_config(TokenBudgetConfig(max_tokens=1000, enabled=True))
+        runtime = _make_runtime(run_id=None)
+        tool_calls = [{"name": "bash", "args": {"command": "ls"}, "id": "call_1"}]
+        assert mw._apply(_make_state_with_usage(total=1500, tool_calls=tool_calls), runtime) is not None
+
+        assert mw.consume_stop_reason(None) == "token_capped"
+        assert mw.consume_stop_reason(None) is None
+
     def test_below_threshold_does_not_stamp_stop_reason(self):
         """A run that only crosses the warn threshold (not the hard stop) keeps
         running and must not stamp ``token_capped`` — the run is not capped."""
@@ -268,6 +281,16 @@ class TestIndependentDimensions:
 class _ToolCallingFakeModel(FakeMessagesListChatModel):
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
         return self
+
+
+class _RecordingToolCallingFakeModel(_ToolCallingFakeModel):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        object.__setattr__(self, "requests", [])
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.requests.append(list(messages))
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
 class TestTokenBudgetAgentGraph:
@@ -315,3 +338,41 @@ class TestTokenBudgetAgentGraph:
         # A later user run still starts with a fresh budget.
         graph.invoke({"messages": [HumanMessage("next question")]}, config=config, context={"thread_id": "goal-thread", "run_id": "run-2"})
         assert executed == ["a", "b", "d"]
+
+    @pytest.mark.parametrize("context", [{"thread_id": "no-run-id"}, {"thread_id": "no-run-id", "run_id": None}])
+    def test_invocation_without_run_id_keeps_one_budget_across_graph_nodes(self, context):
+        """LangGraph hands each node its own Runtime, so an invocation without a run_id can't be keyed by id(runtime)."""
+        executed: list[str] = []
+
+        @as_tool
+        def bash(command: str) -> str:
+            """Run a fake shell command."""
+            executed.append(command)
+            return "ok"
+
+        def call(command: str, tokens: int) -> AIMessage:
+            return AIMessage(
+                content="",
+                id=f"ai-{command}",
+                tool_calls=[{"name": "bash", "id": f"call-{command}", "args": {"command": command}}],
+                usage_metadata={"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens},
+            )
+
+        def answer(text: str) -> AIMessage:
+            return AIMessage(content=text, id=f"ai-{text}", usage_metadata={"input_tokens": 500, "output_tokens": 0, "total_tokens": 500})
+
+        model = _RecordingToolCallingFakeModel(responses=[call("a", 4000), call("b", 4500), answer("first answer"), call("c", 4000), call("d", 4500), answer("second answer")])
+        mw = TokenBudgetMiddleware(TokenBudgetConfig(enabled=True, max_tokens=10_000, warn_threshold=0.8))
+        graph = create_agent(model=model, tools=[bash], middleware=[mw], checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "no-run-id"}}
+
+        # 8.5k of 10k after "b": the warning reaches the next model request.
+        graph.invoke({"messages": [HumanMessage("research")]}, config=config, context=dict(context))
+        assert [getattr(message, "name", None) for message in model.requests[2]][-1] == "budget_warning"
+
+        # The next invocation has its own 10k; the first one's 9k doesn't count.
+        result = graph.invoke({"messages": [HumanMessage("next question")]}, config=config, context=dict(context))
+        assert executed == ["a", "b", "c", "d"]
+        assert result["messages"][-1].content == "second answer"
+        for values in (mw._cumulative_usage, mw._warned, mw._pending_warnings, mw._seen_messages, mw._fallback_run_ids):
+            assert not values

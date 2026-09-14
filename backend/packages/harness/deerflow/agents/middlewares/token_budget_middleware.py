@@ -21,15 +21,18 @@ Run scope:
   and those continuations share one budget; a later user run gets a new
   ``run_id`` and a fresh budget. Only the per-message ``seen`` map is dropped
   (``before_agent`` rebuilds it). Invocations without a non-empty string
-  ``run_id`` use runtime-local identity and clear their usage/warning state
-  in ``after_agent``.
+  ``run_id`` are keyed by LangGraph's run-scoped ``Runtime.control`` object
+  (each graph node gets its own ``Runtime`` wrapper, but they share it) and
+  clear their usage/warning state in ``after_agent``.
 
 Stop-reason surfacing (#3875 Phase 2):
   The hard stop does NOT raise — it strips tool_calls so the agent loop
   terminates naturally and produces a final answer. To let the caller (e.g.
   the subagent executor) distinguish a budget-capped completion from a clean
   one, the run that triggered the hard stop is recorded in ``_stop_reason``
-  and exposed via :meth:`consume_stop_reason`. That dict is intentionally NOT
+  and exposed via :meth:`consume_stop_reason`. It is keyed by the context
+  ``run_id`` exactly as given, ``None`` included, because that is what the
+  executor passes back. That dict is intentionally NOT
   cleared by ``after_agent``/``_clear_run_state`` so the executor can read it
   after the run returns; the bounded dict prevents unbounded growth on
   abandoned runs, and each subagent run builds a fresh middleware instance so
@@ -40,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, override
@@ -84,7 +88,10 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         # Stop reason set when the hard-stop fires. NOT cleared by
         # ``_clear_run_state``/``after_agent`` so the executor can consume it
         # after the run returns; bounded so abandoned runs cannot leak.
-        self._stop_reason: BoundedDict[str, str] = BoundedDict(1000)
+        self._stop_reason: BoundedDict[str | None, str] = BoundedDict(1000)
+        # id(Runtime.control) -> (control, generated key) for invocations
+        # without a context run_id; released in ``after_agent``.
+        self._fallback_run_ids: BoundedDict[int, tuple[object, str]] = BoundedDict(1000)
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {"config": self._config.model_dump(mode="python")}
@@ -100,6 +107,7 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
             self._seen_messages.clear()
             self._cumulative_usage.clear()
             self._stop_reason.clear()
+            self._fallback_run_ids.clear()
 
     def consume_stop_reason(self, run_id: str | None) -> str | None:
         """Pop and return the stop reason the hard-stop set for this run.
@@ -120,10 +128,39 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         run_id = ctx.get("run_id") if isinstance(ctx, dict) else None
         return run_id if isinstance(run_id, str) and run_id else None
 
-    @classmethod
-    def _get_run_id(cls, runtime: Runtime) -> str:
-        # Fallback to runtime object ID to prevent collisions across embedded client runs
-        return cls._context_run_id(runtime) or str(id(runtime))
+    def _get_run_id(self, runtime: Runtime) -> str:
+        run_id = self._context_run_id(runtime)
+        if run_id is not None:
+            return run_id
+        # Same anchor as LoopDetectionMiddleware: ``id(runtime)`` changes from
+        # one graph node to the next, ``Runtime.control`` does not. The key is a
+        # generated token rather than the address, which can be reused once the
+        # object is collected.
+        control = getattr(runtime, "control", None)
+        anchor = control if control is not None else runtime
+        with self._lock:
+            entry = self._fallback_run_ids.get(id(anchor))
+            if entry is None or entry[0] is not anchor:
+                entry = (anchor, f"__invocation__:{uuid.uuid4().hex}")
+                self._fallback_run_ids[id(anchor)] = entry
+            return entry[1]
+
+    def _release_fallback_run_id(self, runtime: Runtime) -> None:
+        control = getattr(runtime, "control", None)
+        anchor = control if control is not None else runtime
+        with self._lock:
+            entry = self._fallback_run_ids.get(id(anchor))
+            if entry is not None and entry[0] is anchor:
+                del self._fallback_run_ids[id(anchor)]
+
+    @staticmethod
+    def _stop_reason_key(runtime: Runtime, run_id: str) -> str | None:
+        # SubagentExecutor consumes the stop reason with its raw run_id, which
+        # is None when the parent run has none.
+        ctx = getattr(runtime, "context", None)
+        if isinstance(ctx, dict) and "run_id" in ctx and (ctx["run_id"] is None or isinstance(ctx["run_id"], str)):
+            return ctx["run_id"]
+        return run_id
 
     def _clear_run_state(self, run_id: str) -> None:
         with self._lock:
@@ -171,6 +208,7 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
                 self._seen_messages.pop(run_id, None)
             return
         self._clear_run_state(run_id)
+        self._release_fallback_run_id(runtime)
 
     @override
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> None:
@@ -274,7 +312,7 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
                 # ``stop_reason=token_capped`` to the lead after the run
                 # returns (the hard stop itself does not raise). See
                 # ``consume_stop_reason``.
-                self._stop_reason[run_id] = "token_capped"
+                self._stop_reason[self._stop_reason_key(runtime, run_id)] = "token_capped"
                 # Also write to runtime.context so the lead worker can read it
                 # without needing a reference to this middleware instance (#4176).
                 ctx = getattr(runtime, "context", None)
