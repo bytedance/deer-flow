@@ -1133,3 +1133,31 @@ def test_summarization_feature_keeps_the_summary_in_model_requests():
     assert result["summary_text"] == "compressed summary"
     assert "first" not in [message.content for message in result["messages"]]
     assert any("compressed summary" in str(message.content) for message in model.received[-1])
+
+
+# ---------------------------------------------------------------------------
+# 45. token_budget=True enforces the default budget
+# ---------------------------------------------------------------------------
+def test_token_budget_true_enforces_the_default_budget():
+    @tool("bash")
+    def bash(command: str) -> str:
+        """Run a fake shell command."""
+        return "ok"
+
+    over_budget = AIMessage(
+        content="",
+        tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "call-1", "type": "tool_call"}],
+        usage_metadata={"input_tokens": 250_000, "output_tokens": 0, "total_tokens": 250_000},
+    )
+    graph = create_deerflow_agent(
+        _FakeModel(responses=[over_budget, AIMessage(content="done")]),
+        tools=[bash],
+        features=RuntimeFeatures(token_budget=True, sandbox=False),
+    )
+    context = {"run_id": "run-1"}
+
+    result = graph.invoke({"messages": [HumanMessage(content="go")]}, context=context)
+
+    assert not any(isinstance(message, ToolMessage) for message in result["messages"])
+    assert "TOKEN BUDGET EXCEEDED" in result["messages"][-1].content
+    assert context["stop_reason"] == "token_capped"

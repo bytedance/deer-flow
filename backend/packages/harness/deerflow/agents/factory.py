@@ -401,7 +401,8 @@ def _assemble_from_features(
             from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
             from deerflow.config.token_budget_config import TokenBudgetConfig
 
-            chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig()))
+            # ``enabled`` defaults to False for config.yaml; ``token_budget=True`` is the opt-in.
+            chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig(enabled=True)))
 
     # --- [14] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())
