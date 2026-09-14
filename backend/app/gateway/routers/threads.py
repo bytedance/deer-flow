@@ -1489,11 +1489,11 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     updates = {key: Overwrite(value) if key in reducer_fields else value for key, value in values.items()}
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
-            source_snapshot = await accessor.aget(read_config)
+            source_metadata = await accessor.aget_metadata(read_config)
             update_config = {
                 **read_config,
                 "configurable": dict(read_config.get("configurable", {})),
-                "metadata": checkpoint_agent_binding_metadata(getattr(source_snapshot, "metadata", None)),
+                "metadata": checkpoint_agent_binding_metadata(source_metadata),
             }
             updated_config = await accessor.aupdate(
                 update_config,

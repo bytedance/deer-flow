@@ -1265,6 +1265,40 @@ class TestEnsureAgent:
 
         assert mock_load_agent_config.call_count == 2
 
+    @pytest.mark.parametrize(
+        "config_error",
+        [
+            FileNotFoundError("missing config"),
+            ValueError("invalid config"),
+        ],
+        ids=["missing", "invalid"],
+    )
+    def test_unreadable_named_agent_config_preserves_legacy_memory_default(
+        self,
+        client,
+        caplog,
+        config_error,
+    ):
+        client._agent_name = "soul-only-agent"
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.load_agent_config", side_effect=config_error) as mock_load_agent_config,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        mock_load_agent_config.assert_called_once_with("soul-only-agent", user_id="owner-1")
+        assert mock_build_middlewares.call_args.kwargs["memory_enabled"] is True
+        assert "using the memory-enabled compatibility default" in caplog.text
+
     def test_authorization_filters_framework_tools_and_reuses_provider(self, client, mock_app_config):
         from deerflow.authz.provider import AuthzDecision, AuthzReason
 

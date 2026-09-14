@@ -2,7 +2,7 @@ import asyncio
 import re
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, patch
 
 import anyio
 import pytest
@@ -211,6 +211,10 @@ class _RawStateAccessor:
     async def aget(self, config):
         checkpoint_tuple = await self.checkpointer.aget_tuple(config)
         return self._snapshot(checkpoint_tuple, config)
+
+    async def aget_metadata(self, config):
+        checkpoint_tuple = await self.checkpointer.aget_tuple(config)
+        return dict(getattr(checkpoint_tuple, "metadata", {}) or {})
 
     async def ahistory(self, config, *, limit=None):
         snapshots = []
@@ -3851,9 +3855,6 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
         tasks=(),
         created_at="2026-07-18T00:00:00+00:00",
     )
-    source_snapshot = SimpleNamespace(
-        metadata={CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
-    )
 
     async def aupdate(config, values, *, as_node=None):
         update_calls.append((config, values, as_node))
@@ -3861,7 +3862,10 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
 
     accessor = SimpleNamespace(
         aupdate=aupdate,
-        aget=AsyncMock(side_effect=[source_snapshot, snapshot]),
+        aget_metadata=AsyncMock(
+            return_value={CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+        ),
+        aget=AsyncMock(return_value=snapshot),
     )
 
     async def build_accessor(_request, *, thread_id, as_node, checkpoint_id=None):
@@ -3904,10 +3908,10 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
     assert updates["artifacts"].value == ["artifact-1"]
     assert updates["title"] == "Renamed"
     assert as_node == "manual_state_update"
-    assert accessor.aget.await_args_list == [
-        call({"configurable": {"thread_id": "state-overwrite", "checkpoint_ns": ""}}),
-        call(updated_config),
-    ]
+    accessor.aget_metadata.assert_awaited_once_with(
+        {"configurable": {"thread_id": "state-overwrite", "checkpoint_ns": ""}},
+    )
+    accessor.aget.assert_awaited_once_with(updated_config)
     assert response.json()["checkpoint_id"] == "ckpt-updated"
 
 

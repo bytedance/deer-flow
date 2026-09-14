@@ -311,7 +311,14 @@ class DeerFlowClient:
             if getattr(self, "_loaded_agent_config_key", None) == loaded_config_key:
                 agent_config = self._loaded_agent_config
             else:
-                agent_config = load_agent_config(self._agent_name, user_id=effective_user_id)
+                try:
+                    agent_config = load_agent_config(self._agent_name, user_id=effective_user_id)
+                except (FileNotFoundError, ValueError):
+                    logger.warning(
+                        "Unable to load config for named agent %s; using the memory-enabled compatibility default",
+                        self._agent_name,
+                        exc_info=True,
+                    )
                 self._loaded_agent_config_key = loaded_config_key
                 self._loaded_agent_config = agent_config
         memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
