@@ -247,14 +247,23 @@ async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
         await asyncio.wait_for(asyncio.shield(task), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
     except TimeoutError:
         # Cancellation lands at the sweep's next await; ``_run_startup_trash_sweep``
-        # only catches ``Exception``, so ``CancelledError`` propagates.
-        task.cancel()
+        # only catches ``Exception``, so ``CancelledError`` propagates. A
+        # ``cancel()`` that returns False means the sweep finished inside the
+        # window between the deadline firing and this call — report that as
+        # the late finish it is, not as a cancellation that never happened.
+        cancelled = task.cancel()
         with suppress(asyncio.CancelledError):
             await task
-        logger.warning(
-            "Startup trash sweep exceeded %.1fs during shutdown; cancelled and proceeding with worker exit.",
-            _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
-        )
+        if cancelled:
+            logger.warning(
+                "Startup trash sweep exceeded %.1fs during shutdown; cancelled and proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        else:
+            logger.info(
+                "Startup trash sweep finished just after the %.1fs shutdown budget; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
     except Exception:
         logger.exception("Startup trash sweep failed during shutdown")
 

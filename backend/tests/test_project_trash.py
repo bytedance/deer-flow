@@ -524,3 +524,41 @@ class TestStartupSweep:
         assert observed_cancel.is_set()
         assert task.cancelled()
         assert any("Startup trash sweep exceeded" in record.message for record in caplog.records)
+
+    async def test_shutdown_hook_reports_a_late_finish_as_a_finish(self, env, monkeypatch, caplog):
+        """A sweep that finished inside the deadline→cancel window is not
+        mislabeled as cancelled: ``cancel()`` returns False there, and the
+        log has to say what actually happened."""
+        from fastapi import FastAPI
+
+        import app.gateway.app as gateway_app
+        import deerflow.projects.trash as trash_mod
+
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def waiting_sweep(*args, **kwargs):
+            started.set()
+            await gate.wait()
+            return SimpleNamespace(purged=0, purge_failures=0, orphans_removed=0, staging_removed=0, content_missing=[])
+
+        monkeypatch.setattr(trash_mod, "run_trash_retention_sweep", waiting_sweep)
+        app = FastAPI()
+        app.state.project_document_repo = env.docs
+        task = asyncio.create_task(gateway_app._run_startup_trash_sweep(app, SimpleNamespace(projects=None)))
+        app.state.startup_trash_sweep_task = task
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        async def deadline_landing_after_the_finish(awaitable, timeout):
+            gate.set()
+            while not task.done():
+                await asyncio.sleep(0)
+            raise TimeoutError
+
+        monkeypatch.setattr(asyncio, "wait_for", deadline_landing_after_the_finish)
+        with caplog.at_level(logging.INFO):
+            await gateway_app._shutdown_startup_trash_sweep(app)
+
+        assert task.done() and not task.cancelled()
+        assert any("finished just after" in record.message for record in caplog.records)
+        assert not any("cancelled and proceeding" in record.message for record in caplog.records)
