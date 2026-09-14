@@ -267,6 +267,7 @@ test("hydrates the active run input before replaying an incremental stream", asy
           values: {
             messages: [
               { id: "human-1", type: "human", content: "First question" },
+              { id: "human-2", type: "human", content: "Second question" },
             ],
           },
         }),
@@ -303,6 +304,51 @@ test("hydrates the active run input before replaying an incremental stream", asy
       ],
     },
   });
+  expect(
+    (entries[0]?.data as { messages: Array<{ id: string }> }).messages,
+  ).toHaveLength(2);
+});
+
+test("continues reconnect when durable state hydration fails", async () => {
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url.toString()).pathname;
+    if (path.endsWith("/runs/run-no-state")) {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [{ id: "human-2", type: "human", content: "Second" }],
+            },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/threads/thread-no-state/state")) {
+      return new Response(JSON.stringify({ detail: "state unavailable" }), {
+        status: 404,
+      });
+    }
+    if (path.endsWith("/runs/run-no-state/stream")) {
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const entries: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-no-state",
+    "run-no-state",
+  )) {
+    entries.push(entry);
+  }
+
+  expect(entries).toEqual([{ event: "end", data: null }]);
+  expect(fetchFn).toHaveBeenCalledTimes(3);
 });
 
 test("falls back to join when preflight cannot resolve the run", async () => {

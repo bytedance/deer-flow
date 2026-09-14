@@ -136,7 +136,9 @@ async function loadReconnectInputSnapshot(
       return undefined;
     }
 
-    const state = await client.threads.getState(threadId, undefined, { signal });
+    const state = await client.threads.getState(threadId, undefined, {
+      signal,
+    });
 
     const durableValues =
       typeof state.values === "object" && state.values !== null
@@ -273,11 +275,10 @@ export function isRunNotCancellableError(error: unknown): boolean {
 }
 
 /**
- * Preflight a reconnect: if the run already reached a terminal state, there is
- * nothing to rejoin. Returns ``true`` when the caller should skip the
- * underlying ``joinStream`` so the SDK's ``onSuccess`` path runs and
- * ``isLoading`` flips back to false — instead of blocking forever on a drained
- * stream bridge.
+ * Preflight a reconnect and return the run record when it can be read. A
+ * missing record or failed request returns ``undefined`` so a legitimately
+ * active reconnect falls back to the original join and the terminal-state
+ * check remains owned by the caller.
  *
  * Any error (404 for an evicted record, network blip, auth hiccup, …) falls
  * back to the original join so a legitimately active reconnect is never
@@ -332,12 +333,16 @@ async function* recoverStreamReplayGaps({
   expectedRunId,
   initialStream,
   resume,
+  signal,
+  reconnectRun,
 }: {
   client: LangGraphClient;
   threadId: string | null | undefined;
   expectedRunId: () => string | undefined;
   initialStream: AsyncIterable<StreamPart>;
   resume: (runId: string, lastEventId?: string) => AsyncIterable<StreamPart>;
+  signal?: AbortSignal;
+  reconnectRun?: Awaited<ReturnType<LangGraphClient["runs"]["get"]>>;
 }): AsyncGenerator<StreamPart> {
   let stream = initialStream;
   let recoveryAttempts = 0;
@@ -378,12 +383,27 @@ async function* recoverStreamReplayGaps({
     };
 
     const durableState = await client.threads
-      .getState(threadId)
+      .getState(threadId, undefined, { signal })
       .catch((error: unknown) => {
         throw new StreamReplayGapError(gap, recoveryAttempts, error);
       });
     if (durableState.values != null) {
-      yield { event: "values", data: durableState.values };
+      // A gap can arrive after the initial hydration frame but before the
+      // input reaches the checkpoint. Rebuild the snapshot from run metadata
+      // so this recovery path cannot overwrite the rescued human message.
+      const recoveredSnapshot = reconnectRun
+        ? await loadReconnectInputSnapshot(
+            client,
+            threadId,
+            runId,
+            reconnectRun,
+            signal,
+          )
+        : undefined;
+      yield {
+        event: "values",
+        data: recoveredSnapshot ?? durableState.values,
+      };
     }
 
     rememberReconnectRun(threadId, runId);
@@ -445,6 +465,8 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       threadId,
       expectedRunId: () => runId,
       initialStream,
+      signal: streamOptionSignal(sanitizedPayload),
+      reconnectRun: undefined,
       resume: (resolvedRunId, lastEventId) => {
         // Keep the recovery run id available to the shared inactive-stream
         // handler even if the SDK omitted its onRunCreated callback.
@@ -520,6 +542,8 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
         threadId,
         expectedRunId: () => runId,
         initialStream: originalJoinStream(threadId, runId, sanitizedOptions),
+        signal: reconnectSignal,
+        reconnectRun,
         resume: (resolvedRunId, lastEventId) =>
           originalJoinStream(threadId, resolvedRunId, {
             ...sanitizedOptions,
