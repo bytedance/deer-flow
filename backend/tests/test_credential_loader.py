@@ -116,6 +116,21 @@ def test_load_claude_code_credential_rereads_when_file_descriptor_changes(monkey
     assert second is not None and second.access_token == "sk-ant-oat01-second"
 
 
+def test_load_claude_code_credential_survives_closed_file_descriptor(tmp_path, monkeypatch):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    read_fd = _pipe_with_secret(b"sk-ant-oat01-fd")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", str(read_fd))
+    first = load_claude_code_credential()
+    # Closing a drained handoff must not strand the models built after it.
+    os.close(read_fd)
+    second = load_claude_code_credential()
+
+    assert first is not None and first.access_token == "sk-ant-oat01-fd"
+    assert second is not None and second.access_token == "sk-ant-oat01-fd"
+
+
 def test_concurrent_loads_drain_file_descriptor_once(tmp_path, monkeypatch):
     _clear_claude_code_env(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
