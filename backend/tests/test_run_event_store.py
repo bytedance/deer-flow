@@ -1133,6 +1133,25 @@ class TestJsonlRunEventStore:
         assert len(await s.list_events("t1", "r1", event_types=["run.delivery"])) == 1
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+    async def test_content_with_unicode_line_separator_round_trips(self, tmp_path, separator):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        content = f"first{separator}second"
+        s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content=content)
+
+        assert [m["content"] for m in await s.list_messages("t1")] == [content]
+        assert await s.count_messages("t1") == 1
+
+        # A fresh store must see the persisted record: seq continues, and put_if_absent finds it.
+        reopened = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        _, created = await reopened.put_if_absent(thread_id="t1", run_id="r1", event_type="human_message", category="message", content="again")
+        assert created is False
+        record = await reopened.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message", content="next")
+        assert record["seq"] == 2
+
+    @pytest.mark.anyio
     async def test_file_at_correct_path(self, tmp_path):
         from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 

@@ -40,6 +40,16 @@ logger = logging.getLogger(__name__)
 _SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
+def _read_jsonl_lines(path: Path) -> list[str]:
+    """Return the records of a JSONL file, split on newlines only.
+
+    ``str.splitlines()`` also breaks on U+0085, U+2028 and U+2029, which
+    ``json.dumps(..., ensure_ascii=False)`` writes unescaped inside strings,
+    so a record containing one of them would be cut into invalid pieces.
+    """
+    return [line for line in path.read_text(encoding="utf-8").split("\n") if line.strip()]
+
+
 class JsonlRunEventStore(RunEventStore):
     def __init__(self, base_dir: str | Path | None = None):
         self._base_dir = Path(base_dir) if base_dir else Path(".deer-flow")
@@ -75,7 +85,7 @@ class JsonlRunEventStore(RunEventStore):
         thread_dir = self._thread_dir(thread_id)
         if thread_dir.exists():
             for f in thread_dir.glob("*.jsonl"):
-                for line in f.read_text(encoding="utf-8").strip().splitlines():
+                for line in _read_jsonl_lines(f):
                     try:
                         record = json.loads(line)
                         max_seq = max(max_seq, record.get("seq", 0))
@@ -103,9 +113,7 @@ class JsonlRunEventStore(RunEventStore):
         if not thread_dir.exists():
             return events
         for f in sorted(thread_dir.glob("*.jsonl")):
-            for line in f.read_text(encoding="utf-8").strip().splitlines():
-                if not line:
-                    continue
+            for line in _read_jsonl_lines(f):
                 try:
                     events.append(json.loads(line))
                 except json.JSONDecodeError:
@@ -119,9 +127,7 @@ class JsonlRunEventStore(RunEventStore):
         if not path.exists():
             return []
         events = []
-        for line in path.read_text(encoding="utf-8").strip().splitlines():
-            if not line:
-                continue
+        for line in _read_jsonl_lines(path):
             try:
                 events.append(json.loads(line))
             except json.JSONDecodeError:
