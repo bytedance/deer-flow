@@ -144,12 +144,12 @@ async def test_bound_batch_task_uses_the_explicit_app_config(monkeypatch) -> Non
         "total_items": 1,
     }
 
-    def available_names(*, app_config, allowed_subagents):
-        captured["names"] = (app_config, allowed_subagents)
+    def available_names(*, app_config, allowed_subagents, user_id=None):
+        captured["names"] = (app_config, allowed_subagents, user_id)
         return ["general-purpose"]
 
-    def subagent_config(name, *, app_config):
-        captured["config"] = (name, app_config)
+    def subagent_config(name, *, app_config, user_id=None):
+        captured["config"] = (name, app_config, user_id)
         return SubagentConfig(
             name="general-purpose",
             description="General purpose",
@@ -175,8 +175,8 @@ async def test_bound_batch_task_uses_the_explicit_app_config(monkeypatch) -> Non
         max_running_items=None,
     )
 
-    assert captured["names"] == (app_config, ["general-purpose"])
-    assert captured["config"] == ("general-purpose", app_config)
+    assert captured["names"] == (app_config, ["general-purpose"], "user-1")
+    assert captured["config"] == ("general-purpose", app_config, "user-1")
     submitter.submit.assert_awaited_once()
 
 

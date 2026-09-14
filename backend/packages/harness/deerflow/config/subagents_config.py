@@ -124,6 +124,10 @@ class CustomSubagentConfig(BaseModel):
         default="inherit",
         description="Model to use - 'inherit' uses parent's model",
     )
+    model_settings: dict[str, object] | None = Field(
+        default=None,
+        description="Per-subagent LLM sampling overrides layered on top of the model profile",
+    )
     max_turns: int = Field(
         default=50,
         ge=1,
@@ -142,12 +146,14 @@ class SubagentsAppConfig(BaseModel):
     timeout_seconds: int = Field(
         default=1800,
         ge=1,
-        description="Default timeout in seconds for built-in subagents (default: 1800 = 30 minutes); custom agents use their own timeout_seconds unless given a per-agent override",
+        description="Default timeout in seconds for built-in and user-store subagents (default: 1800 = 30 minutes); config.yaml custom agents and managed definitions keep their own timeout unless given a per-agent override",
     )
     max_turns: int | None = Field(
         default=None,
         ge=1,
-        description="Optional default max-turn override for all subagents (None = keep builtin defaults)",
+        description=(
+            "Optional default max-turn override for built-in and user-store subagents; config.yaml custom agents and managed definitions keep their own value unless given a per-agent override (None = keep each definition's default)"
+        ),
     )
     max_total_per_run: int = Field(
         default=DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,

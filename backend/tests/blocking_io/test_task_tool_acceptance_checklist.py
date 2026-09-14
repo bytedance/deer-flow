@@ -105,7 +105,7 @@ def _patch_task_tool_boundary(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         task_tool_module,
         "get_subagent_config",
-        lambda _name: SubagentConfig(
+        lambda *_args, **_kwargs: SubagentConfig(
             name="general-purpose",
             description="General helper",
             system_prompt="Base system prompt",

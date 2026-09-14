@@ -334,8 +334,8 @@ class _DummyScheduledTask:
 
 
 def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: None)
-    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose"])
 
     result = _run_task_tool(
         runtime=None,
@@ -356,12 +356,12 @@ def test_task_tool_enforces_caller_subagent_snapshot(monkeypatch):
     runtime.config["metadata"]["allowed_subagents"] = ["planner"]
     captured = {}
 
-    def available(*, allowed_subagents):
+    def available(*, allowed_subagents, **_kwargs):
         captured["allowed"] = allowed_subagents
         return ["planner"]
 
     monkeypatch.setattr(task_tool_module, "get_available_subagent_names", available)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
 
     result = _run_task_tool(
         runtime=runtime,
@@ -380,8 +380,8 @@ def test_task_tool_enforces_caller_subagent_snapshot(monkeypatch):
 def test_task_tool_explains_when_caller_policy_permits_no_subagents(monkeypatch):
     runtime = _make_runtime()
     runtime.config["metadata"]["allowed_subagents"] = []
-    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, allowed_subagents: [])
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, allowed_subagents=None, **_kwargs: [])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
 
     result = _run_task_tool(
         runtime=runtime,
@@ -417,7 +417,7 @@ def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -447,7 +447,7 @@ def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -483,7 +483,7 @@ def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -559,7 +559,7 @@ def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -597,7 +597,7 @@ def test_task_tool_forwards_is_internal_true_to_executor(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -626,7 +626,7 @@ def test_task_tool_forwards_is_internal_false_to_executor(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -655,7 +655,7 @@ def test_task_tool_copies_attributes_to_executor(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -685,7 +685,7 @@ def test_task_tool_rejects_non_mapping_attributes(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
 
     runtime = _make_runtime()
@@ -695,8 +695,8 @@ def test_task_tool_rejects_non_mapping_attributes(monkeypatch):
 
 
 def test_task_tool_rejects_bash_subagent_when_host_bash_disabled(monkeypatch):
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
-    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose"])
     monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: False)
 
     result = _run_task_tool(
@@ -718,6 +718,7 @@ def test_task_tool_threads_runtime_app_config_to_subagent_dependencies(monkeypat
     app_config = object()
     config = _make_subagent_config(name="bash")
     runtime = _make_runtime(app_config=app_config)
+    runtime.context["user_id"] = "runtime-user"
     events = []
     captured = {}
 
@@ -729,12 +730,13 @@ def test_task_tool_threads_runtime_app_config_to_subagent_dependencies(monkeypat
             captured["prompt"] = prompt
             return task_id or "generated-task-id"
 
-    def fake_get_available_subagent_names(*, app_config):
+    def fake_get_available_subagent_names(*, app_config, user_id=None, **_kwargs):
         captured["names_app_config"] = app_config
+        captured["names_user_id"] = user_id
         return ["bash"]
 
-    def fake_get_subagent_config(name, *, app_config):
-        captured["config_lookup"] = (name, app_config)
+    def fake_get_subagent_config(name, *, app_config, user_id=None):
+        captured["config_lookup"] = (name, app_config, user_id)
         return config
 
     def fake_is_host_bash_allowed(config):
@@ -770,11 +772,61 @@ def test_task_tool_threads_runtime_app_config_to_subagent_dependencies(monkeypat
     message = _task_tool_message(output)
     assert message.content == "Task Succeeded. Result: done"
     assert captured["names_app_config"] is app_config
-    assert captured["config_lookup"] == ("bash", app_config)
+    assert captured["names_user_id"] == "runtime-user"
+    assert captured["config_lookup"] == ("bash", app_config, "runtime-user")
     assert captured["bash_gate_app_config"] is app_config
     assert captured["tools_kwargs"]["app_config"] is app_config
     assert captured["executor_kwargs"]["app_config"] is app_config
     assert captured["executor_kwargs"]["tools"] == ["tool-a"]
+
+
+def test_task_tool_uses_runtime_user_for_subagent_resolution(monkeypatch):
+    config = _make_subagent_config(name="api-agent")
+    runtime = _make_runtime()
+    runtime.context["user_id"] = "owner-1"
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    def available_names(**kwargs):
+        captured["available_kwargs"] = kwargs
+        return ["api-agent"]
+
+    def subagent_config(name, **kwargs):
+        captured["config_lookup"] = (name, kwargs)
+        return config
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", available_names)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", subagent_config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda *_args: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="api agent",
+        prompt="use my agent",
+        subagent_type="api-agent",
+        tool_call_id="tc-api-agent",
+    )
+
+    assert _task_tool_message(output).content == "Task Succeeded. Result: done"
+    assert captured["available_kwargs"]["user_id"] == "owner-1"
+    assert captured["config_lookup"][0] == "api-agent"
+    assert captured["config_lookup"][1]["user_id"] == "owner-1"
+    assert captured["executor_kwargs"]["user_id"] == "owner-1"
 
 
 def test_task_tool_emits_running_and_completed_events(monkeypatch):
@@ -823,7 +875,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
 
     def get_result(execution_id):
         polled_execution_ids.append(execution_id)
@@ -904,7 +956,7 @@ def test_task_tool_emits_cumulative_usage_on_running_event(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
@@ -938,7 +990,7 @@ def test_rejected_task_does_not_capture_parent_history(monkeypatch, context_mode
     if rejection == "caller-policy":
         runtime.config["metadata"]["allowed_subagents"] = []
     monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: [] if rejection == "caller-policy" else ["general-purpose"])
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: None if rejection == "unknown" else _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _, **kwargs: None if rejection == "unknown" else _make_subagent_config())
     monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: False)
     capture = MagicMock(wraps=task_tool_module.ParentContextSnapshot.from_state)
     monkeypatch.setattr(task_tool_module.ParentContextSnapshot, "from_state", capture)
@@ -977,7 +1029,7 @@ def test_task_tool_context_mode_captures_dispatch_time_history(monkeypatch, cont
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _, **kwargs: _make_subagent_config())
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda event: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
@@ -1032,7 +1084,7 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -1083,7 +1135,7 @@ def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -1126,7 +1178,7 @@ def test_task_tool_inherits_parent_skill_allowlist_for_default_subagent(monkeypa
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -1172,7 +1224,7 @@ def test_task_tool_intersects_parent_and_subagent_skill_allowlists(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -1211,7 +1263,7 @@ def test_task_tool_no_tool_groups_passes_none(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -1249,7 +1301,7 @@ def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -1288,7 +1340,7 @@ def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
 
     monkeypatch.setattr(
         task_tool_module,
@@ -1325,7 +1377,7 @@ def test_task_tool_returns_timed_out_message(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
 
     monkeypatch.setattr(
         task_tool_module,
@@ -1361,7 +1413,7 @@ def test_task_tool_surfaces_stop_reason_for_capped_run(monkeypatch):
     events = []
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -1403,7 +1455,7 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
 
     receipts = [
         {
@@ -1456,7 +1508,7 @@ def test_cleanup_called_on_completed(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
 
     monkeypatch.setattr(
         task_tool_module,
@@ -1496,7 +1548,7 @@ def test_cleanup_called_on_failed(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
 
     monkeypatch.setattr(
         task_tool_module,
@@ -1536,7 +1588,7 @@ def test_cleanup_called_on_timed_out(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
 
     monkeypatch.setattr(
         task_tool_module,
@@ -1593,7 +1645,7 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
 
     monkeypatch.setattr(
         task_tool_module,
@@ -1663,7 +1715,7 @@ def test_cleanup_scheduled_on_cancellation(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
 
     monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
@@ -1709,7 +1761,7 @@ def test_task_started_emit_failure_stops_subagent_reports_usage_and_cleans_up(mo
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: terminal_result)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", failing_emit)
@@ -1795,7 +1847,7 @@ def test_unexpected_poller_error_deferred_cleanup_survives_sync_invocation(monke
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: execution_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", flip_terminal_off_caller_thread)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", fail_on_status_emit)
@@ -1889,7 +1941,7 @@ def test_unexpected_error_with_failing_status_accessor_preserves_exception_and_a
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: execution_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", broken_accessor)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", ok_emit)
@@ -1971,7 +2023,7 @@ def test_unexpected_error_re_raised_promptly_via_short_grace(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: "exec-grace"}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=["partial"]))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", fail_on_second_emit)
@@ -2079,7 +2131,7 @@ def test_deferred_cleanup_drops_final_usage_when_parent_loop_closed(monkeypatch)
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: execution_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", flip_terminal_and_grow_usage_after_caller_teardown)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", fail_on_status_emit)
@@ -2218,7 +2270,7 @@ def test_deferred_final_usage_reported_on_parent_loop_with_real_recorder(monkeyp
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: execution_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", flip_terminal_and_grow_usage_from_deferred_thread)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", fail_on_status_emit)
@@ -2330,7 +2382,7 @@ async def test_unexpected_error_grace_wait_cancellation_is_honored(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: execution_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", fail_on_status_emit)
@@ -2419,7 +2471,7 @@ def test_execute_async_failure_leaves_no_background_residue(monkeypatch):
             },
         ),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda execution_id_arg: cleanup_calls.append(execution_id_arg))
     monkeypatch.setattr(
         task_tool_module,
@@ -2487,7 +2539,7 @@ def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_first_sleep)
     monkeypatch.setattr(task_tool_module, "run_on_isolated_subagent_loop", fake_run_on_isolated_subagent_loop)
@@ -2551,7 +2603,7 @@ def test_cancellation_wait_uses_subagent_polling_budget(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_then_continue)
@@ -2592,7 +2644,7 @@ def test_cancellation_calls_request_cancel(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: "execution-cancel"}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
 
     monkeypatch.setattr(
         task_tool_module,
@@ -2645,7 +2697,7 @@ def test_task_tool_returns_cancelled_message(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
 
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
@@ -2682,7 +2734,7 @@ def test_task_tool_emits_completed_metadata(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
@@ -2716,7 +2768,7 @@ def test_task_tool_emits_disappeared_task_metadata(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: None)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
@@ -2748,7 +2800,7 @@ def test_task_tool_bounds_large_result_metadata(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result=huge))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
@@ -2819,7 +2871,7 @@ def test_cancellation_reports_subagent_usage(monkeypatch):
         "SubagentExecutor",
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
     )
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_third_sleep)
@@ -2875,7 +2927,7 @@ def test_terminal_events_include_usage(monkeypatch, status, expected_type):
     result = _make_result(status, result="ok" if status == FakeSubagentStatus.COMPLETED else None, error="err" if status != FakeSubagentStatus.COMPLETED else None, token_usage_records=records)
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", fake_emit_custom_event)
@@ -2911,7 +2963,7 @@ def test_terminal_event_usage_none_when_no_records(monkeypatch):
     result = _make_result(FakeSubagentStatus.COMPLETED, result="done", token_usage_records=[])
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
@@ -3005,7 +3057,7 @@ def _run_completed_task_tool(monkeypatch, *, result_text: str, tool_receipts: li
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -3054,7 +3106,7 @@ def _run_completed_task_tool_with_criteria(monkeypatch, *, criteria: list[str], 
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -3114,7 +3166,7 @@ def test_task_tool_acceptance_check_failure_is_isolated(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -3187,7 +3239,7 @@ def test_task_tool_failed_carries_receipts_without_verdict(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
@@ -3223,7 +3275,7 @@ def _capture_executor_call(monkeypatch, **call_kwargs):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
