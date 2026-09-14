@@ -493,3 +493,35 @@ def test_unknown_endpoint_with_junk_cookie_rejected(client):
     client.cookies.set("access_token", "tok")
     res = client.get("/api/future-endpoint")
     assert res.status_code == 401
+
+
+# ── Method-scoped public prefixes (#5078 review P3) ────────────────────────
+
+
+def test_shares_prefix_public_for_get():
+    assert _is_public("/api/shares/dfs_token", "GET") is True
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+def test_shares_prefix_protected_for_other_methods(method: str):
+    """The shares exemption is keyed on the method, not on which route
+    happens to be mounted: any future verb under the prefix stays behind
+    the 401 gate instead of silently becoming anonymous. HEAD included —
+    FastAPI serves no implicit HEAD on the mounted GET route, so nothing
+    today justifies exempting it."""
+    assert _is_public("/api/shares/dfs_token", method) is False
+
+
+def test_shares_prefix_trailing_slash_keeps_method_gating():
+    assert _is_public("/api/shares/", "GET") is True
+    assert _is_public("/api/shares/", "POST") is False
+
+
+def test_webhooks_prefix_stays_method_blind():
+    """Signature-authenticated webhook mounts keep their any-method
+    exemption; only the shares prefix is method-scoped."""
+    for method in ("GET", "POST", "PUT", "DELETE"):
+        assert _is_public("/api/webhooks/github", method) is True

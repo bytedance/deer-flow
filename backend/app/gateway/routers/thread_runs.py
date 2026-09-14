@@ -17,6 +17,7 @@ import logging
 import re
 import uuid
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
@@ -129,6 +130,48 @@ async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
     if "error" in row:
         record.error = row.get("error")
     return record
+
+
+class _RawMessageScanLimitExceeded(RuntimeError):
+    """Raised after one sentinel row proves a raw message scan is oversized."""
+
+    def __init__(self, scanned_rows: int, limit: int) -> None:
+        super().__init__(f"raw message scan exceeded its {limit}-row limit")
+        self.scanned_rows = scanned_rows
+        self.limit = limit
+
+
+@dataclass(slots=True)
+class _RawMessageScanBudget:
+    """Shared raw-row budget for one logical scan across canonical pages."""
+
+    limit: int
+    scanned_rows: int = 0
+    # Highest raw seq observed before visibility filtering. The share
+    # snapshot's audit boundary follows raw consumption — hidden rows the
+    # pager discards still advance the scan.
+    max_seq: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.limit < 0:
+            raise ValueError("raw message scan limit must be non-negative")
+
+    def next_batch_size(self, batch_size: int) -> int:
+        # One sentinel row beyond the remaining budget distinguishes an exact,
+        # complete scan from a genuinely oversized one without walking the
+        # rest of a hidden-row-heavy thread.
+        return min(batch_size, self.limit - self.scanned_rows + 1)
+
+    def consume(self, count: int) -> None:
+        self.scanned_rows += count
+        if self.scanned_rows > self.limit:
+            raise _RawMessageScanLimitExceeded(self.scanned_rows, self.limit)
+
+    def observe(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            seq = row.get("seq")
+            if isinstance(seq, int) and (self.max_seq is None or seq > self.max_seq):
+                self.max_seq = seq
 
 
 def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
@@ -1409,6 +1452,7 @@ async def _scan_thread_message_page(
     before_seq: int | None,
     request: Request,
     user_id: str | None,
+    raw_scan_budget: _RawMessageScanBudget | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Select the newest ``limit + 1`` page-eligible rows before a cursor."""
     return await read_visible_message_page(
@@ -1419,6 +1463,7 @@ async def _scan_thread_message_page(
         before_seq=before_seq,
         user_id=user_id,
         batch_size=THREAD_MESSAGE_PAGE_SCAN_BATCH,
+        raw_scan_budget=raw_scan_budget,
     )
 
 

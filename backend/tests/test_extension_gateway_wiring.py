@@ -665,6 +665,7 @@ def test_extension_public_paths_track_auth_middleware_public_paths():
     from app.gateway.auth_middleware import (
         _PUBLIC_EXACT_PATHS,
         _PUBLIC_PATH_PREFIXES,
+        _PUBLIC_SAFE_METHOD_PATH_PREFIXES,
         _is_public,
     )
     from deerflow.extensions.gateway import (
@@ -672,7 +673,10 @@ def test_extension_public_paths_track_auth_middleware_public_paths():
         _HOST_PUBLIC_PATH_PREFIXES,
     )
 
-    assert _HOST_PUBLIC_PATH_PREFIXES == _PUBLIC_PATH_PREFIXES
+    # The host reserve is the union of the always-public prefixes and the
+    # method-scoped ones: even a GET-scoped public prefix names a namespace
+    # the host keeps for itself, for every method.
+    assert _HOST_PUBLIC_PATH_PREFIXES == _PUBLIC_PATH_PREFIXES + tuple(prefix for _, prefix in _PUBLIC_SAFE_METHOD_PATH_PREFIXES)
     assert _HOST_PUBLIC_EXACT_PATHS == _PUBLIC_EXACT_PATHS
     assert all(_is_public(f"{path}//") for path in _HOST_PUBLIC_EXACT_PATHS)
 

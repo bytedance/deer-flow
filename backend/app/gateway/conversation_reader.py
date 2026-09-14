@@ -9,13 +9,27 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from deerflow.runtime.events.store.base import RunEventStore
     from deerflow.runtime.runs.manager import RunManager
 
 logger = logging.getLogger(__name__)
+
+
+class RawScanBudget(Protocol):
+    """Structural interface of the router's raw-scan budget: it bounds the
+    raw rows a single transcript walk may touch (one sentinel row proves an
+    over-limit history without walking the remainder), observing every row
+    at the consumption point — before visibility filtering — and capping
+    each batch to the remaining allowance."""
+
+    def next_batch_size(self, batch_size: int) -> int: ...
+
+    def consume(self, rows: int) -> None: ...
+
+    def observe(self, rows: list[dict[str, Any]]) -> None: ...
 
 
 async def read_visible_message_page(
@@ -28,6 +42,7 @@ async def read_visible_message_page(
     before_seq: int | None = None,
     message_filter: Callable[[dict[str, Any]], bool] | None = None,
     batch_size: int = 201,
+    raw_scan_budget: RawScanBudget | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Read a backward page, filtering before counting rows and looking ahead.
 
@@ -49,6 +64,7 @@ async def read_visible_message_page(
         include_extra=True,
         batch_size=batch_size,
         message_filter=message_filter,
+        raw_scan_budget=raw_scan_budget,
     )
 
 
@@ -85,6 +101,7 @@ async def scan_visible_thread_messages(
     include_extra: bool,
     batch_size: int,
     message_filter: Callable[[dict[str, Any]], bool] | None = None,
+    raw_scan_budget: RawScanBudget | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Scan raw message rows until ``limit`` visible rows survive filtering."""
     needed = limit + 1 if include_extra else limit
@@ -93,15 +110,19 @@ async def scan_visible_thread_messages(
         visible: list[dict[str, Any]] = []
         scan_after = after_seq
         while len(visible) < needed:
+            scan_batch_size = raw_scan_budget.next_batch_size(batch_size) if raw_scan_budget is not None else batch_size
             raw = await event_store.list_messages(
                 thread_id,
-                limit=batch_size,
+                limit=scan_batch_size,
                 after_seq=scan_after,
                 user_id=user_id,
             )
             if not raw:
                 break
             _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=None, scan_after=scan_after)
+            if raw_scan_budget is not None:
+                raw_scan_budget.consume(len(raw))
+                raw_scan_budget.observe(raw)
             reached_before_bound = False
             for row in raw:
                 if before_seq is not None and row["seq"] >= before_seq:
@@ -116,7 +137,7 @@ async def scan_visible_thread_messages(
             if next_scan_after <= scan_after:
                 _raise_non_advancing_message_scan(thread_id=thread_id, scan_before=None, scan_after=scan_after, next_cursor=next_scan_after, row_count=len(raw))
             scan_after = next_scan_after
-            if reached_before_bound or len(raw) < batch_size:
+            if reached_before_bound or len(raw) < scan_batch_size:
                 break
         has_more = len(visible) > limit
         return visible[:limit], has_more
@@ -124,15 +145,19 @@ async def scan_visible_thread_messages(
     visible_desc: list[dict[str, Any]] = []
     scan_before = before_seq
     while len(visible_desc) < needed:
+        scan_batch_size = raw_scan_budget.next_batch_size(batch_size) if raw_scan_budget is not None else batch_size
         raw = await event_store.list_messages(
             thread_id,
-            limit=batch_size,
+            limit=scan_batch_size,
             before_seq=scan_before,
             user_id=user_id,
         )
         if not raw:
             break
         _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=scan_before, scan_after=None)
+        if raw_scan_budget is not None:
+            raw_scan_budget.consume(len(raw))
+            raw_scan_budget.observe(raw)
         for row in reversed(raw):
             if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids or (message_filter is not None and not message_filter(row)):
                 continue
@@ -143,7 +168,7 @@ async def scan_visible_thread_messages(
         if scan_before is not None and next_scan_before >= scan_before:
             _raise_non_advancing_message_scan(thread_id=thread_id, scan_before=scan_before, scan_after=None, next_cursor=next_scan_before, row_count=len(raw))
         scan_before = next_scan_before
-        if len(raw) < batch_size:
+        if len(raw) < scan_batch_size:
             break
     has_more = len(visible_desc) > limit
     return list(reversed(visible_desc[:limit])), has_more

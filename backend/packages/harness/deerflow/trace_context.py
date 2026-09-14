@@ -42,6 +42,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from typing import Final
 
+from deerflow.redaction import contains_share_token
+
 TRACE_ID_HEADER: Final[str] = "X-Trace-Id"
 DEERFLOW_TRACE_METADATA_KEY: Final[str] = "deerflow_trace_id"
 _MAX_TRACE_ID_LENGTH: Final[int] = 512
@@ -73,6 +75,11 @@ def normalize_trace_id(value: object) -> str | None:
     if not trace_id or len(trace_id) > _MAX_TRACE_ID_LENGTH:
         return None
     if any(ord(ch) < 32 or ord(ch) > 126 for ch in trace_id):
+        return None
+    # A caller-controlled trace id is propagated to logs, response headers,
+    # and tracing metadata. Reject share bearer tokens here so X-Trace-Id or
+    # run metadata cannot become a structured telemetry bypass.
+    if contains_share_token(trace_id):
         return None
     return trace_id
 
