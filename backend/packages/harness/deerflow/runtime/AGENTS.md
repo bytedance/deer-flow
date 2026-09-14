@@ -135,6 +135,13 @@ their per-execution parent-loop proxy, preserving separate events when two
 different delegated agents promote the same tool. The active catalog is fixed
 for one graph execution, so the claim needs no persisted catalog hash.
 
+**JSONL record boundaries** (`runtime/events/store/jsonl.py`): thread reads,
+run reads, and sequence recovery split on physical newlines. Do not use
+`str.splitlines()`: U+0085/U+2028/U+2029 inside valid JSON strings must remain
+part of the record. Preserve existing UTF-8 files and the writer format.
+`tests/test_jsonl_event_store_unicode.py` covers Unicode values, reopening,
+idempotent writes, LF/CRLF, blank lines, and malformed records.
+
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
 contract. Its default implementation walks `list_messages()` backward in
