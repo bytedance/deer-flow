@@ -882,6 +882,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
     from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
+    from deerflow.tools.conversation import CONVERSATION_READER_CONTEXT_KEY
 
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
@@ -1133,7 +1134,13 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Default lead agent (unchanged behavior)
-    raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
+    raw_tools = get_available_tools(
+        model_name=model_name,
+        groups=agent_config.tool_groups if agent_config else None,
+        subagent_enabled=subagent_enabled,
+        include_conversation_reader=callable(cfg.get(CONVERSATION_READER_CONTEXT_KEY)) and not bool(cfg.get("is_subagent")),
+        app_config=resolved_app_config,
+    )
     configured_tools = raw_tools + extra_tools
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]

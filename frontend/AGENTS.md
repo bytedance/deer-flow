@@ -172,3 +172,12 @@ Custom skill export is admin-only and disabled in static demos. The lazy
 or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob download;
 HTTP 409 requires explicit preview refresh. Keep file lists paginated and diagnostics
 localized. Browser handoff does not prove the file was saved to disk.
+
+Sidebar rows request deletion through `ThreadDeleteDialogProvider`, hosted in
+`WorkspaceSidebar` outside the virtualized flat/project lists. Keep the selected
+thread snapshot and retry UI alive when a partial deletion removes its row.
+Focus Cancel on open and after a failed deletion has re-enabled the actions;
+block dismissal while deletion is pending. Show the error message when available,
+with a localized fallback, and log the rejection for debugging. The shared
+delete helper accepts remote 404 (not 403) before retrying local cleanup, and
+`onDeleted` runs only after both deletion steps succeed.

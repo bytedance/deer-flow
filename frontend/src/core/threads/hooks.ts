@@ -3422,7 +3422,13 @@ async function deleteThreadEverywhere(
   apiClient: ThreadDeleteClient,
   threadId: string,
 ) {
-  await apiClient.threads.delete(threadId);
+  try {
+    await apiClient.threads.delete(threadId);
+  } catch (error) {
+    // A previous attempt may have deleted the remote thread before local
+    // cleanup failed. Only 404 is success here; authorization failures are not.
+    if (getHttpStatus(error) !== 404) throw error;
+  }
   await deleteLocalThreadData(threadId);
 }
 
@@ -3517,18 +3523,17 @@ export function useDeleteThread() {
   return useMutation({
     mutationFn: async ({
       threadId,
-      onRemoteDeleted,
+      onDeleted,
     }: {
       threadId: string;
-      onRemoteDeleted?: () => void;
+      onDeleted?: () => void;
     }) => {
       const deletedSidecarThreadIds = await deleteSidecarThreadsForParent(
         apiClient,
         threadId,
       );
-      await apiClient.threads.delete(threadId);
-      onRemoteDeleted?.();
-      await deleteLocalThreadData(threadId);
+      await deleteThreadEverywhere(apiClient, threadId);
+      onDeleted?.();
       return deletedSidecarThreadIds;
     },
     onSuccess(deletedSidecarThreadIds, { threadId }) {

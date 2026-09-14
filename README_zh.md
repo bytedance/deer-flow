@@ -808,6 +808,20 @@ client.clear_goal("thread-1")
 
 所有返回 dict 的方法都会在 CI 中通过 Gateway 的 Pydantic 响应模型校验（`TestGatewayConformance`），以确保内嵌 client 始终和 HTTP API schema 保持同步。完整 API 说明见 `backend/packages/harness/deerflow/client.py`。
 
+## 项目成员归属 (Project Membership)
+
+会话在创建时（选择了某个 project）或之后通过移动菜单加入一个 project。Run
+永远不会修改成员归属：提交消息不能给会话指派或重新指派 project。将会话移出
+某个 project 后，它会保持未指派状态，直到被再次显式移动。
+
+移动会话时会同时刷新其头部归属信息和 project 列表，即使此前的元数据请求仍
+在途中也是如此。
+
+Projects 需要当前版本的数据库表和列。如果数据库已打上旧 0018 迁移序列的
+`0019_thread_incarnations` 版本标记而缺少 project schema，本次构建会在启动
+时拒绝该数据库。针对这类数据库启动此构建前，请先遵循
+[离线数据库恢复流程](docs/database-forward-revision-recovery.md)。
+
 ## 定时任务 (Scheduled Tasks)
 
 DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled-task）MVP。
@@ -825,6 +839,12 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
 - 按每页 50 条浏览执行历史；历史页暂停自动刷新，可随时返回最新记录。 仅在读取成功后显示条数，加载中或失败不会误显示为零条。
+
+**通过 API 筛选执行历史**
+
+排查失败记录时，无需先下载所有成功记录。已认证且具有 `threads:read` 权限的客户端，可以针对自己的任务请求 `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0`。可选的 `status` 支持 `queued`、`launching`、`running`、`success`、`failed`、`skipped`、`interrupted`；这些是执行记录的状态，`completed` 等任务状态会被拒绝（422）。
+
+筛选先于分页执行。`limit`（1–200，默认 50）和 `offset`（非负整数，默认 0）作用于匹配记录，按创建时间、ID 依次降序排列。不传 `status` 时保留原有的混合历史数组，无匹配项返回 `[]`。此 API 不改变任务执行行为，workspace 历史界面仍展示未筛选的记录。
 
 当前 MVP 限制：
 

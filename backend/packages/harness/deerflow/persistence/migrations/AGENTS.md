@@ -22,7 +22,9 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 **Rolling forward compatibility**: the local chain is
 `0018_oauth_identity_pg_partial` → `0019_projects` →
 `0020_threads_meta_project_id` → `0021_batch_acceptance` →
-`0019_thread_incarnations` → `0022_scheduled_occurrence_seq` (current head).
+`0019_thread_incarnations` → `0022_scheduled_occurrence_seq` →
+`0023_user_preferences` (current head). The preference revision adds a separate
+owner/key table with a cascading users foreign key and does not alter users.
 The incarnation revision deliberately retains the exact id audited by the
 rollback-floor binary; Alembic orders revisions by `down_revision`, not by the
 numeric prefix.
