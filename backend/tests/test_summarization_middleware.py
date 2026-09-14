@@ -676,6 +676,37 @@ def test_factory_skip_memory_flush_omits_hook(monkeypatch):
     assert middleware._before_summarization_hooks == []
 
 
+def test_memory_opt_out_compaction_never_queues_durable_memory(monkeypatch):
+    """A real compaction remains memory-silent when the caller opts out."""
+    manager = MagicMock()
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.summarization_middleware.create_chat_model",
+        lambda **_kw: _StaticChatModel(),
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.summarization_hook.get_memory_config",
+        lambda: MemoryConfig(enabled=True),
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.summarization_hook.get_memory_manager",
+        lambda: manager,
+    )
+    app_config = SimpleNamespace(
+        summarization=SummarizationConfig(enabled=True),
+        memory=MemoryConfig(enabled=True),
+    )
+
+    middleware = create_summarization_middleware(
+        app_config=app_config,
+        keep=("messages", 2),
+        skip_memory_flush=True,
+    )
+
+    assert middleware is not None
+    assert middleware.compact_state({"messages": _messages()}, _runtime(agent_name="stateless-worker"), force=True) is not None
+    manager.add_nowait.assert_not_called()
+
+
 def test_new_messages_block_escapes_breakout() -> None:
     """A user turn that closes ``</new_messages>`` and forges an authority
     section must be neutralized before it lands in the summary prompt.
