@@ -346,6 +346,39 @@ async def test_goal_worker_stands_down_after_the_run_hit_its_token_budget(monkey
 
 
 @pytest.mark.asyncio
+async def test_goal_worker_clears_a_satisfied_goal_even_after_the_run_hit_its_token_budget(monkeypatch):
+    checkpointer = InMemorySaver()
+    thread_id = "token-capped-done-goal-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    bridge = _CollectingBridge()
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        return GoalEvaluation(
+            satisfied=True,
+            blocker="none",
+            reason="The visible conversation says the task is done.",
+            evidence_summary="Done.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-capped-done",
+        model_name="test-model",
+        app_config=None,
+        run_stop_reason="token_capped",
+    )
+
+    # The satisfied branch runs before the token-cap stand-down: the goal is cleared, not stood down.
+    assert continuation is None
+    assert await read_thread_goal(checkpointer, thread_id) is None
+
+
+@pytest.mark.asyncio
 async def test_goal_worker_stands_down_when_no_progress_repeats(monkeypatch):
     checkpointer = InMemorySaver()
     thread_id = "no-progress-goal-thread"
