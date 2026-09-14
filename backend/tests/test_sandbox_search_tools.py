@@ -2,6 +2,9 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+from support.symlinks import symlink_or_skip
+
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.config.paths import Paths
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
@@ -119,6 +122,40 @@ def test_grep_tool_accepts_single_file_path(tmp_path, monkeypatch) -> None:
     assert "/mnt/user-data/uploads/report.md:1: Revenue grew 20%" in result
     assert "Path is not a directory" not in result
     assert str(uploads) not in result
+
+
+def _remote_search_runtime():
+    return SimpleNamespace(state={"sandbox": {"sandbox_id": "remote-1"}}, context={"thread_id": "thread-1"})
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (glob_tool, {"pattern": "src/*.py"}),
+        (grep_tool, {"pattern": "needle", "glob": "src/*.py"}),
+    ],
+)
+def test_search_tools_do_not_report_a_truncated_empty_result_as_no_matches(monkeypatch, tool, arguments) -> None:
+    """A remote search whose output hit its cap before any line survived the glob
+    filter has no results to show, but it has not proven there are none."""
+    sandbox = SimpleNamespace(glob=lambda *args, **kwargs: ([], True), grep=lambda *args, **kwargs: ([], True))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+
+    result = tool.func(runtime=_remote_search_runtime(), description="scoped search", path="/mnt/user-data/workspace", **arguments)
+
+    assert not result.startswith(("No files matched", "No matches found"))
+    assert "incomplete" in result
+    assert "/mnt/user-data/workspace" in result
+
+
+@pytest.mark.parametrize(("tool", "arguments", "expected"), [(glob_tool, {"pattern": "*.py"}, "No files matched under"), (grep_tool, {"pattern": "needle"}, "No matches found under")])
+def test_search_tools_keep_the_no_match_message_for_a_complete_empty_result(monkeypatch, tool, arguments, expected) -> None:
+    sandbox = SimpleNamespace(glob=lambda *args, **kwargs: ([], False), grep=lambda *args, **kwargs: ([], False))
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+
+    result = tool.func(runtime=_remote_search_runtime(), description="search", path="/mnt/user-data/workspace", **arguments)
+
+    assert result == f"{expected} /mnt/user-data/workspace"
 
 
 def test_grep_tool_truncates_results(tmp_path, monkeypatch) -> None:
@@ -358,7 +395,7 @@ def test_find_grep_matches_skips_symlink_outside_root(tmp_path) -> None:
     workspace.mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_text("TODO outside\n", encoding="utf-8")
-    (workspace / "outside-link.txt").symlink_to(outside)
+    symlink_or_skip(workspace / "outside-link.txt", outside)
 
     matches, truncated = find_grep_matches(workspace, "TODO")
 

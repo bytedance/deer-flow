@@ -34,6 +34,63 @@ def _open_binary(path: str):
     return open(path, "rb")
 
 
+# The WeCom bot protocol caps message content at 20480 UTF-8 bytes, for both
+# passive stream replies and active markdown pushes.
+_WECOM_MAX_CONTENT_BYTES = 20480
+_TRUNCATION_MARKER = "\n\n... (truncated)"
+# One push must not flood the chat with an unbounded run of messages: keep the
+# first few chunks and collapse the rest into one truncated tail.
+_WECOM_MAX_CHUNK_BATCH = 10
+
+
+def _clip_to_byte_limit(text: str, limit: int) -> str:
+    """Clip text to a UTF-8 byte budget, never splitting a character."""
+    if len(text.encode("utf-8")) <= limit:
+        return text
+    budget = limit - len(_TRUNCATION_MARKER.encode("utf-8"))
+    clipped = text.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+    return clipped + _TRUNCATION_MARKER
+
+
+def _split_for_byte_limit(text: str, limit: int) -> list[str]:
+    """Split text into chunks within the UTF-8 byte limit.
+
+    Prefers newline boundaries so markdown structure survives the split.
+    The batch cap applies inside the loop, so a pathological text is never
+    fully split just to be discarded.
+    """
+    if len(text.encode("utf-8")) <= limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining.encode("utf-8")) > limit:
+        if len(chunks) >= _WECOM_MAX_CHUNK_BATCH - 1:
+            logger.warning(
+                "WeCom push of %d bytes exceeds %d messages, capping the batch",
+                len(text.encode("utf-8")),
+                _WECOM_MAX_CHUNK_BATCH,
+            )
+            chunks.append(_clip_to_byte_limit(remaining, limit))
+            return chunks
+        window = remaining.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+        cut = window.rfind("\n")
+        if cut <= 0:
+            cut = len(window)
+        else:
+            # Keep the delimiter on this chunk's tail: the sequential messages
+            # must round-trip to the original text exactly.
+            cut += 1
+        if cut == 0:
+            # limit is narrower than one whole character; take it anyway so
+            # the loop always advances.
+            cut = 1
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
 class WeComChannel(Channel):
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="wecom", bus=bus, config=config)
@@ -45,6 +102,9 @@ class WeComChannel(Channel):
         self._lifecycle_lock = asyncio.Lock()
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
+        self._ws_send_locks: dict[str, asyncio.Lock] = {}
+        self._ws_send_lock_users: dict[str, int] = {}
+        self._ws_send_locks_guard = asyncio.Lock()
         self._working_message = "Working on it..."
 
     @property
@@ -462,19 +522,40 @@ class WeComChannel(Channel):
                 return
 
             await self._send_with_retry(
-                lambda: self._ws_client.reply_stream(frame, stream_id, msg.text, bool(msg.is_final)),
+                lambda: self._ws_client.reply_stream(frame, stream_id, _clip_to_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES), bool(msg.is_final)),
                 max_retries=_max_retries,
                 log_prefix="[WeCom]",
                 operation_name="stream send",
             )
             return
 
-        body = {"msgtype": "markdown", "markdown": {"content": msg.text}}
-        await self._send_with_retry(
-            lambda: self._ws_client.send_message(msg.chat_id, body),
-            max_retries=_max_retries,
-            log_prefix="[WeCom]",
-        )
+        # No replyable frame (e.g. a scheduled-task push): a stream reply is one
+        # stream per reply and cannot split mid-way, but this path can, so the
+        # full text goes out as sequential markdown messages. Each send awaits,
+        # so hold a per-chat lock across the whole batch: manager workers run
+        # concurrently, and two long pushes to the same chat would otherwise
+        # interleave chunks (A1, B1, A2, B2) and break the sequential contract.
+        async with self._ws_send_locks_guard:
+            lock = self._ws_send_locks.setdefault(msg.chat_id, asyncio.Lock())
+            self._ws_send_lock_users[msg.chat_id] = self._ws_send_lock_users.get(msg.chat_id, 0) + 1
+        try:
+            async with lock:
+                for chunk in _split_for_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES):
+                    body = {"msgtype": "markdown", "markdown": {"content": chunk}}
+                    await self._send_with_retry(
+                        lambda body=body: self._ws_client.send_message(msg.chat_id, body),
+                        max_retries=_max_retries,
+                        log_prefix="[WeCom]",
+                    )
+        finally:
+            async with self._ws_send_locks_guard:
+                self._ws_send_lock_users[msg.chat_id] -= 1
+                # Reclaim only while nobody else is queued on this chat's lock;
+                # the guard serializes the check so a waiter can never end up
+                # holding a fresh lock for a chat whose batch is mid-flight.
+                if self._ws_send_lock_users[msg.chat_id] == 0:
+                    self._ws_send_lock_users.pop(msg.chat_id, None)
+                    self._ws_send_locks.pop(msg.chat_id, None)
 
     async def _upload_media_ws(
         self,

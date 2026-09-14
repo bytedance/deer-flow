@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import case, select, text, update
+from sqlalchemy import case, column, select, table, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -78,6 +79,7 @@ class ThreadMetaRepository(ThreadMetaStore):
                     raise ProjectNotAssignableError(project_id)
             row = ThreadMetaRow(
                 thread_id=thread_id,
+                incarnation=uuid.uuid4().hex,
                 assistant_id=assistant_id,
                 user_id=resolved_user_id,
                 display_name=display_name,
@@ -91,6 +93,24 @@ class ThreadMetaRepository(ThreadMetaStore):
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
+
+    async def claim_unowned(self, thread_id: str, owner: str) -> bool:
+        claim_target = table(
+            ThreadMetaRow.__tablename__,
+            column(ThreadMetaRow.thread_id.key),
+            column(ThreadMetaRow.user_id.key),
+        )
+        async with self._sf() as session:
+            result = await session.execute(
+                update(claim_target)
+                .where(
+                    claim_target.c.thread_id == thread_id,
+                    claim_target.c.user_id.is_(None),
+                )
+                .values(user_id=owner)
+            )
+            await session.commit()
+            return result.rowcount > 0
 
     async def set_project(
         self,
@@ -357,9 +377,15 @@ class ThreadMetaRepository(ThreadMetaStore):
         """Move a thread metadata row to ``owner_user_id``."""
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_owner")
         async with self._sf() as session:
-            if not await self._check_ownership(session, thread_id, resolved_user_id):
+            if session.get_bind().dialect.name == "sqlite":
+                await session.execute(text("BEGIN IMMEDIATE"))
+                row = await session.get(ThreadMetaRow, thread_id)
+            else:
+                row = (await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())).scalar_one_or_none()
+            if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
                 return
-            await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(user_id=owner_user_id, updated_at=datetime.now(UTC)))
+            row.user_id = owner_user_id
+            row.updated_at = datetime.now(UTC)
             await session.commit()
 
     async def delete(
@@ -370,10 +396,12 @@ class ThreadMetaRepository(ThreadMetaStore):
     ) -> None:
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.delete")
         async with self._sf() as session:
-            row = await session.get(ThreadMetaRow, thread_id)
-            if row is None:
-                return
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
+            if session.get_bind().dialect.name == "sqlite":
+                await session.execute(text("BEGIN IMMEDIATE"))
+                row = await session.get(ThreadMetaRow, thread_id)
+            else:
+                row = (await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())).scalar_one_or_none()
+            if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
                 return
             await session.delete(row)
             await session.commit()

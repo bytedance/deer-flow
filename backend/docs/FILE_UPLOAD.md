@@ -137,7 +137,8 @@ To work with these files:
 ```
 
 以前轮次上传的文件不会在每次请求中重复注入。Agent 可按需调用
-`list_uploaded_files` 查询历史上传；如果已知文件名，也可直接使用
+`list_uploaded_files` 查询历史上传（可选 `query` 按文件名子串过滤、
+`extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。如果已知文件名，也可直接使用
 `read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
 
 ### 使用上传的文件
@@ -248,7 +249,7 @@ backend/.deer-flow/threads/
 2. **Uploads Middleware** (`packages/harness/deerflow/agents/middlewares/uploads_middleware.py`)
    - 读取当前消息的 `additional_kwargs.files`
    - 在 Agent 请求前生成并注入 `<current_uploads>` 文件上下文
-   - 历史上传由 `list_uploaded_files` 按需查询，不会每轮自动注入
+   - 历史上传由 `list_uploaded_files` 按需查询（可按文件名/扩展名过滤后再截断），不会每轮自动注入
 
 3. **Nginx 配置** (`nginx.conf`)
    - 路由上传请求到 Gateway API

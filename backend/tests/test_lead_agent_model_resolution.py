@@ -130,6 +130,41 @@ def test_make_lead_agent_signature_matches_langgraph_server_factory_abi():
     assert list(inspect.signature(lead_agent_module.make_lead_agent).parameters) == ["config"]
 
 
+@pytest.mark.parametrize(
+    ("reader", "is_subagent", "is_bootstrap", "expected"),
+    [
+        (None, False, False, False),
+        ({"allowed_ids": ["other-thread"]}, False, False, False),
+        (lambda: None, False, False, True),
+        (lambda: None, True, False, False),
+        (lambda: None, False, True, False),
+    ],
+)
+def test_lead_conversation_tool_requires_callable_host_reader(monkeypatch, reader, is_subagent, is_bootstrap, expected):
+    import deerflow.tools as tools_module
+
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    get_available_tools = MagicMock(return_value=[])
+    monkeypatch.setattr(tools_module, "get_available_tools", get_available_tools)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "system prompt")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+
+    lead_agent_module._make_lead_agent(
+        {"context": {"__conversation_reader": reader, "is_subagent": is_subagent, "is_bootstrap": is_bootstrap}},
+        app_config=app_config,
+    )
+
+    kwargs = get_available_tools.call_args.kwargs
+    if is_bootstrap:
+        assert "include_conversation_reader" not in kwargs
+    else:
+        assert kwargs["include_conversation_reader"] is expected
+
+
 def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
     captured: dict[str, object] = {}
@@ -285,6 +320,45 @@ def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
         "app_config": app_config,
     }
     assert result["model"] is not None
+
+
+@pytest.mark.parametrize(
+    ("runtime_options", "expected_effort"),
+    [
+        pytest.param({}, "high", id="request-leaves-effort-unset"),
+        pytest.param({"reasoning_effort": "low"}, "low", id="request-chooses-effort"),
+    ],
+)
+def test_internal_make_lead_agent_builds_model_whose_profile_sets_reasoning_effort(monkeypatch, runtime_options, expected_effort):
+    """The regular lead-agent build forwards ``reasoning_effort`` even when it is
+    None, so the real factory must merge it with a profile-level value instead of
+    handing the constructor the keyword twice (which raised ``TypeError``)."""
+    model = ModelConfig(
+        name="effort-model",
+        display_name="effort-model",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="effort-model",
+        api_key="test-key",
+        reasoning_effort="high",
+        supports_thinking=False,
+        supports_reasoning_effort=True,
+        supports_vision=False,
+    )
+    app_config = _make_app_config([model])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module._make_lead_agent(
+        {"configurable": {"model_name": "effort-model", **runtime_options}},
+        app_config=app_config,
+    )
+
+    assert result["model"].reasoning_effort == expected_effort
 
 
 @pytest.mark.parametrize("is_bootstrap", [False, True])
@@ -540,7 +614,7 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
         "reasoning_effort": "high",
         "app_config": app_config,
     }
-    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, app_config=app_config)
+    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, include_conversation_reader=False, app_config=app_config)
     assert result["model"] is not None
 
 
@@ -1369,6 +1443,7 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch):
         model_name="agent-model",
         groups=None,
         subagent_enabled=False,
+        include_conversation_reader=False,
         app_config=app_config,
     )
     assert config["context"]["subagent_enabled"] is False

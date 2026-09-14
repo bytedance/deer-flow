@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
+
+MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60
 
 
 def validate_timezone(timezone_name: str) -> str:
@@ -19,6 +21,13 @@ def normalize_cron_expression(expr: str) -> str:
     if len(parts) != 5:
         raise ValueError("Cron expression must contain exactly 5 fields")
     return " ".join(parts)
+
+
+def parse_interval_seconds(schedule_spec: dict[str, object]) -> int:
+    raw = schedule_spec.get("every_seconds")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError("interval schedule requires every_seconds as a positive integer")
+    return raw
 
 
 def next_run_at(
@@ -55,5 +64,9 @@ def next_run_at(
         if next_local.tzinfo is None:
             next_local = next_local.replace(tzinfo=zone)
         return next_local.astimezone(UTC)
+
+    if schedule_type == "interval":
+        every_seconds = parse_interval_seconds(schedule_spec)
+        return now.astimezone(UTC) + timedelta(seconds=every_seconds)
 
     raise ValueError(f"Unsupported schedule_type: {schedule_type}")

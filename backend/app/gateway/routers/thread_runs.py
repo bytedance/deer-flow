@@ -38,16 +38,26 @@ from app.gateway.checkpoint_lineage import (
     is_duration_only_checkpoint,
 )
 from app.gateway.context_usage import build_context_usage
+from app.gateway.conversation_reader import (
+    default_history_hidden_run_ids as _default_history_hidden_run_ids,
+)
+from app.gateway.conversation_reader import (
+    read_visible_message_page,
+)
+from app.gateway.conversation_reader import (
+    scan_visible_thread_messages as _scan_visible_thread_messages,
+)
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import abuild_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
+from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
@@ -229,6 +239,13 @@ class RunResponse(BaseModel):
     middleware_tokens: int = 0
     message_count: int = 0
     stop_reason: str | None = None
+
+
+class ThreadRunsPageResponse(BaseModel):
+    data: list[RunResponse]
+    has_more: bool
+    next_before_created_at: str | None = None
+    next_before_run_id: str | None = None
 
 
 class ArtifactArchiveManifestResponse(BaseModel):
@@ -427,11 +444,6 @@ def _is_visible_human_message(message: Any) -> bool:
 
 def _is_visible_ai_message(message: Any) -> bool:
     return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
-
-
-def _is_thread_history_hidden_message_row(row: dict[str, Any]) -> bool:
-    caller = str((row.get("metadata") or {}).get("caller", ""))
-    return caller.startswith("middleware:") or (caller.startswith("subagent:") and _message_type(row.get("content")) == "ai")
 
 
 def _checkpoint_messages(snapshot: Any) -> list[Any]:
@@ -881,12 +893,6 @@ async def _prepare_edit_regenerate_payload(
     )
 
 
-async def _default_history_hidden_run_ids(run_mgr: Any, thread_id: str, *, user_id: str | None) -> set[str]:
-    superseded_run_ids = await run_mgr.list_successful_regenerate_sources(thread_id, user_id=user_id)
-    edit_visibility = await run_mgr.list_edit_replay_visibility(thread_id, user_id=user_id)
-    return set(superseded_run_ids) | set(edit_visibility.hidden_source_run_ids) | set(edit_visibility.hidden_attempt_run_ids)
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -1030,7 +1036,7 @@ async def wait_run(
     # thread head may be a later run, so do not claim it as this run's result.
     if completed and not reused:
         try:
-            accessor, config = build_checkpoint_state_accessor(
+            accessor, config = await abuild_checkpoint_state_accessor(
                 request,
                 thread_id=thread_id,
                 assistant_id=body.assistant_id,
@@ -1047,14 +1053,65 @@ async def wait_run(
     return {"status": record.status.value, "error": record.error}
 
 
+def _parse_run_page_created_at(value: str) -> str:
+    try:
+        normalized = normalize_run_created_at_iso(value)
+        datetime.fromisoformat(normalized)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="before_created_at must be an ISO-8601 timestamp") from None
+    return normalized
+
+
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
 @require_permission("runs", "read", owner_check=True)
 async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
-    """List all runs for a thread."""
+    """List the newest runs for a thread (default 100, as a bare array)."""
     run_mgr = get_run_manager(request)
     user_id = await get_current_user(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     return [_record_to_response(r) for r in records]
+
+
+@router.get("/{thread_id}/runs/page", response_model=ThreadRunsPageResponse)
+@require_permission("runs", "read", owner_check=True)
+async def list_runs_page(
+    thread_id: ThreadId,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    before_created_at: str | None = Query(default=None),
+    before_run_id: str | None = Query(default=None, min_length=1),
+) -> ThreadRunsPageResponse:
+    """Return a newest-first keyset page of runs for a thread.
+
+    Response: { data: [...], has_more: bool, next_before_created_at, next_before_run_id }
+    Pass both cursor fields from the previous page's last row to continue.
+    """
+    if (before_created_at is None) != (before_run_id is None):
+        raise HTTPException(
+            status_code=422,
+            detail="before_created_at and before_run_id must be provided together",
+        )
+    if before_created_at is not None:
+        before_created_at = _parse_run_page_created_at(before_created_at)
+
+    run_mgr = get_run_manager(request)
+    user_id = await get_current_user(request)
+    records = await run_mgr.list_by_thread(
+        thread_id,
+        user_id=user_id,
+        limit=limit + 1,
+        before_created_at=before_created_at,
+        before_run_id=before_run_id,
+    )
+    has_more = len(records) > limit
+    page = records[:limit]
+    last = page[-1] if page and has_more else None
+    return ThreadRunsPageResponse(
+        data=[_record_to_response(record) for record in page],
+        has_more=has_more,
+        next_before_created_at=format_run_cursor_created_at(last.created_at) if last else None,
+        next_before_run_id=last.run_id if last else None,
+    )
 
 
 @router.get("/{thread_id}/runs/{run_id}", response_model=RunResponse)
@@ -1295,7 +1352,7 @@ async def list_thread_messages(
         limit=limit,
         before_seq=before_seq,
         after_seq=after_seq,
-        request=request,
+        event_store=get_run_event_store(request),
         user_id=user_id,
         hidden_run_ids=hidden_run_ids,
         include_middleware=True,
@@ -1345,122 +1402,6 @@ async def list_thread_messages(
     return messages
 
 
-async def _scan_visible_thread_messages(
-    thread_id: str,
-    *,
-    limit: int,
-    before_seq: int | None,
-    after_seq: int | None,
-    request: Request,
-    user_id: str | None,
-    hidden_run_ids: set[str],
-    include_middleware: bool,
-    include_extra: bool,
-    batch_size: int,
-) -> tuple[list[dict[str, Any]], bool]:
-    """Scan raw message rows until ``limit`` visible rows survive filtering."""
-    event_store = get_run_event_store(request)
-    needed = limit + 1 if include_extra else limit
-
-    if after_seq is not None:
-        visible: list[dict[str, Any]] = []
-        scan_after = after_seq
-        while len(visible) < needed:
-            raw = await event_store.list_messages(
-                thread_id,
-                limit=batch_size,
-                after_seq=scan_after,
-                user_id=user_id,
-            )
-            if not raw:
-                break
-            _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=None, scan_after=scan_after)
-            reached_before_bound = False
-            for row in raw:
-                if before_seq is not None and row["seq"] >= before_seq:
-                    reached_before_bound = True
-                    break
-                if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
-                    continue
-                visible.append(row)
-                if len(visible) == needed:
-                    break
-            next_scan_after = max(row["seq"] for row in raw)
-            if next_scan_after <= scan_after:
-                _raise_non_advancing_message_scan(thread_id=thread_id, scan_before=None, scan_after=scan_after, next_cursor=next_scan_after, row_count=len(raw))
-            scan_after = next_scan_after
-            if reached_before_bound or len(raw) < batch_size:
-                break
-        has_more = len(visible) > limit
-        return visible[:limit], has_more
-
-    visible_desc: list[dict[str, Any]] = []
-    scan_before = before_seq
-    while len(visible_desc) < needed:
-        raw = await event_store.list_messages(
-            thread_id,
-            limit=batch_size,
-            before_seq=scan_before,
-            user_id=user_id,
-        )
-        if not raw:
-            break
-        _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=scan_before, scan_after=None)
-        for row in reversed(raw):
-            if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
-                continue
-            visible_desc.append(row)
-            if len(visible_desc) == needed:
-                break
-        next_scan_before = min(row["seq"] for row in raw)
-        if scan_before is not None and next_scan_before >= scan_before:
-            _raise_non_advancing_message_scan(thread_id=thread_id, scan_before=scan_before, scan_after=None, next_cursor=next_scan_before, row_count=len(raw))
-        scan_before = next_scan_before
-        if len(raw) < batch_size:
-            break
-    has_more = len(visible_desc) > limit
-    return list(reversed(visible_desc[:limit])), has_more
-
-
-def _validate_message_scan_rows(
-    rows: list[dict[str, Any]],
-    *,
-    thread_id: str,
-    scan_before: int | None,
-    scan_after: int | None,
-) -> None:
-    invalid_seq_rows = [row for row in rows if not isinstance(row.get("seq"), int)]
-    if invalid_seq_rows:
-        logger.error(
-            "Thread message scan found rows without sequence values: thread_id=%s scan_before=%s scan_after=%s row_count=%d invalid_count=%d",
-            thread_id,
-            scan_before,
-            scan_after,
-            len(rows),
-            len(invalid_seq_rows),
-        )
-        raise RuntimeError("Run event message rows are missing sequence values")
-
-
-def _raise_non_advancing_message_scan(
-    *,
-    thread_id: str,
-    scan_before: int | None,
-    scan_after: int | None,
-    next_cursor: int,
-    row_count: int,
-) -> None:
-    logger.error(
-        "Thread message scan cursor did not advance: thread_id=%s scan_before=%s scan_after=%s next_cursor=%s row_count=%d",
-        thread_id,
-        scan_before,
-        scan_after,
-        next_cursor,
-        row_count,
-    )
-    raise RuntimeError("Run event message scan did not advance its cursor")
-
-
 async def _scan_thread_message_page(
     thread_id: str,
     *,
@@ -1470,18 +1411,13 @@ async def _scan_thread_message_page(
     user_id: str | None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Select the newest ``limit + 1`` page-eligible rows before a cursor."""
-    run_mgr = get_run_manager(request)
-    hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
-    return await _scan_visible_thread_messages(
-        thread_id,
+    return await read_visible_message_page(
+        event_store=get_run_event_store(request),
+        run_manager=get_run_manager(request),
+        thread_id=thread_id,
         limit=limit,
         before_seq=before_seq,
-        after_seq=None,
-        request=request,
         user_id=user_id,
-        hidden_run_ids=hidden_run_ids,
-        include_middleware=False,
-        include_extra=True,
         batch_size=THREAD_MESSAGE_PAGE_SCAN_BATCH,
     )
 
