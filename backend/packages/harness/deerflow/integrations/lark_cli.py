@@ -82,7 +82,8 @@ except ImportError:  # pragma: no cover - Windows fallback
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
 from deerflow.integrations.lark_broker import LARK_BROKER_URL_ENV
-from deerflow.skills.installer import is_executable_binary_prefix, is_symlink_member, is_unsafe_zip_member
+from deerflow.skills.installer import is_symlink_member, is_unsafe_zip_member
+from deerflow.skills.package_files import is_executable_binary_prefix
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
@@ -1248,6 +1249,23 @@ def _write_lark_cli_sandbox_launcher(staging: Path) -> None:
     launcher.chmod(0o755)
 
 
+def _runtime_artifact_is_executable(relative: Path, candidate: Path) -> bool:
+    """Decide whether a managed runtime artifact is executable, platform-aware.
+
+    POSIX keeps the strict executable-bit contract. NTFS cannot represent the
+    exec bit, so Windows validates these Linux-only artifacts by content
+    instead: the per-arch binaries must carry an executable image magic and
+    the ``bin/lark-cli`` launcher must be a script with a shebang.
+    """
+    if os.name != "nt":
+        return candidate.stat().st_mode & 0o111 != 0
+    with candidate.open("rb") as handle:
+        prefix = handle.read(4)
+    if relative == Path("bin/lark-cli"):
+        return prefix.startswith(b"#!")
+    return is_executable_binary_prefix(prefix)
+
+
 def _validate_lark_cli_sandbox_runtime(root: Path) -> None:
     if root.is_symlink() or not root.is_dir():
         raise ValueError("Managed Lark CLI sandbox runtime root must be a regular directory, not a symlink.")
@@ -1260,7 +1278,7 @@ def _validate_lark_cli_sandbox_runtime(root: Path) -> None:
         candidate = root / relative
         if not candidate.is_file():
             raise ValueError(f"Managed Lark CLI sandbox runtime is missing a regular file: {relative}")
-        if candidate.stat().st_mode & 0o111 == 0:
+        if not _runtime_artifact_is_executable(relative, candidate):
             raise ValueError(f"Managed Lark CLI sandbox runtime file is not executable: {relative}")
 
 

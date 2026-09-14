@@ -2,6 +2,51 @@
 
 This guide explains how to configure DeerFlow for your environment.
 
+## Model request admission
+
+For request-per-minute limits, opt into pacing on each relevant `models[]`
+entry. For example, add this alongside its `name`, `use`, and `model` fields:
+
+```yaml
+request_admission:
+  requests_per_minute: 60
+  group: shared-provider-account
+  max_wait_seconds: 300
+  max_queue_size: 256
+```
+
+Calls wait in a bounded FIFO before dispatch. At 60 RPM, admissions are spaced
+at least one second apart, even after idle periods. The first call can proceed
+immediately. Async waiting is cancellable; a cancelled or expired waiter spends
+no admission. Queue overflow and wait expiry fail locally before dispatch.
+The deadline covers admission waiting only, not the provider's response time.
+
+An explicit `group` shares the budget across model profiles using the same
+provider quota. Omit it for a separate budget per configured model name.
+All profiles in a group must have identical settings. The limiter is shared by
+factory-created model instances across threads and event loops, including
+lead agents, subagents and auxiliary models using the standard LangChain
+BaseChatModel invoke/stream hooks. Restart the Gateway after changing,
+disabling or regrouping active policies; conflicting settings fail model
+construction instead of resetting a live budget.
+
+When enabled, exposed SDK `max_retries` settings are set to zero: SDK retries
+would bypass the admission hook. Agent middleware retries still work and each
+new attempt is paced. Calls outside that middleware no longer get SDK retries.
+Custom providers that bypass BaseChatModel admission hooks or perform hidden
+retries need their own integration. A caller-supplied `rate_limiter` cannot be
+combined with `request_admission`.
+
+This is **process-local RPM pacing**, not TPM accounting or a distributed quota
+service. Divide the provider allowance among Gateway workers/replicas and allow
+headroom for other applications. Provider token limits, external consumption,
+billing failures and permanent errors can still fail a task. Existing
+`llm_call.max_concurrent_calls` remains independent: when enabled, its slot is
+held while the underlying model waits for admission, so use shared groups and
+concurrency settings deliberately. Waiting contributes to model-call latency
+and remains subject to the enclosing run's timeout. This option is off by
+default and does not promise unlimited retries or eventual task completion.
+
 ## Config Versioning
 
 `config.example.yaml` contains a `config_version` field that tracks schema changes. When the example version is higher than your local `config.yaml`, the application emits a startup warning:

@@ -199,7 +199,7 @@ def _make_system_message_coalescing_middleware():
 def _make_dynamic_context_middleware():
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
-    return DynamicContextMiddleware()
+    return DynamicContextMiddleware(memory_enabled=False)
 
 
 def _make_subagent_date_context_middleware():

@@ -11,9 +11,10 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.agents.middlewares.tool_promotion_audit_middleware import record_tool_promotion
 from deerflow.config.tool_search_config import clamp_auto_promote_top_k
-from deerflow.utils.messages import get_original_user_content_text, is_real_user_message
+from deerflow.utils.messages import get_original_user_content_text
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +74,14 @@ class McpRoutingMiddleware(AgentMiddleware[AgentState]):
 
     @staticmethod
     def _latest_user_message(messages: list[Any]) -> HumanMessage | None:
+        """Latest user-authored message, including a hidden Human Input Card reply.
+
+        The card reply is hidden from the UI but is still the user's current
+        request, so ``is_genuine_user_message`` — not ``is_real_user_message``,
+        which drops every ``hide_from_ui`` message — decides this.
+        """
         for message in reversed(messages):
-            if is_real_user_message(message):
+            if is_genuine_user_message(message):
                 return message
         return None
 
