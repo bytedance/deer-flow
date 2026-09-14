@@ -242,6 +242,69 @@ test("short-circuits reconnect to a terminal run", async () => {
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
 });
 
+test("hydrates the active run input before replaying an incremental stream", async () => {
+  const sessionStorage = makeSessionStorage();
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url.toString()).pathname;
+    if (path.endsWith("/runs/run-input")) {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [
+                { id: "human-2", type: "human", content: "Second question" },
+              ],
+            },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/threads/thread-input/state")) {
+      return new Response(
+        JSON.stringify({
+          values: {
+            messages: [
+              { id: "human-1", type: "human", content: "First question" },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/runs/run-input/stream")) {
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const entries: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-input",
+    "run-input",
+  )) {
+    entries.push(entry);
+  }
+
+  expect(entries[0]).toMatchObject({
+    event: "values",
+    data: {
+      messages: [
+        { id: "human-1", content: "First question" },
+        { id: "human-2", content: "Second question" },
+      ],
+    },
+  });
+});
+
 test("falls back to join when preflight cannot resolve the run", async () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "run-1");

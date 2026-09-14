@@ -86,6 +86,95 @@ type StreamPart = {
   data: unknown;
 };
 
+type ReconnectInputSnapshot = Record<string, unknown> & {
+  messages: unknown[];
+};
+
+function streamOptionSignal(options: unknown): AbortSignal | undefined {
+  if (typeof AbortSignal === "undefined") {
+    return undefined;
+  }
+  if (options instanceof AbortSignal) {
+    return options;
+  }
+  if (typeof options !== "object" || options === null) {
+    return undefined;
+  }
+  const signal = Reflect.get(options, "signal");
+  return signal instanceof AbortSignal ? signal : undefined;
+}
+
+/**
+ * Recover the submitted input before replaying an active run. The incremental
+ * chat stream intentionally omits `values`, so a page reload can otherwise
+ * receive the run's AI/tool chunks before its human message has reached the
+ * durable history feed. `runs.get` retains the original graph input in
+ * `kwargs.input`; merge it into the latest durable values for one synthetic
+ * snapshot. Any read failure is deliberately ignored so reconnect semantics
+ * remain unchanged for deployments without run metadata.
+ */
+async function loadReconnectInputSnapshot(
+  client: LangGraphClient,
+  threadId: string,
+  runId: string,
+  run?: Awaited<ReturnType<LangGraphClient["runs"]["get"]>>,
+  signal?: AbortSignal,
+): Promise<ReconnectInputSnapshot | undefined> {
+  try {
+    const resolvedRun =
+      run ?? (await client.runs.get(threadId, runId, { signal }));
+    const runKwargs = Reflect.get(resolvedRun, "kwargs");
+    const input =
+      typeof runKwargs === "object" && runKwargs !== null
+        ? Reflect.get(runKwargs, "input")
+        : undefined;
+    const inputMessages =
+      typeof input === "object" && input !== null
+        ? Reflect.get(input, "messages")
+        : undefined;
+    if (!Array.isArray(inputMessages) || inputMessages.length === 0) {
+      return undefined;
+    }
+
+    const state = await client.threads.getState(threadId, undefined, { signal });
+
+    const durableValues =
+      typeof state.values === "object" && state.values !== null
+        ? state.values
+        : {};
+    const durableMessages = Array.isArray(
+      Reflect.get(durableValues, "messages"),
+    )
+      ? (Reflect.get(durableValues, "messages") as unknown[])
+      : [];
+    const seenIds = new Set(
+      durableMessages.flatMap((message) => {
+        const id =
+          typeof message === "object" && message !== null
+            ? Reflect.get(message, "id")
+            : undefined;
+        return typeof id === "string" && id.length > 0 ? [id] : [];
+      }),
+    );
+    const messages = [
+      ...durableMessages,
+      ...inputMessages.filter((message) => {
+        const id =
+          typeof message === "object" && message !== null
+            ? Reflect.get(message, "id")
+            : undefined;
+        if (typeof id !== "string" || id.length === 0) return true;
+        if (seenIds.has(id)) return false;
+        seenIds.add(id);
+        return true;
+      }),
+    ];
+    return { ...durableValues, messages } as ReconnectInputSnapshot;
+  } catch {
+    return undefined;
+  }
+}
+
 export class StreamReplayGapError extends Error {
   constructor(
     readonly gap: StreamReplayGapData,
@@ -194,16 +283,16 @@ export function isRunNotCancellableError(error: unknown): boolean {
  * back to the original join so a legitimately active reconnect is never
  * silently suppressed.
  */
-async function shouldSkipReconnect(
+async function getReconnectRun(
   client: LangGraphClient,
   threadId: string,
   runId: string,
-): Promise<boolean> {
+  signal?: AbortSignal,
+): Promise<Awaited<ReturnType<LangGraphClient["runs"]["get"]>> | undefined> {
   try {
-    const run = await client.runs.get(threadId, runId);
-    return TERMINAL_RUN_STATUSES.has(run.status);
+    return await client.runs.get(threadId, runId, { signal });
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -398,9 +487,29 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
     // reload after the backend's stream bridge is reaped blocks forever on a
     // drained condition variable, pinning ``isLoading`` true so the first
     // post-reload message is routed to ``stop`` instead of ``submit``.
-    if (threadId && (await shouldSkipReconnect(client, threadId, runId))) {
+    const reconnectSignal = streamOptionSignal(options);
+    const reconnectRun = threadId
+      ? await getReconnectRun(client, threadId, runId, reconnectSignal)
+      : undefined;
+    if (reconnectRun && TERMINAL_RUN_STATUSES.has(reconnectRun.status)) {
       clearReconnectRun(threadId, runId);
       return;
+    }
+    if (threadId && reconnectRun) {
+      const reconnectSnapshot = await loadReconnectInputSnapshot(
+        client,
+        threadId,
+        runId,
+        reconnectRun,
+        reconnectSignal,
+      );
+      if (reconnectSnapshot) {
+        // This is an internal hydration frame. The requested network stream
+        // remains incremental; the SDK receives the current input before any
+        // replayed messages-tuple AI/tool chunks and deduplicates it against
+        // later history or stream copies by message id.
+        yield { event: "values", data: reconnectSnapshot };
+      }
     }
     const sanitizedOptions = forceChatRunStreamOptions(options);
     yield* handleInactiveRunStream({
