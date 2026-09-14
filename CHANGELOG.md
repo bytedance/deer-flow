@@ -590,7 +590,7 @@ This section accumulates work toward the **2.1.0** milestone
   out, a search with real matches past the cap came back empty and complete.
   The search now passes one line beyond its cap so a cut-off result is reported
   as truncated, and the `glob` and `grep` tools say an empty truncated result is
-  incomplete instead of "No matches found".
+  incomplete instead of "No matches found". ([#5427])
 - **sandbox:** Stop BoxLite `grep` from ignoring the directory part of `glob`.
   It compared only file names, so `src/*.js` matched every `.js` file in the
   tree. The glob now applies to the path relative to the search root, the same
@@ -2833,3 +2833,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5403]: https://github.com/bytedance/deer-flow/pull/5403
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
+[#5427]: https://github.com/bytedance/deer-flow/pull/5427

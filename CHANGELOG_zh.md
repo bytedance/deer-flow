@@ -401,7 +401,7 @@
   OpenSandbox 会先限制搜索的原始输出行数，再在 Python 中过滤（`node_modules` 等忽略目录、匹配模式或 `glob`
   范围），但只有达到 `max_results` 时才报告 `truncated`。若被截取的行全部被过滤掉，截断位置之后仍有
   真实匹配的搜索会返回空结果且显示为完整。现在搜索会多输出一行以判断是否被截断，`glob` 和 `grep`
-  工具对被截断的空结果会说明结果不完整，而不是显示 "No matches found"。
+  工具对被截断的空结果会说明结果不完整，而不是显示 "No matches found"。([#5427])
 - **沙箱：** BoxLite `grep` 不再忽略 `glob` 的目录部分。此前只比较文件名，`src/*.js`
   会匹配整棵目录树中的所有 `.js` 文件。现在 glob 作用于相对搜索根目录的路径，与 `glob()`
   及其他 provider 的范围一致。([#5419])
@@ -2167,3 +2167,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5403]: https://github.com/bytedance/deer-flow/pull/5403
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
+[#5427]: https://github.com/bytedance/deer-flow/pull/5427
