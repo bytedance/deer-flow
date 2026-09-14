@@ -15,7 +15,7 @@ import logging
 import re
 import unicodedata
 from bisect import bisect_left
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 from urllib.parse import unquote
 
@@ -72,6 +72,12 @@ _LIST_ITEM_RE = re.compile(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])[ \t]")
 _CONTAINER_PADDING_RE = re.compile(r"[ \t]*")
 _CONTAINER_QUOTE_MARKER_RE = re.compile(r">[ \t]?")
 _CONTAINER_LIST_MARKER_RE = re.compile(r"(?:[-+*]|\d{1,9}[.)])[ \t]+")
+# A container flow-math closer must repeat the opener's own quote-marker
+# prefix verbatim: only a pure quote run can bound the block (a list
+# marker in the prefix means the math is item-rooted, and the item's
+# content column this walk does not model — such math conservatively runs
+# to the message end instead of closing on a guessed shape).
+_CONTAINER_MATH_QUOTE_PREFIX_RE = re.compile(r"[ \t]{0,3}(?:>[ \t]?)*")
 _THEMATIC_RE = re.compile(r"^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$")
 _SETEXT_UNDERLINE_RE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
 # CommonMark type-1 start: the tag name must be followed by a space, a
@@ -830,8 +836,13 @@ def _container_body(content: str) -> tuple[str, bool]:
         offset = marker.end()
 
 
-def _container_leaf_content(content: str) -> tuple[str, int, bool] | None:
+def _container_leaf_content(content: str) -> tuple[str, int, bool, int | None] | None:
     """Return a leaf-block line nested in quote/list containers.
+
+    The fourth element is the flow-math opener's dollar-run length when the
+    leaf is display math (the caller consumes the block's content until a
+    standalone run at least that long, mirroring the root-level math walk),
+    and ``None`` for every other leaf kind.
 
     This parser is deliberately conservative after any quote/list has been
     observed: arbitrary leading indentation may be item content indentation.
@@ -851,7 +862,7 @@ def _container_leaf_content(content: str) -> tuple[str, int, bool] | None:
         # Thematic syntax overlaps a bullet marker (``* * *``), so test it
         # at every container depth before consuming another list marker.
         if offset == thematic_start:
-            return content[offset:], offset, False
+            return content[offset:], offset, False, None
         marker = _CONTAINER_QUOTE_MARKER_RE.match(content, offset)
         if marker is None:
             marker = _CONTAINER_LIST_MARKER_RE.match(content, offset)
@@ -861,15 +872,21 @@ def _container_leaf_content(content: str) -> tuple[str, int, bool] | None:
 
     body = content[offset:]
     if _HEADING_RE.match(body) is not None:
-        return body, offset, True
+        return body, offset, True, None
+    math_match = _DISPLAY_MATH_OPEN_RE.match(body)
+    if math_match is not None and "$" not in body[math_match.end() :]:
+        # Same construct and meta guard as the root-level walk: a valid
+        # flow-math opener is its own block, so it interrupts the item
+        # paragraph, and nothing inside the math is protected.
+        return body, offset, False, len(math_match.group(1))
     if _THEMATIC_RE.match(body) is not None or _SETEXT_UNDERLINE_RE.match(body) is not None:
-        return body, offset, False
+        return body, offset, False, None
     fence = _FENCE_OPEN_RE.match(body)
     if fence is not None and not (fence.group(1)[0] == "`" and "`" in fence.group(2)):
-        return body, offset, False
+        return body, offset, False, None
     html_kind, _tag, _blank_end, _closes_on_open = _html_open(body)
     if html_kind is not None:
-        return body, offset, False
+        return body, offset, False, None
     return None
 
 
@@ -982,13 +999,14 @@ def _iter_line_spans(text: str):
         yield line_start, content_end, line_end
 
 
-def _code_regions(text: str, *, inline_spans: bool = True) -> list[tuple[int, int]]:
-    """Byte extents the Markdown renderer will treat as code: fenced code
-    blocks (CommonMark opener/closer rules — backtick fences reject info
-    strings containing backticks, closers need at least the opener's
-    length) and inline code spans. HTML blocks are deliberately NOT
-    protected — their lines merely terminate paragraphs, so any
-    ``<think>`` inside them is stripped rather than served.
+def _walk_code_regions(text: str, *, inline_spans: bool, emit: Callable[[int, int], None]) -> None:
+    """Walk the byte extents the Markdown renderer treats as code: fenced
+    code blocks (CommonMark opener/closer rules — backtick fences reject
+    info strings containing backticks, closers need at least the opener's
+    length) and inline code spans, passing each ``(start, end)`` region to
+    *emit*. HTML blocks are deliberately NOT protected — their lines merely
+    terminate paragraphs, so any ``<think>`` inside them is stripped rather
+    than served.
 
     The walk is line-structured (linear in the text; the old DOTALL fence
     regex was quadratic per line start) and yields disjoint regions, which
@@ -996,13 +1014,12 @@ def _code_regions(text: str, *, inline_spans: bool = True) -> list[tuple[int, in
     `_strip_think_blocks_outside_markdown_code` safe.
 
     With ``inline_spans=False`` the inline code-span pairing is skipped and
-    only the line-level regions (fences, indented code) are returned. This
+    only the line-level regions (fences, indented code) are emitted. This
     serves callers that need only region extents: an inline span starts
     and ends on a backtick, so it can never reach into edge whitespace,
     while pairing spans on a backtick-dense message costs the full
     index/tuple/materialization pass that a 2 MiB input measures at
     ~2 s / ~164 MiB."""
-    regions: list[tuple[int, int]] = []
     n = len(text)
 
     # Line extents stream: the walk consumes lines strictly in order, so
@@ -1021,6 +1038,9 @@ def _code_regions(text: str, *, inline_spans: bool = True) -> list[tuple[int, in
     container_html_tag: str | None = None
     container_html_blank_end = False
     container_html_requires_quote = False
+    container_math_open = False
+    container_math_len = 0
+    container_math_prefix = ""
     indented_start: int | None = None
     indented_end = 0
     math_open = False
@@ -1056,20 +1076,46 @@ def _code_regions(text: str, *, inline_spans: bool = True) -> list[tuple[int, in
             segment = text[segment_start:segment_end]
             for begin, end in _segment_gfm_inline_contexts(segment):
                 for cbegin, cend in _commonmark_inline_code_spans(segment[begin:end]):
-                    regions.append((segment_start + begin + cbegin, segment_start + begin + cend))
+                    emit(segment_start + begin + cbegin, segment_start + begin + cend)
         segment_start = None
 
     def close_indented() -> None:
         nonlocal indented_start
         if indented_start is not None:
-            regions.append((indented_start, indented_end))
+            emit(indented_start, indented_end)
             indented_start = None
 
     for start, content_end, line_end in _iter_line_spans(text):
+        # Plain-paragraph fast path: with every block state machine idle, a
+        # first character that cannot open any construct this walk
+        # recognizes — blank/indent (space, tab), fence (backtick, tilde),
+        # heading (#), quote (>), list (bullet or decimal marker, any
+        # Unicode digit: ``\d`` in the list grammar is Unicode-aware),
+        # thematic (_), setext (=), HTML (<), math ($) — leaves only the
+        # fallthrough below: extend the open segment. Prose-dominated
+        # messages (the common no-think share) must not pay the construct
+        # battery per line on every anonymous read.
+        if (
+            fence_char is None
+            and html_kind is None
+            and container_html_kind is None
+            and not math_open
+            and not container_math_open
+            and indented_start is None
+            and start < content_end
+            and text[start] not in " \t#>*+-~_<=$`"
+            and not text[start].isdigit()
+        ):
+            if segment_start is None:
+                segment_start = start
+                segment_kind = None
+            segment_end = line_end
+            indented_eligible = False
+            continue
         content = text[start:content_end]
         if fence_char is not None:
             if _fence_closes(content, fence_char, fence_len):
-                regions.append((fence_start, line_end))
+                emit(fence_start, line_end)
                 fence_char = None
                 indented_eligible = True
             continue
@@ -1176,18 +1222,37 @@ def _code_regions(text: str, *, inline_spans: bool = True) -> list[tuple[int, in
         quote_match = _BLOCKQUOTE_RE.match(content) is not None
         list_match = (not quote_match) and _LIST_ITEM_RE.match(content) is not None
         if quote_match or list_match or saw_quotelike:
+            if container_math_open:
+                # Inside a container flow-math block the content is literal
+                # math source to the renderer — headings or fences it
+                # resembles are NOT leaves there, and nothing inside is
+                # protected. The block closes only on a standalone dollar
+                # run at the opener's own quote shape: a deeper quote, a
+                # fresh list item, or a dedented/indented variant is
+                # content (closing on those dropped the renderer's real
+                # math back into segments where backticks paired across
+                # it), and item-rooted math conservatively runs to the
+                # message end — over-consumption is the module's safe
+                # direction, the round-22 leak was the other one.
+                if _CONTAINER_MATH_QUOTE_PREFIX_RE.fullmatch(container_math_prefix) is not None and content.startswith(container_math_prefix) and _math_closes(content[len(container_math_prefix) :], container_math_len):
+                    container_math_open = False
+                continue
             container_leaf = _container_leaf_content(content)
             if container_leaf is not None:
-                leaf_body, leaf_offset, preserve_inline = container_leaf
+                leaf_body, leaf_offset, preserve_inline, math_len = container_leaf
                 # A leaf block inside any quote/list container interrupts the
                 # item paragraph. Item indentation is intentionally parsed
                 # fail-closed because this sanitizer's leak-vs-loss contract
                 # already suppresses code-block protection in such messages.
                 saw_quotelike = True
                 flush_segment()
-                if preserve_inline and inline_spans:
+                if math_len is not None:
+                    container_math_open = True
+                    container_math_len = math_len
+                    container_math_prefix = content[:leaf_offset]
+                elif preserve_inline and inline_spans:
                     for begin, end in _commonmark_inline_code_spans(leaf_body):
-                        regions.append((start + leaf_offset + begin, start + leaf_offset + end))
+                        emit(start + leaf_offset + begin, start + leaf_offset + end)
                 kind, tag, ends_at_blank, closes_on_open = _html_open(leaf_body)
                 if kind is not None and not closes_on_open:
                     container_html_kind = kind
@@ -1235,7 +1300,7 @@ def _code_regions(text: str, *, inline_spans: bool = True) -> list[tuple[int, in
             flush_segment()
             if _HEADING_RE.match(content) is not None and inline_spans:
                 for begin, end in _commonmark_inline_code_spans(content):
-                    regions.append((start + begin, start + end))
+                    emit(start + begin, start + end)
             indented_eligible = True
             continue
         if indented_eligible and not saw_quotelike and _indent_columns(content) >= 4:
@@ -1255,8 +1320,60 @@ def _code_regions(text: str, *, inline_spans: bool = True) -> list[tuple[int, in
     close_indented()
     if fence_char is not None:
         # CommonMark: an unclosed fence runs to the end of the document.
-        regions.append((fence_start, n))
+        emit(fence_start, n)
+
+
+def _code_regions(text: str, *, inline_spans: bool = True) -> list[tuple[int, int]]:
+    """The walk's code regions as a list (see `_walk_code_regions`)."""
+    regions: list[tuple[int, int]] = []
+    _walk_code_regions(text, inline_spans=inline_spans, emit=lambda start, end: regions.append((start, end)))
     return regions
+
+
+# Necessary-condition hints for line-level code regions: a fence needs an
+# opener-shaped line (up to three spaces, then a 3+ run — the opener
+# grammar's own prefix class), and an indented block needs a line indented
+# four-plus columns (any leading whitespace containing a tab reaches four
+# columns: a tab advances to the next multiple of four; otherwise four
+# spaces). Their absence proves no line-level region exists anywhere,
+# which lets the no-opener fast path skip the walk entirely. The hints
+# anchor after every CommonMark line ending — LF, CRLF, and bare CR —
+# because the walk's line splitter treats all three as terminators while
+# ``(?m)^`` only fires after LF.
+_LINE_START_HINT = r"(?:(?<=[\n\r])|\A)"
+_FENCE_LINE_HINT_RE = re.compile(_LINE_START_HINT + r" {0,3}(?:`{3,}|~{3,})")
+_DEEP_INDENT_HINT_RE = re.compile(_LINE_START_HINT + r"(?:[ \t]*\t| {4})")
+
+
+def _code_region_edges(text: str) -> tuple[int | None, int]:
+    """First line-level region's start and last region's end, streamed.
+
+    The no-opener fast path of `_strip_think_blocks_outside_markdown_code`
+    needs only these two extents, and materializing the region list pays
+    one tuple per fence pair — a 1.33 MiB message of repeated fence pairs
+    (open/close per line) measured ~1.47 s / ~60 MiB. The reduction below
+    is a plain min/max over whatever order the walk emits (under
+    ``inline_spans=False`` that order is in fact start-increasing, but the
+    reduction does not rely on it).
+
+    A message with no fence-shaped line and no four-column indent anywhere
+    cannot hold a line-level region at all (the remaining region kinds are
+    backtick-bounded inline spans, which never reach the text's edges), so
+    two compiled scans answer the common code-free case without walking."""
+    if _FENCE_LINE_HINT_RE.search(text) is None and _DEEP_INDENT_HINT_RE.search(text) is None:
+        return None, 0
+    first: int | None = None
+    last = 0
+
+    def emit(start: int, end: int) -> None:
+        nonlocal first, last
+        if first is None or start < first:
+            first = start
+        if end > last:
+            last = end
+
+    _walk_code_regions(text, inline_spans=False, emit=emit)
+    return first, last
 
 
 def _find_think_open(text: str, start: int) -> tuple[int, int] | None:
@@ -1312,20 +1429,20 @@ def _strip_think_blocks_outside_markdown_code(text: str) -> str:
     if _THINK_OPEN_PREFIX_RE.search(text) is None:
         # No opener anywhere — code masking can only hide openers, never
         # add one, so nothing can be removed. Reproduce the shadow trim
-        # below without pairing a single span: only line-level regions
-        # (fences, indented code) can reach the text's edges, because an
-        # inline span starts and ends on a backtick, and whitespace inside
-        # an edge region is masked and therefore not strippable — a plain
-        # ``text.strip()`` would dedent served indented code or drop a
-        # closing fence's trailing terminator.
-        regions = _code_regions(text, inline_spans=False)
+        # below without pairing a single span or materializing the region
+        # list: only line-level regions (fences, indented code) can reach
+        # the text's edges, because an inline span starts and ends on a
+        # backtick, and whitespace inside an edge region is masked and
+        # therefore not strippable — a plain ``text.strip()`` would dedent
+        # served indented code or drop a closing fence's trailing
+        # terminator.
+        first_start, last_end = _code_region_edges(text)
         begin = len(text) - len(text.lstrip())
         end = len(text.rstrip())
-        for region_begin, region_end in regions:
-            if region_begin < begin:
-                begin = region_begin
-            if region_end > end:
-                end = region_end
+        if first_start is not None and first_start < begin:
+            begin = first_start
+        if last_end > end:
+            end = last_end
         return text[begin:end]
     # Build an equal-length classification shadow whose NULs cannot introduce
     # ``<think>`` syntax. Exact source offsets then remain valid without any

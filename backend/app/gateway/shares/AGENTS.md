@@ -31,7 +31,11 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   sections are stripped outside Markdown code examples — code recognition
   is block-aware per CommonMark (fences, all seven raw-HTML block types,
   indented code, ATX headings including empty forms inside quote/list
-  containers, and lazy paragraphs); nested reasoning tags match to their
+  containers, display-math openers there too — their block content is
+  consumed unprotected until a closing dollar run at the opener's own
+  quote shape (item-rooted math runs to the message end; over-consumption
+  is the safe direction) — and lazy paragraphs);
+  nested reasoning tags match to their
   outer close by depth; and GFM table rows and cells are separate inline
   contexts (remarkGfm splits them at the block level before inline parsing,
   so backticks never pair across a row or an unescaped pipe; each row's
@@ -39,7 +43,9 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   item continuation indentation — the way the renderer's containers do).
   Messages with no case-insensitive `<think` opener skip Markdown pairing
   entirely: masking can only hide openers, never add one, so nothing can
-  be removed and the edge trim is computed from the line-level walk alone.
+  be removed and the edge trim comes from streamed region extents — two
+  compiled scans clear code-free messages without walking, and the walk
+  classifies only lines whose first character can open a construct.
   Once a list
   or quote appears, document-level fence/indent protection is suppressed:
   item indentation is not modeled, so possible code is over-stripped rather

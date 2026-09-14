@@ -104,3 +104,34 @@ async def test_share_migration_upgrade_downgrade_cycle(tmp_path: Path) -> None:
         assert "conversation_shares" in await _inspect(engine, _table_names)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_share_migration_retry_creates_missing_indexes(tmp_path: Path) -> None:
+    """Round-22 (bot 09-12 12:31): SQLite DDL is non-transactional, so an
+    upgrade interrupted between the table's creation and the index calls
+    leaves the table present without indexes; the retry must create what is
+    missing instead of skipping the whole guarded block and stamping the
+    revision with the token-hash unique index permanently absent."""
+    db_path = tmp_path / "share-migration-retry.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    cfg = _alembic_config(f"sqlite+aiosqlite:///{db_path}")
+    try:
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _REVISION)
+
+        # Recreate the interrupted state: the table stays, the indexes and
+        # the revision stamp roll back.
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("DROP INDEX IF EXISTS ix_conversation_shares_thread_id"))
+            await conn.execute(sa.text("DROP INDEX IF EXISTS ix_conversation_shares_token_hash"))
+            await conn.execute(sa.text("UPDATE alembic_version SET version_num = :rev"), {"rev": _PREVIOUS})
+
+        await asyncio.to_thread(alembic_command.upgrade, cfg, _REVISION)
+        indexes = await _inspect(
+            engine,
+            lambda conn: {idx["name"]: idx for idx in sa.inspect(conn).get_indexes("conversation_shares")},
+        )
+        assert indexes["ix_conversation_shares_token_hash"]["unique"] in (True, 1)
+        assert "ix_conversation_shares_thread_id" in indexes
+    finally:
+        await engine.dispose()

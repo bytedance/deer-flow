@@ -2881,6 +2881,18 @@ def test_strip_no_opener_fast_path_trim_matches_the_shadow_exactly():
         "| a |\n| --- |\n| b |  ",
         "tail </think> end  ",
         "\tTab-indented tail\t",
+        # Round-22 adversarial pass: the prefilter hints must anchor after
+        # every CommonMark line ending (``(?m)^`` fires after LF only) and
+        # must see tab-column indents (" \t" reaches four columns in two
+        # whitespace characters) — both shapes once bypassed the walk and
+        # diverged from the shadow trim.
+        "prose\r```\ncode\r```  ",
+        "prose\r```\rcode\r```  ",
+        "prose\r\n```\r\ncode\r\n```  ",
+        " \ttab-column indented tail  ",
+        "  \ttwo-space tab indent  ",
+        "> $$\n> x\n> $$  ",
+        "> - | a ` |\n>   | --- |\n>   | b |  ",
     ]
     for text in corpus:
         shadow_parts = []
@@ -2894,3 +2906,113 @@ def test_strip_no_opener_fast_path_trim_matches_the_shadow_exactly():
         trim_begin = len(shadow) - len(shadow.lstrip())
         trim_end = len(shadow.rstrip())
         assert strip(text) == text[trim_begin:trim_end], (text, strip(text))
+
+
+def test_strip_display_math_inside_containers_interrupts_inline_code():
+    """Round-22 (bot 09-12 12:31): remarkMath renders a flow-math opener
+    inside a container as its own block, but the container leaf classifier
+    knew headings/thematic breaks/fences/HTML and not math, so backticks
+    paired across the math block and published the reasoning after it."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    # The reported shape: the math block interrupts the quoted paragraph.
+    out = strip("> a `\n> $$\n> x\n> $$\n> <think>secret</think> ` tail")
+    assert "secret" not in out
+    assert "tail" in out
+
+    # Deeper: inside the math block a pseudo-heading is literal math
+    # source, not a heading, so its backticked tags must not be protected
+    # either — the closer's state must consume the block's content.
+    out = strip("> $$\n> # `<think>inner-secret</think>`\n> $$\n> tail")
+    assert "inner-secret" not in out
+    assert "tail" in out
+
+
+def test_container_math_state_machine_variants():
+    """Round-22 adversarial pass over the container flow-math branch: list
+    items and nested quotes peel to the same opener, a shorter dollar run
+    never closes a wider one, lazy plain lines are math content, and
+    math-looking lines inside an open container HTML block stay its
+    content."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    out = strip("- $$\n  x\n  $$\n  <think>list-math</think> ` t")
+    assert "list-math" not in out
+
+    out = strip("> > $$\n> > x\n> > $$\n> > <think>deep-math</think> ` t")
+    assert "deep-math" not in out
+
+    # A two-dollar run does not close a three-dollar opener.
+    out = strip("> $$$\n> $$\n> <think>still-math</think>\n> $$$\n> ` t")
+    assert "still-math" not in out
+
+    # A lazy plain line inside the quoted math block is math content.
+    out = strip("> $$\nplain <think>lazy-math</think>\n> $$\n> tail")
+    assert "lazy-math" not in out
+
+    # Math-looking lines inside an open container HTML block are its
+    # content (the HTML branch consumes them before any math leaf check).
+    out = strip("> <div>\n> $$\n> x\n> <think>html-math</think> ` t")
+    assert "html-math" not in out
+
+    # Mid-line dollars keep the line a paragraph: the two backticks pair
+    # inside it and the reasoning is legitimate inline code (no overstrip).
+    out = strip("> a ` x\n> $$ inline $$\n> <think>para-math</think> ` t")
+    assert "para-math" in out
+
+
+def test_container_math_closer_is_scoped_to_the_openers_own_quote_shape():
+    """Subagent adversarial pass on the round-22 fix: fenced math closes
+    only on a standalone dollar run at the opener's own container shape.
+    A deeper quote, a fresh list item, or a dedented variant used to close
+    the block early via the greedy peel, dropping the renderer's real math
+    content back into segments where backticks pair across it — the same
+    leak family the round was closing, one nesting level deeper."""
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    # A deeper quote's dollar line is content of the outer math, not its
+    # closer; the two post-close backticks must not pair across the think.
+    out = strip("> $$\n> x\n> > $$\n> a ` b\n> <think>deeper-close</think> ` c\n> $$")
+    assert "deeper-close" not in out
+
+    # A fresh list item's marker line also stays content (list-rooted math
+    # conservatively runs on — over-consumption is the safe direction).
+    out = strip("- $$\n  x\n- $$\n  a ` b\n  <think>item-close</think> ` c\n  $$")
+    assert "item-close" not in out
+
+    # A dedented quote line after a list-rooted opener is content too.
+    out = strip("- $$\n  x\n    > $$\n  a ` b\n  <think>indent-close</think> ` c")
+    assert "indent-close" not in out
+
+    # Root-level math machinery while container math holds only ever
+    # over-strips; pin the direction.
+    out = strip("> $$\n$$\nroot math <think>dual-machine</think>\n$$\n> t")
+    assert "dual-machine" not in out
+
+
+def test_no_opener_fast_path_memory_stays_bounded_on_many_fences():
+    """Round-22 (bot 09-12 12:31): the no-think fast path still materialized
+    one region tuple per fence pair through the region list — a 2 MiB
+    ```` ``` ````-repeated message measured ~1.47 s / ~60 MiB. The edge trim
+    needs only the first region's start and the last region's end."""
+    import tracemalloc
+
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    attack = "```\n```\n" * 174_763  # 1.33 MiB, ~175k fenced regions
+    tracemalloc.start()
+    try:
+        out = strip(attack)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert out == attack  # contiguous edge-to-edge regions keep every byte
+    assert peak < 6 * 1024 * 1024, f"peak {peak / 1024 / 1024:.0f} MiB"
