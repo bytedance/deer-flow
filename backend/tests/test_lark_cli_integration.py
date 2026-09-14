@@ -295,8 +295,8 @@ def test_managed_sandbox_runtime_verifies_and_installs_linux_archives(monkeypatc
     assert hasattr(lark_cli, "_ensure_managed_sandbox_lark_cli"), "managed sandbox runtime installer is missing"
     _patch_paths(monkeypatch, tmp_path / "home")
     archives = {
-        "lark-cli-1.0.65-linux-amd64.tar.gz": _make_lark_cli_binary_tar(b"amd64-binary"),
-        "lark-cli-1.0.65-linux-arm64.tar.gz": _make_lark_cli_binary_tar(b"arm64-binary"),
+        "lark-cli-1.0.65-linux-amd64.tar.gz": _make_lark_cli_binary_tar(b"\x7fELF-amd64-payload"),
+        "lark-cli-1.0.65-linux-arm64.tar.gz": _make_lark_cli_binary_tar(b"\x7fELF-arm64-payload"),
     }
     checksums = "".join(f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in archives.items()).encode()
     assets = {"checksums.txt": checksums, **archives}
@@ -305,9 +305,15 @@ def test_managed_sandbox_runtime_verifies_and_installs_linux_archives(monkeypatc
 
     runtime = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
 
-    assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == b"amd64-binary"
-    assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == b"arm64-binary"
-    assert stat.S_IMODE((runtime / "linux-amd64" / "lark-cli").stat().st_mode) == 0o755
+    assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == b"\x7fELF-amd64-payload"
+    assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == b"\x7fELF-arm64-payload"
+    installed_mode = stat.S_IMODE((runtime / "linux-amd64" / "lark-cli").stat().st_mode)
+    if os.name == "nt":
+        # NTFS cannot represent the exec bit; writability is the strongest
+        # host-side contract the extractor can establish for the artifact.
+        assert installed_mode & 0o222
+    else:
+        assert installed_mode == 0o755
     launcher = (runtime / "bin" / "lark-cli").read_text(encoding="utf-8")
     assert "uname -m" in launcher
     assert "x86_64" in launcher and "aarch64" in launcher
@@ -353,7 +359,7 @@ def test_managed_sandbox_runtime_accepts_prestaged_airgapped_tree(monkeypatch, t
     for arch in ("amd64", "arm64"):
         binary = source / f"linux-{arch}" / "lark-cli"
         binary.parent.mkdir(parents=True)
-        binary.write_bytes(f"{arch}-binary".encode())
+        binary.write_bytes(b"\x7fELF" + f"{arch}-binary".encode())
         binary.chmod(0o755)
     launcher = source / "bin" / "lark-cli"
     launcher.parent.mkdir(parents=True)
@@ -368,8 +374,8 @@ def test_managed_sandbox_runtime_accepts_prestaged_airgapped_tree(monkeypatch, t
 
     runtime = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
 
-    assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == b"amd64-binary"
-    assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == b"arm64-binary"
+    assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == b"\x7fELFamd64-binary"
+    assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == b"\x7fELFarm64-binary"
 
 
 def test_managed_sandbox_runtime_rejects_any_symlink_in_prestaged_tree(monkeypatch, tmp_path) -> None:
@@ -425,7 +431,7 @@ def test_concurrent_managed_sandbox_runtime_installs_serialize_replacement(monke
     for arch in ("amd64", "arm64"):
         binary = source / f"linux-{arch}" / "lark-cli"
         binary.parent.mkdir(parents=True)
-        binary.write_bytes(f"{arch}-binary".encode())
+        binary.write_bytes(b"\x7fELF" + f"{arch}-binary".encode())
         binary.chmod(0o755)
     launcher = source / "bin" / "lark-cli"
     launcher.parent.mkdir(parents=True)
