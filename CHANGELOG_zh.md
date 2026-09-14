@@ -399,7 +399,7 @@
 
 - **沙箱：** BoxLite `grep` 不再忽略 `glob` 的目录部分。此前只比较文件名，`src/*.js`
   会匹配整棵目录树中的所有 `.js` 文件。现在 glob 作用于相对搜索根目录的路径，与 `glob()`
-  及其他 provider 的范围一致。
+  及其他 provider 的范围一致。([#5419])
 - **模型：** 通过 `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` 传递 Claude Code OAuth
   token 时，第一个之后的 Claude 模型不再丢失凭据。每个 `ClaudeChatModel` 实例都会重新加载凭据，
   但文件描述符只能读取一次，导致标题、摘要、subagent 模型以及之后的每次运行都没有凭据，并以
@@ -2161,3 +2161,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5401]: https://github.com/bytedance/deer-flow/pull/5401
 [#5403]: https://github.com/bytedance/deer-flow/pull/5403
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
+[#5419]: https://github.com/bytedance/deer-flow/pull/5419

@@ -585,7 +585,7 @@ This section accumulates work toward the **2.1.0** milestone
 - **sandbox:** Stop BoxLite `grep` from ignoring the directory part of `glob`.
   It compared only file names, so `src/*.js` matched every `.js` file in the
   tree. The glob now applies to the path relative to the search root, the same
-  scope as `glob()` and the other providers.
+  scope as `glob()` and the other providers. ([#5419])
 - **models:** Stop every Claude model after the first from losing its
   credential when the Claude Code OAuth token is handed off through
   `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`. Every `ClaudeChatModel` instance
@@ -2823,3 +2823,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5401]: https://github.com/bytedance/deer-flow/pull/5401
 [#5403]: https://github.com/bytedance/deer-flow/pull/5403
 [#5411]: https://github.com/bytedance/deer-flow/pull/5411
+[#5419]: https://github.com/bytedance/deer-flow/pull/5419
