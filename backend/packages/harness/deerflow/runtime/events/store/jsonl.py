@@ -64,7 +64,7 @@ class JsonlRunEventStore(RunEventStore):
         cancel before acquiring the lock, without starting a mutation.
         """
         async with self._get_write_lock(thread_id):
-            task = asyncio.create_task(operation())
+            task = asyncio.create_task(operation(), name=f"jsonl-mutation:{thread_id}")
             cancellation: asyncio.CancelledError | None = None
             while not task.done():
                 try:
@@ -203,8 +203,9 @@ class JsonlRunEventStore(RunEventStore):
         so callers (e.g. worker.py's flush-retry path) may safely re-buffer
         that thread's batch. When a batch contains multiple thread IDs, thread
         groups are processed sequentially, so a later failure does not roll
-        back earlier thread groups. This rollback does not make a multi-file
-        batch crash-atomic.
+        back earlier thread groups. Cancellation drains the current thread group
+        before propagating, without starting subsequent groups. This rollback
+        does not make a multi-file batch crash-atomic.
         """
         if not events:
             return []

@@ -196,3 +196,59 @@ async def test_cancelled_idempotent_write_is_visible_to_retry_and_other_threads_
         paused.release.set()
         await asyncio.gather(pending, *([retry] if retry is not None else []), return_exceptions=True)
         await asyncio.wait_for(paused.finished.wait(), 5)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fail_first_thread", [False, True])
+async def test_cancelled_multithread_batch_drains_current_group_without_starting_next(tmp_path, monkeypatch, fail_first_thread):
+    store = JsonlRunEventStore(tmp_path)
+    await store.put(**_event(content="baseline"))
+    append = store._append_records
+
+    def finish_first_thread(path, records):
+        if fail_first_thread:
+            raise OSError("injected first-thread append failure")
+        return append(path, records)
+
+    paused = _PausedIO(finish_first_thread)
+
+    def append_with_pause(path, records):
+        if path.stem == "r2":
+            return paused(path, records)
+        return append(path, records)
+
+    monkeypatch.setattr(store, "_append_records", append_with_pause)
+    pending = asyncio.create_task(
+        store.put_batch(
+            [
+                _event(content="first-thread-a"),
+                _event("r2", "first-thread-b"),
+                {**_event(content="second-thread"), "thread_id": "t2"},
+            ]
+        )
+    )
+    try:
+        await asyncio.wait_for(paused.entered.wait(), 5)
+        pending.cancel()
+        await _checkpoint()
+        pending.cancel()
+        await _checkpoint()
+        assert not pending.done(), "the current thread group must finish before cancellation propagates"
+        assert "t2" not in store._seq_counters, "the next thread group must not start"
+        paused.release.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await pending
+        if fail_first_thread:
+            assert isinstance(caught.value.__cause__, OSError)
+            assert [row["content"] for row in await store.list_messages("t1")] == ["baseline"]
+            assert await store.list_events("t1", "r2") == []
+        else:
+            assert caught.value.__cause__ is None
+            assert [row["content"] for row in await store.list_messages("t1")] == ["baseline", "first-thread-a", "first-thread-b"]
+        assert await store.list_messages("t2") == []
+        assert not store._run_file("t2", "r1").exists()
+        assert "t2" not in store._seq_counters
+    finally:
+        paused.release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+        await asyncio.wait_for(paused.finished.wait(), 5)

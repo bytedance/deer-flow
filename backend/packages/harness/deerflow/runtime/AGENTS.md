@@ -299,6 +299,9 @@ cancellation. Repeated cancellation must not detach an active disk worker; a fai
 mutation remains the cause of the propagated cancellation. There is deliberately
 no drain timeout that would release ownership while a worker can still modify files.
 A queued caller can cancel before admission, and unrelated threads remain independent.
+Drain tasks are named `jsonl-mutation:{thread_id}` for asyncio task dumps. Multi-thread
+`put_batch` drains its current group on cancellation and never starts later groups;
+the admitted group keeps its records on success or completes rollback on failure.
 This is a store-local guarantee, not a change to RunJournal cancellation policy or
 JSONL's single-process deployment constraint. Regression coverage is in
 `tests/test_jsonl_event_store_cancellation.py`.
