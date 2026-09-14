@@ -156,13 +156,12 @@ class _DestinationRewriter(HTMLParser):
 
 _READABILITY_JS_DIR = Path(readabilipy.__file__).resolve().parent / "javascript"
 _READABILITY_NPM_INSTALL_TIMEOUT_SECONDS = 300
-_readability_js_state: bool | None = None  # None = not probed yet
+_readability_js_state: bool | None = None  # None = not settled yet; False caches only deterministic failures
 _readability_js_bootstrap_lock = threading.Lock()
 
 
 def _readability_js_ready() -> bool:
-    """Ensure readabilipy's Readability.js dependencies are usable, probing
-    once per process.
+    """Ensure readabilipy's Readability.js dependencies are usable.
 
     readabilipy probes npm with a bare ``npm`` name, which Windows
     CreateProcess never resolves to ``npm.cmd``, so its one-time bootstrap
@@ -170,14 +169,28 @@ def _readability_js_ready() -> bool:
     pure-Python extraction (link hrefs dropped from fetched pages). Resolve
     npm the way the rest of the codebase does (``shutil.which``, as in the
     lark-cli installer) and install the packages readabilipy expects into
-    its javascript directory. When this returns False, extraction stays on
-    the pure-Python path for the life of the process rather than re-running
-    a slow npm install on every fetch.
+    its javascript directory.
+
+    Coordination rules:
+    - Settled outcomes (success, npm missing, non-zero exit) are cached for
+      the process lifetime.
+    - Transient bootstrap errors (``OSError``, timeout) are not cached, so a
+      first-fetch network blip retries on a later call instead of degrading
+      every fetch until restart.
+    - Waiters never block on the lock: while a bootstrap is in flight,
+      other callers get ``False`` (pure-Python for that call). Async
+      callers run ``extract_article`` through ``asyncio.to_thread`` on the
+      shared default executor, and parking one worker per waiting request
+      for the length of an npm install would starve the whole pool.
     """
     global _readability_js_state
     if _readability_js_state is not None:
         return _readability_js_state
-    with _readability_js_bootstrap_lock:
+    if not _readability_js_bootstrap_lock.acquire(blocking=False):
+        # A bootstrap is already in flight; degrade this call instead of
+        # parking the worker thread behind it.
+        return False
+    try:
         if _readability_js_state is not None:
             return _readability_js_state
         if (_READABILITY_JS_DIR / "node_modules").exists():
@@ -188,9 +201,13 @@ def _readability_js_ready() -> bool:
             logger.warning("npm is unavailable; Readability.js extraction uses pure-Python mode")
             _readability_js_state = False
             return False
+        # readabilipy ships a lockfile for its javascript dependencies; npm
+        # ci keeps the install reproducible and never edits package.json.
+        install_verb = "ci" if (_READABILITY_JS_DIR / "package-lock.json").exists() else "install"
+        install_cmd = [npm, install_verb, "--no-audit", "--no-fund"]
         try:
             result = subprocess.run(
-                [npm, "install", "--no-audit", "--no-fund"],
+                install_cmd,
                 cwd=_READABILITY_JS_DIR,
                 check=False,
                 capture_output=True,
@@ -198,9 +215,10 @@ def _readability_js_ready() -> bool:
                 timeout=_READABILITY_NPM_INSTALL_TIMEOUT_SECONDS,
                 env={**os.environ, "npm_config_update_notifier": "false"},
             )
-        except (OSError, subprocess.TimeoutExpired):
-            logger.warning("Bootstrapping Readability.js npm dependencies failed; using pure-Python extraction", exc_info=True)
-            _readability_js_state = False
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            # Transient (offline, timeout under load): leave the state unset
+            # so a later call retries instead of degrading until restart.
+            logger.warning("Bootstrapping Readability.js npm dependencies failed transiently; this call uses pure-Python extraction: %s", exc)
             return False
         if result.returncode != 0:
             logger.warning("npm install for Readability.js dependencies failed: %s", result.stderr.strip()[:500])
@@ -210,6 +228,8 @@ def _readability_js_ready() -> bool:
         if not _readability_js_state:
             logger.warning("Readability.js npm dependencies are still missing after install; using pure-Python extraction")
         return _readability_js_state
+    finally:
+        _readability_js_bootstrap_lock.release()
 
 
 class ReadabilityExtractor:
