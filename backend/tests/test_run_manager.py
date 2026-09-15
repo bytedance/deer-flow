@@ -674,13 +674,36 @@ async def test_has_inflight_ignores_checkpoint_write_reservation(manager: RunMan
 
 
 @pytest.mark.anyio
-async def test_cleanup(manager: RunManager):
-    """After cleanup, the run should be gone."""
-    record = await manager.create("thread-1")
+async def test_cleanup_evicts_with_store(manager_with_store: RunManager):
+    """With a store, cleanup releases the record and history stays readable."""
+    mgr = manager_with_store
+    record = await mgr.create("thread-1")
     run_id = record.run_id
 
+    await mgr.cleanup(run_id, delay=0)
+    assert run_id not in mgr._runs
+    hydrated = await mgr.get(run_id, user_id=record.user_id)
+    assert hydrated is not None
+    assert hydrated.run_id == run_id
+
+
+@pytest.mark.anyio
+async def test_cleanup_without_store_preserves_history(manager: RunManager):
+    """Without a store there is no fallback, so cleanup must not erase history.
+
+    ``run_agent`` schedules cleanup for every terminal run. Evicting in
+    memory-only mode would drop the record from ``_runs`` with nothing left to
+    hydrate it from, making completed runs disappear from history instead of
+    being released from a durable copy.
+    """
+    record = await manager.create("thread-1")
+    run_id = record.run_id
+    await manager.set_status(run_id, RunStatus.success)
+
     await manager.cleanup(run_id, delay=0)
-    assert await manager.get(run_id) is None
+
+    assert await manager.get(run_id) is record
+    assert [r.run_id for r in await manager.list_by_thread("thread-1")] == [run_id]
 
 
 @pytest.mark.anyio
@@ -1595,18 +1618,21 @@ async def test_thread_index_preserves_insertion_order(manager: RunManager):
 
 
 @pytest.mark.anyio
-async def test_thread_index_cleanup_prunes_run_and_empty_bucket(manager: RunManager):
-    a1 = await manager.create("thread-a")
-    a2 = await manager.create("thread-a")
+async def test_thread_index_cleanup_prunes_run_and_empty_bucket(manager_with_store: RunManager):
+    mgr = manager_with_store
+    a1 = await mgr.create("thread-a")
+    a2 = await mgr.create("thread-a")
 
-    await manager.cleanup(a1.run_id, delay=0)
-    assert a1.run_id not in manager._runs
-    assert set(manager._runs_by_thread["thread-a"]) == {a2.run_id}
+    await mgr.cleanup(a1.run_id, delay=0)
+    assert a1.run_id not in mgr._runs
+    assert set(mgr._runs_by_thread["thread-a"]) == {a2.run_id}
 
-    await manager.cleanup(a2.run_id, delay=0)
+    await mgr.cleanup(a2.run_id, delay=0)
     # Empty buckets are pruned so the index cannot grow without bound.
-    assert "thread-a" not in manager._runs_by_thread
-    assert await manager.list_by_thread("thread-a") == []
+    assert "thread-a" not in mgr._runs_by_thread
+    # Both records survive as store-only history; the store does not promise
+    # to preserve the in-memory insertion order.
+    assert {r.run_id for r in await mgr.list_by_thread("thread-a")} == {a1.run_id, a2.run_id}
 
 
 @pytest.mark.anyio
