@@ -79,7 +79,12 @@ export async function staticApiResponse(
       data = {
         version: "1.0",
         lastUpdated: "",
-        user: { workContext: empty, personalContext: empty, topOfMind: empty },
+        user: {
+          workContext: empty,
+          personalContext: empty,
+          topOfMind: empty,
+          cognitiveStyle: empty,
+        },
         history: {
           recentMonths: empty,
           earlierContext: empty,

@@ -9,7 +9,7 @@ template: |-
   Extract facts in this JSON format:
   {{
     "facts": [
-      {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0 }}
+      {{ "content": "...", "category": "preference|knowledge|context|behavior|cognitive|goal|correction", "confidence": 0.0-1.0 }}
     ]
   }}
 
@@ -18,6 +18,7 @@ template: |-
   - knowledge: User's expertise or knowledge areas
   - context: Background context (location, job, projects)
   - behavior: Behavioral patterns
+  - cognitive: Stable reasoning, response-structure, and collaboration habits
   - goal: User's goals or objectives
   - correction: Explicit corrections or mistakes to avoid repeating
 
