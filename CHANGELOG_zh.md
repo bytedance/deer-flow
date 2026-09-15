@@ -397,6 +397,10 @@
 
 ### 修复
 
+- **沙箱：** AIO 的 `glob` 不再把"恰好填满"的结果报告为截断。其 `include_dirs` 分支在收集到
+  `max_results` 个匹配时就立即返回，因此一个只有这么多匹配、后面再无匹配的目录列表也会被标记为
+  被截断，工具据此告诉模型结果不完整。同一函数的另一条分支（以及其他 provider 共用的
+  `parse_remote_search_output`）改为多看一个匹配再判断，结果精确；现在 `include_dirs` 与之一致。
 - **沙箱：** 远程 `glob` 与 `grep` 的输出被截断时，不再报告"没有匹配"。BoxLite、Tenki、E2B 与
   OpenSandbox 会先限制搜索的原始输出行数，再在 Python 中过滤（`node_modules` 等忽略目录、匹配模式或 `glob`
   范围），但只有达到 `max_results` 时才报告 `truncated`。若被截取的行全部被过滤掉，截断位置之后仍有

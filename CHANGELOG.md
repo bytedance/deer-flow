@@ -582,6 +582,13 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **sandbox:** Stop AIO's `glob` from reporting an exactly-full result as
+  truncated. Its `include_dirs` branch returned as soon as it had collected
+  `max_results` matches, so a listing that held exactly that many — and no more
+  — came back flagged as cut off, and the tool told the model the result was
+  incomplete. The other branch in the same function (and the shared
+  `parse_remote_search_output` path the other providers use) decides from one
+  match past the cap instead, which is exact; `include_dirs` now does the same.
 - **sandbox:** Stop remote `glob` and `grep` from reporting "no matches" when
   their output was cut off. BoxLite, Tenki, E2B, and OpenSandbox cap the
   search's raw output and then filter it in Python (ignored directories such as
