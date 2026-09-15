@@ -590,7 +590,7 @@ This section accumulates work toward the **2.1.0** milestone
   request carried a tool call with no result and the provider rejected it, and
   a hard stop saved to the checkpoint kept failing on each new message. All
   guards now remove the matching content blocks through one shared helper,
-  which also keeps a Responses call that clarification retains.
+  which also keeps a Responses call that clarification retains. ([#5447])
 - **sandbox:** Stop remote `glob` and `grep` from reporting "no matches" when
   their output was cut off. BoxLite, Tenki, E2B, and OpenSandbox cap the
   search's raw output and then filter it in Python (ignored directories such as
@@ -2867,4 +2867,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5419]: https://github.com/bytedance/deer-flow/pull/5419
 [#5427]: https://github.com/bytedance/deer-flow/pull/5427
 [#5431]: https://github.com/bytedance/deer-flow/pull/5431
+[#5447]: https://github.com/bytedance/deer-flow/pull/5447
 
