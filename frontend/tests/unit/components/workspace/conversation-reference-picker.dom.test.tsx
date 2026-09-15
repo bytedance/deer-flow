@@ -31,8 +31,18 @@ const threads = [
   },
 ] as unknown as AgentThread[];
 
+let threadsQuery: {
+  data?: AgentThread[];
+  isPending: boolean;
+  isError: boolean;
+} = {
+  data: threads,
+  isPending: false,
+  isError: false,
+};
+
 rs.mock("@/core/threads/hooks", () => ({
-  useThreads: () => ({ data: threads, isPending: false, isError: false }),
+  useThreads: () => threadsQuery,
 }));
 
 rs.mock("@/core/i18n/hooks", () => ({
@@ -48,7 +58,7 @@ rs.mock("@/core/i18n/hooks", () => ({
         referenceConversationsRemove: (title: string) => `Remove ${title}`,
         referencedConversations: "Referenced conversations",
       },
-      common: { untitled: "Untitled" },
+      common: { loading: "Loading...", untitled: "Untitled" },
     },
   }),
 }));
@@ -73,9 +83,24 @@ beforeAll(() => {
 
 afterEach(() => {
   cleanup();
+  threadsQuery = { data: threads, isPending: false, isError: false };
 });
 
 describe("ConversationReferenceList", () => {
+  it("shows a loading row, not the empty state, while the list is still loading", () => {
+    threadsQuery = { data: undefined, isPending: true, isError: false };
+    render(
+      <ConversationReferenceList
+        currentThreadId="t-current"
+        maxReferences={3}
+        onToggle={rs.fn()}
+        selected={[]}
+      />,
+    );
+    expect(screen.getByTestId("conversation-reference-loading")).toBeTruthy();
+    expect(screen.queryByText("No conversations found")).toBeNull();
+  });
+
   it("lists other conversations by title and never the current one", () => {
     render(
       <ConversationReferenceList

@@ -524,8 +524,10 @@ function MessageContent_({
         )}
         {conversationReferences.length > 0 && (
           <div
+            aria-label={t.inputBox.referencedConversations}
             className="flex max-w-full flex-wrap justify-end gap-1"
             data-testid="message-conversation-references"
+            role="group"
           >
             {conversationReferences.map((reference) => (
               <ConversationReferenceChip
