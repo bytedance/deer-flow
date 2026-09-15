@@ -48,7 +48,7 @@ from app.gateway.conversation_reader import (
     scan_visible_thread_messages as _scan_visible_thread_messages,
 )
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
-from app.gateway.internal_auth import get_trusted_internal_owner_user_id
+from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import abuild_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
@@ -1062,12 +1062,30 @@ def _parse_run_page_created_at(value: str) -> str:
     return normalized
 
 
+async def _run_scope_user_id(request: Request) -> str | None:
+    """Resolve the user id used to *filter* run rows, not to authorize access.
+
+    Thread visibility on these endpoints is already authorized by
+    ``@require_permission(..., owner_check=True)``. Trusted internal callers
+    are authorized as a synthetic internal user instead — ``id="default"``
+    without an owner header, or the ``make_safe_user_id``-normalized owner
+    otherwise — while ``start_run`` stamps run rows with the raw trusted-owner
+    value. Filtering by the authorization identity therefore never matches the
+    persisted rows (#5437), so internal callers list the authorized thread's
+    runs unfiltered; browser/API sessions keep the per-user filter.
+    """
+    user = getattr(request.state, "user", None)
+    if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+        return None
+    return await get_current_user(request)
+
+
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
 @require_permission("runs", "read", owner_check=True)
 async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
     """List the newest runs for a thread (default 100, as a bare array)."""
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     return [_record_to_response(r) for r in records]
 
@@ -1095,7 +1113,7 @@ async def list_runs_page(
         before_created_at = _parse_run_page_created_at(before_created_at)
 
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     records = await run_mgr.list_by_thread(
         thread_id,
         user_id=user_id,
@@ -1119,7 +1137,7 @@ async def list_runs_page(
 async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
     run_mgr = get_run_manager(request)
-    user_id = await get_current_user(request)
+    user_id = await _run_scope_user_id(request)
     record = await run_mgr.get(run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
