@@ -300,3 +300,40 @@ Latin words and CJK bigrams both participate in mixed-script similarity.
 Whitespace-separated CJK runs retain adjacent-character ordering.
 INFO logs identify the target and proposal index without memory content and
 explicitly describe a proposed merge, not a completed persistence audit.
+
+#### Relevance-aware retrieval (opt-in)
+
+The deterministic lexical strategy behind issue #4495 lives in
+`deermem/core/relevance.py` (token overlap + idf weights + confidence blend +
+greedy MMR diversity). It never touches the persisted memory format and never
+runs by default.
+
+- `retrieval_relevance_enabled: true` opts in. `memory_search` then ranks every
+  fact in scope (not only literal substring matches) and prompt injection ranks
+  facts against the current query before the token-budget selection.
+  This takes precedence over `retrieval_adapter`: search bypasses FTS5/custom
+  retrieval, while adapter indexing and warm-up remain configured.
+- Ranking reads at most 4096 characters and 128 tokens per query/fact. The
+  no-jieba fallback emits both Latin words and CJK bigrams, including mixed text.
+  `DeerMem.warm()` initializes optional jieba before serving requests, even
+  with character-based token counting. Invalid/missing confidence defaults to 0.
+- Search stops MMR after `top_k` picks. Injection diversifies guaranteed and
+  regular pools independently and lazily, stopping when each token budget is
+  exhausted; it never truncates candidates before the guaranteed partition.
+  MMR caches token sets and incrementally updates maximum similarity penalties.
+- `retrieval_relevance_weight` blends lexical relevance with confidence;
+  `retrieval_diversity_weight` demotes near-duplicate facts. Defaults preserve
+  legacy ordering. Relevance is distinct-query-token IDF coverage; repeated
+  content cannot replace missing terms or saturate a partial match.
+- DeerMem injection builds IDF once from the selected user/agent fact scope,
+  before guaranteed/regular partitioning, using the same bounded tokenizer as
+  search. No IDF work runs without an active lexical query. Category-filtered
+  search uses its filtered corpus; budgets and separate diversity pools can
+  still produce different final selections. No IDF cache crosses calls/scopes.
+- The current-turn query flows from `DynamicContextMiddleware` (bounded,
+  user-message text) through the optional `query` keyword on
+  `MemoryManager.get_context` / `aget_context`. Shared signature inspection
+  omits `query` when it is `None` or the backend is old/uninspectable, preserving
+  forwarding wrappers' absent-hint contract; backend errors never cause retries.
+- Ranking must be deterministic, network-free, and mutation-free: caller-owned
+  fact dicts are read-only inputs.

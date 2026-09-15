@@ -83,11 +83,11 @@ async def test_abefore_agent_does_not_block_event_loop() -> None:
     # event-loop blocking visible to the Blockbuster gate.
     original_build = mw._build_full_reminder
 
-    def slow_build_reminder(runtime=None):
+    def slow_build_reminder(runtime=None, *, query=None):
         import time
 
         time.sleep(0.05)  # 50ms sync sleep — blocks the thread it runs on
-        return original_build(runtime)
+        return original_build(runtime, query=query)
 
     with (
         mock.patch.object(mw, "_build_full_reminder", slow_build_reminder),
@@ -271,11 +271,13 @@ async def test_abefore_agent_propagates_strict_memory_timeout(
         ),
     ],
 )
+@pytest.mark.parametrize("slow_policy", [False, True], ids=["normal_policy", "slow_policy"])
 async def test_abefore_agent_policy_resolution_failure_does_not_replace_timeout(
     monkeypatch: pytest.MonkeyPatch,
     manager_class: str,
     backend_config: dict,
     api_key: str | None,
+    slow_policy: bool,
 ) -> None:
     """An unresolved timeout policy must fail closed with the original cause."""
     if api_key is None:
@@ -294,26 +296,40 @@ async def test_abefore_agent_policy_resolution_failure_does_not_replace_timeout(
     release = threading.Event()
     finished = threading.Event()
 
+    if slow_policy:
+        original_policy = mw._read_failures_are_fatal
+
+        def delayed_policy(*, allow_io=True):
+            if not allow_io:
+                return None
+            # Exercise a cold worker still resolving policy after the 10ms timeout.
+            threading.Event().wait(0.05)
+            return original_policy(allow_io=allow_io)
+
+        monkeypatch.setattr(mw, "_read_failures_are_fatal", delayed_policy)
+
     def blocking_inject(state, runtime=None):
         started.set()
         release.wait(timeout=2)
         finished.set()
 
-    try:
-        with (
-            mock.patch.object(mw, "_inject", blocking_inject),
-            mock.patch(
-                "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
-                0.01,
-            ),
-        ):
+    with (
+        mock.patch.object(mw, "_inject", blocking_inject),
+        mock.patch(
+            "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
+            0.01,
+        ),
+    ):
+        try:
             state = {"messages": [HumanMessage(content="Hello", id="msg-1")]}
             runtime = SimpleNamespace(context={})
             with pytest.raises(MemoryReadError) as exc_info:
                 await mw.abefore_agent(state, runtime)
-    finally:
-        release.set()
-        assert await asyncio.to_thread(finished.wait, 1)
+        finally:
+            # The worker can reach self._inject only after cold policy resolution.
+            # Keep its mock installed until the worker exits, including on timeout.
+            release.set()
+            assert await asyncio.to_thread(finished.wait, 1)
 
     assert isinstance(exc_info.value.__cause__, TimeoutError)
     assert started.is_set()
