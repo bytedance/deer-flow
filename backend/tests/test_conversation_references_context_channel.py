@@ -58,6 +58,15 @@ def test_a_malformed_top_level_value_reports_its_type_error_not_the_conflict():
     assert [(error["type"], error["loc"]) for error in exc.value.errors()] == [("list_type", ("conversation_references",))]
 
 
+@pytest.mark.parametrize("top_level", [("source",), {"source"}, frozenset({"source"})])
+def test_sequence_likes_the_field_accepts_also_report_the_conflict(top_level):
+    # Pydantic's lax mode coerces tuples and sets into the list field, so a
+    # direct Python caller must not slip both grants past the conflict check.
+    with pytest.raises(ValidationError) as exc:
+        RunCreateRequest(conversation_references=top_level, context={"conversation_references": ["source"]})
+    assert [error["type"] for error in exc.value.errors()] == ["conversation_references_conflict"]
+
+
 def test_an_empty_top_level_list_does_not_conflict_with_context():
     body = RunCreateRequest(conversation_references=[], context={"conversation_references": ["source"]})
     assert body.conversation_references == ["source"]
