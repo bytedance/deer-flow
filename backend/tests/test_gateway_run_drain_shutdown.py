@@ -30,7 +30,9 @@ from typing import Annotated, TypedDict
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
 # Module-level so langgraph's get_type_hints (which resolves annotations against
@@ -95,6 +97,57 @@ async def test_shutdown_cancels_and_awaits_inflight_run():
             record.task.cancel()
             with suppress(asyncio.CancelledError):
                 await record.task
+
+
+@pytest.mark.asyncio
+async def test_shutdown_terminalizes_task_cancelled_before_agent_worker_starts():
+    """A cancelled Gateway metadata wrapper still gets events and stream END."""
+    store = MemoryRunStore()
+    events = MemoryRunEventStore()
+    recovered_batches: list[list] = []
+
+    async def on_recovered(records):
+        recovered_batches.append(records)
+
+    rm = RunManager(
+        store=store,
+        event_store=events,
+        on_orphans_recovered=on_recovered,
+    )
+    record = await rm.create("t-pre-agent-shutdown", user_id="user-1")
+    wrapper_started = asyncio.Event()
+
+    async def metadata_wrapper() -> None:
+        wrapper_started.set()
+        await asyncio.Event().wait()
+
+    record.task = asyncio.create_task(metadata_wrapper())
+    await asyncio.wait_for(wrapper_started.wait(), timeout=1.0)
+
+    await rm.shutdown(timeout=5.0)
+
+    stored = await store.get(record.run_id, user_id="user-1")
+    delivery = await events.list_events(
+        record.thread_id,
+        record.run_id,
+        event_types=["run.delivery"],
+    )
+    terminal = await events.list_events(
+        record.thread_id,
+        record.run_id,
+        event_types=["run.end"],
+    )
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    assert len(delivery) == 1
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {
+        "status": RunStatus.interrupted.value,
+        "recovered": True,
+        "authoritative": True,
+    }
+    assert [[item.run_id for item in batch] for batch in recovered_batches] == [[record.run_id]]
 
 
 @pytest.mark.asyncio
@@ -368,8 +421,6 @@ async def test_shutdown_preserves_status_of_run_completed_during_drain():
     """A run that finishes (e.g. success) during the drain window must keep its
     real terminal status — shutdown must not blanket-overwrite it to
     ``interrupted`` in memory or in the store (Copilot review on PR #3381)."""
-    from deerflow.runtime.runs.store.memory import MemoryRunStore
-
     store = MemoryRunStore()
     rm = RunManager(store=store)
     record = await rm.create("t-complete")
@@ -407,8 +458,6 @@ async def test_shutdown_surfaces_failed_interrupted_persist(caplog):
     the run_id), not silently swallowed by the gather (maintainer review on
     PR #3381)."""
     import logging
-
-    from deerflow.runtime.runs.store.memory import MemoryRunStore
 
     class _FailingStore(MemoryRunStore):
         async def update_status(self, *args, **kwargs):

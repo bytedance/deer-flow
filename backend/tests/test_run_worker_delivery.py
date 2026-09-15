@@ -11,10 +11,15 @@ from langgraph.types import Command
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
-from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.manager import (
+    ORPHAN_RECOVERY_STOP_REASON,
+    CancelOutcome,
+    RunManager,
+)
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, _delivery_content_with_outputs, run_agent
@@ -28,6 +33,11 @@ def _make_bridge():
 async def _delivery_events(store: MemoryRunEventStore, thread_id: str, run_id: str) -> list[dict]:
     events = await store.list_events(thread_id, run_id)
     return [e for e in events if e["event_type"] == "run.delivery"]
+
+
+async def _terminal_events(store: MemoryRunEventStore, thread_id: str, run_id: str) -> list[dict]:
+    events = await store.list_events(thread_id, run_id)
+    return [e for e in events if e["event_type"] == "run.end"]
 
 
 def test_delivery_verification_treats_presented_directory_as_covering_produced_files():
@@ -418,6 +428,7 @@ async def test_fenced_worker_leaves_delivery_receipt_to_peer_recovery():
     )
 
     assert await _delivery_events(event_store, record.thread_id, record.run_id) == []
+    assert await _terminal_events(event_store, record.thread_id, record.run_id) == []
     agent_factory.assert_not_called()
     thread_store.update_display_name.assert_not_awaited()
     thread_store.update_status.assert_not_awaited()
@@ -453,6 +464,11 @@ async def test_delivery_event_is_singleton_across_goal_continuations(monkeypatch
                     }
                 ),
                 run_id=uuid4(),
+            )
+            journal.on_chain_end(
+                {"messages": [AIMessage(content=f"turn {stream_calls}")]},
+                run_id=uuid4(),
+                parent_run_id=None,
             )
             yield {"messages": []}
 
@@ -491,6 +507,13 @@ async def test_delivery_event_is_singleton_across_goal_continuations(monkeypatch
             ]
         },
     }
+    terminal = await _terminal_events(store, "thread-1", record.run_id)
+    assert len(terminal) == 1
+    assert terminal[0]["content"]["messages"][0].content == "turn 2"
+    assert terminal[0]["metadata"] == {
+        "status": "success",
+        "authoritative": True,
+    }
 
 
 @pytest.mark.anyio
@@ -520,12 +543,17 @@ async def test_delivery_event_emitted_exactly_once_on_error_path():
     assert delivery[0]["content"]["presented"] == 0
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.error
+    terminal = await _terminal_events(store, "thread-1", record.run_id)
+    assert len(terminal) == 1
+    assert terminal[0]["content"] == {}
+    assert terminal[0]["metadata"] == {
+        "status": "error",
+        "authoritative": True,
+    }
 
 
 @pytest.mark.anyio
-async def test_delivery_is_durable_before_terminal_run_status():
-    events = MemoryRunEventStore()
-
+async def test_delivery_precedes_status_and_terminal_event_follows_status():
     class OrderingRunStore(MemoryRunStore):
         async def update_status(self, run_id, status, *, error=None, stop_reason=None):
             if status not in {"pending", "running"}:
@@ -534,6 +562,16 @@ async def test_delivery_is_durable_before_terminal_run_status():
             return await super().update_status(run_id, status, error=error, stop_reason=stop_reason)
 
     run_store = OrderingRunStore()
+
+    class OrderingEventStore(MemoryRunEventStore):
+        async def put_if_absent(self, **kwargs):
+            if kwargs["event_type"] == "run.end":
+                stored = await run_store.get(kwargs["run_id"])
+                assert stored is not None
+                assert stored["status"] == "success"
+            return await super().put_if_absent(**kwargs)
+
+    events = OrderingEventStore()
     run_manager = RunManager(store=run_store)
     record = await run_manager.create("thread-1")
 
@@ -559,11 +597,12 @@ async def test_delivery_write_retries_before_persisting_success():
     class FlakyReceiptStore(MemoryRunEventStore):
         def __init__(self):
             super().__init__()
-            self.attempts = 0
+            self.attempts_by_type = {}
 
         async def put_if_absent(self, **kwargs):
-            self.attempts += 1
-            if self.attempts == 1:
+            event_type = kwargs["event_type"]
+            self.attempts_by_type[event_type] = self.attempts_by_type.get(event_type, 0) + 1
+            if event_type == "run.delivery" and self.attempts_by_type[event_type] == 1:
                 raise RuntimeError("transient event store outage")
             return await super().put_if_absent(**kwargs)
 
@@ -586,7 +625,7 @@ async def test_delivery_write_retries_before_persisting_success():
         config={},
     )
 
-    assert event_store.attempts == 2
+    assert event_store.attempts_by_type == {"run.delivery": 2, "run.end": 1}
     assert len(await _delivery_events(event_store, "thread-1", record.run_id)) == 1
     assert (await run_store.get(record.run_id))["status"] == "success"
 
@@ -735,4 +774,198 @@ async def test_delivery_event_emitted_when_cancelled_waiting_for_prior_finalizat
     assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.interrupted
+    terminal = await _terminal_events(store, "thread-1", record.run_id)
+    assert len(terminal) == 1
+    assert terminal[0]["content"] == {}
+    assert terminal[0]["metadata"] == {
+        "status": "interrupted",
+        "authoritative": True,
+    }
     run_manager.update_run_completion.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_metadata_wrapper_start_failure_preserves_error_terminal_event():
+    """A setup failure must not be rewritten as cancellation at startup."""
+    run_store = MemoryRunStore()
+    event_store = MemoryRunEventStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create_or_reject("thread-metadata-failure")
+    bridge = _make_bridge()
+    error = "Failed to verify existing thread metadata"
+
+    agent_factory = MagicMock(side_effect=AssertionError("agent must not be built after metadata setup fails"))
+
+    async def metadata_wrapper() -> None:
+        assert await run_manager.fail_start_if_pending(record.run_id, error=error) is True
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=event_store),
+            agent_factory=agent_factory,
+            graph_input={},
+            config={},
+        )
+
+    wrapper = asyncio.create_task(metadata_wrapper())
+    record.task = wrapper
+    await wrapper
+
+    stored = await run_store.get(record.run_id)
+    terminal = await _terminal_events(event_store, record.thread_id, record.run_id)
+
+    assert record.status == RunStatus.error
+    assert record.error == error
+    assert stored is not None
+    assert stored["status"] == RunStatus.error.value
+    assert stored["error"] == error
+    assert len(terminal) == 1
+    assert terminal[0]["content"] == {}
+    assert terminal[0]["metadata"] == {
+        "status": "error",
+        "authoritative": True,
+    }
+    agent_factory.assert_not_called()
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_metadata_wrapper_start_failure_preserves_remote_cancel_winner():
+    """An active wrapper publishes the accepted cancel, not a recovered error."""
+    run_store = MemoryRunStore()
+    event_store = MemoryRunEventStore()
+    ownership = RunOwnershipConfig(
+        lease_seconds=30,
+        grace_seconds=10,
+        heartbeat_enabled=True,
+    )
+    run_manager = RunManager(
+        store=run_store,
+        worker_id="worker-a",
+        run_ownership_config=ownership,
+    )
+    peer = RunManager(
+        store=run_store,
+        worker_id="worker-b",
+        run_ownership_config=ownership,
+    )
+    record = await run_manager.create_or_reject("thread-metadata-failure-cancel-race")
+    bridge = _make_bridge()
+    failure_cas_started = asyncio.Event()
+    release_failure_cas = asyncio.Event()
+    original_finalize = run_store.finalize_if_owned_and_not_cancelled
+
+    async def paused_finalize(*args, **kwargs):
+        failure_cas_started.set()
+        await release_failure_cas.wait()
+        return await original_finalize(*args, **kwargs)
+
+    run_store.finalize_if_owned_and_not_cancelled = paused_finalize
+    agent_factory = MagicMock(side_effect=AssertionError("agent must not be built after cancellation wins"))
+
+    async def metadata_wrapper() -> None:
+        assert (
+            await run_manager.fail_start_if_pending(
+                record.run_id,
+                error="Failed to verify existing thread metadata",
+            )
+            is True
+        )
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=event_store),
+            agent_factory=agent_factory,
+            graph_input={},
+            config={},
+        )
+
+    wrapper = asyncio.create_task(metadata_wrapper())
+    record.task = wrapper
+    await asyncio.wait_for(failure_cas_started.wait(), timeout=1)
+    assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
+    release_failure_cas.set()
+    await asyncio.wait_for(wrapper, timeout=1)
+
+    stored = await run_store.get(record.run_id)
+    terminal = await _terminal_events(event_store, record.thread_id, record.run_id)
+    assert record.status == RunStatus.interrupted
+    assert record.abort_action == "rollback"
+    assert record.error is None
+    assert record.stop_reason == ORPHAN_RECOVERY_STOP_REASON
+    assert stored is not None
+    assert stored["status"] == RunStatus.interrupted.value
+    assert stored["cancel_action"] == "rollback"
+    assert stored["error"] is None
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    assert len(terminal) == 1
+    assert terminal[0]["metadata"] == {
+        "status": "interrupted",
+        "authoritative": True,
+    }
+    agent_factory.assert_not_called()
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "status",
+    [RunStatus.success, RunStatus.error, RunStatus.timeout, RunStatus.interrupted],
+)
+async def test_terminal_event_writer_supports_every_authoritative_run_status(status):
+    from deerflow.runtime.runs.terminal_events import persist_run_terminal_event
+
+    store = MemoryRunEventStore()
+    first = await persist_run_terminal_event(
+        store,
+        thread_id="thread-1",
+        run_id="run-1",
+        status=status,
+        content={"result": "first"},
+    )
+    duplicate = await persist_run_terminal_event(
+        store,
+        thread_id="thread-1",
+        run_id="run-1",
+        status=status,
+        content={"result": "duplicate"},
+    )
+
+    assert first is True
+    assert duplicate is False
+    events = await _terminal_events(store, "thread-1", "run-1")
+    assert len(events) == 1
+    assert events[0]["content"] == {"result": "first"}
+    assert events[0]["metadata"] == {
+        "status": status.value,
+        "authoritative": True,
+    }
+
+
+@pytest.mark.anyio
+async def test_terminal_event_writer_binds_and_restores_the_run_owner():
+    from deerflow.runtime.runs.terminal_events import persist_run_terminal_event
+    from deerflow.runtime.user_context import get_current_user
+
+    class OwnerCapturingStore(MemoryRunEventStore):
+        observed_user_id = None
+
+        async def put_if_absent(self, **kwargs):
+            user = get_current_user()
+            self.observed_user_id = user.id if user is not None else None
+            return await super().put_if_absent(**kwargs)
+
+    previous_user = get_current_user()
+    store = OwnerCapturingStore()
+    await persist_run_terminal_event(
+        store,
+        thread_id="thread-1",
+        run_id="run-1",
+        status=RunStatus.error,
+        user_id="run-owner",
+    )
+
+    assert store.observed_user_id == "run-owner"
+    assert get_current_user() is previous_user

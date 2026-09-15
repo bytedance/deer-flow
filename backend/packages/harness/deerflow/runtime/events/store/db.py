@@ -236,8 +236,9 @@ class DbRunEventStore(RunEventStore):
         ``_max_seq_for_thread`` takes the same PostgreSQL advisory lock used by
         every normal writer (and the in-process lock covers SQLite), so the
         existence check cannot race another ``put_if_absent`` or journal write.
-        Terminal delivery receipts use this method on both the worker and
-        recovery paths; ordinary event types remain append-only.
+        Terminal delivery receipts and authoritative ``run.end`` events use
+        this method on both worker and recovery paths; ordinary event types
+        remain append-only.
         """
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
