@@ -21,6 +21,7 @@ closes.
 from __future__ import annotations
 
 import logging
+import math
 
 from .base import OwnershipBackendError, RenewOutcome, SandboxOwnershipStore
 
@@ -132,7 +133,9 @@ class RedisOwnershipStore(SandboxOwnershipStore):
         client: Redis | None = None,
     ) -> None:
         self._owner_id = owner_id
-        self._ttl_ms = max(1, int(float(ttl_seconds) * 1000))
+        # Redis accepts integer milliseconds; round up so conversion never
+        # shortens the configured lease.
+        self._ttl_ms = max(1, math.ceil(float(ttl_seconds) * 1000))
         self._key_prefix = key_prefix.rstrip(":")
         # Redis.from_url is lazy, so an unreachable Redis does not block provider
         # construction; the first claim raises instead. socket_timeout bounds

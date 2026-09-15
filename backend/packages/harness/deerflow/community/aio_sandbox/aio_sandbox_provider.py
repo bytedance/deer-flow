@@ -547,11 +547,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         This is what the per-sandbox ``flock`` used to cover for free: a held lock
         cannot expire. A lease can, so the exclusion has to be held deliberately
         rather than assumed to outlast the work it guards. Reachable without an
-        abnormal backend — the config schema bounds only ``renewal_interval_seconds``
-        (> 0) and ``ttl_multiplier`` (>= 2), so a legal setting puts the TTL below a
-        normal container stop, and ``LocalContainerBackend._stop_container`` passes
-        no ``timeout`` to ``subprocess.run``, so a wedged daemon blocks unbounded
-        even at the default 120s.
+        abnormal backend — the config schema permits very short derived TTLs
+        (Redis down to 1 ms), so a legal setting can put the TTL below a normal
+        container stop, and ``LocalContainerBackend._stop_container`` passes no
+        ``timeout`` to ``subprocess.run``, so a wedged daemon blocks unbounded even
+        at the default 120s.
 
         The TTL stays finite on purpose: the heartbeat dies with the process, so a
         destroyer that crashes mid-stop still releases the container one TTL later
