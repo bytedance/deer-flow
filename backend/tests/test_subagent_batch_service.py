@@ -664,6 +664,11 @@ async def test_lease_lost_during_teardown_wait_refuses_immediate_retry(monkeypat
     executions: dict[str, SimpleNamespace] = {}
 
     async def renew_lease(_repo):
+        # Upstream revalidates the lease once after tool assembly and before
+        # execute_async(). That check must succeed so this case still reaches
+        # a dispatched child; later renews are the teardown-wait path.
+        if _repo.lease_renewals == 1:
+            return {"valid": True, "cancel_requested": False}
         return {"valid": False, "cancel_requested": True}
 
     repository = _bookkeeping_failure_item_repo(renew_lease=renew_lease)
@@ -693,7 +698,7 @@ async def test_lease_lost_during_teardown_wait_refuses_immediate_retry(monkeypat
 
     assert repository.finalized is None
     assert repository.item_status == "leased"
-    assert repository.lease_renewals >= 1
+    assert repository.lease_renewals >= 2
     assert current_seq() == 1
     assert not executions["execution-1"].execution_teardown_event.is_set()
 
@@ -756,6 +761,10 @@ async def test_teardown_wait_renewal_failure_does_not_escape_or_finalize(monkeyp
     executions: dict[str, SimpleNamespace] = {}
 
     async def renew_lease(_repo):
+        # First renew is the pre-launch assembly revalidation; fail only
+        # after the child has been dispatched and teardown wait has started.
+        if _repo.lease_renewals == 1:
+            return {"valid": True, "cancel_requested": False}
         raise OSError("synthetic lease renewal failure")
 
     repository = _bookkeeping_failure_item_repo(renew_lease=renew_lease)
@@ -796,7 +805,7 @@ async def test_teardown_wait_renewal_failure_does_not_escape_or_finalize(monkeyp
 
     assert repository.finalized is None
     assert repository.item_status == "leased"
-    assert repository.lease_renewals >= 1
+    assert repository.lease_renewals >= 2
     assert executions["execution-1"].execution_teardown_event.is_set()
     assert current_seq() == 1
 
