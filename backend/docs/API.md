@@ -355,9 +355,18 @@ else `externalize_min_chars`, and `fallback_max_chars`; 12,000 serialized
 characters by default), so results reach the model inline instead of being
 externalized to a file. A message that does not fit starts the next page intact.
 Only a message longer than 4,000 characters, or one whose serialized form alone
-exceeds the budget, is truncated; its omitted suffix is not retrievable in this
-first version. Results include message IDs, sequence numbers, continuation,
-truncation and unavailability. Hidden messages, reasoning blocks, raw tool
+exceeds the budget, is truncated. Such a message carries
+`continuation: {"message_seq", "offset"}`; `read_conversation(thread_id,
+message_seq=..., offset=...)` without a cursor returns the next part of that one
+message (at most 20,000 text characters, sized to the same budget) with its
+`offset`, `text_length` and, while text remains, a new continuation. Offsets
+refer to the source's current text: an offset past its end returns
+`invalid_request`, and a message that is no longer visible is unavailable. If the
+`read_conversation` budget is too small to return any text (below roughly 800
+serialized characters), the result is `output_budget_too_small` rather than a
+continuation that makes no progress.
+Results include message IDs, sequence numbers, continuation, truncation and
+unavailability. Hidden messages, reasoning blocks, raw tool
 results and subagent internals are excluded. Source data is not changed.
 
 **Live reads and retained copies.** Each call reads the source's current visible
@@ -378,12 +387,12 @@ retroactively erase those copies either; they follow the destination's own
 retention and deletion behavior. Once the source is unavailable, further source
 reads report unavailability rather than reconstructing it from destination copies.
 
-**Incomplete requirements.** When `truncated` is true, the tool's notice asks the
-agent to acknowledge omitted text and request the missing material before claiming
-it has incorporated all requirements. `has_more: false` means there are no older
-messages to page through, not that every returned message is complete. Pagination
-cannot recover a truncated suffix. This is model guidance, not a new confirmation
-mechanism or a guarantee of model compliance.
+**Incomplete requirements.** When `truncated` is true, the tool's notice tells
+the agent to read the rest through each cut message's continuation before relying
+on it, and to acknowledge the omission and request the missing material if that
+read is unavailable. `has_more: false` means there are no older messages to page
+through, not that every returned message is complete. This is model guidance, not
+a new confirmation mechanism or a guarantee of model compliance.
 
 This first version adds no frontend picker or link-to-reference conversion. The
 tool is unavailable to bootstrap agents, subagents and embedded clients without
