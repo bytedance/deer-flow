@@ -11,6 +11,7 @@ import pytest
 from deerflow.community.aio_sandbox.local_backend import (
     LocalContainerBackend,
     _ContainerInspection,
+    _docker_server_is_desktop,
     _format_container_command_for_log,
     _format_container_mount,
     _NetworkInspection,
@@ -185,9 +186,13 @@ def test_docker_desktop_detection_uses_daemon_operating_system(monkeypatch, oper
         assert cmd == ["docker", "info", "--format", "{{json .OperatingSystem}}"]
         return SimpleNamespace(stdout=operating_system, stderr="", returncode=0)
 
+    _docker_server_is_desktop.cache_clear()
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    assert backend._docker_server_is_desktop() is expected
+    try:
+        assert backend._docker_server_is_desktop() is expected
+    finally:
+        _docker_server_is_desktop.cache_clear()
 
 
 def test_darwin_open_keeps_docker_to_reconcile_restricted_sandbox(monkeypatch):
