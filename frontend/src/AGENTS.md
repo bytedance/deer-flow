@@ -32,7 +32,7 @@
    pages; `resolveThreadContext` must neither
    enqueue account writes nor create a fallback thread override that masks a
    later server preference. The
-   Settings > Tools MCP switch calls the targeted `PATCH /api/mcp/config`
+   Capability Center > Plugins MCP switch calls the targeted `PATCH /api/mcp/config`
    mutation, disables switches until that mutation's success refetch completes,
    displays the backend error `detail` through a toast, and invalidates
    `["mcpConfig"]` only after success.
@@ -71,7 +71,7 @@
    fixed page size and an explicit load-more control; full results remain available
    only through JSONL export. The panel must not infer batch mode from prompt text
    or inject the complete result set into chat state.
-   Settings > Integrations uses a local generation only to suppress stale React
+   Capability Center > Plugins > Lark uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains
    so backend cross-tab ordering remains authoritative.

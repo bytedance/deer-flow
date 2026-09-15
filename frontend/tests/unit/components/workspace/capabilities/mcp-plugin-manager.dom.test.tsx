@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
-import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-page";
+import { MCPPluginManager } from "@/components/workspace/capabilities/mcp-plugin-manager";
 
 const mcpMockState = rs.hoisted(() => ({
   isPending: false,
+  isLoading: false,
   error: null as Error | null,
   mutate: rs.fn(),
   updateIsPending: false,
@@ -27,6 +28,14 @@ const DURABLE_TASK_SERVER = {
 rs.mock("@/core/i18n/hooks", () => ({
   useI18n: () => ({
     t: {
+      capabilities: {
+        enabled: "Enabled",
+        disabled: "Disabled",
+        details: "View details",
+        addPlugin: "Add server",
+        mcpLabel: "MCP",
+        mcpDescription: "MCP tools",
+      },
       common: {
         error: "Error:",
         loading: "Loading",
@@ -68,7 +77,7 @@ rs.mock("@/core/i18n/hooks", () => ({
 rs.mock("@/core/mcp/hooks", () => ({
   useMCPConfig: () => ({
     config: { mcp_servers: mcpMockState.servers },
-    isLoading: false,
+    isLoading: mcpMockState.isLoading,
     error: mcpMockState.error,
   }),
   useEnableMCPServer: () => ({
@@ -120,6 +129,7 @@ function definitionTextbox(): HTMLTextAreaElement {
 
 afterEach(() => {
   mcpMockState.isPending = false;
+  mcpMockState.isLoading = false;
   mcpMockState.error = null;
   mcpMockState.updateIsPending = false;
   mcpMockState.mutate.mockReset();
@@ -128,11 +138,29 @@ afterEach(() => {
   cleanup();
 });
 
-describe("ToolSettingsPage MCP switches", () => {
+describe("MCPPluginManager MCP switches", () => {
+  it.each(["loading", "error"])(
+    "preserves other plugins during an MCP %s",
+    (state) => {
+      mcpMockState.isLoading = state === "loading";
+      mcpMockState.error =
+        state === "error" ? new Error("request failed") : null;
+      render(
+        <MCPPluginManager>
+          <button>Configure Lark</button>
+        </MCPPluginManager>,
+      );
+      expect(
+        screen.getByRole("button", { name: "Configure Lark" }),
+      ).toBeDefined();
+      expect(screen.queryByRole("button", { name: "Add server" })).toBeNull();
+    },
+  );
+
   it("renders a localized load error", () => {
     mcpMockState.error = new Error("request failed");
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
 
     expect(screen.getByText("Error: request failed")).toBeDefined();
   });
@@ -141,7 +169,7 @@ describe("ToolSettingsPage MCP switches", () => {
     twoServers();
     mcpMockState.isPending = true;
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
 
     const switches = screen.getAllByRole("switch");
     expect(switches).toHaveLength(2);
@@ -153,7 +181,7 @@ describe("ToolSettingsPage MCP switches", () => {
   it("submits only the selected server state when idle", () => {
     twoServers();
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
 
     const switches = screen.getAllByRole("switch");
     const githubSwitch = switches[0];
@@ -169,11 +197,11 @@ describe("ToolSettingsPage MCP switches", () => {
   });
 });
 
-describe("ToolSettingsPage add server", () => {
+describe("MCPPluginManager add server", () => {
   it("submits only the pasted servers to the atomic create endpoint", () => {
     twoServers();
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
     openAddDialog();
     fireEvent.change(screen.getByRole("textbox"), {
       target: {
@@ -193,7 +221,7 @@ describe("ToolSettingsPage add server", () => {
   it("does not submit stale sibling configurations while adding", () => {
     twoServers();
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
     openAddDialog();
     fireEvent.change(screen.getByRole("textbox"), {
       target: { value: '{"added": {"command": "uvx"}}' },
@@ -211,7 +239,7 @@ describe("ToolSettingsPage add server", () => {
   it("reports a malformed definition without writing", () => {
     twoServers();
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
     openAddDialog();
     fireEvent.change(screen.getByRole("textbox"), {
       target: { value: "{not json" },
@@ -228,7 +256,7 @@ describe("ToolSettingsPage add server", () => {
   it("offers the add action when no server is configured yet", () => {
     setServers({});
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
 
     expect(screen.getByText("No tools")).toBeDefined();
     expect(
@@ -241,7 +269,7 @@ describe("ToolSettingsPage add server", () => {
   it("rejects an existing name instead of silently replacing it", () => {
     twoServers();
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
     openAddDialog();
     fireEvent.change(screen.getByRole("textbox"), {
       target: { value: '{"github": {"command": "uvx"}}' },
@@ -253,11 +281,11 @@ describe("ToolSettingsPage add server", () => {
   });
 });
 
-describe("ToolSettingsPage edit server", () => {
+describe("MCPPluginManager edit server", () => {
   it("prefills the complete server definition", () => {
     twoServers();
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
     openEditDialog("remote");
 
     const definition = JSON.parse(definitionTextbox().value) as {
@@ -273,7 +301,7 @@ describe("ToolSettingsPage edit server", () => {
   it("updates only one server while preserving all of its hidden fields", () => {
     twoServers();
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
     openEditDialog("remote");
     const textbox = definitionTextbox();
     const definition = JSON.parse(textbox.value) as {
@@ -299,7 +327,7 @@ describe("ToolSettingsPage edit server", () => {
   it("rejects renaming through the edit dialog", () => {
     twoServers();
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
     openEditDialog("github");
     fireEvent.change(screen.getByRole("textbox"), {
       target: {
@@ -315,7 +343,7 @@ describe("ToolSettingsPage edit server", () => {
   it("rejects editing multiple servers at once", () => {
     twoServers();
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
     openEditDialog("github");
     fireEvent.change(screen.getByRole("textbox"), {
       target: {
@@ -330,11 +358,11 @@ describe("ToolSettingsPage edit server", () => {
   });
 });
 
-describe("ToolSettingsPage remove server", () => {
+describe("MCPPluginManager remove server", () => {
   it("submits only the selected server name", () => {
     twoServers();
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
     fireEvent.click(screen.getByRole("button", { name: "Delete github" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
 
@@ -347,7 +375,7 @@ describe("ToolSettingsPage remove server", () => {
   it("does not write when the confirmation is dismissed", () => {
     twoServers();
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
     fireEvent.click(screen.getByRole("button", { name: "Delete github" }));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
@@ -357,7 +385,7 @@ describe("ToolSettingsPage remove server", () => {
   it("deletes a configured server whose name is empty", () => {
     setServers({ "": { enabled: false, description: "Legacy server" } });
 
-    render(<ToolSettingsPage />);
+    render(<MCPPluginManager />);
     fireEvent.click(
       screen.getByRole("button", { name: "Delete (empty name)" }),
     );

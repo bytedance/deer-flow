@@ -1407,7 +1407,11 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
-  // Skills list — settings page and slash autocomplete
+  void page.route("**/api/mcp/config", (route) =>
+    route.fulfill({ json: { mcp_servers: {} } }),
+  );
+
+  // Skills list — capability center and slash autocomplete
   void page.route("**/api/skills", (route) => {
     if (route.request().method() === "GET") {
       return route.fulfill({
