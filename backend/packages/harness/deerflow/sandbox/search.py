@@ -44,6 +44,7 @@ IGNORE_PATTERNS = [
     "*.tmp",
     "*.temp",
     ".upload-*.part",
+    ".deer-flow-companions*",
     "*.bak",
     "*.cache",
     ".cache",

@@ -397,6 +397,7 @@
 
 ### 修复
 
+- **上传：** 把转换后的 Markdown companion 暴露给 `<current_uploads>` 与 `list_uploaded_files`，并转发前端的 `markdown_file`，使智能体对 UTF-8 文本调用 `read_file`，而不是去读二进制原件。转换时写入的 `.deer-flow-companions.json` 保留碰撞改名映射（`a.pdf` → `a_1.md`）；身份用私有 hard-link 钉住转换时 inode，原地编辑仍挂在原文件上，删后同名重建（含 Linux inode 复用）则失效。sidecar 读取有字节/条目上限；转换用 temp+`os.replace` 写出，不跟随预占后被换成的 symlink。([#4981]，相关 [#3750])
 - **沙箱：** 远程 `glob` 与 `grep` 的输出被截断时，不再报告"没有匹配"。BoxLite、Tenki、E2B 与
   OpenSandbox 会先限制搜索的原始输出行数，再在 Python 中过滤（`node_modules` 等忽略目录、匹配模式或 `glob`
   范围），但只有达到 `max_results` 时才报告 `truncated`。若被截取的行全部被过滤掉，截断位置之后仍有
