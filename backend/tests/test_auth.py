@@ -129,6 +129,14 @@ def test_decode_token_invalid():
     assert isinstance(decode_token("completely-wrong"), TokenError)
 
 
+def test_decode_token_malformed_jwt():
+    """JWT with wrong number of parts (not 3) returns TokenError."""
+    from app.gateway.auth.errors import TokenError
+
+    assert isinstance(decode_token("header.payload"), TokenError)
+    assert isinstance(decode_token("header.payload.signature.extra"), TokenError)
+
+
 def test_create_token_custom_expiry():
     """Custom expiry is respected."""
     user_id = str(uuid4())
