@@ -27,7 +27,7 @@ def _app_with_config(
     app.include_router(features.router)
     tools = []
     if browser_enabled:
-        tools.append(SimpleNamespace(name="browser_navigate", model_extra=browser_extra or {}))
+        tools.append(SimpleNamespace(name="browser_navigate", use="deerflow.community.browser:browser_navigate_tool", model_extra=browser_extra or {}))
     if conversation_references_enabled:
         tools.append(SimpleNamespace(name="read_conversation", use="deerflow.tools.conversation:read_conversation", model_extra={}))
     fake_config = SimpleNamespace(

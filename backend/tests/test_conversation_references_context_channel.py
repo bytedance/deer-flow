@@ -52,6 +52,12 @@ def test_top_level_and_context_references_together_are_rejected():
     assert [error["type"] for error in exc.value.errors()] == ["conversation_references_conflict"]
 
 
+def test_a_malformed_top_level_value_reports_its_type_error_not_the_conflict():
+    with pytest.raises(ValidationError) as exc:
+        RunCreateRequest(conversation_references="source", context={"conversation_references": ["source"]})
+    assert [(error["type"], error["loc"]) for error in exc.value.errors()] == [("list_type", ("conversation_references",))]
+
+
 def test_an_empty_top_level_list_does_not_conflict_with_context():
     body = RunCreateRequest(conversation_references=[], context={"conversation_references": ["source"]})
     assert body.conversation_references == ["source"]

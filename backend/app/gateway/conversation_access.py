@@ -120,7 +120,7 @@ def conversation_references_enabled(app_config: AppConfig) -> bool:
     Shared by run admission and ``/api/features`` so the UI gate and the
     server check cannot drift.
     """
-    return any(getattr(tool, "use", None) == CONVERSATION_TOOL_USE for tool in app_config.tools)
+    return any(tool.use == CONVERSATION_TOOL_USE for tool in app_config.tools)
 
 
 def _is_int(value: object) -> bool:

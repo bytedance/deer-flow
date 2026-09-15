@@ -67,7 +67,11 @@ class RunCreateRequest(BaseModel):
         lifted = {**data, "context": {key: value for key, value in context.items() if key != "conversation_references"}}
         if references is None:
             return lifted
-        if data.get("conversation_references"):
+        top_level = data.get("conversation_references")
+        if top_level is not None and not isinstance(top_level, list):
+            # Let the field report its own type error instead of a misleading conflict.
+            return data
+        if top_level:
             raise PydanticCustomError("conversation_references_conflict", "Pass conversation_references at the top level or in context, not both")
         lifted["conversation_references"] = references
         return lifted
