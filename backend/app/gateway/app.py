@@ -923,5 +923,5 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     return app
 
 
-# Create app instance for uvicorn
+# ASGI entrypoint: ``uvicorn app.gateway.app:app`` imports this, so the app is built at import time.
 app = create_app()
