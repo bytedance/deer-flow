@@ -201,6 +201,14 @@ export const enUS: Translations = {
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
+    referenceConversations: "Reference a conversation",
+    referenceConversationsSearch: "Search conversations",
+    referenceConversationsEmpty: "No conversations found",
+    referenceConversationsLimit: (max: number) =>
+      `Up to ${max} conversations per message`,
+    referenceConversationsRemove: (title: string) =>
+      `Remove reference to ${title}`,
+    referencedConversations: "Referenced conversations",
     inputPolish: "Polish input",
     inputPolishing: "Polishing input...",
     inputPolishNoChanges: "This input is already clear.",

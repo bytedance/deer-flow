@@ -92,6 +92,14 @@ type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   /**
+   * Thread IDs of conversations the user attached for this run. They ride in
+   * `context.conversation_references`, which the Gateway consumes at admission;
+   * the LangGraph SDK drops unknown top-level body fields, so the top-level
+   * request field is not reachable from here. Display metadata for the
+   * transcript travels separately in `additionalKwargs`.
+   */
+  conversationReferences?: string[];
+  /**
    * Invoked exactly once when the send passes the in-flight guard and is
    * genuinely dispatched. It never fires on the early-return path, so callers
    * can safely perform one-time cleanup (e.g. clearing quoted references)
@@ -2359,6 +2367,9 @@ export function useThreadStream({
             },
             context: {
               ...extraContext,
+              ...(options?.conversationReferences?.length
+                ? { conversation_references: options.conversationReferences }
+                : {}),
               ...context,
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",

@@ -169,6 +169,12 @@ export interface Translations {
     disclaimer: string;
     createSkillPrompt: string;
     addAttachments: string;
+    referenceConversations: string;
+    referenceConversationsSearch: string;
+    referenceConversationsEmpty: string;
+    referenceConversationsLimit: (max: number) => string;
+    referenceConversationsRemove: (title: string) => string;
+    referencedConversations: string;
     inputPolish: string;
     inputPolishing: string;
     inputPolishNoChanges: string;
