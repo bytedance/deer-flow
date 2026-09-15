@@ -1624,6 +1624,39 @@ class E2BSandboxProvider(SandboxProvider):
                 if time.monotonic() >= deadline:
                     stats.budget_exhausted = True
                     break
+                # For warm-pool sandboxes: skip the probe while they are still
+                # within idle_timeout (a command probe would reset e2b's idle
+                # timer and keep them alive forever). After idle_timeout has
+                # elapsed, we *must* probe — the VM may have been reaped by e2b
+                # and we need to detect that to free the capacity slot.
+                with self._lock:
+                    warm_entry = self._warm_pool.get(sandbox_id)
+                if warm_entry is not None:
+                    _seed, parked_at = warm_entry
+                    idle_timeout = float(self._config["idle_timeout"])
+                    age = time.time() - parked_at
+                    if age < idle_timeout:
+                        # Still within idle window; don't probe (any command
+                        # would reset e2b's idle timer and keep the sandbox
+                        # alive forever). Count it as live so duplicate
+                        # cleanup still runs.
+                        live.append((sandbox_id, metadata, None))  # type: ignore[arg-type]
+                        continue
+                    # Past idle_timeout — this sandbox should have expired.
+                    # Do NOT reconnect/probe: connecting and running `true`
+                    # would itself reset the idle timer, creating an infinite
+                    # loop where we "probe" at expiry, the probe keeps the
+                    # sandbox alive, we refresh parked_at, and the VM never
+                    # dies. Instead, treat it as a stale orphan: kill it
+                    # directly after the orphan grace period and free the slot.
+                    stale_entries.append(
+                        (
+                            sandbox_id,
+                            metadata,
+                            float(self._config["reconciliation_grace_seconds"]),
+                        )
+                    )
+                    continue
                 try:
                     client = self._reconnect_live_client(self._get_sandbox_cls(), sandbox_id)
                 except Exception as e:
@@ -1639,9 +1672,19 @@ class E2BSandboxProvider(SandboxProvider):
             stats.duplicates += max(0, len(live) - 1)
             canonical_id, canonical_metadata, canonical_client = live[0]
             with self._lock:
-                already_local = canonical_id in self._sandboxes
+                # Already owned by this process: either active in _sandboxes or warm in _warm_pool
+                already_local = canonical_id in self._sandboxes or canonical_id in self._warm_pool
             if already_local:
-                self._safe_close_client(canonical_client)
+                # already_owned shortcut above means canonical_client is None here;
+                # nothing to close. The sandbox is already tracked correctly.
+                if canonical_client is not None:
+                    self._safe_close_client(canonical_client)
+                # Continue to duplicate cleanup below so other candidates for the
+                # same (user, thread) are still killed.
+            elif canonical_client is None:
+                # Should not happen (only already_owned path passes None as client),
+                # but be defensive.
+                continue
             elif not self._reserve_reconciliation_capacity(
                 canonical_id,
                 reservation_token=self._capacity_reservation_from_metadata(canonical_metadata),
@@ -1684,7 +1727,12 @@ class E2BSandboxProvider(SandboxProvider):
                     else:
                         stats.adopted += 1
 
+            # 1. Kill all duplicates after the first one
             for sandbox_id, _metadata, client in live[1:]:
+                # If client is None, this duplicate was already locally owned
+                # (shouldn't normally happen after sorting by local_id), just skip.
+                if client is None:
+                    continue
                 first_seen = self._orphan_first_seen.setdefault(sandbox_id, observed_at)
                 if observed_at - first_seen < float(self._config["reconciliation_grace_seconds"]):
                     self._safe_close_client(client)
@@ -1703,7 +1751,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._orphan_first_seen.pop(sandbox_id, None)
                     self._forget_local_sandbox(sandbox_id)
                     self._release_ownership(sandbox_id)
-                self._safe_close_client(client)
+                    self._safe_close_client(client)
 
         for sandbox_id, metadata, minimum_age in stale_entries:
             if time.monotonic() >= deadline:
@@ -2069,6 +2117,40 @@ class E2BSandboxProvider(SandboxProvider):
                 break
             except Exception as e:
                 logger.warning("Failed to upload mount %s -> %s: %s", host_path, container_path, e)
+
+        # When creating (or reclaiming) a sandbox for a known thread, also upload
+        # the host-side thread user-data dirs (workspace, outputs, uploads) so that
+        # artifacts produced in a previous sandbox are visible to the new VM. Without
+        # this, after a sandbox is destroyed and recreated, commands that reference
+        # prior outputs fail with "file not found".
+        if thread_id is not None:
+            from deerflow.config.paths import get_paths  # lazy import to avoid cycles
+            paths = get_paths()
+            home_dir = self._config["home_dir"].rstrip("/") or "/home/user"
+            thread_dir = paths.thread_dir(thread_id, user_id=effective_user_id)
+            thread_root = thread_dir / "user-data"
+
+            # Mirror the same subdirs that _sync_outputs_to_host pulls back:
+            # workspace, outputs, plus uploads (uploads are written on the host
+            # by the uploads API so they already exist there before acquire).
+            thread_mount_subdirs = ("workspace", "outputs", "uploads")
+            for sub in thread_mount_subdirs:
+                if budget.expired:
+                    truncation_reason = _mount_deadline_reason(deadline_seconds)
+                    warn_pass_stopped(truncation_reason)
+                    break
+                host_path = thread_root / sub
+                container_path = f"{home_dir}/{sub}"
+                if not host_path.exists():
+                    continue  # nothing to upload for this subdir yet
+                try:
+                    self._upload_tree(client, host_path, container_path, read_only=False, budget=budget)
+                except _MountPassLimitExceeded as e:
+                    truncation_reason = str(e)
+                    warn_pass_stopped(truncation_reason)
+                    break
+                except Exception as e:
+                    logger.warning("Failed to upload thread %s dir %s -> %s: %s", sub, host_path, container_path, e)
 
         return MountUploadResult(
             truncated=truncation_reason is not None,
@@ -2553,7 +2635,11 @@ class E2BSandboxProvider(SandboxProvider):
         """Evict the oldest warm entry, holding a transitioning slot.
 
         The warm entry is popped and a transitioning slot is taken.  The slot
-        stays occupied until the control plane confirms the VM is gone.
+        stays occupied until the control plane confirms the VM is gone, which
+        prevents concurrent acquirers from over-committing capacity during the
+        kill window. Every exit path (success, already-gone, connect error,
+        kill error, peer-owned) MUST release the transitioning slot via
+        ``_end_transition_locked()`` or it will leak forever.
         """
         with self._lock:
             retryable = self._eviction_tombstones - self._evictions_in_progress
@@ -2590,6 +2676,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._evictions_in_progress.discard(evict_id)
                     if not self._shutdown_called:
                         self._eviction_tombstones.add(evict_id)
+                    self._end_transition_locked()
             self._forget_mount_result(evict_id)
             self._release_ownership(evict_id)
             return None
@@ -2613,6 +2700,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._evictions_in_progress.discard(evict_id)
                     if not self._shutdown_called:
                         self._eviction_tombstones.add(evict_id)
+                    self._end_transition_locked()
             self._forget_mount_result(evict_id)
             self._release_ownership(evict_id)
             return None
