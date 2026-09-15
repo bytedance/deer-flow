@@ -187,6 +187,8 @@ async def test_manager_close_all_consumes_group_failure_after_caller_cancellatio
 
     loop.cleanup_futures[0].set_exception(RuntimeError("teardown failed"))
     await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
 
     assert group_future.done()
     assert group_future in consumed
