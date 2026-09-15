@@ -860,7 +860,12 @@ class BrowserSession:
             await self._loop.run(self._dispatch_input(event))
 
     def _submit_close(self) -> Future[Any]:
-        return self._loop.submit(self._close())
+        close_coro = self._close()
+        try:
+            return self._loop.submit(close_coro)
+        except Exception:
+            close_coro.close()
+            raise
 
     async def close(self) -> None:
         close_future = asyncio.wrap_future(self._submit_close())
@@ -1034,11 +1039,19 @@ class BrowserSessionManager:
             sessions = list(self._sessions.values())
             self._sessions.clear()
             self._last_used.clear()
-        close_futures = [asyncio.wrap_future(session._submit_close()) for session in sessions]
-        for close_future in close_futures:
+        close_futures: list[asyncio.Future[Any]] = []
+        for session in sessions:
+            try:
+                close_future = asyncio.wrap_future(session._submit_close())
+            except Exception as exc:
+                logger.debug("browser session close submission failed: %s", exc)
+                continue
             close_future.add_done_callback(_consume_future_exception)
+            close_futures.append(close_future)
         if close_futures:
-            await asyncio.shield(asyncio.gather(*close_futures))
+            close_group = asyncio.gather(*close_futures)
+            close_group.add_done_callback(_consume_future_exception)
+            await asyncio.shield(close_group)
         return len(sessions)
 
 
