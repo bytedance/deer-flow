@@ -76,6 +76,11 @@ def test_detect_reinforcement_default_bundled():
     assert detect_reinforcement(msgs) is True
 
 
+def test_detect_reinforcement_explicit_durable_chinese_confirmation():
+    msgs = [_human("对，我就是喜欢简洁回答，以后都保持这样。")]
+    assert detect_reinforcement(msgs) is True
+
+
 def test_detect_correction_patterns_override():
     custom = [re.compile(r"zzz")]
     assert detect_correction([_human("zzz here")], patterns=custom) is True

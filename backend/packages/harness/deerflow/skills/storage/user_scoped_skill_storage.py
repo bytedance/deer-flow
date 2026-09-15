@@ -362,25 +362,19 @@ class UserScopedSkillStorage(LocalSkillStorage):
     # ------------------------------------------------------------------
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
-        # Ensure user custom skills directory exists
-        self._user_custom_root.mkdir(parents=True, exist_ok=True)
-        target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            delete=False,
-            dir=str(target.parent),
-        ) as tmp_file:
-            tmp_file.write(content)
-            tmp_path = Path(tmp_file.name)
-        try:
-            with self._skill_projection_mutation():
+        with self._skill_projection_mutation():
+            target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(target.parent)) as tmp_file:
+                    tmp_path = Path(tmp_file.name)
+                    tmp_file.write(content)
                 tmp_path.replace(target)
                 make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+            finally:
+                if tmp_path is not None:
+                    tmp_path.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -412,7 +406,12 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
         Custom and managed integration skills live outside ``_host_root``, so
         the default implementation's single-root check would reject them.
+        One-level package-directory symlinks under either configured custom-skill
+        category root retain the operator-managed external-skill compatibility
+        of the base storage.
         """
+        if skill_file.is_symlink():
+            raise ValueError(f"Resolved skill file {skill_file} must stay within the configured skill roots and cannot be a symlink.")
         resolved_file = skill_file.resolve()
         allowed_roots = (
             self._host_root.resolve(),
@@ -425,6 +424,8 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 return resolved_file
             except ValueError:
                 continue
+        if any(self._is_external_skill_directory_symlink(skill_file, custom_root) for custom_root in (self._user_custom_root, self._global_custom_root)):
+            return resolved_file
         raise ValueError(
             f"Resolved skill file {resolved_file} must stay within the global skills root "
             f"({self._host_root.resolve()}), the per-user custom root "

@@ -153,6 +153,27 @@ class TestReadOnlyPath:
             sandbox.write_file("/mnt/skills/new_file.py", "content")
         assert exc_info.value.errno == errno.EROFS
 
+    def test_bash_write_to_projected_copy_does_not_mutate_source(self, tmp_path):
+        source = tmp_path / "canonical" / "SKILL.md"
+        view = tmp_path / "skills_view" / "public" / "demo" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        view.parent.mkdir(parents=True)
+        source.write_text("ORIGINAL\n", encoding="utf-8")
+        from deerflow.skills.projection import _copy_into_view
+
+        _copy_into_view(str(source), str(view))
+        assert view.stat().st_ino != source.stat().st_ino
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/skills/public/demo", local_path=str(view.parent), read_only=True),
+            ],
+        )
+        sandbox.execute_command("python -c \"from pathlib import Path; Path(r'/mnt/skills/public/demo/SKILL.md').write_text('MUTATED\\n', encoding='utf-8')\"")
+        assert source.read_text(encoding="utf-8") == "ORIGINAL\n"
+        assert view.read_text(encoding="utf-8") == "MUTATED\n"
+
     def test_write_file_allowed_on_writable_mount(self, tmp_path):
         data_dir = tmp_path / "data"
         data_dir.mkdir()
@@ -308,6 +329,31 @@ class TestSymlinkEscapes:
         assert "/mnt/data/nested/" in entries
         assert "/mnt/data/nested/linked-dir/" in entries
         assert "/mnt/data/dir-link" not in entries
+
+    def test_list_dir_raises_when_path_is_missing(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/data/missing")
+
+    def test_list_dir_empty_directory_returns_empty(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        assert sandbox.list_dir("/mnt/data") == []
 
     def test_write_file_blocks_symlink_into_nested_read_only_mount(self, tmp_path):
         repo_dir = tmp_path / "repo"
@@ -542,8 +588,75 @@ class TestMultipleMounts:
         assert "/mnt/data/file.txt" in masked
         assert str(mount_dir) not in masked
 
+    @pytest.mark.parametrize("suffix", ["", ":3:needle", " 3 needle"])
+    def test_reverse_resolve_keeps_mount_spelling_for_symlink_resolving_outside(self, tmp_path, suffix):
+        """A link under a mount whose target is outside every mount must not turn
+        into the target's host path.
+
+        ``grep -n`` output (``link.py:3:...``) used to hide this only because the
+        whole line was resolved as one nonexistent file; once a match ends at
+        ``:``, the link itself is resolved like any whitespace-terminated path.
+        """
+        workspace = (tmp_path / "workspace").resolve()
+        workspace.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.py").write_text("needle\n")
+        _symlink_to(outside / "secret.py", workspace / "link.py")
+        sandbox = LocalSandbox("test", [PathMapping(container_path="/mnt/user-data/workspace", local_path=str(workspace))])
+
+        masked = sandbox._reverse_resolve_paths_in_output(f"{workspace}/link.py{suffix}")
+
+        assert masked == f"/mnt/user-data/workspace/link.py{suffix}"
+        # Structured results take the same path back: ``glob`` returned the target's host path.
+        assert sandbox.glob("/mnt/user-data/workspace", "*.py") == (["/mnt/user-data/workspace/link.py"], False)
+
+    def test_reverse_resolve_prefers_the_mount_a_symlink_resolves_into(self, tmp_path):
+        """The spelling fallback applies only when resolution leaves every mount."""
+        workspace = (tmp_path / "workspace").resolve()
+        uploads = (tmp_path / "uploads").resolve()
+        workspace.mkdir()
+        uploads.mkdir()
+        (uploads / "doc.md").write_text("x\n")
+        _symlink_to(uploads / "doc.md", workspace / "doc.md")
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/user-data/workspace", local_path=str(workspace)),
+                PathMapping(container_path="/mnt/user-data/uploads", local_path=str(uploads)),
+            ],
+        )
+
+        assert sandbox._reverse_resolve_path(str(workspace / "doc.md")) == "/mnt/user-data/uploads/doc.md"
+
+    def test_reverse_resolve_spelling_fallback_does_not_keep_dot_dot_escapes(self, tmp_path):
+        """``mount/../x`` is outside the mount by spelling too, so it must not come
+        back as ``/mnt/.../../x`` -- a virtual path forward resolution rejects."""
+        workspace = (tmp_path / "workspace").resolve()
+        workspace.mkdir()
+        sandbox = LocalSandbox("test", [PathMapping(container_path="/mnt/user-data/workspace", local_path=str(workspace))])
+
+        resolved = sandbox._reverse_resolve_path(f"{workspace}/../outside/secret.py")
+
+        assert not resolved.startswith("/mnt/user-data/workspace")
+
 
 class TestLocalSandboxProviderMounts:
+    def test_skill_isolation_capability_fails_closed_when_host_bash_is_enabled(self):
+        provider = LocalSandboxProvider.__new__(LocalSandboxProvider)
+
+        with patch(
+            "deerflow.sandbox.local.local_sandbox_provider.is_host_bash_allowed",
+            return_value=False,
+        ):
+            assert provider.supports_agent_skill_isolation is True
+
+        with patch(
+            "deerflow.sandbox.local.local_sandbox_provider.is_host_bash_allowed",
+            return_value=True,
+        ):
+            assert provider.supports_agent_skill_isolation is False
+
     def test_thread_mappings_mount_per_user_integration_projections(self, tmp_path):
         from deerflow.config.paths import Paths
 

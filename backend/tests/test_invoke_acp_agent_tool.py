@@ -14,6 +14,7 @@ from deerflow.tools.builtins.invoke_acp_agent_tool import (
     _build_acp_mcp_servers,
     _build_mcp_servers,
     _build_permission_response,
+    _format_invocation_error,
     _get_work_dir,
     build_invoke_acp_agent_tool,
 )
@@ -122,6 +123,14 @@ def test_build_permission_response_denies_when_auto_approve_false():
     assert response.outcome.outcome == "cancelled"
 
 
+def test_missing_mcode_command_returns_install_and_login_guidance():
+    result = _format_invocation_error("mcode", "mcode", FileNotFoundError())
+
+    assert "npm install --global @minimax-ai/code" in result
+    assert "mcode login" in result
+    assert "restart DeerFlow" in result
+
+
 @pytest.mark.anyio
 async def test_build_invoke_tool_description_and_unknown_agent_error():
     tool = build_invoke_acp_agent_tool(
@@ -223,7 +232,17 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
             client = captured["client"]
             await client.session_update(
                 "session-1",
-                SimpleNamespace(content=text_content_block("ACP result")),
+                SimpleNamespace(
+                    session_update="agent_thought_chunk",
+                    content=text_content_block("internal reasoning"),
+                ),
+            )
+            await client.session_update(
+                "session-1",
+                SimpleNamespace(
+                    session_update="agent_message_chunk",
+                    content=text_content_block("ACP result"),
+                ),
             )
 
     class DummyProcessContext:

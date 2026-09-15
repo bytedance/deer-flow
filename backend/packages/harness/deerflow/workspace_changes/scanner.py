@@ -6,7 +6,7 @@ import os
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
 from pathlib import Path
 
-from deerflow.constants import BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME
+from deerflow.constants import BROWSER_FRAMES_DIRNAME, MCP_INTERNAL_DIRNAME, TOOL_RESULTS_DIRNAME
 
 from .types import (
     DiffUnavailableReason,
@@ -21,6 +21,10 @@ EXCLUDED_DIR_NAMES = {
     ".hg",
     ".svn",
     ".cache",
+    # Stdio MCP subprocess temp/debug files live below this server-owned
+    # namespace. They remain addressable when a tool returns their path, but
+    # they are not user-authored workspace deliverables or workspace changes.
+    MCP_INTERNAL_DIRNAME,
     ".next",
     ".venv",
     # Transient per-step browser screenshots: live progress feedback surfaced in
@@ -255,6 +259,33 @@ def _snapshot_file(
     )
 
 
+def _normalize_symlink_target(target: str) -> str:
+    """Strip the Windows extended-length prefix from a symlink target.
+
+    ``os.readlink`` on Windows reports absolute targets in extended-length
+    form (``\\\\?\\C:\\...`` or ``\\\\?\\UNC\\server\\share``). Recorded targets
+    are surfaced in workspace-change events and compared against ordinary
+    paths, so keep the plain spelling.
+
+    On POSIX this is a provable identity: the strip only applies on Windows
+    hosts. ``readlink(2)`` returns the literal string the link was created
+    with, and backslash is a valid filename byte on Linux — a target string
+    that merely starts with ``\\\\?\\`` there must be recorded verbatim.
+
+    On Windows, only extended *drive-letter* paths are stripped. Other
+    ``\\\\?\\`` namespace forms (volume-GUID paths, device paths) are kept
+    verbatim: stripping them would leave a relative-looking remainder that
+    no longer names the target's namespace.
+    """
+    if os.name != "nt":
+        return target
+    if target.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + target[len("\\\\?\\UNC\\") :]
+    if target.startswith("\\\\?\\") and len(target) >= 7 and target[4].isascii() and target[4].isalpha() and target[5] == ":" and target[6] in "\\/":
+        return target[4:]
+    return target
+
+
 def _snapshot_symlink(root: WorkspaceRoot, host_file: Path) -> FileSnapshot | None:
     # Deliberately never follows the link (no read_bytes()/open() on the target):
     # the target may point anywhere on the host, including outside the scanned
@@ -274,6 +305,8 @@ def _snapshot_symlink(root: WorkspaceRoot, host_file: Path) -> FileSnapshot | No
         target = os.readlink(host_file)
     except OSError:
         target = None
+    else:
+        target = _normalize_symlink_target(target)
 
     return FileSnapshot(
         path=virtual_path,

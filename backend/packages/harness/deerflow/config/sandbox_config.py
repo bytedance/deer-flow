@@ -1,9 +1,74 @@
+import ipaddress
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
+SandboxNetworkMode = Literal["open", "isolated", "allowlist"]
+SandboxNetworkApproval = Literal["deny", "prompt"]
+
+
+class SandboxNetworkConfig(BaseModel):
+    """Outbound network policy for locally managed AIO sandboxes."""
+
+    mode: SandboxNetworkMode = Field(
+        default="open",
+        description="open keeps the current Docker networking behavior; isolated denies all egress; allowlist permits configured domains and optional runtime approval.",
+    )
+    allow_domains: list[str] = Field(
+        default_factory=list,
+        description="Exact domains or leading-wildcard domains (for example *.pythonhosted.org) allowed in allowlist mode.",
+    )
+    approval: SandboxNetworkApproval = Field(
+        default="prompt",
+        description="Whether a denied public HTTP(S) destination may ask an interactive user for a temporary or sandbox-lifetime grant.",
+    )
+    temporary_grant_ttl: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        description="Lifetime in seconds for the temporary approval choice.",
+    )
+    proxy_image: str = Field(
+        default="ghcr.io/bytedance/deer-flow-sandbox-network-proxy:latest",
+        min_length=1,
+        description="Managed Python runtime image used for the trusted network-policy sidecar.",
+    )
+
+    @field_validator("allow_domains")
+    @classmethod
+    def _normalize_allow_domains(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in values:
+            value = raw.strip().lower().rstrip(".")
+            suffix = value[2:] if value.startswith("*.") else value
+            if not value or value == "*" or not suffix or "://" in value or "/" in value or ":" in value or "*" in suffix or suffix.startswith(".") or suffix.endswith("."):
+                raise ValueError(f"invalid sandbox network allowlist domain: {raw!r}")
+            try:
+                suffix.encode("idna")
+            except UnicodeError as exc:
+                raise ValueError(f"invalid sandbox network allowlist domain: {raw!r}") from exc
+            try:
+                ipaddress.ip_address(suffix)
+            except ValueError:
+                pass
+            else:
+                raise ValueError(f"invalid sandbox network allowlist domain: {raw!r}")
+            ascii_suffix = suffix.encode("idna").decode("ascii")
+            labels = ascii_suffix.split(".")
+            if (
+                len(labels) < 2
+                or len(ascii_suffix) > 253
+                or any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-") or any(not (char.isascii() and (char.isalnum() or char == "-")) for char in label) for label in labels)
+            ):
+                raise ValueError(f"invalid sandbox network allowlist domain: {raw!r}")
+            canonical = ("*." if value.startswith("*.") else "") + ascii_suffix
+            if canonical not in seen:
+                seen.add(canonical)
+                normalized.append(canonical)
+        return normalized
 
 
 class SandboxOwnershipConfig(BaseModel):
@@ -29,6 +94,7 @@ class SandboxOwnershipConfig(BaseModel):
     renewal_interval_seconds: float = Field(
         default=30.0,
         gt=0,
+        allow_inf_nan=False,
         description=(
             "How often an owning instance refreshes its leases. The lease TTL is derived from this (interval x ttl_multiplier), so ownership liveness is independent of sandbox.idle_timeout: "
             "renewal keeps running even when idle cleanup is disabled (idle_timeout: 0)."
@@ -37,6 +103,7 @@ class SandboxOwnershipConfig(BaseModel):
     ttl_multiplier: float = Field(
         default=4.0,
         ge=2,
+        allow_inf_nan=False,
         description="Lease TTL as a multiple of renewal_interval_seconds. At least 2, so a single missed renewal (slow host, brief Redis blip) cannot expire a live owner's lease. Default 4 tolerates three consecutive misses.",
     )
     key_prefix: str = Field(
@@ -74,8 +141,8 @@ class SandboxConfig(BaseModel):
         allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
             Dangerous and intended only for fully trusted local workflows.
 
-    AioSandboxProvider, BoxliteProvider, and E2BSandboxProvider shared options:
-        image: Sandbox image to use (Docker/AIO image or BoxLite OCI image)
+    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, and OpenSandboxProvider shared options:
+        image: Sandbox image to use (Docker/AIO, BoxLite OCI, or OpenSandbox image)
         replicas: Positive provider capacity. E2B shares it across Gateway
             workers when ownership uses Redis; other modes/providers keep
             process-local accounting.
@@ -95,6 +162,13 @@ class SandboxConfig(BaseModel):
     AioSandboxProvider and E2BSandboxProvider shared options:
         ownership: Cross-instance sandbox ownership store (memory | redis). Multi-instance
             deployments sharing a sandbox backend need redis; see SandboxOwnershipConfig.
+
+    OpenSandboxProvider specific options:
+        api_key, domain, protocol, request_timeout, use_server_proxy: OpenSandbox
+            management and execd connection settings.
+        ready_timeout: Create/readiness deadline in seconds (default: 30).
+        sandbox_timeout: Remote lifetime in seconds (default: 14400); 0 requires
+            explicit provider cleanup.
     """
 
     use: str = Field(
@@ -107,7 +181,7 @@ class SandboxConfig(BaseModel):
     )
     image: str | None = Field(
         default=None,
-        description="Sandbox image to use (Docker/AIO image or BoxLite OCI image)",
+        description="Sandbox image to use (Docker/AIO, BoxLite OCI, or OpenSandbox image)",
     )
     port: int | None = Field(
         default=None,
@@ -164,6 +238,10 @@ class SandboxConfig(BaseModel):
         default_factory=dict,
         description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
     )
+    network: SandboxNetworkConfig = Field(
+        default_factory=SandboxNetworkConfig,
+        description="AioSandboxProvider outbound network isolation and approval policy.",
+    )
 
     bash_output_max_chars: int = Field(
         default=20000,
@@ -184,8 +262,9 @@ class SandboxConfig(BaseModel):
         default=600,
         gt=0,
         description=(
-            "Maximum wall-clock seconds a host bash command may run before it is terminated, process group and all (LocalSandboxProvider). "
-            "Keeps a blocking foreground command (e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
+            "Maximum wall-clock seconds a bash command may run before it is terminated. LocalSandboxProvider applies it to the host process group; "
+            "OpenSandboxProvider forwards it to the remote exec service when a call has no explicit timeout. Keeps a blocking foreground command "
+            "(e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
         ),
     )
 

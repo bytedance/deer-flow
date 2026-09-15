@@ -9,6 +9,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -18,6 +21,7 @@ import pytest
 
 from deerflow.community.boxlite.box import BoxliteBox
 from deerflow.community.boxlite.provider import BoxliteProvider, _import_simplebox
+from deerflow.trace_context import get_current_trace_id, request_trace_context
 
 _LEGACY_COLLIDING_IDENTITIES = (
     ("user-9721", "thread-9721"),
@@ -47,6 +51,9 @@ class _FakeBox:
         # Health check: box.execute_command("echo ok") → exec("sh", "-lc", "echo ok")
         if len(argv) >= 3 and argv[0] == "sh" and argv[1] == "-lc" and argv[2] == "echo ok":
             return type("_FakeResult", (), {"stdout": "ok\n", "stderr": "", "exit_code": 0})()
+        if len(argv) >= 3 and argv[0] == "sh" and argv[1] == "-lc" and "__DF_SEARCH_STATUS__:" in argv[2]:
+            # A search that ran and found nothing (see sandbox/remote_search.py).
+            return type("_FakeResult", (), {"stdout": "\n__DF_SEARCH_STATUS__:1\n", "stderr": "", "exit_code": 0})()
         return _FakeResult()
 
     async def stop(self):
@@ -165,6 +172,19 @@ def test_execute_command_forwards_timeout_to_sdk_and_loop_runner() -> None:
     assert run_timeouts == [5]
 
 
+def test_execute_command_appends_exit_marker_when_failure_has_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LocalSandbox parity: a nonzero exit survives in the output text even
+    when the command produced output (acceptance-checklist evidence)."""
+    box = BoxliteBox("box-id", box=object(), run=_fake_run)
+    monkeypatch.setattr(
+        box,
+        "_exec",
+        lambda *argv, **kwargs: types.SimpleNamespace(exit_code=1, stdout="5 passed, 1 error\n", stderr=""),
+    )
+
+    assert box.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
 def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, ...]] = []
 
@@ -193,7 +213,7 @@ def test_grep_always_prints_filename_for_single_file_paths() -> None:
 
     box.grep("/mnt/user-data/uploads/report.md", "needle")
 
-    grep_commands = [argv[0][2] for argv in fake._exec_history if argv[0][:2] == ("sh", "-lc") and argv[0][2].startswith("grep ")]
+    grep_commands = [argv[0][2] for argv in fake._exec_history if argv[0][:2] == ("sh", "-lc") and "grep -r " in argv[0][2]]
     assert grep_commands
     assert "-H" in grep_commands[-1].split()
 
@@ -474,6 +494,48 @@ def test_acquire_reclaims_from_warm_pool(monkeypatch):
     assert sid1 == sid2  # Same deterministic ID
     assert sid2 in provider._boxes
     assert sid2 not in provider._warm_pool
+
+
+@pytest.mark.asyncio
+async def test_acquire_async_propagates_request_trace_context(monkeypatch):
+    """acquire_async must carry request ContextVars into the worker thread.
+
+    Regression test (#5089): the dedicated-executor bridge replaced the
+    inherited ``to_thread`` acquire (which copies contextvars). Without an
+    explicit ``copy_context`` the worker thread reads the trace id bound by
+    ``request_trace_context()`` as unset and logs ``trace_id=-``.
+    """
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    seen: list[str | None] = []
+    original = BoxliteProvider._acquire_scope_locked
+
+    def spy(self, key, sandbox_id):
+        # Runs inside the executor worker thread, under the copied context.
+        seen.append(get_current_trace_id())
+        return original(self, key, sandbox_id)
+
+    monkeypatch.setattr(BoxliteProvider, "_acquire_scope_locked", spy)
+
+    try:
+        with request_trace_context("trace-boxlite-5089"):
+            sid = await provider.acquire_async("thread-1", user_id="u1")
+        assert sid
+        assert seen == ["trace-boxlite-5089"]
+    finally:
+        # _fake_run uses asyncio.run, which cannot run inside this test's event
+        # loop thread; shut down on a worker thread so box close() completes.
+        await asyncio.to_thread(provider.shutdown)
 
 
 def test_explicit_recent_reclaim_skip_avoids_health_check(monkeypatch):
@@ -873,7 +935,9 @@ def test_reset_parks_running_resources_for_later_cleanup(monkeypatch):
     assert provider._warm_pool[sid_active][0] is active_box
     assert provider._warm_pool[sid_warm][0] is warm_box
     assert provider._thread_boxes == {}
-    assert provider._acquire_locks == {}
+    with pytest.raises(RuntimeError, match="closed"):
+        with provider._acquire_serializer.hold("k"):
+            pass
     assert not active_box._closed
     assert not warm_box._closed
     assert not provider._shutdown_called
@@ -1226,3 +1290,196 @@ def test_failed_health_check_does_not_remove_swapped_warm_entry(monkeypatch):
     )
     assert not replacement.is_closed
     provider.shutdown()
+
+
+def test_sandbox_id_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert BoxliteProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+
+
+def test_sandbox_id_none_user_quirk_pinned():
+    """BoxLite passes user_id through raw; None renders as the literal "None".
+
+    Quirk pinned per RFC #4741 §2.2 (its _thread_key uses "" instead, so the
+    two disagree). NOT fixed here — unifying the resolution is a separate
+    behavior-changing decision with its own follow-up issue.
+    """
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert BoxliteProvider._sandbox_id("t-1", None) == derive_sandbox_scope_token(user_id="None", thread_id="t-1")
+
+
+def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
+    # "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    # verbatim, one entry per line, so a per-line strip() corrupts the name.
+    class _FindBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            marker = "__DF_SEARCH_STATUS__" if "__DF_SEARCH_STATUS__:" in argv[2] else "__DF_FIND_STATUS__"
+            return types.SimpleNamespace(stdout=f"/mnt/user-data/workspace/notes.txt \n\n{marker}:0\n", stderr="", exit_code=0)
+
+    box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace/notes.txt "]
+
+    found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
+    assert found == ["/mnt/user-data/workspace/notes.txt "]
+    assert truncated is False
+
+
+def test_list_dir_raises_when_find_returns_no_entries() -> None:
+    class _EmptyBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout="\n__DF_FIND_STATUS__:1\n", stderr="", exit_code=1)
+
+    box = BoxliteBox("box-id", box=_EmptyBox(), run=_fake_run)
+
+    with pytest.raises(FileNotFoundError):
+        box.list_dir("/mnt/user-data/workspace")
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
+    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    class _MissingBinaryBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout="", stderr="", exit_code=127)
+
+    box = BoxliteBox("box-id", box=_MissingBinaryBox(), run=_fake_run)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        box.list_dir("/mnt/user-data/workspace")
+
+
+def test_list_dir_uses_find_H_to_dereference_start_point() -> None:
+    captured: list[tuple] = []
+
+    class _FindBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            captured.append(argv)
+            return types.SimpleNamespace(stdout="/mnt/user-data/workspace\n\n__DF_FIND_STATUS__:0\n", stderr="", exit_code=0)
+
+    box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace"]
+    assert any(len(argv) >= 3 and "find -H " in str(argv[2]) for argv in captured)
+
+
+# ── Remote grep/glob failure contract against a real POSIX sh (#5376) ─────────
+
+_RS_POSIX = pytest.mark.skipif(
+    os.name == "nt" or any(shutil.which(tool) is None for tool in ("sh", "head", "grep", "find")),
+    reason="POSIX sh, head, grep and find required",
+)
+
+
+def _rs_env(tmp_path, failing: str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    if failing is not None:
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir()
+        fake = bin_dir / failing
+        fake.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _rs_box(tmp_path, monkeypatch, failing: str | None = None) -> BoxliteBox:
+    box = BoxliteBox("box-id", box=_FakeBox(name="box-id"), run=_fake_run)
+    shell_env = _rs_env(tmp_path, failing)
+
+    def sh(script: str, env=None, timeout=None):
+        # ``sh -c`` (not ``-lc``) keeps a login profile from overriding the fake PATH.
+        proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=shell_env, check=False)
+        return types.SimpleNamespace(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
+
+    monkeypatch.setattr(box, "_sh", sh)
+    return box
+
+
+def _rs_search(box, op: str, root: str):
+    return box.grep(root, "needle") if op == "grep" else box.glob(root, "**/*.py")
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("op", ["grep", "glob"])
+def test_remote_search_missing_root_raises_file_not_found(tmp_path, monkeypatch, op) -> None:
+    with pytest.raises(FileNotFoundError):
+        _rs_search(_rs_box(tmp_path, monkeypatch), op, str(tmp_path / "missing"))
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "binary"), [("grep", "grep"), ("glob", "find")])
+def test_remote_search_missing_binary_raises_instead_of_no_matches(tmp_path, monkeypatch, op, binary) -> None:
+    with pytest.raises(OSError, match="exited with code 127"):
+        _rs_search(_rs_box(tmp_path, monkeypatch, failing=binary), op, str(tmp_path))
+
+
+@_RS_POSIX
+def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeypatch) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("def needle():\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, _ = box.grep(str(tmp_path), "needle")
+    assert [(os.path.basename(m.path), m.line_number) for m in matches] == [("app.py", 1)]
+    assert box.grep(str(tmp_path), "zzz_nothing") == ([], False)
+    found, _ = box.glob(str(tmp_path), "**/*.py")
+    assert [os.path.basename(path) for path in found] == ["app.py"]
+    assert box.glob(str(tmp_path), "*.md") == ([], False)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 51, False), ("grep", 52, True), ("glob", 51, False), ("glob", 52, True)])
+def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 caps the raw stream at 51 lines, and every line falls outside
+    # the glob, so nothing survives the Python-side filter. Only the cap decides
+    # whether that empty result is complete; reporting it as such reads as "no
+    # matches" while an in-scope file may sit past the cap.
+    (tmp_path / "other").mkdir()
+    for index in range(entries):
+        (tmp_path / "other" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        result = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        result = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert result == ([], truncated)
+
+
+@_RS_POSIX
+def test_grep_glob_keeps_its_directory_prefix(tmp_path, monkeypatch) -> None:
+    # grep has no portable --include, so the glob is applied in Python. Matching
+    # only its basename broadened "src/*.js" to every *.js in the tree; the scope
+    # must follow the same relative-to-root semantics as glob() (Tenki, E2B).
+    for rel in ("src/a.js", "src/deep/b.js", "vendor/c.js"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("const needle = 1;\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    def grep_scope(glob: str) -> list[str]:
+        matches, _ = box.grep(str(tmp_path), "needle", glob=glob)
+        return sorted(os.path.relpath(m.path, tmp_path) for m in matches)
+
+    def glob_scope(glob: str) -> list[str]:
+        found, _ = box.glob(str(tmp_path), glob)
+        return sorted(os.path.relpath(path, tmp_path) for path in found)
+
+    assert grep_scope("src/*.js") == ["src/a.js"]
+    for glob in ("src/*.js", "src/**/*.js", "**/*.js", "*.js"):
+        assert grep_scope(glob) == glob_scope(glob), glob
+
+
+@_RS_POSIX
+def test_grep_single_file_path_with_matching_glob(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("needle here\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, truncated = box.grep(str(target), "needle", glob="*.txt")
+
+    assert [m.path for m in matches] == [str(target)]
+    assert truncated is False
+    assert box.grep(str(target), "needle", glob="*.md") == ([], False)

@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="deerflow",
         description="DeerFlow terminal workbench — a TUI over the embedded DeerFlow harness.",
+        epilog="Extension management: deerflow extensions --help",
         add_help=True,
     )
     parser.add_argument("message", nargs="*", help="initial prompt for the TUI, or message in --cli mode")
@@ -204,6 +205,7 @@ deerflow — DeerFlow terminal workbench
   deerflow --json "question"    stream newline-delimited JSON events
   deerflow --recursion-limit N --print "question"
                               set the headless agent-loop super-step limit
+  deerflow extensions --help  install and manage trusted Python extensions
   echo "question" | deerflow --print
 """
 
@@ -222,6 +224,10 @@ def _run_overrides(plan: LaunchPlan) -> dict[str, int]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "extensions":
+        from deerflow.extensions.cli import main as extensions_main
+
+        return extensions_main(argv[1:])
     plan = plan_launch(
         argv,
         stdin_isatty=sys.stdin.isatty(),

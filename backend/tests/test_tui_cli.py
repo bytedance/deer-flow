@@ -2,11 +2,15 @@
 
 import pytest
 
-from deerflow.tui.cli import LaunchPlan, plan_launch
+from deerflow.tui.cli import LaunchPlan, build_parser, plan_launch
 
 
 def plan(argv, *, stdin_tty=True, stdout_tty=True, env=None):
     return plan_launch(argv, stdin_isatty=stdin_tty, stdout_isatty=stdout_tty, env=env or {})
+
+
+def test_top_level_help_points_to_extension_management():
+    assert "deerflow extensions --help" in build_parser().format_help()
 
 
 def test_bare_command_on_tty_launches_tui():

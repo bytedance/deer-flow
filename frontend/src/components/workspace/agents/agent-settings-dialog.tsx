@@ -24,14 +24,18 @@ import { useUpdateAgent } from "@/core/agents";
 import type { Agent, ReasoningEffort } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
+import { useSubagents } from "@/core/subagents";
 
 import {
+  allowedSubagentsToSelection,
   DEFAULT_MODEL_VALUE,
   INHERIT_VALUE,
   MAX_AGENT_OUTPUT_TOKENS,
   parseAgentModelSettingsDraft,
   resolveEffectiveModel,
+  selectionToAllowedSubagents,
   selectionToThinkingEnabled,
+  type SubagentAccessSelection,
   thinkingEnabledToSelection,
 } from "./agent-settings-dialog-helpers";
 
@@ -44,7 +48,7 @@ interface AgentSettingsDialogProps {
 }
 
 /**
- * Edits a custom agent's model behavior (issue #4336): default model plus the
+ * Edits a custom agent's display name and model behavior: default model plus the
  * per-agent temperature / max_tokens overrides and thinking / reasoning
  * defaults. Persists through `PUT /api/agents/{name}`; changes take effect on
  * the agent's next run.
@@ -56,7 +60,9 @@ export function AgentSettingsDialog({
 }: AgentSettingsDialogProps) {
   const { t } = useI18n();
   const { models } = useModels();
+  const { subagents } = useSubagents();
   const updateAgent = useUpdateAgent();
+  const [displayName, setDisplayName] = useState(agent.display_name ?? "");
 
   const [model, setModel] = useState(agent.model ?? DEFAULT_MODEL_VALUE);
   const [temperature, setTemperature] = useState(
@@ -75,6 +81,12 @@ export function AgentSettingsDialog({
   const [reasoningEffort, setReasoningEffort] = useState(
     agent.reasoning_effort ?? INHERIT_VALUE,
   );
+  const [subagentAccess, setSubagentAccess] = useState<SubagentAccessSelection>(
+    allowedSubagentsToSelection(agent.allowed_subagents),
+  );
+  const [selectedSubagents, setSelectedSubagents] = useState<string[]>(
+    agent.allowed_subagents ?? [],
+  );
 
   // The resolved profile gates which controls are meaningful: thinking and
   // reasoning-effort only apply when the selected model advertises support.
@@ -87,8 +99,29 @@ export function AgentSettingsDialog({
   const supportsThinking = selectedModel?.supports_thinking ?? false;
   const supportsReasoningEffort =
     selectedModel?.supports_reasoning_effort ?? false;
+  const selectableSubagents = useMemo(
+    () =>
+      Array.from(
+        new Map(
+          subagents
+            .filter((item) => item.enabled && !item.conflict)
+            .map((item) => [item.name, item]),
+        ).values(),
+      ),
+    [subagents],
+  );
+  const missingSubagents = useMemo(() => {
+    const selectableNames = new Set(
+      selectableSubagents.map((item) => item.name),
+    );
+    return selectedSubagents.filter((name) => !selectableNames.has(name));
+  }, [selectableSubagents, selectedSubagents]);
 
   async function handleSave() {
+    if ([...displayName.trim()].length > 100) {
+      toast.error(t.agents.settingsDisplayNameTooLong);
+      return;
+    }
     const parsedSettings = parseAgentModelSettingsDraft({
       temperature,
       maxTokens,
@@ -106,6 +139,7 @@ export function AgentSettingsDialog({
       await updateAgent.mutateAsync({
         name: agent.name,
         request: {
+          display_name: displayName.trim() || null,
           model: model === DEFAULT_MODEL_VALUE ? null : model,
           model_settings: parsedSettings.modelSettings,
           thinking_enabled: supportsThinking
@@ -115,6 +149,10 @@ export function AgentSettingsDialog({
             supportsReasoningEffort && reasoningEffort !== INHERIT_VALUE
               ? (reasoningEffort as ReasoningEffort)
               : null,
+          allowed_subagents: selectionToAllowedSubagents(
+            subagentAccess,
+            selectedSubagents,
+          ),
         },
       });
       toast.success(t.agents.settingsSaved);
@@ -133,6 +171,25 @@ export function AgentSettingsDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-1">
+          <div className="space-y-1.5">
+            <label htmlFor="agent-display-name" className="text-sm font-medium">
+              {t.agents.settingsDisplayName}
+            </label>
+            <Input
+              id="agent-display-name"
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
+              placeholder={agent.name}
+              aria-describedby="agent-display-name-hint"
+            />
+            <p
+              id="agent-display-name-hint"
+              className="text-muted-foreground text-xs"
+            >
+              {t.agents.settingsDisplayNameHint} ({agent.name}){" · "}
+              {[...displayName.trim()].length}/100
+            </p>
+          </div>
           {/* Default model */}
           <div className="space-y-1.5">
             <span className="text-sm font-medium">
@@ -244,6 +301,92 @@ export function AgentSettingsDialog({
               </Select>
             </div>
           )}
+
+          <div className="space-y-2 border-t pt-4">
+            <div>
+              <p className="text-sm font-medium">
+                {t.settings.subagents.bindingTitle}
+              </p>
+              <p className="text-muted-foreground text-xs">
+                {t.settings.subagents.bindingDescription}
+              </p>
+            </div>
+            <Select
+              value={subagentAccess}
+              onValueChange={(value) =>
+                setSubagentAccess(value as SubagentAccessSelection)
+              }
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  {t.settings.subagents.allAllowed}
+                </SelectItem>
+                <SelectItem value="none">
+                  {t.settings.subagents.noneAllowed}
+                </SelectItem>
+                <SelectItem value="selected">
+                  {t.settings.subagents.selectedAllowed}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            {subagentAccess === "selected" && (
+              <div className="max-h-40 space-y-2 overflow-y-auto rounded-md border p-3">
+                {selectableSubagents.map((item) => (
+                  <label
+                    key={item.name}
+                    className="flex items-start gap-2 text-sm"
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 size-4"
+                      checked={selectedSubagents.includes(item.name)}
+                      onChange={(event) =>
+                        setSelectedSubagents((current) =>
+                          event.target.checked
+                            ? [...current, item.name]
+                            : current.filter((name) => name !== item.name),
+                        )
+                      }
+                    />
+                    <span>
+                      <span className="font-medium">
+                        {item.display_name ?? item.name}
+                      </span>
+                      <span className="text-muted-foreground block text-xs">
+                        {item.description}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+                {missingSubagents.map((name) => (
+                  <label
+                    key={name}
+                    className="text-muted-foreground flex items-start gap-2 text-sm"
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 size-4"
+                      checked
+                      onChange={() =>
+                        setSelectedSubagents((current) =>
+                          current.filter((item) => item !== name),
+                        )
+                      }
+                    />
+                    <span>
+                      <span className="font-medium">{name}</span>
+                      <span className="block text-xs">
+                        {t.settings.subagents.missing}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         <DialogFooter>

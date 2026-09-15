@@ -25,6 +25,7 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.migrations._env_filters import (
     LANGGRAPH_OWNED_TABLES,
     include_object,
+    register_configured_extension_table_prefixes,
 )
 
 # Re-export under the module namespace for any consumer that addresses them
@@ -43,6 +44,14 @@ except ImportError:
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# This process never starts a Gateway, so ``load_extensions()`` has not run and
+# ``EXTENSION_TABLE_PREFIXES`` would be empty in the one place ``include_object``
+# reads it. Read the declarations straight from config instead; extension code
+# is never imported here.
+_extension_prefixes = register_configured_extension_table_prefixes()
+if _extension_prefixes:
+    logging.getLogger(__name__).info("alembic: excluding extension-owned tables with prefixes %s", ", ".join(sorted(_extension_prefixes)))
 
 target_metadata = Base.metadata
 

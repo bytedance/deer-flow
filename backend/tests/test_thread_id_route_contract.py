@@ -73,16 +73,31 @@ def _collect_thread_id_routes():
         artifacts,
         browser,
         feedback,
+        mcp_tasks,
         runs,
         scheduled_tasks,
         skills,
+        subagent_batches,
         suggestions,
         thread_runs,
         threads,
         uploads,
     )
 
-    routers = [artifacts, browser, feedback, runs, scheduled_tasks, skills, suggestions, thread_runs, threads, uploads]
+    routers = [
+        artifacts,
+        browser,
+        feedback,
+        mcp_tasks,
+        runs,
+        scheduled_tasks,
+        skills,
+        subagent_batches,
+        suggestions,
+        thread_runs,
+        threads,
+        uploads,
+    ]
     cases = []
     for module in routers:
         for route in module.router.routes:
@@ -121,6 +136,26 @@ def test_sweep_covers_expected_surface():
     """Sanity: the sweep must actually see the known thread_id routes."""
     assert len(_THREAD_ID_ROUTES) >= 30
     assert any("suggestions" in name for name, _, _ in _THREAD_ID_ROUTES)
+    assert any("mcp_tasks" in name for name, _, _ in _THREAD_ID_ROUTES)
+    assert any("subagent_batches" in name for name, _, _ in _THREAD_ID_ROUTES)
+
+
+def test_sweep_covers_every_router_module_with_thread_id_routes():
+    """No router module declaring ``{thread_id}`` route paths may fall out of
+    the runtime sweep (a file merely mentioning thread_id in a body field
+    does not count)."""
+    import importlib
+
+    swept = {name for name, _, _ in _THREAD_ID_ROUTES}
+    missing = []
+    for path in sorted(ROUTERS_DIR.glob("*.py")):
+        module = importlib.import_module(f"app.gateway.routers.{path.stem}")
+        routes = getattr(getattr(module, "router", None), "routes", None) or []
+        if not any("{thread_id}" in getattr(route, "path", "") for route in routes):
+            continue
+        if path.stem not in swept:
+            missing.append(path.stem)
+    assert not missing, f"routers with thread_id routes missing from the runtime sweep: {missing}"
 
 
 @pytest.mark.parametrize(

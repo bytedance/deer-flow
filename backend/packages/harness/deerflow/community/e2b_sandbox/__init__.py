@@ -22,6 +22,7 @@ Configuration example (``config.yaml``)::
       reconciliation_max_pages: 10
       reconciliation_max_items: 200
       reconciliation_max_seconds: 15
+      mount_upload_deadline_seconds: 120   # mount upload pass deadline; default: 120
       mounts:                          # one-shot upload of host files into the sandbox
         - host_path: /path/on/host
           container_path: /path/in/sandbox

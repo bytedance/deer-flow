@@ -11,7 +11,7 @@ pin the actionable error contract and guard the normal text path.
 from pathlib import Path
 from types import SimpleNamespace
 
-from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.tools import read_file_tool
 
 
@@ -63,6 +63,38 @@ def test_read_file_tool_text_file_unaffected(tmp_path, monkeypatch) -> None:
 
     assert "hello 你好" in result, result
     assert "binary" not in result.lower(), result
+
+
+def test_read_file_tool_keeps_custom_mount_path_provider_owned(tmp_path, monkeypatch) -> None:
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    runtime = _local_runtime(tmp_path)
+    mounted = tmp_path / "mounted-code"
+    mounted.mkdir()
+    (mounted / "notes.txt").write_text("first\nsecond\nthird", encoding="utf-8")
+    sandbox = LocalSandbox(
+        "local:t1",
+        path_mappings=[PathMapping(container_path="/mnt/code-read", local_path=str(mounted), read_only=True)],
+    )
+    mount = VolumeMountConfig(host_path=str(mounted), container_path="/mnt/code-read", read_only=True)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools._get_custom_mounts", lambda: [mount])
+
+    full = read_file_tool.func(
+        runtime=runtime,
+        description="read mounted file",
+        path="/mnt/code-read/notes.txt",
+    )
+    ranged = read_file_tool.func(
+        runtime=runtime,
+        description="read mounted line",
+        path="/mnt/code-read/notes.txt",
+        start_line=2,
+        end_line=2,
+    )
+
+    assert full == "first\nsecond\nthird"
+    assert ranged == "second"
 
 
 def test_read_file_tool_passes_line_range_into_sandbox(monkeypatch) -> None:

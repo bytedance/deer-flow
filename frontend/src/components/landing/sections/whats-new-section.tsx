@@ -68,7 +68,7 @@ export function WhatsNewSection({ className }: { className?: string }) {
   return (
     <Section
       className={cn("", className)}
-      title="Whats New in DeerFlow 2.0"
+      title="What's New in DeerFlow 2.0"
       subtitle="DeerFlow is now evolving from a Deep Research agent into a full-stack Super Agent"
     >
       <div

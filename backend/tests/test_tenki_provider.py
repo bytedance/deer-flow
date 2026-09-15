@@ -1,6 +1,6 @@
 """Unit tests for the Tenki community sandbox provider.
 
-These run in CI without ``tenki-sandbox`` installed: they cover the lazy-import
+These run in CI without ``tenki`` installed: they cover the lazy-import
 error path, provider lifecycle, path-safety guards, the native ``fs`` file
 round-trip, warm-pool mechanics, and scope resolution — none of which need a live
 sandbox. A single opt-in integration test (``test_integration_real_sandbox``)
@@ -10,8 +10,12 @@ exercises a real Tenki microVM end to end when ``TENKI_API_KEY`` is set.
 from __future__ import annotations
 
 import errno
+import logging
 import os
+import re
 import shlex
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -106,6 +110,13 @@ class _FakeFS:
         return _FakeFileInfo(path, len(self._owner.files[path]))
 
 
+def _search_inner(script: str) -> str:
+    """The grep/find command inside ``remote_search_command``, or ``script`` itself."""
+    if "__DF_SEARCH_STATUS__:" not in script:
+        return script
+    return script[script.index("{ ") + 2 : script.index('; echo $? > "$_st"; }')]
+
+
 class _FakeSandbox:
     """A fake tenki ``Sandbox``: a native ``fs`` API plus the handful of shell
     commands the adapter still emits for search, backed by one in-memory
@@ -149,12 +160,21 @@ class _FakeSandbox:
     def _run_script(self, script: str) -> _FakeResult:
         if script == "echo ok":
             return _FakeResult(stdout=b"ok\n")
+        if script == "failing-tests":
+            return _FakeResult(exit_code=1, stdout=b"5 passed, 1 error\n")
         if "BOOTSTRAP_OK" in script:  # provider create-time bootstrap script
             return _FakeResult(stdout=b"BOOTSTRAP_OK\n")
-        if script.startswith("find "):
-            root = shlex.split(script)[1]
+        if "__DF_SEARCH_STATUS__:" in script:
+            return self._search(script)
+        if script.startswith("find ") or "find -H " in script:
+            match = re.search(r"(?:^|[\s;{])find(?:\s+-[HLP])*\s+(\S+)", script)
+            root = match.group(1).strip("'\"") if match else ""
             hits = [p for p in self.files if p == root or p.startswith(f"{root.rstrip('/')}/")]
-            return _FakeResult(stdout=("\n".join(hits) + "\n").encode() if hits else b"")
+            listing = ("\n".join(hits) + "\n") if hits else ""
+            if "__DF_FIND_STATUS__:" in script:
+                status = 0 if hits else 1
+                return _FakeResult(stdout=f"{listing}\n__DF_FIND_STATUS__:{status}\n".encode(), exit_code=status)
+            return _FakeResult(stdout=listing.encode())
         if script.startswith("grep "):
             # grep <flags> -e <pattern> <root> 2>/dev/null | head -N
             tokens = shlex.split(script)
@@ -169,23 +189,28 @@ class _FakeSandbox:
             return _FakeResult(stdout=("\n".join(lines) + "\n").encode() if lines else b"")
         return _FakeResult()
 
+    def _search(self, script: str) -> _FakeResult:
+        # remote_search_command: a root-existence check, then the wrapped search and its status marker.
+        root = shlex.split(re.search(r"\[ ! -e (.+?) \]; then", script).group(1))[0].rstrip("/") or "/"
+        if not any(p == root or p.startswith(f"{root}/") for p in (*self.files, *self.dirs)):
+            return _FakeResult(stdout=b"__DF_SEARCH_STATUS__:missing\n")
+        inner = _search_inner(script)
+        listing = self._run_script(inner).stdout_text
+        status = 0 if listing or inner.startswith("find ") else 1
+        return _FakeResult(stdout=f"{listing}\n__DF_SEARCH_STATUS__:{status}\n".encode())
+
     def close(self):
         self.closed = True
         if self.close_error is not None:
             raise self.close_error
 
 
-class _FakeProject:
+class _FakeWorkspace:
+    """Mirrors tenki 1.0.2 ``IdentityWorkspace``: id and name, no ``projects``."""
+
     def __init__(self, id: str, name: str) -> None:
         self.id = id
         self.name = name
-
-
-class _FakeWorkspace:
-    def __init__(self, id: str, name: str, projects: list[_FakeProject]) -> None:
-        self.id = id
-        self.name = name
-        self.projects = projects
 
 
 class _FakeIdentity:
@@ -200,12 +225,44 @@ class _FakeClient:
         self._sandbox_factory = sandbox_factory or (lambda: _FakeSandbox())
         self.last_sandbox: _FakeSandbox | None = None
         self._by_id: dict[str, _FakeSandbox] = {}
-        self._workspaces = workspaces if workspaces is not None else [_FakeWorkspace("ws1", "Workspace", [_FakeProject("proj1", "Project")])]
+        self._workspaces = workspaces if workspaces is not None else [_FakeWorkspace("ws1", "Workspace")]
 
     def who_am_i(self):
         return _FakeIdentity(self._workspaces)
 
-    def create(self, **kwargs):
+    # Keyword-only and deliberately WITHOUT **kwargs, mirroring tenki 1.0.2's
+    # Client.create. The 0.4.0-era double accepted **kwargs, so it swallowed the
+    # project_id the real 1.x rejects and the suite passed against a provider
+    # that could not create a sandbox. An unexpected kwarg must be a TypeError
+    # here exactly as it is against the real SDK.
+    def create(
+        self,
+        *,
+        name=None,
+        workspace_id=None,
+        sticky=False,
+        wait=True,
+        max_duration=None,
+        image=None,
+        cpu_cores=None,
+        memory_mb=None,
+        env=None,
+    ):
+        kwargs = {
+            "name": name,
+            "workspace_id": workspace_id,
+            "sticky": sticky,
+            "wait": wait,
+        }
+        for key, value in (
+            ("max_duration", max_duration),
+            ("image", image),
+            ("cpu_cores", cpu_cores),
+            ("memory_mb", memory_mb),
+            ("env", env),
+        ):
+            if value is not None:
+                kwargs[key] = value
         self.create_count += 1
         self.create_kwargs.append(kwargs)
         sandbox = self._sandbox_factory()
@@ -314,6 +371,14 @@ def test_execute_command_formats_stdout_and_forwards_env_timeout() -> None:
     assert call["env"] == {"BASE": "1", "EXTRA": "2"}
     assert call["timeout"] == 5
     assert call["cwd"] is None  # no forced cwd; runs in sandbox default dir
+
+
+def test_execute_command_appends_exit_marker_when_failure_has_output() -> None:
+    """LocalSandbox parity: a nonzero exit survives in the output text even
+    when the command produced output (acceptance-checklist evidence)."""
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake)
+    assert box.execute_command("failing-tests") == "5 passed, 1 error\n\nExit Code: 1"
 
 
 def test_execute_command_returns_error_as_text() -> None:
@@ -539,7 +604,7 @@ def test_grep_passes_capital_h_so_single_file_matches_parse() -> None:
     box = TenkiSandbox("sb", fake)
     box.write_file("/mnt/user-data/workspace/a.txt", "needle here\n")
     box.grep("/mnt/user-data/workspace", "needle")
-    grep_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("grep ")]
+    grep_scripts = [_search_inner(c["argv"][2]) for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and _search_inner(c["argv"][2]).startswith("grep ")]
     assert grep_scripts and "-H" in shlex.split(grep_scripts[0])
 
 
@@ -554,7 +619,7 @@ def test_grep_single_file_path_with_matching_glob() -> None:
 
 
 def _grep_script(fake: _FakeSandbox) -> list[str]:
-    scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("grep ")]
+    scripts = [_search_inner(c["argv"][2]) for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and _search_inner(c["argv"][2]).startswith("grep ")]
     assert scripts, "no grep command was issued"
     return shlex.split(scripts[0])
 
@@ -582,16 +647,18 @@ def test_grep_case_sensitive_omits_ignore_case_flag() -> None:
 def test_glob_include_dirs_adds_directory_type_to_find() -> None:
     fake = _FakeSandbox()
     box = TenkiSandbox("sb", fake)
+    box.write_file("/mnt/user-data/workspace/a.txt", "x")  # glob searches an existing root
     box.glob("/mnt/user-data/workspace", "*", include_dirs=True)
-    find_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("find ")]
+    find_scripts = [_search_inner(c["argv"][2]) for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and _search_inner(c["argv"][2]).startswith("find ")]
     assert find_scripts and "-type d" in find_scripts[-1]  # dirs requested, not just files
 
 
 def test_list_dir_forwards_max_depth() -> None:
     fake = _FakeSandbox()
     box = TenkiSandbox("sb", fake)
+    box.write_file("/mnt/user-data/workspace/a.txt", "x")
     box.list_dir("/mnt/user-data/workspace", max_depth=4)
-    find_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("find ")]
+    find_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and "find " in c["argv"][2]]
     assert find_scripts and "-maxdepth 4" in find_scripts[-1]
 
 
@@ -648,8 +715,9 @@ def test_create_passes_prefixed_name_and_scope(monkeypatch):
     assert sid in provider._sandboxes
     kwargs = client.create_kwargs[0]
     assert kwargs["name"].startswith("deer-flow-tenki-")
-    assert kwargs["project_id"] == "proj1"
     assert kwargs["workspace_id"] == "ws1"
+    # Tenki 1.x has no project layer; passing one is a TypeError against the SDK.
+    assert "project_id" not in kwargs
     provider.shutdown()
 
 
@@ -897,29 +965,57 @@ def test_shutdown_destroys_all_and_stops_reaper(monkeypatch):
 # ── Provider: scope resolution ─────────────────────────────────────────
 
 
-def test_scope_auto_resolves_single(monkeypatch):
+def test_scope_auto_resolves_single_workspace(monkeypatch):
     client = _FakeClient()
     provider = _install(monkeypatch, client=client)
     provider.acquire("thread-1", user_id="u1")
-    assert client.create_kwargs[0]["project_id"] == "proj1"
     assert client.create_kwargs[0]["workspace_id"] == "ws1"
     provider.shutdown()
 
 
-def test_explicit_project_id_skips_lookup(monkeypatch):
+def test_explicit_workspace_id_skips_lookup(monkeypatch):
     client = _FakeClient()
-    provider = _install(monkeypatch, client=client, config_attrs={"project_id": "explicit"})
+    provider = _install(monkeypatch, client=client, config_attrs={"workspace_id": "explicit"})
     provider.acquire("thread-1", user_id="u1")
-    assert client.create_kwargs[0]["project_id"] == "explicit"
+    assert client.create_kwargs[0]["workspace_id"] == "explicit"
     provider.shutdown()
 
 
-def test_ambiguous_project_raises(monkeypatch):
-    client = _FakeClient(workspaces=[_FakeWorkspace("ws1", "W", [_FakeProject("p1", "A"), _FakeProject("p2", "B")])])
+def test_ambiguous_workspace_raises(monkeypatch):
+    client = _FakeClient(workspaces=[_FakeWorkspace("ws1", "A"), _FakeWorkspace("ws2", "B")])
     provider = _install(monkeypatch, client=client)
-    with pytest.raises(ValueError, match="project_id"):
+    with pytest.raises(ValueError, match="workspace_id"):
         provider.acquire("thread-1", user_id="u1")
     provider.shutdown()
+
+
+def test_stale_project_id_is_ignored_with_a_warning(monkeypatch, caplog):
+    """A 0.4.0-era config keeps booting; the dead key says so instead of going quiet.
+
+    SandboxConfig is ``extra="allow"``, so an unread project_id would sit in
+    config.yaml scoping nothing. It also used to short-circuit the identity
+    lookup, so silently dropping it changes how scope resolves.
+    """
+    client = _FakeClient()
+    with caplog.at_level(logging.WARNING, logger="deerflow.community.tenki.provider"):
+        provider = _install(monkeypatch, client=client, config_attrs={"project_id": "proj_legacy"})
+    assert "sandbox.project_id is ignored" in caplog.text
+    provider.acquire("thread-1", user_id="u1")
+    assert "project_id" not in client.create_kwargs[0]
+    assert client.create_kwargs[0]["workspace_id"] == "ws1"
+    provider.shutdown()
+
+
+def test_create_rejects_project_id_like_the_real_sdk(monkeypatch):
+    """Guards the hole that let the 1.x break through: the old double took **kwargs.
+
+    tenki 1.0.2's Client.create is keyword-only with no **kwargs, so a stray
+    project_id raises TypeError. The double must do the same or a provider that
+    cannot create a sandbox goes on passing its tests.
+    """
+    client = _FakeClient()
+    with pytest.raises(TypeError, match="project_id"):
+        client.create(name="n", workspace_id="ws1", project_id="proj1")
 
 
 # ── Live integration (opt-in) ──────────────────────────────────────────
@@ -941,3 +1037,124 @@ def test_integration_real_sandbox(monkeypatch):
         assert box.read_file("/mnt/user-data/workspace/it.txt") == "tenki-e2e"
     finally:
         provider.shutdown()
+
+
+def test_sandbox_id_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert TenkiSandboxProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+    assert TenkiSandboxProvider._sandbox_id("t-1", "") == derive_sandbox_scope_token(user_id="", thread_id="t-1")
+
+
+def test_list_dir_raises_when_find_returns_no_entries() -> None:
+    box = TenkiSandbox("sb", _FakeSandbox())
+
+    with pytest.raises(FileNotFoundError):
+        box.list_dir("/mnt/user-data/missing")
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
+    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box._sh = lambda *args, **kwargs: _FakeResult(exit_code=127)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        box.list_dir("/mnt/user-data/workspace")
+
+
+def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
+    # "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    # verbatim, one entry per line, so a per-line strip() corrupts the name.
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box.write_file("/mnt/user-data/workspace/notes.txt ", "payload\n")
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace/notes.txt "]
+
+    found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
+    assert found == ["/mnt/user-data/workspace/notes.txt "]
+    assert truncated is False
+
+
+# ── Remote grep/glob failure contract against a real POSIX sh (#5376) ─────────
+
+_RS_POSIX = pytest.mark.skipif(
+    os.name == "nt" or any(shutil.which(tool) is None for tool in ("sh", "head", "grep", "find")),
+    reason="POSIX sh, head, grep and find required",
+)
+
+
+def _rs_env(tmp_path, failing: str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    if failing is not None:
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir()
+        fake = bin_dir / failing
+        fake.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _rs_box(tmp_path, monkeypatch, failing: str | None = None) -> TenkiSandbox:
+    box = TenkiSandbox("sb", _FakeSandbox())
+    shell_env = _rs_env(tmp_path, failing)
+
+    def sh(script: str, env=None, timeout=None) -> _FakeResult:
+        # ``sh -c`` (not ``-lc``) keeps a login profile from overriding the fake PATH.
+        proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=shell_env, check=False)
+        return _FakeResult(exit_code=proc.returncode, stdout=proc.stdout.encode(), stderr=proc.stderr.encode())
+
+    monkeypatch.setattr(box, "_sh", sh)
+    return box
+
+
+def _rs_search(box, op: str, root: str):
+    return box.grep(root, "needle") if op == "grep" else box.glob(root, "**/*.py")
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("op", ["grep", "glob"])
+def test_remote_search_missing_root_raises_file_not_found(tmp_path, monkeypatch, op) -> None:
+    with pytest.raises(FileNotFoundError):
+        _rs_search(_rs_box(tmp_path, monkeypatch), op, str(tmp_path / "missing"))
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "binary"), [("grep", "grep"), ("glob", "find")])
+def test_remote_search_missing_binary_raises_instead_of_no_matches(tmp_path, monkeypatch, op, binary) -> None:
+    with pytest.raises(OSError, match="exited with code 127"):
+        _rs_search(_rs_box(tmp_path, monkeypatch, failing=binary), op, str(tmp_path))
+
+
+@_RS_POSIX
+def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeypatch) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("def needle():\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, _ = box.grep(str(tmp_path), "needle")
+    assert [(os.path.basename(m.path), m.line_number) for m in matches] == [("app.py", 1)]
+    assert box.grep(str(tmp_path), "zzz_nothing") == ([], False)
+    found, _ = box.glob(str(tmp_path), "**/*.py")
+    assert [os.path.basename(path) for path in found] == ["app.py"]
+    assert box.glob(str(tmp_path), "*.md") == ([], False)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 51, False), ("grep", 52, True), ("glob", 51, False), ("glob", 52, True)])
+def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 caps the raw stream at 51 lines, and every line falls outside
+    # the glob, so nothing survives the Python-side filter. Only the cap decides
+    # whether that empty result is complete; reporting it as such reads as "no
+    # matches" while an in-scope file may sit past the cap.
+    (tmp_path / "other").mkdir()
+    for index in range(entries):
+        (tmp_path / "other" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        result = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        result = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert result == ([], truncated)

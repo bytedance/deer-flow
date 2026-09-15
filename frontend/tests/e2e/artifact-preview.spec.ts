@@ -216,7 +216,10 @@ test.describe("Artifact preview stability", () => {
     const artifactsPanel = page.locator("#artifacts");
     await expect(artifactsPanel.getByText("report.md")).toBeVisible();
 
-    const targetHeading = artifactsPanel.locator("h2#概述");
+    // Anchors keep rehype-sanitize's user-content- clobber prefix (see
+    // rehypeScopedSlug), so the heading id — and the translated fragment
+    // link that scrolls to it — are both prefixed.
+    const targetHeading = artifactsPanel.locator("h2#user-content-概述");
     await expect(targetHeading).toHaveCount(1);
     await artifactsPanel.getByRole("link", { name: "概述" }).click();
 

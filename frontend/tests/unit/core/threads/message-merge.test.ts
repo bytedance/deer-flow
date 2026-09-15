@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, rs, test } from "@rstest/core";
 import { InfiniteQueryObserver, QueryClient } from "@tanstack/react-query";
 
+import { getMessageRunId } from "@/core/messages/run-duration";
 import {
   buildThreadMessagesPageUrl,
   buildVisibleHistoryMessages,
@@ -9,6 +10,7 @@ import {
   computeSummarizationTransientMessages,
   countHumanMessagesExcludingSuperseded,
   flattenThreadHistoryPages,
+  getCurrentTurnRunIds,
   getSummarizationMiddlewareMessages,
   getThreadHistoryNextPageParam,
   getVisibleOptimisticMessages,
@@ -53,7 +55,17 @@ test("mergeMessages removes duplicate messages already present in history", () =
   expect(mergeMessages([human, ai, human, ai], [], [])).toEqual([human, ai]);
 });
 
-test("mergeMessages does not collapse an unloaded gap before the first shared anchor", () => {
+test("mergeMessages keeps a protected early message before the first shared anchor instead of dropping it", () => {
+  // #4065 established that an early message rescued by summarization must not
+  // be appended to the tail: its canonical position is earlier, and the tail is
+  // provably wrong. Suppressing it entirely was the other half of that fix, and
+  // it is how a user's own question disappeared from a long thread once the
+  // first history page no longer reached back to it (#4666).
+  //
+  // Both concerns hold at once: the message stays before the first shared
+  // anchor (never the tail), which is the one position both the checkpoint and
+  // seq-sorted history agree on. The gap to the unloaded pages remains, but a
+  // gap is recoverable by paging — a dropped message is not.
   const protectedEarly = {
     id: "protected-early",
     type: "human",
@@ -72,7 +84,7 @@ test("mergeMessages does not collapse an unloaded gap before the first shared an
 
   expect(
     mergeMessages([latestHuman, latestAi], [protectedEarly, latestHuman], []),
-  ).toEqual([latestHuman, latestAi]);
+  ).toEqual([protectedEarly, latestHuman, latestAi]);
 });
 
 test("mergeMessages lets live thread messages replace overlapping history", () => {
@@ -132,7 +144,9 @@ test("mergeMessages preserves historical run metadata on a live checkpoint repla
     {
       ...checkpointAi,
       run_id: "run-1",
-      additional_kwargs: { turn_duration: 114 },
+      // The replacement keeps the trusted feed position alongside the run
+      // metadata: dropping deerflow_seq here was defect R3.
+      additional_kwargs: { turn_duration: 114, deerflow_seq: 1 },
     },
   ]);
 });
@@ -879,8 +893,8 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
   // run_id is carried onto each content message (#3779) so historical subtask
   // cards can fetch their persisted step history on expand.
   expect(buildVisibleHistoryMessages(rows, new Set(["run-old"]))).toEqual([
-    { ...newHuman, run_id: "run-new" },
-    { ...newAi, run_id: "run-new" },
+    { ...newHuman, run_id: "run-new", additional_kwargs: { deerflow_seq: 3 } },
+    { ...newAi, run_id: "run-new", additional_kwargs: { deerflow_seq: 4 } },
   ]);
 });
 
@@ -1624,6 +1638,472 @@ test("local turn order keeps early streamed steps behind the user message", () =
   ]);
 });
 
+test("local turn order keeps an existing clarification card with its original turn", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research today's market",
+  } as Message;
+  const previousAnswer = {
+    id: "previous-answer",
+    type: "ai",
+    content: "Here is the completed report",
+  } as Message;
+  const clarificationCard = {
+    id: "clarification-card",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "clarification-call",
+    content: "Which market should I research?",
+  } as Message;
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Summarize the report",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Reading the report",
+  } as Message;
+  const baselineIdentities = new Set([
+    "message:previous-human",
+    "message:previous-answer",
+    "tool:clarification-call",
+  ]);
+
+  // A live checkpoint tail can be woven after the newly persisted human
+  // message even though the card was already visible before submission.
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        previousHuman,
+        previousAnswer,
+        currentHuman,
+        clarificationCard,
+        currentStep,
+      ],
+      baselineIdentities,
+    ),
+  ).toEqual([
+    previousHuman,
+    previousAnswer,
+    clarificationCard,
+    currentHuman,
+    currentStep,
+  ]);
+});
+
+test("local turn order preserves relative order across displaced message sources", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research today's market",
+  } as Message;
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Summarize the report",
+  } as Message;
+  const historyOnlyCard = {
+    id: "history-only-card",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "history-only-call",
+    content: "Which market should I research?",
+  } as Message;
+  const baselineAnswer = {
+    id: "baseline-answer",
+    type: "ai",
+    content: "Here is the completed report",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Reading the report",
+  } as Message;
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        previousHuman,
+        currentHuman,
+        historyOnlyCard,
+        baselineAnswer,
+        currentStep,
+      ],
+      new Set(["message:previous-human", "message:baseline-answer"]),
+      new Set(["tool:history-only-call"]),
+    ),
+  ).toEqual([
+    previousHuman,
+    historyOnlyCard,
+    baselineAnswer,
+    currentHuman,
+    currentStep,
+  ]);
+});
+
+test("current turn run id derivation selects only visible unconfirmed steps", () => {
+  const baselineStep = {
+    id: "baseline-step",
+    type: "ai",
+    content: "Previous answer",
+    run_id: "run-previous",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Current progress",
+    run_id: "run-current",
+  } as Message;
+  const runlessStep = {
+    id: "runless-step",
+    type: "tool",
+    content: "Pending metadata",
+    tool_call_id: "runless-call",
+  } as Message;
+  const hiddenStep = {
+    id: "hidden-step",
+    type: "ai",
+    content: "Internal control",
+    run_id: "run-hidden",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const confirmedHistoryStep = {
+    id: "confirmed-history-step",
+    type: "tool",
+    content: "Previously persisted result",
+    tool_call_id: "confirmed-history-call",
+    run_id: "run-history",
+  } as Message;
+
+  expect(
+    getCurrentTurnRunIds(
+      [
+        baselineStep,
+        currentStep,
+        runlessStep,
+        hiddenStep,
+        confirmedHistoryStep,
+      ],
+      new Set(["message:baseline-step"]),
+      new Set(["tool:confirmed-history-call"]),
+    ),
+  ).toEqual(new Set(["run-current"]));
+  expect(
+    getCurrentTurnRunIds([runlessStep], new Set(["message:baseline-step"])),
+  ).toEqual(new Set());
+  expect(getCurrentTurnRunIds([currentStep], null)).toEqual(new Set());
+});
+
+test("history-confirmed live cards are not derived as current-run steps", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research today's market",
+  } as Message;
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Summarize the report",
+    run_id: "run-current",
+  } as Message;
+  const oldHistoryCard = {
+    id: "old-history-card",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "old-history-call",
+    content: "Which market should I research?",
+    run_id: "run-previous",
+  } as Message;
+  const baselineIdentities = new Set(["message:previous-human"]);
+  const historyIdentities = new Set(["tool:old-history-call"]);
+  const currentTurnRunIds = getCurrentTurnRunIds(
+    [oldHistoryCard],
+    baselineIdentities,
+    historyIdentities,
+  );
+
+  expect(currentTurnRunIds).toEqual(new Set());
+  expect(
+    restoreLocalTurnMessageOrder(
+      [previousHuman, currentHuman, oldHistoryCard],
+      baselineIdentities,
+      historyIdentities,
+      currentTurnRunIds,
+    ),
+  ).toEqual([previousHuman, oldHistoryCard, currentHuman]);
+});
+
+test("local turn order repairs a displaced suffix when the human is first", () => {
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Summarize the report",
+    run_id: "run-current",
+  } as Message;
+  const oldHistoryCard = {
+    id: "old-history-card",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "old-history-call",
+    content: "Which market should I research?",
+    run_id: "run-previous",
+  } as Message;
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [currentHuman, oldHistoryCard],
+      new Set(),
+      new Set(["tool:old-history-call"]),
+    ),
+  ).toEqual([oldHistoryCard, currentHuman]);
+});
+
+test("local turn order anchors on the latest non-baseline human after compaction", () => {
+  // A summarized checkpoint may omit an older human that remains in canonical
+  // history. The latest non-baseline human is the submitted turn even before
+  // the server assigns it an id; choosing the first identifiable one would move
+  // established intervening turns around the old human.
+  const oldHistoryHuman = {
+    id: "old-history-human",
+    type: "human",
+    content: "An earlier request omitted by the checkpoint",
+  } as Message;
+  const oldHistoryAnswer = {
+    id: "old-history-answer",
+    type: "ai",
+    content: "An earlier answer",
+  } as Message;
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "The immediately previous request",
+  } as Message;
+  const previousAnswer = {
+    id: "previous-answer",
+    type: "ai",
+    content: "The immediately previous answer",
+  } as Message;
+  const currentHuman = {
+    type: "human",
+    content: "The newly submitted request",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Current streamed progress",
+  } as Message;
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        oldHistoryHuman,
+        oldHistoryAnswer,
+        previousHuman,
+        previousAnswer,
+        currentHuman,
+        currentStep,
+      ],
+      new Set(["message:previous-human", "message:previous-answer"]),
+      new Set(["message:old-history-answer"]),
+    ),
+  ).toEqual([
+    oldHistoryHuman,
+    oldHistoryAnswer,
+    previousHuman,
+    previousAnswer,
+    currentHuman,
+    currentStep,
+  ]);
+});
+
+test("history-confirmed current steps still move behind their human", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research the robot sector",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Searching for catalysts",
+    run_id: "run-current",
+  } as Message;
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Continue tracking the robot sector",
+    run_id: "run-current",
+  } as Message;
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [previousHuman, currentStep, currentHuman],
+      new Set(["message:previous-human"]),
+      new Set(["message:current-step"]),
+    ),
+  ).toEqual([previousHuman, currentHuman, currentStep]);
+});
+
+test("local turn order keeps the current run's persisted steps after the new human", () => {
+  // After an interrupt/stop, the current turn's already-executed steps are
+  // flushed into canonical history. They belong AFTER the new human input even
+  // though history now confirms them — treating them as displaced old message
+  // would move the current run's own progress above the message that owns it.
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research the robot sector",
+  } as Message;
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Continue tracking the robot sector",
+    run_id: "run-current",
+  } as Message;
+  const currentAnsweredStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Searching for catalysts",
+    run_id: "run-current",
+  } as Message;
+  const currentToolStep = {
+    id: "current-tool",
+    type: "tool",
+    content: "results",
+    tool_call_id: "call-current",
+    run_id: "run-current",
+  } as Message;
+  const baselineIdentities = new Set(["message:previous-human"]);
+  const historyIdentities = new Set([
+    "message:previous-human",
+    "message:current-human",
+    "message:current-step",
+    "tool:call-current",
+  ]);
+
+  // The human already at its correct position, followed by its own steps.
+  expect(
+    restoreLocalTurnMessageOrder(
+      [previousHuman, currentHuman, currentAnsweredStep, currentToolStep],
+      baselineIdentities,
+      historyIdentities,
+      new Set(["run-current"]),
+    ),
+  ).toEqual([
+    previousHuman,
+    currentHuman,
+    currentAnsweredStep,
+    currentToolStep,
+  ]);
+
+  // An empty explicit set exercises the pending-human run_id anchor and still
+  // protects the persisted current-run steps.
+  expect(
+    restoreLocalTurnMessageOrder(
+      [previousHuman, currentHuman, currentAnsweredStep, currentToolStep],
+      baselineIdentities,
+      historyIdentities,
+      new Set(),
+    ),
+  ).toEqual([
+    previousHuman,
+    currentHuman,
+    currentAnsweredStep,
+    currentToolStep,
+  ]);
+
+  // Even when the current turn's human is missing its run_id, explicit
+  // current-turn run ids keep its steps in place below the human.
+  const humanWithoutRun = {
+    id: "current-human",
+    type: "human",
+    content: "Continue tracking the robot sector",
+  } as Message;
+  expect(
+    restoreLocalTurnMessageOrder(
+      [previousHuman, humanWithoutRun, currentAnsweredStep, currentToolStep],
+      baselineIdentities,
+      historyIdentities,
+      new Set(["run-current"]),
+    ),
+  ).toEqual([
+    previousHuman,
+    humanWithoutRun,
+    currentAnsweredStep,
+    currentToolStep,
+  ]);
+});
+
+test("local turn order restores a clarification card that only canonical history confirmed", () => {
+  // The card can reach the merged list through the REST history page without
+  // ever entering the live checkpoint `messages` value, so it is not in the
+  // pre-submit baseline. It must still be treated as an established-past-turn
+  // message (not an in-flight pending step) and stay above the new human.
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research today's market",
+  } as Message;
+  const previousAnswer = {
+    id: "previous-answer",
+    type: "ai",
+    content: "Here is the completed report",
+  } as Message;
+  const clarificationCard = {
+    id: "clarification-card",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "clarification-call",
+    content: "Which market should I research?",
+  } as Message;
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Summarize the report",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Reading the report",
+  } as Message;
+  // Baseline captured at submit time: the previous turn is there, but the
+  // card has not reached the live checkpoint yet, so it is absent.
+  const baselineIdentities = new Set([
+    "message:previous-human",
+    "message:previous-answer",
+  ]);
+  // Canonical history has already committed the card identity.
+  const historyIdentities = new Set([
+    "message:previous-human",
+    "message:previous-answer",
+    "tool:clarification-call",
+  ]);
+
+  // The merged list has the card woven after the new human (from history).
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        previousHuman,
+        previousAnswer,
+        currentHuman,
+        clarificationCard,
+        currentStep,
+      ],
+      baselineIdentities,
+      historyIdentities,
+    ),
+  ).toEqual([
+    previousHuman,
+    previousAnswer,
+    clarificationCard,
+    currentHuman,
+    currentStep,
+  ]);
+});
+
 test("reconnected turn order moves same-run steps back behind the user message", () => {
   // Reload mid-run: replayed `messages-tuple` steps reach the merged list
   // before the turn's human message (the retained replay buffer may have
@@ -1686,6 +2166,46 @@ test("reconnected turn order leaves a resent turn after an interrupted run untou
   expect(
     restoreReconnectedTurnMessageOrder([interruptedStep, human, newStep]),
   ).toEqual([interruptedStep, human, newStep]);
+});
+
+test("reconnected turn order keeps interrupted uniform-run history in its original turn", () => {
+  // Branch-seeded and mocked feeds can stamp every message with one run_id.
+  // Without a terminal answer, that synthetic id cannot prove that the older
+  // tool step belongs to the newer human turn.
+  const human1 = {
+    id: "human-1",
+    type: "human",
+    content: "First question",
+    run_id: "run-x",
+  } as Message;
+  const interruptedStep = {
+    id: "step-1",
+    type: "ai",
+    content: "Working on the first question",
+    tool_calls: [{ id: "tc-1", name: "web_search", args: {} }],
+    run_id: "run-x",
+  } as unknown as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second question",
+    run_id: "run-x",
+  } as Message;
+  const step2 = {
+    id: "step-2",
+    type: "ai",
+    content: "Working on the second question",
+    run_id: "run-x",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      interruptedStep,
+      human2,
+      step2,
+    ]),
+  ).toEqual([human1, interruptedStep, human2, step2]);
 });
 
 test("reconnected turn order only moves steps of the sandwiched run in multi-turn history", () => {
@@ -2092,4 +2612,395 @@ test("refresh reconstructs the same 1-to-6 order from run events without a bridg
       (message) => message.content,
     ),
   ).toEqual(["1", "2", "3", "4", "5", "6"]);
+});
+
+test("a compacted checkpoint's protected user message survives a history page window that misses it (#4666)", () => {
+  // Captured from a real two-round long run: once the thread passes the
+  // 50-row `/messages/page` window AND context compaction fires, the two
+  // sources stop overlapping at the head. History's first page starts
+  // mid-run, while the compacted checkpoint still carries the turn's first
+  // user message (summarization rescues the dynamic-context triplet).
+  //
+  // That message is the user's own question. Suppressing it because its
+  // canonical position sits in an unloaded page makes it vanish from the
+  // transcript entirely — the "用户消息消失" reports in #4666 / #4508 / #4363.
+  const reminder = {
+    id: "u1",
+    type: "system",
+    content: "<system-reminder><current_date>…</current_date>",
+    additional_kwargs: { hide_from_ui: true, dynamic_context_reminder: true },
+  } as unknown as Message;
+  const firstUserMessage = {
+    id: "u1__user",
+    type: "human",
+    content: "MARK-FIRST-QUESTION",
+  } as Message;
+  const recentStep = {
+    id: "step-40",
+    type: "ai",
+    content: "step 40",
+  } as Message;
+  const laterUserMessage = {
+    id: "u2",
+    type: "human",
+    content: "SECOND-QUESTION",
+  } as Message;
+
+  // First history page: starts mid-run, has_more=true — no first user message.
+  const canonicalWindow = [recentStep, laterUserMessage];
+  // Compacted checkpoint: reminder + rescued first user message + recent tail.
+  const compactedCheckpoint = [reminder, firstUserMessage, recentStep];
+
+  const merged = mergeMessages(canonicalWindow, compactedCheckpoint, []);
+
+  expect(merged.map((message) => message.content)).toContain(
+    "MARK-FIRST-QUESTION",
+  );
+});
+
+test("a checkpoint message earlier than the loaded window is placed by its seq (#4666)", () => {
+  // With `deerflow_seq` on both sides, placement stops being a guess. Captured
+  // shape: after compaction the checkpoint still holds the turn's first user
+  // message (seq=2) while the first history page starts at seq=29, so the only
+  // anchor available to the old rule sat 25 rows into the window.
+  const withSeq = (message: Message, seq: number) =>
+    ({
+      ...message,
+      additional_kwargs: { ...message.additional_kwargs, deerflow_seq: seq },
+    }) as Message;
+
+  const firstUserMessage = withSeq(
+    {
+      id: "u1__user",
+      type: "human",
+      content: "MARK-FIRST-QUESTION",
+    } as Message,
+    2,
+  );
+  const windowStep = withSeq(
+    { id: "step-29", type: "ai", content: "…step 29" } as Message,
+    29,
+  );
+  const laterUserMessage = withSeq(
+    { id: "u2", type: "human", content: "SECOND-QUESTION" } as Message,
+    41,
+  );
+
+  const anchorStep = withSeq(
+    { id: "step-58", type: "ai", content: "…step 58" } as Message,
+    58,
+  );
+
+  // The anchor must sit INSIDE the window, as it does in the captured run
+  // (canonical #25 of 50): weaving before the anchor is what puts the message
+  // in the middle, and only seq can say it belongs at the head.
+  const canonicalWindow = [windowStep, laterUserMessage, anchorStep];
+  const compactedCheckpoint = [firstUserMessage, anchorStep];
+
+  expect(
+    mergeMessages(canonicalWindow, compactedCheckpoint, []).map(
+      (m) => m.content,
+    ),
+  ).toEqual(["MARK-FIRST-QUESTION", "…step 29", "SECOND-QUESTION", "…step 58"]);
+});
+
+test("buildVisibleHistoryMessages carries each row's seq onto the message", () => {
+  const rows = [
+    {
+      run_id: "run-1",
+      seq: 7,
+      content: { id: "m1", type: "human", content: "hi" } as Message,
+      metadata: { caller: "" },
+      created_at: "2026-08-04T00:00:00Z",
+    },
+  ] as RunMessage[];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set())[0]!.additional_kwargs
+      ?.deerflow_seq,
+  ).toBe(7);
+});
+
+test("a checkpoint message earlier than the loaded window is placed by its seq even when the two sides share no anchor (#4666)", () => {
+  // What a user hits by opening an old, already-summarized conversation and
+  // sending a new message. The loaded page is the newest rows from BEFORE that
+  // turn; the compacted checkpoint holds only the rescued first user message
+  // plus steps of the new run, which are not in the feed yet. The two sides
+  // therefore share no identity at all and the anchor walk never runs — so the
+  // rescued turn was appended after the whole window (measured at row 50 of 50
+  // on a reproducing run) even though its seq was known the entire time.
+  const withSeq = (message: Message, seq: number) =>
+    ({
+      ...message,
+      additional_kwargs: { ...message.additional_kwargs, deerflow_seq: seq },
+    }) as Message;
+
+  const rescuedFirstTurn = withSeq(
+    {
+      id: "u1__user",
+      type: "human",
+      content: "MARK-FIRST-QUESTION",
+    } as Message,
+    2,
+  );
+  const loadedWindow = [
+    withSeq(
+      { id: "step-172", type: "ai", content: "…step 172" } as Message,
+      172,
+    ),
+    withSeq(
+      { id: "step-174", type: "ai", content: "…step 174" } as Message,
+      174,
+    ),
+  ];
+  // Steps of the run the user just started: still streaming, so no seq yet, and
+  // no identity in common with the page on screen.
+  const newRunSteps = [
+    { id: "step-new-1", type: "ai", content: "…new step 1" } as Message,
+    { id: "step-new-2", type: "ai", content: "…new step 2" } as Message,
+  ];
+
+  expect(
+    mergeMessages(loadedWindow, [rescuedFirstTurn, ...newRunSteps], []).map(
+      (m) => m.content,
+    ),
+  ).toEqual([
+    "MARK-FIRST-QUESTION",
+    "…step 172",
+    "…step 174",
+    "…new step 1",
+    "…new step 2",
+  ]);
+});
+
+test("local turn order anchors on the exact submitted human identity (X__user normalized)", () => {
+  // The anchor recorded at submit time names one identity; the server's
+  // visible copy arrives as `<id>__user` and normalizes onto it.
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research the robot sector",
+  } as Message;
+  const previousAnswer = {
+    id: "previous-answer",
+    type: "ai",
+    content: "Done",
+  } as Message;
+  const earlyStep = {
+    id: "early-step",
+    type: "ai",
+    content: "Searching for catalysts",
+    run_id: "run-new",
+  } as Message;
+  const serverHumanCopy = {
+    id: "new-human__user",
+    type: "human",
+    content: "Continue tracking",
+    run_id: "run-new",
+  } as Message;
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [previousHuman, previousAnswer, earlyStep, serverHumanCopy],
+      new Set(["message:previous-human", "message:previous-answer"]),
+      new Set(["message:previous-human", "message:previous-answer"]),
+      new Set(["run-new"]),
+      "message:new-human",
+    ),
+  ).toEqual([previousHuman, previousAnswer, serverHumanCopy, earlyStep]);
+});
+
+test("local turn order keeps established history while the anchored human is absent", () => {
+  // R2: the checkpoint baseline covers only the latest turn while canonical
+  // history holds an older one. Until the submitted human reaches the render
+  // snapshot, no reordering may happen — a history-only human outside the
+  // baseline is not proof of the current turn.
+  const earlierAnswer = {
+    id: "earlier-answer",
+    type: "ai",
+    content: "Earlier answer",
+  } as Message;
+  const oldHuman = {
+    id: "old-human",
+    type: "human",
+    content: "An older request",
+  } as Message;
+  const recentHuman = {
+    id: "recent-human",
+    type: "human",
+    content: "The recent request",
+  } as Message;
+  const recentAnswer = {
+    id: "recent-answer",
+    type: "ai",
+    content: "The recent answer",
+  } as Message;
+  const newStep = {
+    id: "new-step",
+    type: "ai",
+    content: "Working on the follow-up",
+    run_id: "run-new",
+  } as Message;
+  const display = [earlierAnswer, oldHuman, recentHuman, recentAnswer, newStep];
+  const baseline = new Set(["message:recent-human", "message:recent-answer"]);
+  const confirmed = new Set([
+    "message:earlier-answer",
+    "message:old-human",
+    "message:recent-human",
+    "message:recent-answer",
+  ]);
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      display,
+      baseline,
+      confirmed,
+      new Set(["run-new"]),
+      "message:new-human",
+    ),
+  ).toEqual(display);
+});
+
+test("local turn order with a null anchor never borrows a history-only human", () => {
+  // Hidden human-input replies and regenerate replays submit no visible
+  // human, so no human identity may anchor the repair at all.
+  const earlierAnswer = {
+    id: "earlier-answer",
+    type: "ai",
+    content: "Earlier answer",
+  } as Message;
+  const oldHuman = {
+    id: "old-human",
+    type: "human",
+    content: "An older request",
+  } as Message;
+  const recentHuman = {
+    id: "recent-human",
+    type: "human",
+    content: "The recent request",
+  } as Message;
+  const replyStep = {
+    id: "reply-step",
+    type: "ai",
+    content: "Applying the answer",
+    run_id: "run-reply",
+  } as Message;
+  const display = [earlierAnswer, oldHuman, recentHuman, replyStep];
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      display,
+      new Set(["message:recent-human"]),
+      new Set(["message:earlier-answer", "message:old-human"]),
+      new Set(["run-reply"]),
+      null,
+    ),
+  ).toEqual(display);
+});
+
+test("local turn order repair is idempotent across repeated deliveries", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research the robot sector",
+  } as Message;
+  const earlyStep = {
+    id: "early-step",
+    type: "ai",
+    content: "Searching for catalysts",
+    run_id: "run-new",
+  } as Message;
+  const submittedHuman = {
+    id: "local-human-1",
+    type: "human",
+    content: "Continue tracking",
+  } as Message;
+  const displaced = [previousHuman, earlyStep, submittedHuman];
+  const baseline = new Set(["message:previous-human"]);
+  const args = [
+    baseline,
+    new Set(["message:previous-human"]),
+    new Set(["run-new"]),
+    "message:local-human-1",
+  ] as const;
+
+  const once = restoreLocalTurnMessageOrder(displaced, ...args);
+  expect(once).toEqual([previousHuman, submittedHuman, earlyStep]);
+  // Re-merging the same repaired snapshot converges to the identical order.
+  expect(restoreLocalTurnMessageOrder(once, ...args)).toEqual(once);
+  expect(restoreLocalTurnMessageOrder(displaced, ...args)).toEqual(once);
+});
+
+test("mergeMessages preserves canonical seq when a live copy without seq replaces the content (R3)", () => {
+  // Content replacement must not drop trusted ordering metadata: the live
+  // checkpoint copy refreshes the text, but the thread-global position the
+  // feed established stays attached to the merged message.
+  const history = buildVisibleHistoryMessages(
+    [
+      {
+        run_id: "run-1",
+        seq: 1,
+        content: { id: "h1", type: "human", content: "question" } as Message,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-09-08T00:00:00Z",
+      },
+      {
+        run_id: "run-1",
+        seq: 2,
+        content: { id: "a1", type: "ai", content: "draft" } as Message,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-09-08T00:00:01Z",
+      },
+    ],
+    new Set(),
+  );
+  const live = [
+    { id: "h1", type: "human", content: "question" } as Message,
+    { id: "a1", type: "ai", content: "final answer" } as Message,
+  ];
+
+  const merged = mergeMessages(history, live, []);
+
+  expect(merged.map((message) => message.content)).toEqual([
+    "question",
+    "final answer",
+  ]);
+  expect(
+    merged.map((message) => message.additional_kwargs?.deerflow_seq),
+  ).toEqual([1, 2]);
+  expect(merged.map((message) => getMessageRunId(message))).toEqual([
+    "run-1",
+    "run-1",
+  ]);
+});
+
+test("mergeMessages places a live message with seq inside the loaded window by position (R4)", () => {
+  // Identity anchors alone weave a pending live message before the NEXT shared
+  // anchor, inverting positions the server already settled: history
+  // H-first(1), A-second(3), A-last(5) plus live H-second(2), A-last(5) came
+  // out as 1,3,2,5. The trusted seq skeleton must produce 1,2,3,5.
+  const withSeq = (message: Message, seq: number) =>
+    ({
+      ...message,
+      additional_kwargs: { ...message.additional_kwargs, deerflow_seq: seq },
+    }) as Message;
+
+  const history = [
+    withSeq({ id: "h-first", type: "human", content: "first" } as Message, 1),
+    withSeq({ id: "a-second", type: "ai", content: "second" } as Message, 3),
+    withSeq({ id: "a-last", type: "ai", content: "last" } as Message, 5),
+  ];
+  const live = [
+    withSeq(
+      { id: "h-second", type: "human", content: "second q" } as Message,
+      2,
+    ),
+    withSeq({ id: "a-last", type: "ai", content: "last" } as Message, 5),
+  ];
+
+  const merged = mergeMessages(history, live, []);
+
+  expect(
+    merged.map((message) => message.additional_kwargs?.deerflow_seq),
+  ).toEqual([1, 2, 3, 5]);
 });

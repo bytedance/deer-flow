@@ -70,7 +70,7 @@ def web_fetch_tool(url: str) -> str:
     result = client.fetch(url)
     if result.startswith("Error: "):
         return result
-    article = readability_extractor.extract_article(result)
+    article = readability_extractor.extract_article(result, url=url)
     return article.to_markdown()[:4096]
 
 

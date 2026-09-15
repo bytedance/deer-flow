@@ -51,6 +51,7 @@ describe("loadArtifactContent", () => {
       expect(new Headers(init?.headers).get("Range")).toBe(
         `bytes=0-${ARTIFACT_PREVIEW_MAX_BYTES - 1}`,
       );
+      expect(init?.credentials).toBe("include");
       return new Response(bytes, {
         status: 206,
         headers: {
@@ -144,5 +145,48 @@ describe("loadArtifactContent", () => {
       sha256:
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     });
+  });
+
+  it("parses a weak (W/) SHA-256 ETag returned by a gzipped response", async () => {
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("content", {
+        status: 200,
+        headers: { ETag: `W/"${"b".repeat(64)}"` },
+      }),
+    );
+
+    const loaded = await loadArtifactContent({
+      filepath: "/mnt/user-data/outputs/report.md",
+      threadId: "thread-1",
+    });
+
+    expect(loaded.sha256).toBe("b".repeat(64));
+  });
+
+  it("resolves without throwing when crypto.subtle is unavailable (non-secure context)", async () => {
+    rs.stubGlobal("crypto", { subtle: undefined } as unknown as Crypto);
+
+    const bytes = new TextEncoder().encode("complete");
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async (_url: string, init?: RequestInit) => {
+        expect(new Headers(init?.headers).has("Range")).toBe(false);
+        return new Response(bytes, {
+          status: 200,
+          headers: { "Content-Length": String(bytes.length) },
+        });
+      }),
+    );
+
+    const loaded = await loadArtifactContent({
+      filepath: "/mnt/user-data/outputs/non-secure.html",
+      threadId: "thread-1",
+      full: true,
+    });
+
+    // FNV-1a fallback keeps preview working and returns a string; because it
+    // is not a 64-hex digest the UI treats it as non-editable (no 422 on save).
+    expect(typeof loaded.sha256).toBe("string");
+    expect(loaded.sha256).toHaveLength(8);
   });
 });

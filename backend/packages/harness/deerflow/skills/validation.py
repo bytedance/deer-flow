@@ -25,6 +25,12 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
         return False, f"{SKILL_MD_FILE} not found", None
 
     content = skill_md.read_text(encoding="utf-8")
+    return validate_skill_frontmatter_text(content)
+
+
+def validate_skill_frontmatter_text(content: str) -> tuple[bool, str, str | None]:
+    """Validate captured text using the same rules as installation."""
+    skill_md = Path(SKILL_MD_FILE)
     parts, error = split_skill_markdown(content)
     if error:
         return False, error, None
@@ -64,11 +70,14 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
     if not isinstance(description, str):
         return False, f"Description must be a string, got {type(description).__name__}", None
     description = description.strip()
-    if description:
-        if "<" in description or ">" in description:
-            return False, "Description cannot contain angle brackets (< or >)", None
-        if len(description) > 1024:
-            return False, f"Description is too long ({len(description)} characters). Maximum is 1024 characters.", None
+    # The loader (parse_skill_file) drops a skill whose description is blank, so
+    # accepting one here would write a SKILL.md that never loads again.
+    if not description:
+        return False, "Description cannot be empty", None
+    if "<" in description or ">" in description:
+        return False, "Description cannot contain angle brackets (< or >)", None
+    if len(description) > 1024:
+        return False, f"Description is too long ({len(description)} characters). Maximum is 1024 characters.", None
 
     try:
         parse_allowed_tools(frontmatter.get("allowed-tools"), skill_md)

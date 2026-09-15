@@ -351,6 +351,13 @@ class TestSelectStaleCandidates:
         assert len(candidates) == 1
         assert candidates[0]["id"] == "f1"
 
+    def test_recent_explicit_confirmation_resets_review_clock(self):
+        fact = _make_fact("f1", days_ago=400, expected_valid_days=90)
+        fact["lastConfirmedAt"] = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+        memory = _make_memory([fact])
+
+        assert _select_stale_candidates(memory, _memory_config(staleness_age_days=90)) == []
+
     def test_huge_evd_does_not_abort_selection(self):
         # A huge persisted expected_valid_days (10**400) makes the review window
         # unrepresentable in datetime arithmetic. The fact cannot yet be stale

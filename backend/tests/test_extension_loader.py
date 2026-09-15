@@ -28,6 +28,30 @@ def test_no_specs_yields_empty_result():
     assert loaded.has_middleware_contributors is False
 
 
+def test_host_disabled_required_extension_is_skipped_before_resolution(monkeypatch):
+    def _must_not_resolve(path: str):
+        raise AssertionError(f"disabled extension was resolved: {path}")
+
+    monkeypatch.setattr("deerflow.extensions.loader.resolve_variable", _must_not_resolve)
+
+    loaded, diagnostics = load_extensions([ExtensionSpec(use="missing_extension:install", enabled=False, required=True)])
+
+    assert diagnostics == []
+    assert loaded.has_middleware_contributors is False
+
+
+def test_manager_metadata_is_accepted_without_reaching_the_install_hook():
+    spec = ExtensionSpec(
+        name="demo",
+        package="deerflow-extension-demo",
+        use=f"{_FIXTURE}:install_ok",
+        enabled=False,
+    )
+
+    assert spec.name == "demo"
+    assert spec.package == "deerflow-extension-demo"
+
+
 def test_successful_install_registers_and_attributes():
     spec = ExtensionSpec(use=f"{_FIXTURE}:install_ok")
     loaded, diagnostics = load_extensions([spec])
@@ -88,6 +112,9 @@ def test_install_failure_rolls_back_partial_registration():
     assert sources == {f"{_FIXTURE}:install_ok"}
     assert len(loaded.middleware_contributors) == 1, "rollback must clear every partial registration"
     assert loaded.task_lifecycle == (), "rollback must clear partial lifecycle registrations too"
+    assert loaded.system_model_observers == ()
+    assert loaded.services == ()
+    assert loaded.routers == ()
 
 
 def test_rollback_does_not_remove_a_different_specs_registrations_sharing_the_same_use():
@@ -261,7 +288,7 @@ def test_compatible_string_subclass_api_marker_can_load(monkeypatch):
     monkeypatch.setattr(
         demo_extensions.install_ok,
         "__deerflow_api__",
-        _HostileString("0.1.0"),
+        _HostileString("0.2.0"),
         raising=False,
     )
 
@@ -382,3 +409,89 @@ def test_host_registry_satisfies_the_public_contract():
     from deerflow.extensions.registry import ExtensionRegistry as HostRegistry
 
     assert isinstance(HostRegistry(), ContractRegistry)
+
+
+class TestTablePrefixRegistration:
+    """A spec's ``table_prefix`` must reach alembic's exclusion filter.
+
+    ``EXTENSION_TABLE_PREFIXES`` is module-level mutable state shared with
+    ``_env_filters``, so every test here restores it -- a test that registers
+    a prefix and leaves it registered would poison every later test in the
+    process, including the filter's own suite.
+    """
+
+    def setup_method(self):
+        from deerflow.persistence.migrations import _env_filters
+
+        self._saved = set(_env_filters.EXTENSION_TABLE_PREFIXES)
+
+    def teardown_method(self):
+        from deerflow.persistence.migrations import _env_filters
+
+        _env_filters.EXTENSION_TABLE_PREFIXES.clear()
+        _env_filters.EXTENSION_TABLE_PREFIXES.update(self._saved)
+
+    def test_a_declared_prefix_is_registered_with_the_migration_filter(self):
+        from deerflow.persistence.migrations._env_filters import include_object
+
+        spec = ExtensionSpec(use=f"{_FIXTURE}:install_ok", table_prefix="ext_")
+        load_extensions([spec])
+
+        assert include_object(None, "ext_events", "table", True, None) is False
+
+    def test_no_declared_prefix_registers_nothing(self):
+        from deerflow.persistence.migrations import _env_filters
+
+        spec = ExtensionSpec(use=f"{_FIXTURE}:install_ok")
+        load_extensions([spec])
+
+        assert _env_filters.EXTENSION_TABLE_PREFIXES == self._saved
+
+    def test_a_disabled_specs_prefix_is_still_registered(self):
+        """Tables from a previously-enabled run may still be in the database;
+        disabling the extension must not make autogenerate reflect them."""
+        from deerflow.persistence.migrations._env_filters import include_object
+
+        spec = ExtensionSpec(use=f"{_FIXTURE}:install_ok", enabled=False, table_prefix="ext_")
+        load_extensions([spec])
+
+        assert include_object(None, "ext_events", "table", True, None) is False
+
+    def test_a_failing_specs_prefix_is_still_registered(self):
+        """A broken install() this run doesn't retroactively delete tables a
+        prior successful run already created."""
+        from deerflow.persistence.migrations._env_filters import include_object
+
+        spec = ExtensionSpec(use=f"{_FIXTURE}:install_partial_then_raise", table_prefix="ext_")
+        load_extensions([spec])
+
+        assert include_object(None, "ext_events", "table", True, None) is False
+
+    def test_a_prefix_that_collides_with_a_host_table_aborts_loading(self):
+        """A typo such as table_prefix: "run" would silently stop alembic from
+        managing the host's own `runs` table. That must abort startup loudly
+        rather than degrade the whole host's autogenerate coverage, regardless
+        of `required` -- the corruption is not scoped to this one extension."""
+        spec = ExtensionSpec(use=f"{_FIXTURE}:install_ok", required=False, table_prefix="run")
+
+        with pytest.raises(ExtensionLoadError, match="runs"):
+            load_extensions([spec])
+
+    def test_an_empty_prefix_is_rejected_at_config_load(self):
+        """Omit the key to declare no prefix; "" is not a way to spell that.
+
+        The declaration is read by two processes that cannot both be right
+        about an empty string: the loader's ``if spec.table_prefix:`` would
+        treat it as "no prefix", while a reader taking it literally has a
+        prefix that matches every table name. Rejecting it here means the
+        question is never asked twice — and it is asked in the process an
+        operator is actually looking at when the Gateway refuses to start.
+        """
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="table_prefix"):
+            ExtensionSpec(use=f"{_FIXTURE}:install_ok", table_prefix="")
+
+    def test_omitting_the_key_remains_the_way_to_declare_no_prefix(self):
+        assert ExtensionSpec(use=f"{_FIXTURE}:install_ok").table_prefix is None
+        assert ExtensionSpec(use=f"{_FIXTURE}:install_ok", table_prefix=None).table_prefix is None

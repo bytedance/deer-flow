@@ -109,6 +109,9 @@ messages:
         "newFacts": [
           {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0, "expected_valid_days": 90, "scope": "user|thread|project", "durability": "durable|temporary", "authority": "descriptive|transactional" }}
         ],
+        "factsToReinforce": [
+          {{ "id": "fact_id_1", "scope": "user|thread|project", "reason": "explicit user confirmation of this existing fact" }}
+        ],
         "factsToRemove": [
           {{ "id": "fact_id_1", "scope": "user|thread|project", "reason": "explicit user-level contradiction or retraction", "replacementFactIndex": 0 }}
         ],
@@ -128,6 +131,7 @@ messages:
       - Include specific metrics, version numbers, and proper nouns in facts
       - Only add facts that are clearly stated (0.9+) or strongly implied (0.7+)
       - Use category "correction" for explicit agent mistakes or user corrections; assign confidence >= 0.95 when the correction is explicit
+      - Add an existing fact to factsToReinforce only when the new conversation explicitly confirms that same durable fact is still true. Include its exact id, scope, and reason. Do not reinforce a fact merely because it was shown in Current Memory State, was automatically injected, was retrieved, or was extracted again.
       - Include "sourceError" only for explicit correction facts when the prior mistake or wrong approach is clearly stated; omit it otherwise
       - Remove an existing fact only when the user explicitly contradicts or retracts it at user scope. A thread/project-local exception does not contradict a user-level fact.
       - factsToRemove entries MUST include scope and reason. Use replacementFactIndex when a removal depends on a replacement in newFacts; the zero-based index must identify that replacement. Omit replacementFactIndex only for a pure user-level retraction with no replacement.

@@ -15,12 +15,24 @@ Warning injection uses the deferred pattern:
   - wrap_model_call injects it as a HumanMessage at the next model call.
 This preserves AIMessage(tool_calls) → ToolMessage pairing.
 
+Run scope:
+  Usage and warning state are keyed by ``run_id`` and survive ``after_agent``.
+  A single Gateway run may re-enter the graph for hidden goal continuations,
+  and those continuations share one budget; a later user run gets a new
+  ``run_id`` and a fresh budget. Only the per-message ``seen`` map is dropped
+  (``before_agent`` rebuilds it). Invocations without a non-empty string
+  ``run_id`` are keyed by LangGraph's run-scoped ``Runtime.control`` object
+  (each graph node gets its own ``Runtime`` wrapper, but they share it) and
+  clear their usage/warning state in ``after_agent``.
+
 Stop-reason surfacing (#3875 Phase 2):
   The hard stop does NOT raise — it strips tool_calls so the agent loop
   terminates naturally and produces a final answer. To let the caller (e.g.
   the subagent executor) distinguish a budget-capped completion from a clean
   one, the run that triggered the hard stop is recorded in ``_stop_reason``
-  and exposed via :meth:`consume_stop_reason`. That dict is intentionally NOT
+  and exposed via :meth:`consume_stop_reason`. It is keyed by the context
+  ``run_id`` exactly as given, ``None`` included, because that is what the
+  executor passes back. That dict is intentionally NOT
   cleared by ``after_agent``/``_clear_run_state`` so the executor can read it
   after the run returns; the bounded dict prevents unbounded growth on
   abandoned runs, and each subagent run builds a fresh middleware instance so
@@ -31,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, override
@@ -75,7 +88,13 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         # Stop reason set when the hard-stop fires. NOT cleared by
         # ``_clear_run_state``/``after_agent`` so the executor can consume it
         # after the run returns; bounded so abandoned runs cannot leak.
-        self._stop_reason: BoundedDict[str, str] = BoundedDict(1000)
+        self._stop_reason: BoundedDict[str | None, str] = BoundedDict(1000)
+        # id(Runtime.control) -> (control, generated key) for invocations
+        # without a context run_id; released in ``after_agent``.
+        self._fallback_run_ids: BoundedDict[int, tuple[object, str]] = BoundedDict(1000)
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {"config": self._config.model_dump(mode="python")}
 
     @classmethod
     def from_config(cls, config: TokenBudgetConfig) -> TokenBudgetMiddleware:
@@ -88,6 +107,7 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
             self._seen_messages.clear()
             self._cumulative_usage.clear()
             self._stop_reason.clear()
+            self._fallback_run_ids.clear()
 
     def consume_stop_reason(self, run_id: str | None) -> str | None:
         """Pop and return the stop reason the hard-stop set for this run.
@@ -102,12 +122,49 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
             return self._stop_reason.pop(run_id, None)
 
     @staticmethod
-    def _get_run_id(runtime: Runtime) -> str:
+    def _context_run_id(runtime: Runtime) -> str | None:
+        """Resolve the explicit identity shared by continuation invocations."""
         ctx = getattr(runtime, "context", None)
-        if isinstance(ctx, dict) and "run_id" in ctx:
+        run_id = ctx.get("run_id") if isinstance(ctx, dict) else None
+        return run_id if isinstance(run_id, str) and run_id else None
+
+    def _get_run_id(self, runtime: Runtime) -> str:
+        run_id = self._context_run_id(runtime)
+        if run_id is not None:
+            return run_id
+        # Same anchor as LoopDetectionMiddleware: ``id(runtime)`` changes from
+        # one graph node to the next, ``Runtime.control`` does not. The key is a
+        # generated token rather than the address, which can be reused once the
+        # object is collected. Unlike loop detection, ``execution_info.run_id``
+        # is skipped on purpose: without a context run_id the budget is per
+        # invocation, not per RunnableConfig run.
+        control = getattr(runtime, "control", None)
+        anchor = control if control is not None else runtime
+        with self._lock:
+            entry = self._fallback_run_ids.get(id(anchor))
+            if entry is None or entry[0] is not anchor:
+                entry = (anchor, f"__invocation__:{uuid.uuid4().hex}")
+                self._fallback_run_ids[id(anchor)] = entry
+            # Least recently used goes first, so a full map never evicts an active invocation.
+            self._fallback_run_ids.move_to_end(id(anchor))
+            return entry[1]
+
+    def _release_fallback_run_id(self, runtime: Runtime) -> None:
+        control = getattr(runtime, "control", None)
+        anchor = control if control is not None else runtime
+        with self._lock:
+            entry = self._fallback_run_ids.get(id(anchor))
+            if entry is not None and entry[0] is anchor:
+                del self._fallback_run_ids[id(anchor)]
+
+    @staticmethod
+    def _stop_reason_key(runtime: Runtime, run_id: str) -> str | None:
+        # SubagentExecutor consumes the stop reason with its raw run_id, which
+        # is None when the parent run has none.
+        ctx = getattr(runtime, "context", None)
+        if isinstance(ctx, dict) and "run_id" in ctx and (ctx["run_id"] is None or isinstance(ctx["run_id"], str)):
             return ctx["run_id"]
-        # Fallback to runtime object ID to prevent collisions across embedded client runs
-        return str(id(runtime))
+        return run_id
 
     def _clear_run_state(self, run_id: str) -> None:
         with self._lock:
@@ -146,7 +203,16 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
     def after_agent(self, state: AgentState, runtime: Runtime) -> None:
         if not self._config.enabled:
             return
-        self._clear_run_state(self._get_run_id(runtime))
+        run_id = self._get_run_id(runtime)
+        if self._context_run_id(runtime) is not None:
+            # A Gateway run re-enters the graph for hidden goal continuations
+            # under the same run_id, and they share this run's budget. Keep the
+            # usage and warning state; before_agent rebuilds the seen map.
+            with self._lock:
+                self._seen_messages.pop(run_id, None)
+            return
+        self._clear_run_state(run_id)
+        self._release_fallback_run_id(runtime)
 
     @override
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> None:
@@ -250,7 +316,7 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
                 # ``stop_reason=token_capped`` to the lead after the run
                 # returns (the hard stop itself does not raise). See
                 # ``consume_stop_reason``.
-                self._stop_reason[run_id] = "token_capped"
+                self._stop_reason[self._stop_reason_key(runtime, run_id)] = "token_capped"
                 # Also write to runtime.context so the lead worker can read it
                 # without needing a reference to this middleware instance (#4176).
                 ctx = getattr(runtime, "context", None)

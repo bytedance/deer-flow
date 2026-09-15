@@ -10,6 +10,7 @@ from typing import Any
 
 from deerflow_extension_api import (
     EXTENSION_TASK_STORE_KEY,
+    CompactionEvent,
     ExtensionData,
     SystemModelRequest,
     SystemModelResult,
@@ -57,8 +58,51 @@ def _host_is_cancelling() -> bool:
     first increments the task's cancellation counter, so it is what tells the
     two apart.
     """
-    task = asyncio.current_task()
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        # Synchronous hook sites (agent assembly) can run with no loop at all,
+        # and "no loop" means there is no host task being cancelled.
+        return False
     return task is not None and task.cancelling() > 0
+
+
+def notify_agent_assembled(descriptor: object, extensions: object | None = None) -> None:
+    """Fan a completed assembly out to observers, in registration order.
+
+    Synchronous: agent construction is synchronous and there is no loop to
+    dispatch onto. Failures are contained per observer — a broken observer must
+    not prevent an agent from being built.
+    """
+    resolved = extensions
+    if resolved is None:
+        from deerflow.extensions import get_agent_build_extensions
+
+        resolved = get_agent_build_extensions()
+    observers = getattr(resolved, "agent_assembly_observers", ())
+    if not observers:
+        return
+    app_store = getattr(resolved, "app_store", None)
+    for source, observer in observers:
+        try:
+            observer.on_agent_assembled(app_store, descriptor)
+        except asyncio.CancelledError:
+            if _host_is_cancelling():
+                raise
+            # Same rule as the awaited hooks: an observer raising it on its own
+            # must not skip its successors, and must not turn graph
+            # construction into a deferred interrupt.
+            logger.exception(
+                "Extension %s: on_agent_assembled raised CancelledError for %s",
+                source,
+                type(descriptor).__name__,
+            )
+        except Exception:
+            logger.exception(
+                "Extension %s: on_agent_assembled failed for %s",
+                source,
+                type(descriptor).__name__,
+            )
 
 
 async def _notify_each(
@@ -416,3 +460,41 @@ def dispatch_system_model_observation(
     finally:
         if not submitted:
             coro.close()
+
+
+def notify_context_compacted(event: CompactionEvent, extensions: LoadedExtensions | None = None) -> None:
+    """Fan a completed compaction out to observers, fire-and-forget.
+
+    The compaction seam sits in the summarization middleware's ``before_model`` /
+    ``abefore_model`` hooks; the sync half has no loop to await onto, and the async
+    half must not block the model-call turn on observer latency. Both therefore call
+    this synchronous entry point, which dispatches to the registered extension-notify
+    loop the same non-blocking way a synchronous system-model-call cancellation does,
+    reusing the same fail-open cancellation containment inside ``_notify_each``.
+
+    There is no live task for this hook to attach observers to (unlike lifecycle or
+    system-model-call notification, which run from an awaited call site holding the
+    real task store), so observers receive a detached store — the same fallback
+    ``notify_system_model_call`` uses when its caller has none.
+    """
+    resolved = extensions
+    if resolved is None:
+        from deerflow.extensions import get_agent_build_extensions
+
+        resolved = get_agent_build_extensions()
+    observers = resolved.context_compaction_observers
+    if not observers:
+        return
+    app_store = resolved.app_store
+    task_store = ExtensionData("detached")
+    what = f"compaction ({event.transform_kind})"
+    dispatch_system_model_observation(
+        _notify_each(
+            observers,
+            "on_context_compacted",
+            lambda observer: observer.on_context_compacted(app_store, task_store, event),
+            what,
+            None,
+        ),
+        what,
+    )

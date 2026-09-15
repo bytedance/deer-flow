@@ -9,6 +9,11 @@ from deerflow.mcp.tasks.models import (
     TaskSubmission,
     TaskSubmitRequest,
 )
+from deerflow.mcp.tasks.ordinary import (
+    ORDINARY_MCP_TASK_DRIVER,
+    McpTaskProtocolError,
+    OrdinaryMcpTaskDriver,
+)
 
 __all__ = [
     "ATTENTION_TASK_STATUSES",
@@ -21,4 +26,7 @@ __all__ = [
     "TaskStatus",
     "TaskSubmission",
     "TaskSubmitRequest",
+    "ORDINARY_MCP_TASK_DRIVER",
+    "McpTaskProtocolError",
+    "OrdinaryMcpTaskDriver",
 ]

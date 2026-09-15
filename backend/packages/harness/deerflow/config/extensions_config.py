@@ -1,20 +1,33 @@
 """Unified extensions configuration for MCP servers and skills."""
 
+import errno
 import json
 import logging
+import math
 import os
 import stat
 import tempfile
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.runtime_paths import existing_project_file
-from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
+from deerflow.constants import (
+    DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+    MCP_TASK_NAME_MAX_LENGTH,
+    MCP_TASK_SERVER_NAME_MAX_LENGTH,
+)
 
 logger = logging.getLogger(__name__)
+
+_JSON_KWARGS_ERROR = "middleware kwargs values must be JSON types (object, array, string, number, boolean, or null)"
+_non_atomic_fallback_targets: set[Path] = set()
+_non_atomic_fallback_targets_lock = threading.Lock()
 
 
 def normalize_mcp_transport_alias(data: Any) -> Any:
@@ -62,6 +75,111 @@ class McpToolOverride(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class McpTaskToolsetConfig(BaseModel):
+    """One ordinary submit/status/cancel contract exposed by an MCP server.
+
+    Tool names are the exact raw names advertised by that server. The
+    presentation prefix added by ``langchain-mcp-adapters`` is deliberately not
+    part of this durable binding.
+    """
+
+    name: str = Field(
+        min_length=1,
+        max_length=MCP_TASK_NAME_MAX_LENGTH,
+        description="Stable local name shown for tasks from this toolset",
+    )
+    submit_tool: str = Field(min_length=1, description="Raw MCP tool name used to submit work")
+    status_tool: str = Field(min_length=1, description="Raw MCP tool name used to poll work")
+    cancel_tool: str = Field(min_length=1, description="Raw MCP tool name used to cancel work")
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("MCP task toolset name must not be empty")
+        return value
+
+
+class McpUserScopedAuthConfig(BaseModel):
+    """Per-user credential injection for a shared MCP server (HTTP/SSE transports).
+
+    Maps DeerFlow user ids to credential header values so that one configured
+    MCP server can serve several users, each authenticated to the remote
+    service with their own credential. The credential for the authenticated
+    user is injected into every tool call by the built-in user-scoped auth
+    interceptor; the server entry's static ``headers`` are only used for
+    startup tool discovery.
+
+    Values support the same ``$ENV_VAR`` resolution as the rest of this file,
+    so raw secrets can stay in the process environment.
+    """
+
+    enabled: bool = Field(default=True, description="Whether user-scoped credential injection is enabled")
+    header: str = Field(default="Authorization", description="HTTP header to set with the resolved user credential")
+    users: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of DeerFlow user id to full credential header value (e.g. 'Bearer <token>'); values support $ENV_VAR references",
+    )
+    on_missing: Literal["deny", "passthrough"] = Field(
+        default="deny",
+        description=("Behavior when the calling user has no mapped credential (or the mapped value resolved empty): 'deny' fails the tool call with an actionable error; 'passthrough' forwards the request with the server's static headers"),
+    )
+    model_config = ConfigDict(extra="allow")
+
+    @field_validator("header")
+    @classmethod
+    def _validate_header_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("user_auth.header must not be empty")
+        return value
+
+
+class McpContextHeadersConfig(BaseModel):
+    """Per-request credential injection for an MCP server (HTTP/SSE transports).
+
+    Maps HTTP header names to keys of the run request's ``config.context.secrets``
+    carrier, so one configured MCP server can serve callers that each supply their
+    own credential *per request* rather than per configured user. The built-in
+    context-headers interceptor resolves the mapping on every tool call; the
+    server entry's static ``headers`` are only used for startup tool discovery.
+
+    Unlike ``user_auth``, this block stores **no credential** — only header names
+    and run-context key names — so it is safe to return unmasked from the config
+    API. The values arrive out-of-band with each run and never enter the prompt,
+    tool arguments, or trace payloads (see ``runtime/secret_context.py``).
+    """
+
+    enabled: bool = Field(default=True, description="Whether request-scoped header injection is enabled")
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of HTTP header name to the key to read from the run request's config.context.secrets (e.g. {'X-Tenant-Id': 'tenant_id'})",
+    )
+    on_missing: Literal["deny", "passthrough"] = Field(
+        default="deny",
+        description=("Behavior when a mapped key is absent from the request secrets (or resolved empty): 'deny' fails the tool call with an actionable error; 'passthrough' forwards the request with the server's static headers"),
+    )
+    model_config = ConfigDict(extra="allow")
+
+    @field_validator("headers")
+    @classmethod
+    def _validate_mapping_entries(cls, value: dict[str, str]) -> dict[str, str]:
+        seen: dict[str, str] = {}
+        for header_name, secret_key in value.items():
+            if not header_name.strip():
+                raise ValueError("headers_from_context.headers must not contain a blank header name")
+            if not isinstance(secret_key, str) or not secret_key.strip():
+                raise ValueError(f"headers_from_context.headers[{header_name!r}] must name a non-blank secret key from config.context.secrets")
+            # HTTP field names are case-insensitive, so two spellings of one
+            # header are one header with two candidate values, and which one
+            # reaches the remote would depend on dict ordering.
+            lowered = header_name.lower()
+            if lowered in seen:
+                raise ValueError(f"headers_from_context.headers maps the same HTTP header under two spellings ({seen[lowered]!r} and {header_name!r}); header names are case-insensitive, so keep only one")
+            seen[lowered] = header_name
+        return value
+
+
 class McpOAuthConfig(BaseModel):
     """OAuth configuration for an MCP server (HTTP/SSE transports)."""
 
@@ -96,6 +214,14 @@ class McpServerConfig(BaseModel):
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
+    user_auth: McpUserScopedAuthConfig | None = Field(
+        default=None,
+        description="Per-user credential injection (for sse or http type): map DeerFlow user ids to per-user credential header values",
+    )
+    headers_from_context: McpContextHeadersConfig | None = Field(
+        default=None,
+        description="Per-request credential injection (for sse or http type): map HTTP header names to keys of the run request's config.context.secrets",
+    )
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
@@ -105,17 +231,39 @@ class McpServerConfig(BaseModel):
     )
     tool_call_timeout: float | None = Field(
         default=None,
-        description="Timeout in seconds for individual stdio MCP tool calls. HTTP/SSE servers use transport-level timeouts. None means no timeout.",
+        description=("Timeout in seconds for individual stdio MCP tool calls and durable-task calls on every transport. Other HTTP/SSE tools use transport-level timeouts. None means no call-level timeout."),
     )
     session_init_timeout: float | None = Field(
         default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
         description=(
             "Timeout in seconds for MCP server bring-up: tool discovery (subprocess spawn + initialize + tools/list) "
-            "and persistent stdio session initialization. Defaults to DEFAULT_MCP_SESSION_INIT_TIMEOUT so a hung "
-            "server cannot block agent construction indefinitely. None means no timeout."
+            "and persistent stdio session initialization, plus ephemeral HTTP/SSE durable-task session "
+            "initialization. Defaults to DEFAULT_MCP_SESSION_INIT_TIMEOUT so a hung server cannot block agent "
+            "construction or the task poller indefinitely. None means no timeout."
         ),
     )
+    task_toolsets: list[McpTaskToolsetConfig] = Field(
+        default_factory=list,
+        description="Ordinary submit/status/cancel tool groups managed by the durable MCP task runtime",
+    )
     model_config = ConfigDict(extra="allow")
+
+    @field_validator("headers")
+    @classmethod
+    def _validate_header_names(cls, value: dict[str, str]) -> dict[str, str]:
+        # HTTP field names are case-insensitive, so two spellings of one header
+        # are one field with two candidate values. The adapter copies the static
+        # mapping verbatim, so both would reach the wire; a later per-request or
+        # OAuth override only replaces one spelling, leaving the other to leak a
+        # shared credential across tenant authority. Reject at config time so a
+        # bad mapping cannot reach the connection.
+        seen: dict[str, str] = {}
+        for header_name in value:
+            lowered = header_name.lower()
+            if lowered in seen:
+                raise ValueError(f"headers maps the same HTTP header under two spellings ({seen[lowered]!r} and {header_name!r}); header names are case-insensitive, so keep only one")
+            seen[lowered] = header_name
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -130,6 +278,18 @@ class McpServerConfig(BaseModel):
         spelling works, with ``type`` taking precedence when both are provided.
         """
         return normalize_mcp_transport_alias(data)
+
+    @model_validator(mode="after")
+    def _validate_task_tool_bindings(self) -> "McpServerConfig":
+        claimed: dict[str, str] = {}
+        for toolset in self.task_toolsets:
+            for role in ("submit_tool", "status_tool", "cancel_tool"):
+                raw_name = getattr(toolset, role)
+                previous = claimed.get(raw_name)
+                if previous is not None:
+                    raise ValueError(f"MCP task tool {raw_name!r} must be unique across task_toolsets and roles; it is configured as both {previous} and {toolset.name}.{role}")
+                claimed[raw_name] = f"{toolset.name}.{role}"
+        return self
 
 
 def resolve_effective_mcp_routing(server_config: McpServerConfig | None, original_tool_name: str) -> dict[str, Any]:
@@ -150,12 +310,76 @@ class SkillStateConfig(BaseModel):
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
 
 
+def _coerce_json_kwargs_value(value: Any) -> Any:
+    """Keep JSON types; stringify YAML timestamps so they match JSON strings."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(_JSON_KWARGS_ERROR)
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.isoformat()
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) and key.strip() for key in value):
+            raise ValueError("middleware kwargs keys must be non-empty strings")
+        return {key: _coerce_json_kwargs_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_coerce_json_kwargs_value(item) for item in value]
+    raise ValueError(_JSON_KWARGS_ERROR)
+
+
+class ConfiguredMiddlewareSpec(BaseModel):
+    """One config-declared AgentMiddleware with optional constructor arguments."""
+
+    class_path: str = Field(
+        ...,
+        alias="class",
+        min_length=1,
+        description="AgentMiddleware class path in 'module.path:ClassName' form.",
+    )
+    kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description=("Keyword arguments passed to the middleware constructor. Values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON."),
+    )
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @field_validator("class_path")
+    @classmethod
+    def _strip_class_path(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("middleware class path must be a non-empty string")
+        return stripped
+
+    @field_validator("kwargs", mode="before")
+    @classmethod
+    def _kwargs_none_is_empty(cls, value: Any) -> Any:
+        return {} if value is None else value
+
+    @field_validator("kwargs")
+    @classmethod
+    def _kwargs_are_json_object(cls, value: dict[str, Any]) -> dict[str, Any]:
+        coerced = _coerce_json_kwargs_value(value)
+        json.dumps(coerced)
+        return coerced
+
+
 class ExtensionsConfig(BaseModel):
     """Unified configuration for MCP servers and skills."""
 
-    middlewares: list[str] = Field(
+    middlewares: list[str | ConfiguredMiddlewareSpec] = Field(
         default_factory=list,
-        description="AgentMiddleware class paths loaded into the lead-agent middleware chain. Each entry uses 'module.path:ClassName'.",
+        description=(
+            "AgentMiddleware entries loaded into the lead-agent and subagent middleware chains. "
+            "Each entry is a 'module.path:ClassName' string or an object with 'class' and optional "
+            "'kwargs'. kwargs values must be JSON types; YAML dates and timestamps are coerced to "
+            "ISO strings."
+        ),
     )
     mcp_servers: dict[str, McpServerConfig] = Field(
         default_factory=dict,
@@ -168,9 +392,28 @@ class ExtensionsConfig(BaseModel):
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    def to_file_dict(self) -> dict[str, Any]:
-        """Serialize in the public extensions_config.json shape."""
-        return self.model_dump(by_alias=True)
+    @field_validator("middlewares")
+    @classmethod
+    def _normalize_middleware_entries(cls, value: list[str | ConfiguredMiddlewareSpec]) -> list[str | ConfiguredMiddlewareSpec]:
+        normalized: list[str | ConfiguredMiddlewareSpec] = []
+        for entry in value:
+            if isinstance(entry, str):
+                stripped = entry.strip()
+                if not stripped:
+                    raise ValueError("middleware class path must be a non-empty string")
+                normalized.append(stripped)
+                continue
+            normalized.append(entry)
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_task_server_names_fit_storage(self) -> "ExtensionsConfig":
+        for server_name, server in self.mcp_servers.items():
+            if not server.task_toolsets:
+                continue
+            if not server_name.strip() or len(server_name) > MCP_TASK_SERVER_NAME_MAX_LENGTH:
+                raise ValueError(f"MCP task server name must contain 1 to {MCP_TASK_SERVER_NAME_MAX_LENGTH} characters")
+        return self
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path | None:
@@ -260,6 +503,9 @@ class ExtensionsConfig(BaseModel):
 
         Returns:
             ExtensionsConfig: The loaded config, or empty config if file not found.
+            Its ``$VAR`` strings are already resolved, so it must never be
+            serialized back to disk; writers use
+            :func:`read_raw_extensions_config` instead.
         """
         resolved_path = cls.resolve_config_path(config_path)
         if resolved_path is None:
@@ -364,8 +610,47 @@ def _fsync_directory_best_effort(directory: Path) -> None:
             logger.debug("Could not close extensions config directory: %s", directory, exc_info=True)
 
 
+def _overwrite_in_place(target_path: Path, source_path: Path) -> None:
+    """Copy *source_path* onto *target_path* without unlinking the destination inode.
+
+    Fallback for destinations that cannot be replaced by rename — see
+    :func:`atomic_write_extensions_config`. This deliberately truncates the
+    live file, so a crash mid-write leaves it short; the caller only reaches
+    this path when the atomic route is impossible.
+    """
+    payload = source_path.read_bytes()
+    with open(target_path, "wb") as target_file:
+        target_file.write(payload)
+        target_file.flush()
+        os.fsync(target_file.fileno())
+
+
+def _log_non_atomic_fallback(target_path: Path) -> None:
+    """Warn once per target when a bind mount forces the unsafe write path."""
+    warning_key = target_path.resolve(strict=False)
+    with _non_atomic_fallback_targets_lock:
+        first_fallback = warning_key not in _non_atomic_fallback_targets
+        _non_atomic_fallback_targets.add(warning_key)
+
+    logger.log(
+        logging.WARNING if first_fallback else logging.DEBUG,
+        "Cannot atomically replace %s (it is a bind-mount point); overwriting in place. A crash during this write can leave the file truncated.",
+        target_path,
+    )
+
+
 def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
-    """Write extensions config without exposing a truncated or partial file."""
+    """Write extensions config without exposing a truncated or partial file.
+
+    Falls back to a non-atomic in-place overwrite when the destination is a
+    bind-mounted file: Docker mounts ``extensions_config.json`` as its own
+    mount point, and the kernel refuses to rename over a mount point with
+    ``EBUSY`` regardless of whether the mount is read-only. Without the
+    fallback every Gateway write to this file fails in the production
+    compose stack (MCP enable/disable, ``PUT``/``PATCH /api/mcp/config``,
+    skill updates), contradicting the documented promise that the file is
+    editable at runtime through the API.
+    """
     path = Path(path)
     target_path = path.resolve(strict=False) if path.is_symlink() else path
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -393,7 +678,13 @@ def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
 
-        os.replace(temporary_path, target_path)
+        try:
+            os.replace(temporary_path, target_path)
+        except OSError as exc:
+            if exc.errno != errno.EBUSY:
+                raise
+            _log_non_atomic_fallback(target_path)
+            _overwrite_in_place(target_path, temporary_path)
         _fsync_directory_best_effort(target_path.parent)
     finally:
         if temporary_path is not None:
@@ -405,6 +696,47 @@ def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
                     temporary_path,
                     exc_info=True,
                 )
+
+
+def read_raw_extensions_config(path: Path) -> dict[str, Any]:
+    """Read the on-disk config object with ``$VAR`` placeholders left intact.
+
+    This is the only safe merge source for a read-modify-write.
+    ``ExtensionsConfig.from_file()`` resolves placeholders into live values and
+    unset variables into ``""``, so writing its model back would persist
+    secrets in plaintext and erase the references. Raises ``FileNotFoundError``
+    when *path* does not exist, and ``ValueError`` for a malformed document;
+    that message omits the path so API callers can surface it as-is.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw_data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Extensions configuration is not valid JSON: {e.msg} at line {e.lineno} column {e.colno}") from e
+    if not isinstance(raw_data, dict):
+        raise ValueError("Extensions configuration must be a JSON object")
+    return raw_data
+
+
+def validate_raw_extensions_config(raw_data: dict[str, Any]) -> ExtensionsConfig:
+    """Validate a raw write candidate exactly as the runtime will load it.
+
+    Resolution works on a copy, so *raw_data* keeps its placeholders and can be
+    written as-is once this returns.
+    """
+    return ExtensionsConfig.model_validate(ExtensionsConfig.resolve_env_variables(raw_data))
+
+
+def set_raw_skill_enabled(raw_data: dict[str, Any], skill_name: str, enabled: bool) -> None:
+    """Set one skill's enabled state in a raw config, leaving everything else as written."""
+    skills = raw_data.setdefault("skills", {})
+    if not isinstance(skills, dict):
+        raise ValueError("Extensions config `skills` must be a JSON object")
+    entry = skills.get(skill_name)
+    if isinstance(entry, dict):
+        entry["enabled"] = enabled
+    else:
+        skills[skill_name] = {"enabled": enabled}
 
 
 def get_extensions_config() -> ExtensionsConfig:
@@ -439,6 +771,47 @@ def get_extensions_config() -> ExtensionsConfig:
 #: has no event-loop affinity, so writers running on different loops still
 #: exclude each other.
 extensions_config_write_lock = threading.Lock()
+
+
+@contextmanager
+def extensions_config_file_lock(path: Path) -> Iterator[None]:
+    """Exclude read-modify-write cycles in other Gateway processes.
+
+    ``extensions_config_write_lock`` serializes threads in this process. This
+    sidecar advisory lock extends the same critical section across worker
+    processes and separate embedded clients that share the config directory.
+    Callers must hold both locks around the complete read, merge, write, and
+    reload cycle; locking only the final atomic replace still permits lost
+    updates.
+    """
+    target_path = Path(path)
+    target_path = target_path.resolve(strict=False) if target_path.is_symlink() else target_path.absolute()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target_path.parent / f".{target_path.name}.lock"
+
+    with open(lock_path, "a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig:

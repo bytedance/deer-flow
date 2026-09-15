@@ -117,7 +117,7 @@ async def test_mcp_tool_name_prefix_can_be_disabled_per_server_without_disabling
         patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
         patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
         patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
-        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("deerflow.mcp.tools.build_mcp_tool_interceptors", return_value=[]),
         patch("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient),
         patch("langchain_mcp_adapters.tools.load_mcp_tools", side_effect=fake_load_mcp_tools),
         patch("deerflow.mcp.tools._make_session_pool_tool", side_effect=lambda tool, *_args, **_kwargs: tool) as wrap_tool,

@@ -367,17 +367,29 @@ fi
 # appended here, so the default (local) and provisioner modes never expose the
 # host daemon. Mounting the socket = root-equivalent host control; see SECURITY.md.
 
-if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
-    export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
-fi
+docker_socket="$(read_dotenv_value DEER_FLOW_DOCKER_SOCKET)"
+docker_socket="${docker_socket:-/var/run/docker.sock}"
 
 if [ "$sandbox_mode" = "aio" ]; then
-    if [ ! -S "$DEER_FLOW_DOCKER_SOCKET" ]; then
-        echo -e "${RED}⚠ Docker socket not found at $DEER_FLOW_DOCKER_SOCKET${NC}"
-        echo "  AioSandboxProvider (DooD) will not work."
-        exit 1
+    if [ ! -S "$docker_socket" ]; then
+        # On Windows (Git Bash / MSYS), Docker Desktop mounts the default
+        # /var/run/docker.sock into containers even though no host socket file exists.
+        if [ "$docker_socket" = "/var/run/docker.sock" ] && [[ "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]] && docker info >/dev/null 2>&1; then
+            :
+        else
+            echo -e "${RED}⚠ Docker socket not found at $docker_socket${NC}"
+            echo "  AioSandboxProvider (DooD) will not work."
+            exit 1
+        fi
     fi
-    echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
+    # On Windows (Git Bash / MSYS), exporting /var/run/docker.sock causes MSYS to
+    # convert it to C:\Program Files\Git\var\run\docker.sock when invoking native
+    # docker compose, triggering mkdir errors. Unsetting the default allows Compose
+    # to evaluate its own default literal fallback (${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}).
+    if [[ "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]] && [ "$DEER_FLOW_DOCKER_SOCKET" = "/var/run/docker.sock" ]; then
+        unset DEER_FLOW_DOCKER_SOCKET
+    fi
+    echo -e "${GREEN}✓ Docker socket: $docker_socket${NC}"
     echo -e "${YELLOW}  Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
     COMPOSE_CMD+=(-f "$DOCKER_DIR/docker-compose.dood.yaml")
 fi
@@ -386,17 +398,34 @@ echo ""
 
 # ── Start / Up ───────────────────────────────────────────────────────────────
 
+report_startup_failure() {
+    echo -e "${RED}✗ DeerFlow services failed to become ready.${NC}" >&2
+    echo '  If Docker Compose reports "unknown flag: --wait", upgrade to a version that' >&2
+    echo '  supports `docker compose up --wait`.' >&2
+    echo "  Container status:" >&2
+    "${COMPOSE_CMD[@]}" ps >&2 || true
+    echo "" >&2
+    echo "  Recent Gateway logs:" >&2
+    "${COMPOSE_CMD[@]}" logs --no-color --tail 100 gateway >&2 || true
+}
+
 if [ "$CMD" = "start" ]; then
     echo "Starting containers (no rebuild)..."
     echo ""
     # shellcheck disable=SC2086
-    "${COMPOSE_CMD[@]}" up -d --remove-orphans $services
+    if ! "${COMPOSE_CMD[@]}" up -d --remove-orphans --wait --wait-timeout 180 $services; then
+        report_startup_failure
+        exit 1
+    fi
 else
     # Default: build + start
     echo "Building images and starting containers..."
     echo ""
     # shellcheck disable=SC2086
-    "${COMPOSE_CMD[@]}" up --build -d --remove-orphans $services
+    if ! "${COMPOSE_CMD[@]}" up --build -d --remove-orphans --wait --wait-timeout 180 $services; then
+        report_startup_failure
+        exit 1
+    fi
 fi
 
 echo ""

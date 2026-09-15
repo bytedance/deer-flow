@@ -17,6 +17,7 @@ from deerflow_extension_api import API_VERSION
 from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.extensions.registry import ExtensionRegistry, LoadedExtensions
+from deerflow.persistence.migrations._env_filters import register_extension_table_prefix
 from deerflow.reflection import resolve_variable
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,18 @@ class ExtensionSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    enabled: bool = Field(
+        default=True,
+        description="When false, skip the extension without resolving or importing it",
+    )
+    name: str | None = Field(
+        default=None,
+        description="Stable operator-facing name recorded by the extension manager",
+    )
+    package: str | None = Field(
+        default=None,
+        description="Installed Python distribution recorded by the extension manager",
+    )
     use: str = Field(description="Entry point path, e.g. 'my_extension:install'")
     config: dict[str, Any] = Field(
         default_factory=dict,
@@ -37,6 +50,22 @@ class ExtensionSpec(BaseModel):
     required: bool = Field(
         default=False,
         description="When true, a load failure aborts startup instead of being skipped",
+    )
+    table_prefix: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Table-name prefix this extension owns, if it persists data under its own "
+            "MetaData and migration chain. Registered with "
+            "deerflow.persistence.migrations._env_filters so alembic revision --autogenerate "
+            "excludes those tables instead of reflecting them from a live database and "
+            "proposing to drop them. Registered from two processes: here for the Gateway, "
+            "and from migrations/env.py -- reading this declaration, never importing the "
+            "extension -- for alembic, which never starts a Gateway. Omit the key to "
+            "declare no prefix; an empty string is rejected here rather than treated "
+            "as absent, so that one declaration cannot mean 'no prefix' to one of "
+            "those two processes and 'a prefix matching every table' to the other."
+        ),
     )
 
 
@@ -85,8 +114,8 @@ def _parse_version(version: object) -> tuple[int, ...] | None:
 def _compatible(declared: str, current: str) -> bool:
     """One-directional, with the semver window for the contract's life stage.
 
-    Pre-1.0 the contract surface is observational only and minors may break,
-    so the window is same major.minor with patches additive: host >= declared.
+    Pre-1.0 minors may break, so the window is same major.minor with patches
+    additive: host >= declared.
     From 1.0 on contracts only grow within a major, so a newer host stays
     compatible with older extensions while an extension written against a
     newer minor is refused — it would reach for contract additions the host
@@ -130,6 +159,30 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
     loaded_sources: list[str] = []
 
     for spec in specs:
+        if spec.table_prefix:
+            # Registered unconditionally -- even for a disabled or later-failing
+            # spec -- because the tables it names may already exist in the
+            # database from a previous run. Excluding them from alembic's view
+            # is the safe direction; the risk this guards against is
+            # autogenerate proposing to drop them, not registering one prefix
+            # too many.
+            #
+            # A prefix that collides with a host table name is not a
+            # per-extension failure `required: false` can shrug off: it
+            # corrupts the shared alembic filter for that host table for the
+            # life of the process, regardless of whether this extension ever
+            # loads. It always aborts startup.
+            try:
+                register_extension_table_prefix(spec.table_prefix)
+            except ValueError as exc:
+                message = str(exc)
+                diagnostics.append(Diagnostic.error(spec.use, message))
+                logger.error("Extension %s: %s", spec.use, message)
+                raise ExtensionLoadError(message) from exc
+
+        if not spec.enabled:
+            continue
+
         try:
             install = resolve_variable(spec.use)
         except Exception as exc:

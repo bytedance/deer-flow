@@ -13,11 +13,24 @@ from typing import Any
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import InboundMessage, InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
 _DISCORD_MAX_MESSAGE_LEN = 2000
+
+# Bound for outbound work scheduled onto the Discord client's event loop.
+# Discord API calls normally return in well under a second; anything still
+# pending after this is a dead or wedged client, not a slow response.
+DISCORD_OUTBOUND_TIMEOUT_SECONDS = 30.0
+
+# File uploads carry an unbounded-size payload with no per-channel size cap
+# (unlike Feishu/Telegram's send_file limits), so they get their own, larger
+# bound: a 50 MB artifact over a ~5 Mbps uplink takes ~80 s to push, and a
+# large 429 retry-after inside discord.py can extend that further. Cancelling
+# a healthy upload mid-transfer would report it as failed, so the bound here
+# only exists to convert a wedged client into a logged failure.
+DISCORD_UPLOAD_TIMEOUT_SECONDS = 120.0
 
 
 class DiscordChannel(Channel):
@@ -66,6 +79,15 @@ class DiscordChannel(Channel):
 
         # Typing indicator management
         self._typing_tasks: dict[str, asyncio.Task] = {}
+
+        # Strong references for this channel's in-flight ack-reaction tasks.
+        # The event loop keeps only weak references to scheduled tasks, so a
+        # bare ``asyncio.create_task`` could be garbage-collected mid-flight
+        # and silently drop the acknowledgment reaction (same retention
+        # pattern as the deferred subagent cleanup in #4928). Instance-level
+        # on purpose, matching ``_typing_tasks``: one channel's shutdown must
+        # not cancel another instance's in-flight reactions.
+        self._ack_reaction_tasks: set[asyncio.Task[None]] = set()
 
         self._client = None
         self._thread: threading.Thread | None = None
@@ -177,25 +199,26 @@ class DiscordChannel(Channel):
         discord_loop = self._discord_loop
         current_loop = asyncio.get_running_loop()
         if discord_loop is None or discord_loop is current_loop:
-            await self._cancel_typing_tasks()
+            await self._cancel_ephemeral_tasks()
         elif discord_loop.is_running():
-            # Serialize cleanup with _start_typing() on the owning loop.  The
+            # Serialize cleanup with _start_typing()/_schedule_ack_reaction()
+            # on the owning loop.  The
             # loop may exit between is_running() and scheduling, so neither
             # scheduling nor waiting is allowed to block the rest of stop().
-            cleanup_coro = self._cancel_typing_tasks()
+            cleanup_coro = self._cancel_ephemeral_tasks()
             try:
                 cleanup_future = asyncio.run_coroutine_threadsafe(cleanup_coro, discord_loop)
             except RuntimeError:
                 cleanup_coro.close()
-                logger.warning("[Discord] event loop stopped before typing-task cleanup could be scheduled")
+                logger.warning("[Discord] event loop stopped before ephemeral-task cleanup could be scheduled")
             else:
                 try:
                     await asyncio.wait_for(asyncio.wrap_future(cleanup_future), timeout=10)
                 except TimeoutError:
                     cleanup_future.cancel()
-                    logger.warning("[Discord] typing-task cleanup timed out after 10s")
+                    logger.warning("[Discord] ephemeral-task cleanup timed out after 10s")
                 except Exception:
-                    logger.exception("[Discord] error while cleaning up typing tasks")
+                    logger.exception("[Discord] error while cleaning up ephemeral tasks")
 
         if self._client and discord_loop and discord_loop.is_running():
             close_coro = self._client.close()
@@ -222,17 +245,53 @@ class DiscordChannel(Channel):
         # discard the stale references here; awaiting them from this loop would
         # raise a cross-loop RuntimeError.
         if discord_loop and discord_loop is not current_loop and not discord_loop.is_running():
-            self._discard_typing_tasks()
+            self._discard_ephemeral_tasks()
 
         self._client = None
         self._discord_loop = None
         self._discord_module = None
         logger.info("Discord channel stopped")
 
+    @property
+    def is_running(self) -> bool:
+        """Running means the client thread is still alive, not just started.
+
+        ``_run_client`` exits when discord.py gives up for good (invalidated
+        token, unrecoverable close) while ``_running`` stays True, so the base
+        flag alone would keep reporting a healthy channel forever. Mirrors
+        ``FeishuChannel.is_running`` so ``ChannelService.ensure_channel_ready``
+        can restart the channel after its client thread dies.
+        """
+        if not self._running:
+            return False
+        return self._thread is not None and self._thread.is_alive()
+
+    async def _run_on_discord_loop(self, coro, *, timeout: float = DISCORD_OUTBOUND_TIMEOUT_SECONDS):
+        """Schedule *coro* on the Discord loop and await it with a bound.
+
+        The Discord client runs on a dedicated thread whose loop is stopped but
+        not closed when the client dies, so ``call_soon_threadsafe`` keeps
+        queueing callbacks that never run and an unbounded ``wrap_future``
+        await would hang a ChannelManager worker forever. ``stop()`` already
+        bounds its identical cross-loop awaits with ``wait_for``; this extends
+        that pattern to the outbound path. Failing fast when the loop is
+        missing or not running turns a dead client into a logged send failure
+        instead of a wedged worker.
+        """
+        loop = self._discord_loop
+        if loop is None or not loop.is_running():
+            coro.close()
+            raise RuntimeError("Discord client event loop is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
+
     async def send(self, msg: OutboundMessage) -> None:
         # Stop typing indicator once we're sending the response
-        stop_future = asyncio.run_coroutine_threadsafe(self._stop_typing(msg.chat_id, msg.thread_ts), self._discord_loop)
-        await asyncio.wrap_future(stop_future)
+        await self._run_on_discord_loop(self._stop_typing(msg.chat_id, msg.thread_ts))
 
         target = await self._resolve_target(msg)
         if target is None:
@@ -241,12 +300,10 @@ class DiscordChannel(Channel):
 
         text = msg.text or ""
         for chunk in self._split_text(text):
-            send_future = asyncio.run_coroutine_threadsafe(target.send(chunk), self._discord_loop)
-            await asyncio.wrap_future(send_future)
+            await self._run_on_discord_loop(target.send(chunk))
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
-        stop_future = asyncio.run_coroutine_threadsafe(self._stop_typing(msg.chat_id, msg.thread_ts), self._discord_loop)
-        await asyncio.wrap_future(stop_future)
+        await self._run_on_discord_loop(self._stop_typing(msg.chat_id, msg.thread_ts))
 
         target = await self._resolve_target(msg)
         if target is None:
@@ -264,8 +321,7 @@ class DiscordChannel(Channel):
             # success and failure paths.
             data = await asyncio.to_thread(self._read_attachment_bytes, str(attachment.actual_path))
             file = self._discord_module.File(io.BytesIO(data), filename=attachment.filename)
-            send_future = asyncio.run_coroutine_threadsafe(target.send(file=file), self._discord_loop)
-            await asyncio.wrap_future(send_future)
+            await self._run_on_discord_loop(target.send(file=file), timeout=DISCORD_UPLOAD_TIMEOUT_SECONDS)
             logger.info("[Discord] file uploaded: %s", attachment.filename)
             return True
         except Exception:
@@ -315,6 +371,36 @@ class DiscordChannel(Channel):
                 )
         self._typing_tasks.clear()
 
+    async def _cancel_ack_reaction_tasks(self) -> None:
+        """Cancel in-flight ack reactions so stop() does not strand them.
+
+        A task interrupted mid-HTTP-call would otherwise stay in the
+        retention set forever, pinning this channel instance and the discord
+        Message object graph after shutdown.
+        """
+        pending = [task for task in self._ack_reaction_tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _discard_ack_reaction_tasks(self) -> None:
+        """Forget stale ack-reaction tasks after the owning loop stopped."""
+        for task in list(self._ack_reaction_tasks):
+            if not task.done():
+                logger.warning("[Discord] discarding pending ack-reaction task for stopped loop")
+        self._ack_reaction_tasks.clear()
+
+    async def _cancel_ephemeral_tasks(self) -> None:
+        """Cancel typing indicators and in-flight ack reactions together."""
+        await self._cancel_typing_tasks()
+        await self._cancel_ack_reaction_tasks()
+
+    def _discard_ephemeral_tasks(self) -> None:
+        """Forget stale typing and ack-reaction tasks (stopped-loop fallback)."""
+        self._discard_typing_tasks()
+        self._discard_ack_reaction_tasks()
+
     async def _stop_typing(self, chat_id: str, thread_ts: str | None = None) -> None:
         """Stops the typing loop for a specific target."""
         target_id = thread_ts or chat_id
@@ -329,6 +415,25 @@ class DiscordChannel(Channel):
             await message.add_reaction("✅")
         except Exception:
             logger.debug("[Discord] failed to add reaction to message %s", message.id, exc_info=True)
+
+    def _on_ack_reaction_task_done(self, task: asyncio.Task[None]) -> None:
+        self._ack_reaction_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("[Discord] ack reaction task failed: %s", exc)
+
+    def _schedule_ack_reaction(self, message) -> asyncio.Task[None]:
+        """Schedule the ack reaction with a strong task reference.
+
+        The delayed HTTP call must survive until completion; see
+        ``_ack_reaction_tasks`` for why a bare ``create_task`` is unsafe here.
+        """
+        task = asyncio.create_task(self._add_reaction(message))
+        self._ack_reaction_tasks.add(task)
+        task.add_done_callback(self._on_ack_reaction_task_done)
+        return task
 
     async def _on_message(self, message) -> None:
         if not self._running or not self._client:
@@ -373,64 +478,135 @@ class DiscordChannel(Channel):
         if connect_code and await self._bind_connection_from_connect_code(message, connect_code):
             return
 
-        # --- Determine thread/channel routing and typing target ---
-        thread_id = None
-        chat_id = None
-        typing_target = None  # The Discord object to type into
+        # /connect is a local control-plane command and is consumed above. For
+        # ordinary messages, reserve the shared intake slot before any Discord
+        # API call, thread mapping write, or connection-identity query. The
+        # provisional routing fields are used only for overload logging; the
+        # final message is built after thread routing completes.
+        msg_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
+        provisional = self._make_inbound(
+            chat_id=str(message.channel.id),
+            user_id=str(message.author.id),
+            text=text,
+            msg_type=msg_type,
+            metadata={
+                "guild_id": str(guild.id) if guild else None,
+                "channel_id": str(message.channel.id),
+                "message_id": str(message.id),
+            },
+        )
+        reservation = self._reserve_inbound(provisional)
+        if reservation is None:
+            return
 
-        if isinstance(message.channel, self._discord_module.Thread):
-            # --- Message already inside a thread ---
-            thread_obj = message.channel
-            thread_id = str(thread_obj.id)
-            chat_id = str(thread_obj.parent_id or thread_obj.id)
-            typing_target = thread_obj
+        await self._handle_admitted_message(
+            message,
+            text=text,
+            msg_type=msg_type,
+            guild=guild,
+            has_mention=bool(has_mention),
+            reservation=reservation,
+        )
 
-            # If this is a known active thread, process normally
-            if thread_id in self._active_thread_ids:
-                msg_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
-                inbound = self._make_inbound(
-                    chat_id=chat_id,
-                    user_id=str(message.author.id),
-                    text=text,
-                    msg_type=msg_type,
-                    thread_ts=thread_id,
-                    metadata={
-                        "guild_id": str(guild.id) if guild else None,
-                        "channel_id": str(message.channel.id),
-                        "message_id": str(message.id),
-                    },
-                )
-                inbound.topic_id = thread_id
-                inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
-                self._publish(inbound)
-                # Start typing indicator in the thread
-                if typing_target:
-                    await self._start_typing(typing_target, chat_id, thread_id)
-                asyncio.create_task(self._add_reaction(message))
-                return
-
-            # Thread not tracked (orphaned) — create new thread and handle below
-            logger.debug("[Discord] message in orphaned thread %s, will create new thread", thread_id)
+    async def _handle_admitted_message(
+        self,
+        message,
+        *,
+        text: str,
+        msg_type: InboundMessageType,
+        guild,
+        has_mention: bool,
+        reservation: InboundReservation,
+    ) -> None:
+        """Finish Discord routing while owning one bounded intake slot."""
+        reservation_transferred = False
+        try:
+            # --- Determine thread/channel routing and typing target ---
             thread_id = None
-            typing_target = None
+            chat_id = None
+            typing_target = None  # The Discord object to type into
 
-        # At this point we're guaranteed to be in a channel, not a thread
-        # (the Thread case is handled above). Apply mention_only for all
-        # non-thread messages — no special case needed.
-        channel_id = str(message.channel.id)
+            if isinstance(message.channel, self._discord_module.Thread):
+                # --- Message already inside a thread ---
+                thread_obj = message.channel
+                thread_id = str(thread_obj.id)
+                chat_id = str(thread_obj.parent_id or thread_obj.id)
+                typing_target = thread_obj
 
-        # Check if there's an active thread for this channel
-        if channel_id in self._active_threads:
-            # respect mention_only: if enabled, only process messages that mention the bot
-            # (unless the channel is in allowed_channels)
-            # Messages within a thread are always allowed through (continuation).
-            # At this code point we know the message is in a channel, not a thread
-            # (Thread case handled above), so always apply the check.
-            if self._mention_only and not has_mention and channel_id not in self._allowed_channels:
-                logger.debug("[Discord] skipping no-@ message in channel %s (not in thread)", channel_id)
+                # If this is a known active thread, process normally
+                if thread_id in self._active_thread_ids:
+                    inbound = self._make_inbound(
+                        chat_id=chat_id,
+                        user_id=str(message.author.id),
+                        text=text,
+                        msg_type=msg_type,
+                        thread_ts=thread_id,
+                        metadata={
+                            "guild_id": str(guild.id) if guild else None,
+                            "channel_id": str(message.channel.id),
+                            "message_id": str(message.id),
+                        },
+                    )
+                    inbound.topic_id = thread_id
+                    inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
+                    if not self._publish_reserved(inbound, reservation):
+                        return
+                    reservation_transferred = True
+                    # Start typing indicator in the thread
+                    if typing_target:
+                        await self._start_typing(typing_target, chat_id, thread_id)
+                    self._schedule_ack_reaction(message)
+                    return
+
+                # Thread not tracked (orphaned) — create new thread and handle below
+                logger.debug("[Discord] message in orphaned thread %s, will create new thread", thread_id)
+                thread_id = None
+                typing_target = None
+
+            # At this point we're guaranteed to be in a channel, not a thread
+            # (the Thread case is handled above). Apply mention_only for all
+            # non-thread messages — no special case needed.
+            channel_id = str(message.channel.id)
+
+            # Check if there's an active thread for this channel
+            if channel_id in self._active_threads:
+                # respect mention_only: if enabled, only process messages that mention the bot
+                # (unless the channel is in allowed_channels)
+                # Messages within a thread are always allowed through (continuation).
+                # At this code point we know the message is in a channel, not a thread
+                # (Thread case handled above), so always apply the check.
+                if self._mention_only and not has_mention and channel_id not in self._allowed_channels:
+                    logger.debug("[Discord] skipping no-@ message in channel %s (not in thread)", channel_id)
+                    return
+                # mention_only + fresh @ → create new thread instead of routing to existing one
+                if self._mention_only and has_mention:
+                    thread_obj = await self._create_thread(message)
+                    if thread_obj is not None:
+                        target_thread_id = str(thread_obj.id)
+                        self._record_thread_mapping(channel_id, target_thread_id)
+                        await asyncio.to_thread(self._persist_thread_mappings)
+                        thread_id = target_thread_id
+                        chat_id = channel_id
+                        typing_target = thread_obj
+                        logger.info("[Discord] created new thread %s in channel %s on mention (replacing existing thread)", target_thread_id, channel_id)
+                    else:
+                        logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
+                        thread_id = channel_id
+                        chat_id = channel_id
+                        typing_target = message.channel
+                else:
+                    # Existing session → route to the existing thread
+                    target_thread_id = self._active_threads[channel_id]
+                    logger.debug("[Discord] routing message in channel %s to existing thread %s", channel_id, target_thread_id)
+                    thread_id = target_thread_id
+                    chat_id = channel_id
+                    typing_target = await self._get_channel_or_thread(target_thread_id)
+            elif self._mention_only and not has_mention and channel_id not in self._allowed_channels:
+                # Not mentioned and not in an allowed channel → skip
+                logger.debug("[Discord] skipping message without mention in channel %s", channel_id)
                 return
-            # mention_only + fresh @ → create new thread instead of routing to existing one
-            if self._mention_only and has_mention:
+            elif self._mention_only and has_mention:
+                # First mention in this channel → create thread
                 thread_obj = await self._create_thread(message)
                 if thread_obj is not None:
                     target_thread_id = str(thread_obj.id)
@@ -438,91 +614,74 @@ class DiscordChannel(Channel):
                     await asyncio.to_thread(self._persist_thread_mappings)
                     thread_id = target_thread_id
                     chat_id = channel_id
-                    typing_target = thread_obj
-                    logger.info("[Discord] created new thread %s in channel %s on mention (replacing existing thread)", target_thread_id, channel_id)
+                    typing_target = thread_obj  # Type into the new thread
+                    logger.info("[Discord] created thread %s in channel %s for user %s", target_thread_id, channel_id, message.author.display_name)
                 else:
+                    # Fallback: thread creation failed (disabled/permissions), reply in channel
                     logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
                     thread_id = channel_id
                     chat_id = channel_id
-                    typing_target = message.channel
+                    typing_target = message.channel  # Type into the channel
+            elif self._thread_mode:
+                # thread_mode but mention_only is False → create thread anyway for conversation grouping
+                thread_obj = await self._create_thread(message)
+                if thread_obj is None:
+                    # Thread creation failed (disabled/permissions), fall back to channel replies
+                    logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
+                    thread_id = channel_id
+                    chat_id = channel_id
+                    typing_target = message.channel  # Type into the channel
+                else:
+                    target_thread_id = str(thread_obj.id)
+                    self._record_thread_mapping(channel_id, target_thread_id)
+                    await asyncio.to_thread(self._persist_thread_mappings)
+                    thread_id = target_thread_id
+                    chat_id = channel_id
+                    typing_target = thread_obj  # Type into the new thread
             else:
-                # Existing session → route to the existing thread
-                target_thread_id = self._active_threads[channel_id]
-                logger.debug("[Discord] routing message in channel %s to existing thread %s", channel_id, target_thread_id)
-                thread_id = target_thread_id
-                chat_id = channel_id
-                typing_target = await self._get_channel_or_thread(target_thread_id)
-        elif self._mention_only and not has_mention and channel_id not in self._allowed_channels:
-            # Not mentioned and not in an allowed channel → skip
-            logger.debug("[Discord] skipping message without mention in channel %s", channel_id)
-            return
-        elif self._mention_only and has_mention:
-            # First mention in this channel → create thread
-            thread_obj = await self._create_thread(message)
-            if thread_obj is not None:
-                target_thread_id = str(thread_obj.id)
-                self._record_thread_mapping(channel_id, target_thread_id)
-                await asyncio.to_thread(self._persist_thread_mappings)
-                thread_id = target_thread_id
-                chat_id = channel_id
-                typing_target = thread_obj  # Type into the new thread
-                logger.info("[Discord] created thread %s in channel %s for user %s", target_thread_id, channel_id, message.author.display_name)
-            else:
-                # Fallback: thread creation failed (disabled/permissions), reply in channel
-                logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
+                # No threading — reply directly in channel
                 thread_id = channel_id
                 chat_id = channel_id
                 typing_target = message.channel  # Type into the channel
-        elif self._thread_mode:
-            # thread_mode but mention_only is False → create thread anyway for conversation grouping
-            thread_obj = await self._create_thread(message)
-            if thread_obj is None:
-                # Thread creation failed (disabled/permissions), fall back to channel replies
-                logger.info("[Discord] thread creation failed in channel %s, falling back to channel replies", channel_id)
-                thread_id = channel_id
-                chat_id = channel_id
-                typing_target = message.channel  # Type into the channel
-            else:
-                target_thread_id = str(thread_obj.id)
-                self._record_thread_mapping(channel_id, target_thread_id)
-                await asyncio.to_thread(self._persist_thread_mappings)
-                thread_id = target_thread_id
-                chat_id = channel_id
-                typing_target = thread_obj  # Type into the new thread
-        else:
-            # No threading — reply directly in channel
-            thread_id = channel_id
-            chat_id = channel_id
-            typing_target = message.channel  # Type into the channel
 
-        msg_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
-        inbound = self._make_inbound(
-            chat_id=chat_id,
-            user_id=str(message.author.id),
-            text=text,
-            msg_type=msg_type,
-            thread_ts=thread_id,
-            metadata={
-                "guild_id": str(guild.id) if guild else None,
-                "channel_id": str(message.channel.id),
-                "message_id": str(message.id),
-            },
-        )
-        inbound.topic_id = thread_id
-        inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
+            inbound = self._make_inbound(
+                chat_id=chat_id,
+                user_id=str(message.author.id),
+                text=text,
+                msg_type=msg_type,
+                thread_ts=thread_id,
+                metadata={
+                    "guild_id": str(guild.id) if guild else None,
+                    "channel_id": str(message.channel.id),
+                    "message_id": str(message.id),
+                },
+            )
+            inbound.topic_id = thread_id
+            inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
 
-        # Start typing indicator in the correct target (thread or channel)
-        if typing_target:
-            await self._start_typing(typing_target, chat_id, thread_id)
+            if not self._publish_reserved(inbound, reservation):
+                return
+            reservation_transferred = True
 
-        self._publish(inbound)
-        asyncio.create_task(self._add_reaction(message))
+            # Start typing/reaction only after bounded admission succeeds.
+            if typing_target:
+                await self._start_typing(typing_target, chat_id, thread_id)
+            self._schedule_ack_reaction(message)
+        finally:
+            if not reservation_transferred:
+                reservation.release()
 
-    def _publish(self, inbound) -> None:
-        """Publish an inbound message to the main event loop."""
+    def _publish_reserved(self, inbound: InboundMessage, reservation: InboundReservation) -> bool:
+        """Transfer an already-reserved message to the Gateway loop."""
         if self._main_loop and self._main_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
-            future.add_done_callback(lambda f: logger.exception("[Discord] publish_inbound failed", exc_info=f.exception()) if f.exception() else None)
+            try:
+                # This is called from discord.py's private event-loop thread.
+                self._main_loop.call_soon_threadsafe(self._commit_reserved_inbound, reservation, inbound)
+                return True
+            except RuntimeError:
+                logger.info("[Discord] main loop stopped before reserved inbound could be scheduled")
+        reservation.release()
+        return False
 
     async def _attach_connection_identity(self, inbound: InboundMessage, guild_id: str | None = None) -> InboundMessage:
         return await attach_connection_identity(
@@ -588,9 +747,9 @@ class DiscordChannel(Channel):
                 logger.exception("Discord client error")
         finally:
             try:
-                self._discord_loop.run_until_complete(self._cancel_typing_tasks())
+                self._discord_loop.run_until_complete(self._cancel_ephemeral_tasks())
             except Exception:
-                logger.exception("Error while cleaning up Discord typing tasks")
+                logger.exception("Error while cleaning up Discord ephemeral tasks")
             try:
                 if self._client and not self._client.is_closed():
                     self._discord_loop.run_until_complete(self._client.close())
@@ -660,9 +819,8 @@ class DiscordChannel(Channel):
         except (TypeError, ValueError):
             return None
 
-        get_future = asyncio.run_coroutine_threadsafe(self._fetch_channel(target_id), self._discord_loop)
         try:
-            return await asyncio.wrap_future(get_future)
+            return await self._run_on_discord_loop(self._fetch_channel(target_id))
         except Exception:
             logger.exception("[Discord] failed to resolve target id=%s", raw_id)
             return None

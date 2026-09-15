@@ -33,6 +33,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          version: "0.11.1"
 
       - name: Install backend dependencies (documented default)
         working-directory: backend
@@ -46,6 +49,15 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      # Duration-aware split: `make test-shard` balances the shards by real
+      # wall-clock cost from backend/.test_durations (read-only for shards, so
+      # concurrent jobs never race writes on it). Every test runs exactly once.
+      # Fail-fast is off so a failing shard reports its tests without cancelling
+      # its peers.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     services:
       postgres:
@@ -85,12 +97,15 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          version: "0.11.1"
 
       - name: Install backend dependencies
         working-directory: backend
         run: uv sync --group dev --extra postgres
 
-      - name: Run unit tests of backend
+      - name: Run unit tests of backend (shard ${{ matrix.shard }} of 4)
         working-directory: backend
         env:
           # Expose the job's Postgres service to the cross-pod dedupe integration
@@ -98,4 +113,4 @@ jobs:
           # mapping those tests silently skip and the headline capability is never
           # exercised in CI.
           DEDUPE_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
-        run: make test
+        run: make test-shard SPLITS=4 GROUP=${{ matrix.shard }}

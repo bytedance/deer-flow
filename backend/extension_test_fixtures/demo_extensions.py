@@ -20,7 +20,7 @@ def install_ok(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     registry.middlewares(_Contributor("ok"))
 
 
-@extension(api="0.1", name="stamped")
+@extension(api="0.2", name="stamped")
 def install_stamped(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     INSTALLED.append("stamped")
     registry.task_lifecycle(_Contributor("stamped"))
@@ -32,7 +32,7 @@ def install_future_api(registry: ExtensionRegistry, config: Mapping[str, Any]) -
     registry.middlewares(_Contributor("future"))
 
 
-@extension(api="0.2", name="newer-minor")
+@extension(api="0.3", name="newer-minor")
 def install_newer_minor_api(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     """Written against a newer 0.x minor than the host provides: before 1.0,
     minors carry no compatibility promise in either direction."""
@@ -41,9 +41,13 @@ def install_newer_minor_api(registry: ExtensionRegistry, config: Mapping[str, An
 
 
 def install_partial_then_raise(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
-    """Registers two contributors, then fails — exercises rollback."""
-    registry.middlewares(_Contributor("partial"))
-    registry.task_lifecycle(_Contributor("partial"))
+    """Register every contribution kind, then fail to exercise five-bucket rollback."""
+    partial = _Contributor("partial")
+    registry.middlewares(partial)
+    registry.task_lifecycle(partial)
+    registry.system_model_observer(partial)
+    registry.service(partial)
+    registry.routers((partial,))
     raise ValueError("boom")
 
 

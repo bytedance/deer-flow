@@ -21,8 +21,9 @@ import os
 import threading
 import time
 from collections.abc import Callable, Coroutine
+from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import urlparse
 
 if TYPE_CHECKING:
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+ScreenshotType = Literal["png", "jpeg", "webp"]
 
 # Element roles/tags treated as interactive when building a page snapshot. The
 # model addresses elements by the ``data-df-ref`` index this snapshot stamps, so
@@ -171,6 +173,14 @@ def _is_playwright_timeout_error(exc: Exception) -> bool:
     return exc.__class__.__name__ == "TimeoutError" and exc.__class__.__module__.startswith("playwright.")
 
 
+def _consume_future_exception(future: asyncio.Future[Any]) -> None:
+    """Retrieve detached close errors; the concurrent-future callback logs them."""
+    if future.cancelled():
+        return
+    with contextlib.suppress(Exception):
+        future.exception()
+
+
 def redact_browser_url(url: str) -> str:
     """Drop query/fragment so a blocked-URL log line can't leak tokens/PII."""
     try:
@@ -197,7 +207,7 @@ class _PlaywrightLoopThread:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return await asyncio.wrap_future(future)
 
-    def submit(self, coro: Coroutine[Any, Any, Any]) -> None:
+    def submit(self, coro: Coroutine[Any, Any, Any]) -> Future[Any]:
         """Schedule *coro* on the private loop without blocking the caller."""
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
 
@@ -208,6 +218,7 @@ class _PlaywrightLoopThread:
                 logger.debug("browser background task failed: %s", exc)
 
         future.add_done_callback(_log_failure)
+        return future
 
     def run_sync(self, coro: Coroutine[Any, Any, T], timeout: float | None = None) -> T:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -315,6 +326,16 @@ class BrowserSession:
         self._input_live_frame_generation = 0
         self._input_live_frame_pending = False
         self._page_listener_bound = False
+        # The event loop only holds weak references to tasks, so a fire-and-forget
+        # task can be collected mid-execution. The schedulers below clear their
+        # ``*_pending`` guards in a ``finally`` block, which would then never run.
+        self._background_tasks: set[asyncio.Future[Any]] = set()
+
+    def _spawn_background(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Run *coro* detached, keeping a strong reference until it settles."""
+        task = asyncio.ensure_future(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     @property
     def active_refs(self) -> int:
@@ -402,7 +423,7 @@ class BrowserSession:
         """
         self._page = page
         if self._on_frame is not None and not self._screencast_binding and page is not self._screencast_page:
-            asyncio.ensure_future(self._rebind_screencast_safe())
+            self._spawn_background(self._rebind_screencast_safe())
 
     def _bind_new_page_listener(self) -> None:
         """Follow popups/new tabs so auth flows stay visible and controllable.
@@ -533,9 +554,16 @@ class BrowserSession:
         text = await page.inner_text("body")
         return text[:max_chars]
 
-    async def _screenshot_bytes(self, full_page: bool) -> bytes:
+    async def _screenshot_bytes(
+        self,
+        full_page: bool,
+        image_type: ScreenshotType,
+        quality: int | None,
+    ) -> bytes:
         page = await self._ensure_page()
-        return await page.screenshot(full_page=full_page, type="png")
+        if quality is None:
+            return await page.screenshot(full_page=full_page, type=image_type)
+        return await page.screenshot(full_page=full_page, type=image_type, quality=quality)
 
     async def _live_frame(self) -> bytes:
         page = await self._ensure_page()
@@ -562,7 +590,7 @@ class BrowserSession:
         if self._settle_live_frames_pending:
             return
         self._settle_live_frames_pending = True
-        asyncio.ensure_future(self._settle_live_frames())
+        self._spawn_background(self._settle_live_frames())
 
     async def _push_live_frame(self) -> None:
         if self._on_frame is None:
@@ -596,7 +624,7 @@ class BrowserSession:
         if self._input_live_frame_pending:
             return
         self._input_live_frame_pending = True
-        asyncio.ensure_future(self._flush_input_live_frames())
+        self._spawn_background(self._flush_input_live_frames())
 
     async def _back(self) -> PageSnapshot:
         page = await self._ensure_page()
@@ -786,9 +814,15 @@ class BrowserSession:
         with self._activity():
             return await self._loop.run(self._get_text(max_chars))
 
-    async def screenshot_bytes(self, full_page: bool = False) -> bytes:
+    async def screenshot_bytes(
+        self,
+        full_page: bool = False,
+        *,
+        image_type: ScreenshotType = "png",
+        quality: int | None = None,
+    ) -> bytes:
         with self._activity():
-            return await self._loop.run(self._screenshot_bytes(full_page))
+            return await self._loop.run(self._screenshot_bytes(full_page, image_type, quality))
 
     async def live_frame(self) -> bytes:
         with self._activity():
@@ -825,8 +859,18 @@ class BrowserSession:
         with self._activity():
             await self._loop.run(self._dispatch_input(event))
 
+    def _submit_close(self) -> Future[Any]:
+        close_coro = self._close()
+        try:
+            return self._loop.submit(close_coro)
+        except Exception:
+            close_coro.close()
+            raise
+
     async def close(self) -> None:
-        await self._loop.run(self._close())
+        close_future = asyncio.wrap_future(self._submit_close())
+        close_future.add_done_callback(_consume_future_exception)
+        await asyncio.shield(close_future)
 
 
 class BrowserSessionManager:
@@ -995,8 +1039,19 @@ class BrowserSessionManager:
             sessions = list(self._sessions.values())
             self._sessions.clear()
             self._last_used.clear()
+        close_futures: list[asyncio.Future[Any]] = []
         for session in sessions:
-            await session.close()
+            try:
+                close_future = asyncio.wrap_future(session._submit_close())
+            except Exception as exc:
+                logger.debug("browser session close submission failed: %s", exc)
+                continue
+            close_future.add_done_callback(_consume_future_exception)
+            close_futures.append(close_future)
+        if close_futures:
+            close_group = asyncio.gather(*close_futures)
+            close_group.add_done_callback(_consume_future_exception)
+            await asyncio.shield(close_group)
         return len(sessions)
 
 

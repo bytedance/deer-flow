@@ -80,6 +80,34 @@ def test_system_model_observers_are_attributed_and_require_task_storage():
     assert loaded.needs_task_store is True
 
 
+def test_services_are_attributed_without_allocating_task_storage():
+    registry = ExtensionRegistry()
+    service = _Contributor("service")
+    with registry.attributed_to("service_ext:install"):
+        registry.service(service)
+
+    loaded = registry.build()
+
+    assert loaded.services == (("service_ext:install", service),)
+    assert loaded.needs_task_store is False
+
+
+def test_routers_are_flattened_in_registration_order_without_task_storage():
+    registry = ExtensionRegistry()
+    first = _Contributor("first-router")
+    second = _Contributor("second-router")
+    with registry.attributed_to("router_ext:install"):
+        registry.routers((first, second))
+
+    loaded = registry.build()
+
+    assert loaded.routers == (
+        ("router_ext:install", first),
+        ("router_ext:install", second),
+    )
+    assert loaded.needs_task_store is False
+
+
 def test_rollback_restores_all_registration_buckets_positionally():
     registry = ExtensionRegistry()
     with registry.attributed_to("keep:install"):
@@ -89,6 +117,8 @@ def test_rollback_restores_all_registration_buckets_positionally():
         registry.middlewares(_Contributor("drop-middleware"))
         registry.task_lifecycle(_Contributor("drop-lifecycle"))
         registry.system_model_observer(_Contributor("drop-observer"))
+        registry.service(_Contributor("drop-service"))
+        registry.routers((_Contributor("drop-router"),))
 
     registry.rollback_to(mark)
     loaded = registry.build()
@@ -96,6 +126,8 @@ def test_rollback_restores_all_registration_buckets_positionally():
     assert [contributor.tag for _, contributor in loaded.middleware_contributors] == ["keep"]
     assert loaded.task_lifecycle == ()
     assert loaded.system_model_observers == ()
+    assert loaded.services == ()
+    assert loaded.routers == ()
 
 
 def test_registration_order_is_preserved():
@@ -120,11 +152,15 @@ def test_discard_removes_every_entry_of_one_source():
     with registry.attributed_to("bad:install"):
         registry.middlewares(drop)
         registry.system_model_observer(drop)
+        registry.service(drop)
+        registry.routers((drop,))
     registry.discard("bad:install")
     loaded = registry.build()
     assert loaded.middleware_contributors == (("good:install", keep),)
     assert loaded.task_lifecycle == (("good:install", keep),)
     assert loaded.system_model_observers == ()
+    assert loaded.services == ()
+    assert loaded.routers == ()
 
 
 def test_registering_outside_attributed_to_raises():
