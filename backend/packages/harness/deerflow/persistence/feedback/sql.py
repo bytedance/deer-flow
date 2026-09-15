@@ -198,7 +198,8 @@ class FeedbackRepository:
         With an explicit ``None`` user id (unfiltered reads) several users may
         hold feedback on the same run, so order deterministically — the
         per-run collapse below keeps the last row per ``run_id``, i.e. the
-        most recently created feedback with ``feedback_id`` breaking ties.
+        most recently written feedback (``created_at`` is refreshed on
+        update), with ``feedback_id`` breaking ties.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.list_by_thread_grouped")
         stmt = select(FeedbackRow).where(FeedbackRow.thread_id == thread_id)
@@ -220,7 +221,8 @@ class FeedbackRepository:
 
         Same deterministic ordering as :meth:`list_by_thread_grouped`: with an
         explicit ``None`` user id the per-run collapse keeps the most recently
-        created feedback, ties broken by ``feedback_id``.
+        written feedback (``created_at`` is refreshed on update), ties broken
+        by ``feedback_id``.
         """
         if not run_ids:
             return {}
