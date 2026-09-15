@@ -22,6 +22,37 @@ export const RESERVED_SLASH_SKILL_NAMES = new Set([
 
 export const SLASH_SKILL_RE = /^\/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+|$)/;
 
+// The name grammar of SLASH_SKILL_RE (and the backend gate it mirrors) as a
+// standalone predicate: every surface that *offers* a skill — the picker and
+// the slash suggestions — must only offer names that can actually activate.
+// The runtime skill parser accepts any non-empty metadata name, so custom
+// and archive-installed skills can carry uppercase or whitespace the
+// lowercase-only grammar can never parse.
+//
+// Derived from SLASH_SKILL_RE itself rather than restated as a second
+// literal: a name is activatable exactly when the pinned grammar, run over
+// the name as a complete activation, captures the full name back. The
+// contract test pins SLASH_SKILL_RE to the shared fixture and
+// slash.test.ts pins this predicate to the parser, so there is no separate
+// grammar that can silently drift out of agreement.
+export function isActivatableSkillName(name: string): boolean {
+  const match = SLASH_SKILL_RE.exec(`/${name} `);
+  return match !== null && match[1] === name;
+}
+
+/**
+ * The two builtin slash commands the composer offers alongside skills.
+ * Exported from this contract-pinned module so every consumer derives from
+ * one source: the composer's builtin command list and the skill picker's
+ * exclusion set. `goal` is additionally covered by the reserved set;
+ * `compact` is not — which is what makes this shared source load-bearing
+ * (a same-named skill must never be pickable while `/compact` routes to
+ * context compaction). The tuple itself is frontend-only and deliberately
+ * absent from the shared contract fixture — the fixture pins the reserved
+ * set, not the composer's builtin commands.
+ */
+export const COMPOSER_BUILTIN_COMMAND_NAMES = ["goal", "compact"] as const;
+
 export type SlashSkillReference = {
   name: string;
   remainingText: string;

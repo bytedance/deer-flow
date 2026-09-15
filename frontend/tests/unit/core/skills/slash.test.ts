@@ -2,6 +2,7 @@ import { describe, expect, it } from "@rstest/core";
 
 import type { Skill } from "@/core/skills";
 import {
+  isActivatableSkillName,
   parseSlashSkillReference,
   resolveSlashSkillDisplay,
 } from "@/core/skills/slash";
@@ -38,6 +39,49 @@ describe("parseSlashSkillReference", () => {
     expect(parseSlashSkillReference("hello /data-analysis")).toBeNull();
     expect(parseSlashSkillReference("/a/b")).toBeNull();
     expect(parseSlashSkillReference("plain text")).toBeNull();
+  });
+});
+
+describe("isActivatableSkillName", () => {
+  it("accepts exactly the lowercase-hyphen grammar of SLASH_SKILL_RE", () => {
+    expect(isActivatableSkillName("data")).toBe(true);
+    expect(isActivatableSkillName("data-analysis")).toBe(true);
+    expect(isActivatableSkillName("a0-b1")).toBe(true);
+    expect(isActivatableSkillName("DataTools")).toBe(false);
+    expect(isActivatableSkillName("data tools")).toBe(false);
+    expect(isActivatableSkillName("data_tools")).toBe(false);
+    expect(isActivatableSkillName("data.tools")).toBe(false);
+    expect(isActivatableSkillName("data--analysis")).toBe(false);
+    expect(isActivatableSkillName("-data")).toBe(false);
+    expect(isActivatableSkillName("data-")).toBe(false);
+    expect(isActivatableSkillName("")).toBe(false);
+  });
+
+  it("agrees with the parser for every non-reserved name shape", () => {
+    // The predicate has no grammar of its own to drift: it must classify a
+    // name exactly as the production parser would receive it. If this ever
+    // goes red, the predicate and SLASH_SKILL_RE disagree about what is
+    // activatable — the reserved names are excluded only because the parser
+    // additionally drops them, which is a separate shadowing layer the
+    // catalogs apply on their own.
+    const names = [
+      "data",
+      "data-analysis",
+      "a0-b1",
+      "DataTools",
+      "data tools",
+      "data_tools",
+      "data.tools",
+      "data--analysis",
+      "-data",
+      "data-",
+      "",
+    ];
+    for (const name of names) {
+      expect(isActivatableSkillName(name)).toBe(
+        parseSlashSkillReference(`/${name} x`)?.name === name,
+      );
+    }
   });
 });
 
