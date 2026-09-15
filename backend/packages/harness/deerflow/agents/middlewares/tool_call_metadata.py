@@ -42,28 +42,37 @@ def _content_block_call_id(block: dict[str, Any], id_keys: tuple[str, ...]) -> s
     return None
 
 
+def _tool_call_block_id_keys(block: Any) -> tuple[str, ...] | None:
+    block_type = block.get("type") if isinstance(block, dict) else None
+    return _CONTENT_TOOL_CALL_ID_KEYS.get(block_type) if isinstance(block_type, str) else None
+
+
 def _sync_content_tool_call_blocks(content: Any, retained_calls: list[dict[str, Any]]) -> Any:
     """Drop content tool-call blocks whose call is no longer on the message.
 
     A block left behind is sent as a tool call with no matching tool result,
     which Anthropic and the OpenAI Responses API reject on every later request
     for the thread. Blocks without an id (Gemini-style ``function_call``) pair
-    with retained calls by name, in order. Returns ``content`` itself when no
-    block is dropped.
+    by name, in order, with the retained calls that no id-bearing block already
+    matched. Returns ``content`` itself when no block is dropped.
     """
     if not isinstance(content, list):
         return content
 
     retained_ids = {call["id"] for call in retained_calls if isinstance(call.get("id"), str) and call["id"]}
-    idless_budget = Counter(call["name"] for call in retained_calls if isinstance(call.get("name"), str))
-    synced: list[Any] = []
+    # (block, is a tool-call block, the call id it carries or None when id-less)
+    entries: list[tuple[Any, bool, str | None]] = []
     for block in content:
-        block_type = block.get("type") if isinstance(block, dict) else None
-        id_keys = _CONTENT_TOOL_CALL_ID_KEYS.get(block_type) if isinstance(block_type, str) else None
-        if id_keys is None:
+        id_keys = _tool_call_block_id_keys(block)
+        entries.append((block, id_keys is not None, _content_block_call_id(block, id_keys) if id_keys is not None else None))
+    matched_ids = {call_id for _, _, call_id in entries if call_id in retained_ids}
+    idless_budget = Counter(call["name"] for call in retained_calls if isinstance(call.get("name"), str) and not (isinstance(call.get("id"), str) and call["id"] in matched_ids))
+
+    synced: list[Any] = []
+    for block, is_tool_call_block, call_id in entries:
+        if not is_tool_call_block:
             synced.append(block)
             continue
-        call_id = _content_block_call_id(block, id_keys)
         if call_id is not None:
             if call_id in retained_ids:
                 synced.append(block)

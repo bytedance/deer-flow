@@ -102,6 +102,16 @@ class TestContentToolCallBlockSync:
 
         assert cloned.content == blocks[:3]
 
+    def test_idless_budget_skips_calls_already_paired_by_id(self):
+        # A retained call whose own id-bearing block matched must not also let
+        # a same-named id-less block survive on the name budget.
+        with_id = {"type": "function_call", "id": "a", "name": "bash", "args": {}}
+        idless = {"type": "function_call", "name": "bash", "args": {}}
+        message = AIMessage(content=[with_id, idless], tool_calls=[_call("a"), _call("b")])
+
+        assert clone_ai_message_with_tool_calls(message, [_call("a")]).content == [with_id]
+        assert clone_ai_message_with_tool_calls(message, [_call("a"), _call("b")]).content is message.content
+
     def test_keeps_blocks_for_calls_that_remain_invalid_tool_calls(self):
         # DanglingToolCallMiddleware answers invalid_tool_calls with a placeholder
         # ToolMessage, so their content block must stay to pair with it.
