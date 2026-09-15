@@ -445,6 +445,7 @@ export const zhCN: Translations = {
       cron: "cron 表达式",
       cronPlaceholder: "0 9 * * *",
       runAt: "运行时间",
+      invalidRunAt: "所选时区中不存在这个本地时间，请选择其他时间。",
       timezone: "时区",
       intervalAmount: "每",
       intervalUnitSeconds: "秒",

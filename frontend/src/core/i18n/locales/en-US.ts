@@ -471,6 +471,8 @@ export const enUS: Translations = {
       cron: "Cron expression",
       cronPlaceholder: "0 9 * * *",
       runAt: "Run at",
+      invalidRunAt:
+        "This local time does not exist in the selected timezone. Choose another time.",
       timezone: "Timezone",
       intervalAmount: "Every",
       intervalUnitSeconds: "seconds",
