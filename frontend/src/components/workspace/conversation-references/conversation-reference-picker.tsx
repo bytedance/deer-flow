@@ -42,7 +42,7 @@ export function ConversationReferenceList({
   onToggle,
 }: ConversationReferenceListProps) {
   const { t } = useI18n();
-  const { data: threads } = useThreads();
+  const { data: threads, isPending } = useThreads();
   const selectedIds = new Set(selected.map((reference) => reference.threadId));
   const atCap = selected.length >= maxReferences;
   const candidates = (threads ?? []).filter(
@@ -53,7 +53,17 @@ export function ConversationReferenceList({
     <Command className="[&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-2">
       <CommandInput placeholder={t.inputBox.referenceConversationsSearch} />
       <CommandList>
-        <CommandEmpty>{t.inputBox.referenceConversationsEmpty}</CommandEmpty>
+        {isPending ? (
+          // Never claim there are no conversations before the list has loaded.
+          <div
+            className="text-muted-foreground py-6 text-center text-sm"
+            data-testid="conversation-reference-loading"
+          >
+            {t.common.loading}
+          </div>
+        ) : (
+          <CommandEmpty>{t.inputBox.referenceConversationsEmpty}</CommandEmpty>
+        )}
         <CommandGroup>
           {candidates.map((thread) => {
             const title = titleOfThread(thread);
