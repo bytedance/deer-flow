@@ -2,6 +2,8 @@ import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 
 import type {
+  BatchDeleteInput,
+  BatchUpdateInput,
   MemoryFactInput,
   MemoryFactPatchInput,
   UserMemory,
@@ -146,4 +148,36 @@ export async function updateMemoryFact(
     },
   );
   return readMemoryResponse(response, "Failed to update memory fact");
+}
+
+export async function batchDeleteMemoryFacts(
+  input: BatchDeleteInput,
+): Promise<UserMemory> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/memory/facts/batch-delete`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input),
+    },
+  );
+  return readMemoryResponse(response, "Failed to batch delete memory facts");
+}
+
+export async function batchUpdateMemoryFacts(
+  input: BatchUpdateInput,
+): Promise<UserMemory> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/memory/facts/batch`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input),
+    },
+  );
+  return readMemoryResponse(response, "Failed to batch update memory facts");
 }
