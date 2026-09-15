@@ -73,6 +73,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     done; \
     UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync --locked --extra redis $extras_flags'
 
+# Install Readability.js's npm dependencies with the reviewed lockfile and no
+# lifecycle scripts; without them web fetch falls back to pure-Python
+# extraction. The staged node_modules rides the backend COPY into the runtime
+# stage, where npm is also available for repairs.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    sh -c 'cd backend && uv run --no-sync python scripts/setup_readability_js.py'
+
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.
 ENV LANG=C.UTF-8
