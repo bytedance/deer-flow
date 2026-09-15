@@ -242,7 +242,12 @@ def nested_section_value(lines: list[str], section_path: str, key: str) -> str |
 
 
 def tools_include_name(lines: list[str], tool_name: str) -> bool:
-    """Return True when the top-level tools list has an active item name."""
+    """Return True when the top-level tools list has an active item name.
+
+    The first list item fixes the list indent, and each item's first key column
+    identifies its direct fields. The name may appear anywhere in the mapping;
+    deeper-nested names are ignored in both indented and indentless lists.
+    """
     inside = False
     list_indent: int | None = None
     field_indent: int | None = None
@@ -262,6 +267,7 @@ def tools_include_name(lines: list[str], tool_name: str) -> bool:
         indent = len(line) - len(stripped)
         item_match = _LIST_ITEM_KEY_RE.match(line)
         if item_match:
+            indent = item_match.end(1)
             if list_indent is None:
                 list_indent = indent
             if indent != list_indent:

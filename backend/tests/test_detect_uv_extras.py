@@ -216,6 +216,17 @@ def test_detect_browser_ignores_names_outside_tool_fields(tmp_path, indent, othe
 
 
 @pytest.mark.parametrize("indent", ["", "  "])
+def test_detect_browser_name_after_nested_block(tmp_path, indent):
+    """A nested block must not reset tracking of the tool's direct fields."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        f"tools:\n{indent}- group: browser\n{indent}  options:\n{indent}    x: 1\n{indent}  name: browser_navigate\n",
+        encoding="utf-8",
+    )
+    assert detect.detect_from_config(cfg) == ["browser"]
+
+
+@pytest.mark.parametrize("indent", ["", "  "])
 def test_detect_browser_stops_at_following_section(tmp_path, indent):
     """A later section's item name is not a tool name."""
     cfg = tmp_path / "config.yaml"
