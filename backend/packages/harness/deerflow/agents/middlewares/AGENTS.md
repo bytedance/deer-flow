@@ -1,5 +1,9 @@
 ### Middleware Chain
 
+Compaction preserves all state-level `SystemMessage`s as framework instructions,
+including untagged legacy reminders. Transient instructions belong in request
+wrappers. A fully rescued partition skips compaction.
+
 After latest-user rescue, if the inherited trimmer empties an AI/Tool-only
 window, format it and use `_build_summary_input_text(strategy="last")`.
 Keep normal human-anchored trimming and the final-message fallback for mixed

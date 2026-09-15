@@ -575,7 +575,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
 
         # The latest real user message (the current request) must survive: peer
-        # rescue no longer covers it (see _preserve_dynamic_context_reminders), so
+        # rescue no longer covers it (see _preserve_required_context), so
         # lock its id here and rescue by exact id. This keeps the current request
         # without "moving cutoff" — which would also retain early AI/Tool turns and
         # never compress a first-turn long analysis. A Human Input Card reply is
@@ -587,7 +587,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 break
 
         messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages, latest_user_id=latest_user_id)
+        messages_to_summarize, preserved_messages = self._preserve_required_context(messages_to_summarize, preserved_messages, latest_user_id=latest_user_id)
         if not messages_to_summarize:
             return None
         return messages_to_summarize, preserved_messages, previous_summary, total_tokens
@@ -760,7 +760,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             **({"task_history": result.task_history} if result.task_history is not None else {}),
         }
 
-    def _preserve_dynamic_context_reminders(
+    def _preserve_required_context(
         self,
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
@@ -769,9 +769,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     ) -> tuple[list[AnyMessage], list[AnyMessage]]:
         """Keep system messages, tagged dynamic-context reminders and the current user request out of compression.
 
-        Only system messages, tagged reminders (date ``SystemMessage`` + optional
-        ``__memory`` peer, both carrying ``dynamic_context_reminder=True``) and the
-        latest real user message are rescued. A subagent keeps its whole system
+        State-level SystemMessages are framework-owned instructions and must
+        survive compaction, including legacy untagged reminders and extension
+        instructions. Transient instructions should be injected into requests,
+        not state. Tagged reminders (including their ``__memory`` peers) and the
+        latest real user message are also rescued. A subagent keeps its whole system
         prompt as the leading ``SystemMessage`` in state (``create_agent`` is built
         with ``system_prompt=None``), so compressing it would leave every later
         call without its instructions. The untagged ``__user`` peer is deliberately NOT
@@ -780,6 +782,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         *current* request is instead identified by ``latest_user_id``, so a
         first-turn long analysis keeps its ``__user`` request while its early
         AI/Tool turns still compress.
+
+        Rescuing the whole partition is legitimate: ``_prepare_compaction``
+        skips compaction when there is no history left to summarize.
         """
         rescued: list[AnyMessage] = []
         remaining: list[AnyMessage] = []
