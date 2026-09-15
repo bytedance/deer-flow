@@ -679,12 +679,16 @@ async def test_cleanup_evicts_with_store(manager_with_store: RunManager):
     mgr = manager_with_store
     record = await mgr.create("thread-1")
     run_id = record.run_id
+    # Mirrors the production sequence: run_agent only schedules cleanup once
+    # the run is terminal and its store row has been finalized.
+    await mgr.set_status(run_id, RunStatus.success)
 
     await mgr.cleanup(run_id, delay=0)
     assert run_id not in mgr._runs
     hydrated = await mgr.get(run_id, user_id=record.user_id)
     assert hydrated is not None
     assert hydrated.run_id == run_id
+    assert hydrated.status is RunStatus.success
 
 
 @pytest.mark.anyio
