@@ -161,6 +161,18 @@ export function getLeadingSlashSkillQuery(value: string): string | null {
   return query;
 }
 
+export function filterSkillsForAgent(
+  skills: Skill[],
+  agentSkillNames?: string[] | null,
+): Skill[] {
+  if (!agentSkillNames) {
+    return skills;
+  }
+
+  const allowedNames = new Set(agentSkillNames);
+  return skills.filter((skill) => allowedNames.has(skill.name));
+}
+
 export function getMatchingSkillSuggestions(
   skills: Skill[],
   query: string,

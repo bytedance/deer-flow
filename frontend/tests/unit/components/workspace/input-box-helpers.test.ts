@@ -6,6 +6,7 @@ import {
   canPolishInput,
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
+  filterSkillsForAgent,
   finishGoalRequest,
   getGoalObjectiveCounter,
   getInputSubmitAction,
@@ -292,6 +293,31 @@ describe("getLeadingSlashSkillQuery", () => {
     expect(getLeadingSlashSkillQuery("rev")).toBeNull();
     expect(getLeadingSlashSkillQuery("/rev now")).toBeNull();
     expect(getLeadingSlashSkillQuery("/a/b")).toBeNull();
+  });
+});
+
+describe("filterSkillsForAgent", () => {
+  it("keeps all skills when the agent inherits the global catalog", () => {
+    const skills = [makeSkill("research"), makeSkill("writer")];
+
+    expect(filterSkillsForAgent(skills, null)).toEqual(skills);
+    expect(filterSkillsForAgent(skills, undefined)).toEqual(skills);
+  });
+
+  it("keeps only skills allowed by the active agent", () => {
+    const skills = [
+      makeSkill("research"),
+      makeSkill("writer"),
+      makeSkill("disabled-writer", false),
+    ];
+
+    expect(filterSkillsForAgent(skills, ["writer", "missing"])).toEqual([
+      makeSkill("writer"),
+    ]);
+  });
+
+  it("treats an empty allowlist as no skills available", () => {
+    expect(filterSkillsForAgent([makeSkill("research")], [])).toEqual([]);
   });
 });
 
