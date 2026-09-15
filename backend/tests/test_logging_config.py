@@ -667,3 +667,67 @@ def test_url_redaction_filter_leaves_arrow_paths_in_other_logs_alone() -> None:
     assert record.getMessage() == sandbox_error  # byte-for-byte passthrough
     assert "/mnt/knowledge" in record.getMessage()
     assert "<redacted>" not in record.getMessage()
+
+
+def test_url_redaction_filter_redirecting_survives_spacey_location() -> None:
+    """Round-13 P3: the Redirecting anchor keeps the ``^Redirecting `` prefix
+    (the urllib3-owned literal that stops the sandbox false positive) but the
+    tail must be loose — ``redirect_location`` is the raw Location header
+    string, and interior spaces are legal field syntax a misbehaving server
+    can emit. A whitespace-strict tail voided the pass entirely and leaked
+    the origin-form request target in the first slot; a space-carrying
+    second slot now collapses whole."""
+    from deerflow.logging_config import UrlRedactionFilter
+
+    filt = UrlRedactionFilter()
+
+    # The reviewer's repro: both credentials must go, shape kept.
+    spacey = logging.LogRecord(
+        "urllib3.connectionpool",
+        logging.DEBUG,
+        __file__,
+        1,
+        "Redirecting %s -> %s",
+        ("/private/BearerSecret?token=QuerySecret", "/bad location"),
+        None,
+    )
+    assert filt.filter(spacey) is True
+    assert spacey.getMessage() == "Redirecting /<redacted> -> /<redacted>"
+    assert "BearerSecret" not in spacey.getMessage()
+
+    # The FIRST slot gets the same grammar treatment: the recursive urlopen
+    # frame passes the previous raw Location as its url, so t1 can carry
+    # interior spaces too.
+    spacey_t1 = logging.LogRecord(
+        "urllib3.connectionpool",
+        logging.DEBUG,
+        __file__,
+        1,
+        "Redirecting %s -> %s",
+        ("/bad target?token=QuerySecret", "/private/x"),
+        None,
+    )
+    assert filt.filter(spacey_t1) is True
+    assert spacey_t1.getMessage() == "Redirecting /<redacted> -> /<redacted>"
+    assert "QuerySecret" not in spacey_t1.getMessage()
+
+    # An absolute Location with an interior space stays whole for the
+    # generic absolute-URL pass (which stops its rest at whitespace).
+    spacey_absolute = logging.LogRecord(
+        "urllib3.connectionpool",
+        logging.DEBUG,
+        __file__,
+        1,
+        "Redirecting %s -> %s",
+        ("/private/BearerSecret?token=QuerySecret", "https://mirror.example/other page?sig=OtherSecret"),
+        None,
+    )
+    assert filt.filter(spacey_absolute) is True
+    assert spacey_absolute.getMessage() == "Redirecting /<redacted> -> https://mirror.example/<redacted> page?sig=OtherSecret"
+    assert "BearerSecret" not in spacey_absolute.getMessage()
+
+    # The sandbox arrow false positive stays excluded: the prefix anchor,
+    # not a strict tail, is what keeps non-Redirecting messages untouched.
+    sandbox = logging.LogRecord("deerflow.sandbox.local.local_sandbox_provider", logging.ERROR, "p.py", 1, "sandbox.mounts entry /srv/knowledge -> /mnt/knowledge ignored: missing", (), None)
+    assert filt.filter(sandbox) is True
+    assert sandbox.getMessage() == "sandbox.mounts entry /srv/knowledge -> /mnt/knowledge ignored: missing"

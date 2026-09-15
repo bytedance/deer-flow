@@ -1172,7 +1172,12 @@ class WechatChannel(Channel):
             )
             return None
         if encrypted is None:
-            logger.warning("[WeChat] inbound image exceeds size limit (%d bytes), skipping message_id=%s", self._max_inbound_image_bytes, message_id)
+            # Neutral on purpose: None covers both the in-flight cap abort
+            # and the Content-Encoding refusal, and _download_cdn_bytes has
+            # already logged the accurate reason for either — asserting a
+            # size limit here would contradict the encoding line (the
+            # manager's reader callers use the same neutral shape).
+            logger.warning("[WeChat] inbound image skipped by download guard, message_id=%s", message_id)
             return None
         decrypted = _decrypt_aes_128_ecb(encrypted, aes_key)
         if self._max_inbound_image_bytes > 0 and len(decrypted) > self._max_inbound_image_bytes:
@@ -1244,7 +1249,10 @@ class WechatChannel(Channel):
             )
             return None
         if encrypted is None:
-            logger.warning("[WeChat] inbound file exceeds size limit (%d bytes), skipping message_id=%s", self._max_inbound_file_bytes, message_id)
+            # Same neutral shape as the image path: the accurate reason (cap
+            # abort vs Content-Encoding refusal) is logged inside
+            # _download_cdn_bytes; asserting one here can contradict it.
+            logger.warning("[WeChat] inbound file skipped by download guard, message_id=%s", message_id)
             return None
         decrypted = _decrypt_aes_128_ecb(encrypted, aes_key)
         if self._max_inbound_file_bytes > 0 and len(decrypted) > self._max_inbound_file_bytes:
@@ -1269,6 +1277,9 @@ class WechatChannel(Channel):
     def _stage_downloaded_file(self, filename: str, content: bytes) -> Path | None:
         download_dir = self._download_dir()
         if download_dir is None:
+            # Silent None here made an attachment vanish with no log line —
+            # the same observability gap as a mislabeled skip reason.
+            logger.warning("[WeChat] no state directory configured, dropping staged inbound media file %s", filename)
             return None
         try:
             download_dir.mkdir(parents=True, exist_ok=True)

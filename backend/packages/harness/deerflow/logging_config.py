@@ -77,14 +77,21 @@ _URLLIB3_RETRYING_RE = re.compile(r"^(?P<head>Retrying \(.*\) after connection b
 # header may itself be a relative reference (RFC 9110 allows it). The generic
 # absolute-URL pass only sees scheme-bearing halves, so origin-form slots
 # collapse to ``/<redacted>`` here; absolute slots are left for that pass.
-# The pattern is anchored to the WHOLE message — urllib3's record is exactly
-# this line — while allowing interior whitespace in the second slot because
-# it is the raw Location header. An ``-> /path`` arrow is not by itself an
-# urllib3-owned shape:
+# The pattern keeps the ``^Redirecting `` prefix anchor — the urllib3-owned
+# literal — because an ``-> /path`` arrow is not urllib3-owned shape:
 # non-URL logs render it too (sandbox mount mappings log
 # ``sandbox.mounts entry <host_path> -> <container_path>``), and a substring
 # match rewrote the container path in that actionable error (CI round 11).
-_URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S+) -> (?P<t2>\S.*)$")
+# The tail is deliberately loose: ``redirect_location`` is the raw Location
+# header string, and interior spaces are legal field syntax a misbehaving
+# server can emit — a whitespace-strict tail would void the pass entirely
+# and leak the origin-form request target in the first slot (round 13). A
+# space-carrying second slot collapses whole when it starts with ``/``. The
+# first slot gets the same grammar treatment: the recursive urlopen frame
+# passes the previous raw Location as its url, so t1 can carry interior
+# spaces too — it is lazy, splitting at the FIRST `` -> `` the way the
+# line was constructed left to right.
+_URLLIB3_REDIRECTING_ORIGIN_RE = re.compile(r"^Redirecting (?P<t1>\S.*?) -> (?P<t2>\S.*)$")
 
 # The two scheme-bearing patterns start with a character class, so re.sub
 # retries the match at every position of a long token — a letter run with no
@@ -239,7 +246,9 @@ class UrlRedactionFilter(logging.Filter):
 # installed source (2.7.0): every other emitter logs host:port only
 # (connection establishment/reset) or an absolute URL in one piece
 # (``connection.py``'s header-parse warning), which the generic absolute-URL
-# pass rewrites without a dedicated shape.
+# pass rewrites without a dedicated shape. The closure is version-anchored:
+# a urllib3 upgrade can change these format strings and silently reopen it —
+# re-run the emitter enumeration when bumping the dependency.
 _REDACTED_LOGGER_NAMES = ("httpx",)
 
 

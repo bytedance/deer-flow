@@ -1079,3 +1079,98 @@ class TestWecomMediaUrlGate:
 
         assert result is None
         assert client.streamed_urls == []
+
+
+class TestWeChatDownloadGuardLabels:
+    """Round-14 nit: ``_download_cdn_bytes`` returns None for two reasons
+    (in-flight cap abort, Content-Encoding refusal), and both used to be
+    labeled "exceeds size limit (N bytes)" by the callers — a contradictory
+    pair on the encoding path, where the transfer may be tiny. The callers
+    now log a neutral guard line; the accurate reason stays inside the
+    download function (same shape as the manager reader callers)."""
+
+    def _channel_with(self, handler):
+        import base64
+
+        import httpx
+
+        from app.channels.wechat import WechatChannel
+
+        channel = WechatChannel(MessageBus(), config={"bot_token": "test-token"})
+        channel._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[assignment]
+        self._aes_key = base64.b64encode(b"\x01" * 16).decode()
+        return channel
+
+    @staticmethod
+    def _image_item(aes_key: str) -> dict:
+        return {"image_item": {"media": {"full_url": "https://cdn.weixin.qq.com/private/photo.bin", "aes_key": aes_key}}}
+
+    def test_encoding_refusal_logs_neutral_guard_line(self, caplog):
+        import gzip as _gzip
+        import logging as _logging
+
+        import httpx
+
+        class _AsyncChunks(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield _gzip.compress(b"\x00" * 1024)
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=_AsyncChunks())
+
+        channel = self._channel_with(handler)
+        channel._max_inbound_image_bytes = 1024 * 1024
+
+        with caplog.at_level(_logging.WARNING, logger="app.channels.wechat"):
+            result = _run(channel._extract_image_file(self._image_item(self._aes_key), message_id="m1", index=0))
+
+        assert result is None
+        formatted = "\n".join(record.getMessage() for record in caplog.records)
+        # Accurate reason from the download function...
+        assert "Content-Encoding" in formatted
+        # ...and a neutral caller line that no longer asserts a size limit
+        # the transfer never hit.
+        assert "skipped by download guard" in formatted
+        assert "exceeds size limit" not in formatted
+
+    def test_cap_abort_logs_neutral_guard_line(self, caplog):
+        import logging as _logging
+
+        import httpx
+
+        class _AsyncChunks(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"\x00" * 8
+                yield b"\x00" * 8
+                yield b"\x00" * 8
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, stream=_AsyncChunks())
+
+        channel = self._channel_with(handler)
+        channel._max_inbound_image_bytes = 8  # stream cap = padded(8) = 16 < 24
+
+        with caplog.at_level(_logging.WARNING, logger="app.channels.wechat"):
+            result = _run(channel._extract_image_file(self._image_item(self._aes_key), message_id="m2", index=0))
+
+        assert result is None
+        formatted = "\n".join(record.getMessage() for record in caplog.records)
+        # The function's accurate in-flight abort line carries the reason...
+        assert "aborting before full read" in formatted
+        # ...and the caller stays neutral instead of asserting the plaintext
+        # limit for a ciphertext cap decision.
+        assert "skipped by download guard" in formatted
+        assert "exceeds size limit" not in formatted
+
+    def test_staging_without_state_dir_is_logged_not_silent(self, caplog):
+        import logging as _logging
+
+        from app.channels.wechat import WechatChannel
+
+        channel = WechatChannel(MessageBus(), config={"bot_token": "test-token"})
+        assert channel._download_dir() is None
+
+        with caplog.at_level(_logging.WARNING, logger="app.channels.wechat"):
+            assert channel._stage_downloaded_file("photo.bin", b"x") is None
+
+        assert "no state directory configured" in caplog.text
