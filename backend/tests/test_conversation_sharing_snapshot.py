@@ -2549,6 +2549,118 @@ def test_many_short_lines_with_table_introducers_stay_bounded():
     assert peak < 48 * 1024 * 1024, f"peak {peak / 1024 / 1024:.0f} MiB"
 
 
+def test_inert_backslash_keeps_sparse_offset_maps():
+    """Round-27 (bot 09-14 12:31): one otherwise inert backslash sent the
+    entire message through the per-character tuple-map fallback — a direct
+    500 kB public string ending in ``\\`` peaked ~150 MiB while producing
+    unchanged output, and permitted messages are four times larger. The
+    sparse decoder now mirrors the backslash-separator and slash-run
+    branches, so an inert backslash is a position-preserving substitution
+    with no exception records at all."""
+    import tracemalloc
+
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    public = "plain public text without any escapes or references " * 10_000
+    attack = public + "\\"
+    tracemalloc.start()
+    try:
+        out = neutralize(attack)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert out == attack
+    assert peak < 32 * 1024 * 1024, f"peak {peak / 1024 / 1024:.0f} MiB"
+
+    # The workspace-path normalizer's own backslash gate: one big
+    # "workspace"-bearing token with inert backslashes stays sparse too
+    # (measured ~47 MiB per view at the old per-character fallback).
+    attack = "/workspace/chats/THREAD7q " + "workspace" + "a\\" + "b" * 99_999
+    tracemalloc.start()
+    try:
+        out = neutralize(attack)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert "[private artifact omitted]" in out
+    assert peak < 32 * 1024 * 1024, f"peak {peak / 1024 / 1024:.0f} MiB"
+
+    # A 16-byte composition that outlives the shared pass budget must not
+    # re-open the whole-message materialization (internal-review bypass:
+    # this exact shape peaked 147.8 MiB at 500 kB / ~597 MiB at 2 MiB —
+    # byte-identical to the pre-fix number — because the generic caller's
+    # materialized loop recomputes the sparse result char-by-char).
+    attack = public[:500_000] + " \\u005cu005cu005c"
+    tracemalloc.start()
+    try:
+        out = neutralize(attack)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert out == attack
+    assert peak < 32 * 1024 * 1024, f"peak {peak / 1024 / 1024:.0f} MiB"
+
+
+def test_signed_percent_pairs_are_invalid_escapes_not_crashes():
+    """Round-27 internal review (both sub-reviewers): ``int("-1", 16)``
+    parses negative and sailed past ``byte < 0x80`` into ``chr(-1)`` — an
+    uncaught ValueError on every anonymous share read and title sanitize
+    for innocuous public text like ``hello %-1 world``. A minus-leading
+    pair is an invalid escape, not a decode, in all three percent
+    branches; those bytes stay literal and public. Plus-leading pairs
+    already decoded at the parent (``int("+a", 16) == 10``); the contract
+    pinned for them is only that they never crash ``chr``."""
+    from app.gateway.shares.snapshot import (
+        _collapse_separators_with_offsets,
+        _normalize_workspace_path_with_offsets,
+        sanitize_share_title,
+    )
+    from app.gateway.shares.snapshot import (
+        _neutralize_private_references as neutralize,
+    )
+
+    for text in ("hello %-1 world", "%-9", "x%-fb", "100% -1 ok"):
+        assert neutralize(text) == text
+        view, _ = _collapse_separators_with_offsets(text, resolve_dots=False)
+        assert view == text
+    for text in ("a%+a b", "%+2f y"):
+        neutralize(text)
+    assert sanitize_share_title("my thread %-1 title") == "my thread %-1 title"
+    view, _ = _normalize_workspace_path_with_offsets("workspace/%-1/chats", resolve_dots=False)
+    assert view == "workspace/%-1/chats"
+
+
+def test_code_region_tuple_overhead_stays_bounded_as_policy():
+    """Round-27 decline (bot 09-14 12:31): a literal ``<think>`` inside code
+    legitimately disables the no-think fast path, after which one tuple per
+    inline span is linear in the message. Measured band at the module's 2
+    MiB rendered-bytes ceiling: 13.5 MiB sparse, 27-34 MiB at 699k-span
+    packing, ~122 MiB for maximally dense alternating spans — a linear
+    constant of roughly 64 B per input char, with no super-linear shape
+    found across two independent adversarial families (interleaved
+    in/out-of-code thinks, unbalanced backticks, fences, unterminated and
+    doubled tags). This is deliberate: the materialized regions list keeps
+    the strip's code simple and its worst case proportional to a message
+    that already passed the byte budget; the accepted tradeoff is recorded
+    here (293 kB shape below) so a future super-linear regression still
+    fails this bound while normal allocator noise does not."""
+    import tracemalloc
+
+    from app.gateway.shares.snapshot import (
+        _strip_think_blocks_outside_markdown_code as strip,
+    )
+
+    message = "`<think>literal</think>`" + "`x`" * 100_000
+    tracemalloc.start()
+    try:
+        out = strip(message)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert "literal" in out  # inside code: kept verbatim
+    assert peak < 64 * 1024 * 1024, f"peak {peak / 1024 / 1024:.0f} MiB"
+
+
 def test_multichar_ascii_entity_fjlig_manufactures_route_syntax():
     """``&fjlig;`` is the only multi-character pure-ASCII entity in the
     HTML5 table (enumerated; the set is provably complete), and it extends
@@ -2699,41 +2811,55 @@ def test_entity_bearing_shadow_keeps_compact_span_map():
     assert spans[10_000] == (10_000, 10_004)
 
 
-def test_entity_decode_that_needs_collapse_falls_back_to_materialized():
-    """A decoded backslash, slash run, or dot segment must go through the
-    materialized path — the sparse decoder deliberately leaves those to the
-    full collapse."""
+def test_dot_segments_fall_back_to_materialized_but_separators_stay_sparse():
+    """Round-27 contract: the sparse decoder now resolves backslash
+    separators and slash runs (an inert backslash no longer forces the
+    per-character fallback), so only stack-shaped dot-segment resolution —
+    and compositions that outlive the pass budget — take the materialized
+    path."""
     from app.gateway.shares.snapshot import (
         _collapse_separators_with_offsets,
         _normalize_workspace_path_with_offsets,
     )
 
-    # `&#92;` is separator-normalized straight to `/` by the entity table, so
-    # it stays on the sparse path rather than falling back.
+    # `&#92;` is separator-normalized straight to `/` by the entity table.
     view, spans = _collapse_separators_with_offsets("a&#92;b", resolve_dots=False)
     assert view == "a/b"
     assert type(spans).__name__ == "_SparseSpans"
 
-    # `&sol;&sol;` decodes to a foldable slash run that must fold to one `/`.
+    # `&sol;&sol;` decodes to a foldable slash run that folds to one `/`
+    # sparsely now (round-27): no per-character tuple list.
     view, spans = _collapse_separators_with_offsets("&sol;&sol;workspace", resolve_dots=False)
     assert view == "/workspace"
-    assert isinstance(spans, list)
+    assert type(spans).__name__ == "_SparseSpans"
 
-    # `&#46;&#46;` decodes to `..` under a slash: dot resolution required.
+    # A raw backslash run and its Windows-separator substitution stay
+    # sparse too — the round-27 memory regression's exact shapes.
+    view, spans = _collapse_separators_with_offsets("a\\b", resolve_dots=False)
+    assert view == "a/b"
+    assert type(spans).__name__ == "_SparseSpans"
+    view, spans = _collapse_separators_with_offsets("x\\\\/api/threads/t1", resolve_dots=False)
+    assert view == "x/api/threads/t1"
+    assert type(spans).__name__ == "_SparseSpans"
+
+    # `&#46;&#46;` decodes to `..` under a slash: dot resolution required —
+    # the one shape that still materializes.
     view, spans = _collapse_separators_with_offsets("a/b/&#46;&#46;/workspace/chats/id", resolve_dots=True)
     assert view == "a/workspace/chats/id"
     assert isinstance(spans, list)
 
-    # Workspace percent path: `%255C` -> `\\` -> `/` (decoded backslash).
+    # Workspace percent path: `%255C` -> `\` -> `/` (decoded backslash),
+    # sparsely now.
     view, spans = _normalize_workspace_path_with_offsets("a%255Cb", resolve_dots=False)
     assert view == "a/b"
-    assert isinstance(spans, list)
+    assert type(spans).__name__ == "_SparseSpans"
 
 
 def test_sparse_escape_decode_matches_materialized_collapse():
     """The sparse decoder must be byte-identical to the materialized collapse
-    loop everywhere it is actually used (no backslash/slash-run/dot in the
-    decoded shadow), including composed and semicolon-less encodings."""
+    loop everywhere it is actually used (no dot-segment or budget-exhausted
+    composition in the decoded shadow), including composed, semicolon-less,
+    backslash-separator, and slash-run encodings (round-27)."""
     from app.gateway.shares import snapshot as snapshot_module
 
     corpus = [
@@ -2766,6 +2892,31 @@ def test_sparse_escape_decode_matches_materialized_collapse():
         "x%2541 y&amp;#47;workspace&#47;chats&#47;id",
         "/workspace/chats/&fjlig;secret",
         "x&amp; &fjlig; &amp;#47;api&amp;#47;threads&amp;#47;fjid",
+    ]
+    # Round-27: the sparse decoder now also mirrors the backslash-separator
+    # and slash-run branches, so their raw, composed, and budget-edge shapes
+    # join the byte-identical parity corpus.
+    corpus += [
+        "a\\b",
+        "x\\\\/api/threads/t1",
+        "a//b",
+        "https://e.com//x//y",
+        "\\\\",
+        "a\\\\b",
+        "&sol;&sol;w",
+        "%252F%252Fw",
+        "a%255Cb",
+        "\\u005c/x",
+        "pre \\ post",
+        "&amp;#92;\\/api/threads/x",
+        "\\\\\\",
+        "x\\/",
+        "/\\",
+        "&amp;amp;#92;b",
+        "&amp;amp;amp;#92;b",
+        "%-1",
+        "%+a",
+        "%+2f",
     ]
 
     def reference(text, decode_percent):
@@ -2802,6 +2953,20 @@ def test_sparse_escape_decode_matches_materialized_collapse():
             assert len(sparse) == len(ref_spans), (text, decode_percent)
             for i in range(len(ref_spans)):
                 assert sparse[i] == ref_spans[i], (text, decode_percent, i, sparse[i], ref_spans[i])
+
+    # Round-27 internal review: the generic caller never falls back for a
+    # residual backslash or foldable run (its materialized loop shares the
+    # sparse pass budget and has no trailing passes — the fallback would
+    # recompute the sparse result at per-character memory cost), so the
+    # as-written caller must equal the materialized reference for EVERY
+    # corpus shape, budget-exhausted compositions included.
+    for text in corpus:
+        shadow, spans = snapshot_module._collapse_separators_with_offsets(text, resolve_dots=False)
+        ref_shadow, ref_spans = reference(text, False)
+        assert shadow == ref_shadow, (text, shadow, ref_shadow)
+        assert len(spans) == len(ref_spans), (text,)
+        for i in range(len(ref_spans)):
+            assert spans[i] == ref_spans[i], (text, i, spans[i], ref_spans[i])
 
 
 def test_strip_gfm_table_cells_never_pair_backticks_across_rows():

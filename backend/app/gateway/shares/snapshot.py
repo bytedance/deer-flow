@@ -1513,7 +1513,10 @@ def _collapse_separators_once(
                 byte = 0x100
             # Workspace route syntax is ASCII.  Leaving non-ASCII bytes
             # encoded avoids inventing an imprecise character-to-byte map.
-            if byte < 0x80:
+            # ``int(x, 16)`` accepts a sign, so a ``%-1``/``%+a`` pair
+            # parses negative and would crash ``chr`` — reject those like
+            # every other invalid escape (round-27 internal review).
+            if 0 <= byte < 0x80:
                 normalized.append(chr(byte))
                 spans.append((i, i + 2))
                 i += 3
@@ -1662,15 +1665,17 @@ class _IdentitySpans:
 
 
 class _SparseSpans:
-    """Compact offset map: identity positions plus decoded-byte-group spans.
+    """Compact offset map: identity positions plus transformed-group spans.
 
     ``spans[i]`` returns ``(i, i)`` for every position that maps to itself
-    and the recorded ``(first, last)`` span for each decoded entity/percent
-    triple. Positions after a decode shift by that decode's shrink, so the
-    map stores sorted decode records plus prefix shrinks and answers any
-    index in O(log #decodes) — O(decoded entities) memory instead of the
-    per-character tuple list a near-limit entity-bearing token would
-    otherwise materialize.
+    and the recorded ``(first, last)`` span for each shrinking group — an
+    entity or percent decode, a unicode escape, a backslash run before a
+    separator, or a foldable slash run (the round-27 extension; a lone
+    backslash substituting 1:1 emits no record at all). Positions after a
+    group shift by that group's shrink, so the map stores sorted records
+    plus prefix shrinks and answers any index in O(log #groups) —
+    O(transformed groups) memory instead of the per-character tuple list
+    a near-limit token would otherwise materialize.
     """
 
     __slots__ = ("_length", "_indexes", "_firsts", "_lasts", "_output_lengths", "_prefix_shrinks")
@@ -1708,15 +1713,19 @@ class _SparseSpans:
 
 
 def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _SparseSpans]:
-    """Decode entities (and optionally percent) to a fixpoint, sparsely.
+    """Normalize escapes and separators to a fixpoint, sparsely.
 
-    Mirrors ``_collapse_separators_once``'s entity/percent branches without
-    materializing a per-character span list: each decoded byte group becomes
-    one exception record, every other output position maps to itself, and
-    composition across passes projects each new decode through the prior
-    exceptions. Backslash and slash-run handling stay out — callers gate on
-    ``\\`` and foldable ``//`` before entering and fall back to the
-    materialized path when the decoded shadow re-introduces them.
+    Mirrors ``_collapse_separators_once``'s entity, percent, unicode-escape,
+    backslash-separator, and slash-run branches without materializing a
+    per-character span list: each shrinking byte group becomes one exception
+    record, every other output position maps to itself, and composition
+    across passes projects each new decode through the prior exceptions.
+    A backslash run that does *not* precede a separator is a
+    position-preserving substitution (each byte becomes ``/``) — it emits no
+    record at all, which is what keeps one inert backslash on a near-limit
+    public message out of the per-character fallback (round-27: a 500 kB
+    plain string ending in ``\\`` peaked ~150 MiB producing unchanged
+    output).
 
     Levels compose by carrying records across passes: every record of the
     previous pass that a new decode did not subsume keeps its original
@@ -1724,15 +1733,17 @@ def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _Sp
     position an earlier pass decoded and later passes left alone (a
     standalone ``&amp;`` survivor) stays a recorded exception instead of
     silently becoming identity-shifted (the round-19 under-mapping). The
-    map therefore stays sparse — O(total decodes) records — for multi-pass
-    shapes too; falling back to per-character tuple lists here would let
-    adversarial entity text re-open the measured memory cost on every
-    anonymous resolution.
+    map therefore stays sparse — O(total shrinking groups) records — for
+    multi-pass shapes too; falling back to per-character tuple lists here
+    would let adversarial entity text re-open the measured memory cost on
+    every anonymous resolution. Dot-segment resolution stays out: its pops
+    are stack-shaped, not append-only records, so callers fall back to the
+    materialized path for it.
     """
     current = text
     records: list[tuple[int, int, int, int]] = []
     for _ in range(_COLLAPSE_MAX_PASSES):
-        if _HTML_ENTITY_RE.search(current) is None and not (decode_percent and "%" in current):
+        if _HTML_ENTITY_RE.search(current) is None and not (decode_percent and "%" in current) and "\\" not in current and _FOLDABLE_SLASH_RUN_RE.search(current) is None:
             break
         spans = _SparseSpans(len(current), records)
         out: list[str] = []
@@ -1744,6 +1755,31 @@ def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _Sp
         changed = False
         i = 0
         n = len(current)
+
+        def emit(start: int, stop: int, output: str) -> None:
+            """Append one shrinking group (input ``[start, stop)`` →
+            ``output``) with its exception record, carrying prior records."""
+            nonlocal out_index, delta, cursor, carried, changed
+            out.append(current[cursor:start])
+            out_index += start - cursor
+            # Records in the copied region keep their original spans; their
+            # positions move LEFT by the cumulative shrink of the decodes
+            # before them (a decode shortens everything after it).
+            while carried < len(records) and records[carried][0] < start:
+                record_index, first, last, output_length = records[carried]
+                new_records.append((record_index - delta, first, last, output_length))
+                carried += 1
+            new_records.append((out_index, spans[start][0], spans[stop - 1][1], len(output)))
+            out.append(output)
+            out_index += len(output)
+            delta += (stop - start) - len(output)
+            # Records strictly inside the decoded group are subsumed by its
+            # projected span.
+            while carried < len(records) and records[carried][0] < stop:
+                carried += 1
+            cursor = stop
+            changed = True
+
         while i < n:
             char = current[i]
             decoded: str | None = None
@@ -1753,7 +1789,10 @@ def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _Sp
                     byte = int(current[i + 1 : i + 3], 16)
                 except ValueError:
                     byte = 0x100
-                if byte < 0x80:
+                # Sign-leading pairs parse negative and would crash
+                # ``chr`` — they are invalid escapes, not decodes (same
+                # rule as the materialized pass).
+                if 0 <= byte < 0x80:
                     decoded = chr(byte)
                     end = i + 3
             if decoded is None and char == "&":
@@ -1761,29 +1800,46 @@ def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _Sp
                 if entity is not None:
                     decoded, end = entity
             if decoded is not None and end is not None:
-                out.append(current[cursor:i])
-                out_index += i - cursor
-                # Records in the copied region keep their original spans;
-                # their positions move LEFT by the cumulative shrink of the
-                # decodes before them (a decode shortens everything after it).
-                while carried < len(records) and records[carried][0] < i:
-                    record_index, first, last, output_length = records[carried]
-                    new_records.append((record_index - delta, first, last, output_length))
-                    carried += 1
-                first = spans[i][0]
-                last = spans[end - 1][1]
-                new_records.append((out_index, first, last, len(decoded)))
-                out.append(decoded)
-                out_index += len(decoded)
-                delta += (end - i) - len(decoded)
-                # Records strictly inside the decoded group are subsumed by
-                # its projected span.
-                while carried < len(records) and records[carried][0] < end:
-                    carried += 1
+                emit(i, end, decoded)
                 i = end
-                cursor = i
-                changed = True
                 continue
+            if char == "\\":
+                run_end = i
+                while run_end < n and current[run_end] == "\\":
+                    run_end += 1
+                unicode_escape = _UNICODE_ESCAPE_RE.match(current, run_end)
+                decoded_escape = _decode_unicode_escape(unicode_escape.group(0)) if unicode_escape is not None else None
+                if decoded_escape is not None:
+                    emit(i, unicode_escape.end(), decoded_escape)
+                    i = unicode_escape.end()
+                    continue
+                if run_end < n and current[run_end] == "/":
+                    emit(i, run_end + 1, "/")
+                    i = run_end + 1
+                    continue
+                if run_end > i:
+                    # Windows-separator substitution: each backslash not
+                    # before a separator becomes one. Positions never shift,
+                    # so no record and no delta — downstream indexes and
+                    # carried records stay valid untouched, and each output
+                    # byte maps to itself like the sparse map's identity
+                    # positions.
+                    out.append(current[cursor:i])
+                    out_index += i - cursor
+                    out.append("/" * (run_end - i))
+                    out_index += run_end - i
+                    cursor = run_end
+                    changed = True
+                    i = run_end
+                    continue
+            if char == "/" and (i == 0 or current[i - 1] != ":"):
+                run_end = i
+                while run_end < n and current[run_end] == "/":
+                    run_end += 1
+                if run_end - i > 1:
+                    emit(i, run_end, "/")
+                    i = run_end
+                    continue
             i += 1
         if not changed:
             break
@@ -1798,12 +1854,15 @@ def _decode_escapes_sparse(text: str, *, decode_percent: bool) -> tuple[str, _Sp
 
 
 def _needs_materialized_collapse(shadow: str, *, resolve_dots: bool) -> bool:
-    """Whether ``shadow`` still needs backslash/slash-run/dot processing.
+    """Whether ``shadow`` still needs the materialized collapse path.
 
-    The sparse decode resolves entities and percent to a fixpoint but leaves
-    backslash separators, slash-run folding, and dot-segment removal to the
-    materialized path. Any of those still reachable in ``shadow`` makes the
-    sparse result incomplete.
+    The sparse decode now resolves entities, percent, unicode escapes,
+    backslash separators, and slash runs to a fixpoint; a backslash or
+    foldable run still reachable in ``shadow`` means the composed encoding
+    outlived the sparse pass budget, so the materialized loop (with its
+    extra canonicalization passes) finishes it. Dot-segment removal is
+    stack-shaped — pops, not append-only records — so it always takes the
+    materialized path.
     """
     if "\\" in shadow or _FOLDABLE_SLASH_RUN_RE.search(shadow) is not None:
         return True
@@ -1845,15 +1904,22 @@ def _collapse_separators_with_offsets(text: str, *, resolve_dots: bool = True) -
             return text, _IdentitySpans(len(text))
         normalized, spans = _remove_dot_segments_once(text, _IdentitySpans(len(text)))
         return normalized, spans
-    if "&" in text and _HTML_ENTITY_RE.search(text) is not None and "\\" not in text and _FOLDABLE_SLASH_RUN_RE.search(text) is None:
-        # Entity-only token: the sparse decoder resolves every valid character
-        # reference to a fixpoint without a per-character span list (round-16:
-        # one trailing ``&amp;`` on a 500 kB message still peaked ~206 MiB
-        # through two materialized maps), composing levels across passes.
-        # Fall back to the materialized path only when the decoded shadow
-        # still needs backslash, slash-run, or dot processing.
+    if ("&" in text and _HTML_ENTITY_RE.search(text) is not None) or "\\" in text or _FOLDABLE_SLASH_RUN_RE.search(text) is not None:
+        # Escape- or separator-bearing token: the sparse decoder resolves
+        # every valid character reference, unicode escape, backslash
+        # separator, and foldable slash run to a fixpoint without a
+        # per-character span list (round-16 entity measurement, round-27
+        # backslash measurement: one trailing ``\`` on a 500 kB message
+        # peaked ~150 MiB through the materialized fallback while producing
+        # unchanged output), composing levels across passes. Only a shadow
+        # with dot segments falls back — this caller's materialized loop
+        # shares the sparse pass budget and has no trailing passes, so for
+        # a residual backslash or foldable run it would recompute the
+        # sparse result byte-for-byte at per-character memory cost (the
+        # round-27 internal-review bypass: a 16-byte ``\u005c`` chain that
+        # outlives the budget re-opened the whole-message blowup).
         normalized, sparse = _decode_escapes_sparse(text, decode_percent=False)
-        if not _needs_materialized_collapse(normalized, resolve_dots=resolve_dots):
+        if not resolve_dots or ("/." not in normalized and "/%2e" not in normalized.lower()):
             return normalized, sparse
     if resolve_dots:
         normalized, spans = _remove_dot_segments_once(text, [(index, index) for index in range(len(text))])
@@ -1896,11 +1962,14 @@ def _normalize_workspace_path_with_offsets(text: str, *, resolve_dots: bool) -> 
         spans = [(index, index) for index in range(len(text))]
         normalized, spans = _remove_dot_segments_once(text, spans, encoded_dots=False)
         return normalized, spans
-    if "\\" not in text and _FOLDABLE_SLASH_RUN_RE.search(text) is None and ("%" in text or ("&" in text and _HTML_ENTITY_RE.search(text) is not None)):
-        # Entity/percent-only path: decode to a fixpoint with a sparse offset
-        # map (round-16, levels composed across passes), falling back only
-        # when the decoded shadow still needs backslash, slash-run, or dot
-        # processing.
+    if "%" in text or ("&" in text and _HTML_ENTITY_RE.search(text) is not None) or "\\" in text or _FOLDABLE_SLASH_RUN_RE.search(text) is not None:
+        # Escape- or separator-bearing path: decode to a fixpoint with a
+        # sparse offset map (round-16, levels composed across passes;
+        # round-27 extends the sparse pass over backslash separators and
+        # slash runs so a lone inert backslash no longer forces the
+        # per-character fallback), falling back only when the decoded
+        # shadow still needs dot-segment resolution or outlived the pass
+        # budget.
         normalized, sparse = _decode_escapes_sparse(text, decode_percent=True)
         if not _needs_materialized_collapse(normalized, resolve_dots=resolve_dots):
             return normalized, sparse
@@ -2166,7 +2235,7 @@ def _workspace_separator_unit_count(value: str) -> int:
                 byte = int(value[i + 1 : i + 3], 16)
             except ValueError:
                 byte = 0x100
-            if byte < 0x80 and chr(byte) == "/":
+            if 0 <= byte < 0x80 and chr(byte) == "/":
                 count += 1
                 i += 3
                 continue
