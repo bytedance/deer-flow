@@ -2,112 +2,257 @@ import logging
 import re
 from pathlib import Path
 
-from .types import Skill
+import yaml
+
+from .types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
 
 logger = logging.getLogger(__name__)
 
+# Valid POSIX environment-variable name.
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PORTABLE_TOOL_ALIASES = {
+    "Bash": "bash",
+    "Edit": "str_replace",
+    "Glob": "glob",
+    "Grep": "grep",
+    "Read": "read_file",
+    "WebFetch": "web_fetch",
+    "WebSearch": "web_search",
+    "Write": "write_file",
+}
 
-def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None = None) -> Skill | None:
+
+def _normalize_unscoped_allowed_tool(tool_name: str) -> str:
+    """Map known portable aliases while preserving unknown runtime names."""
+    if "(" in tool_name or ")" in tool_name:
+        return tool_name
+    return _PORTABLE_TOOL_ALIASES.get(tool_name, tool_name)
+
+
+def _split_portable_allowed_tools(raw: str, skill_file: Path) -> list[str]:
+    """Split a portable scalar while preserving quoted parenthesized patterns."""
+    tokens: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote: str | None = None
+    escaped = False
+
+    for char in raw:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            current.append(char)
+            continue
+        if char.isspace() and depth == 0:
+            if current:
+                tokens.append("".join(current))
+                current = []
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                raise ValueError(f"allowed-tools in {skill_file} contains an unmatched closing parenthesis")
+            depth -= 1
+        current.append(char)
+
+    if quote is not None:
+        raise ValueError(f"allowed-tools in {skill_file} contains an unclosed quote")
+    if depth:
+        raise ValueError(f"allowed-tools in {skill_file} contains an unclosed parenthesized pattern")
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
+def _format_yaml_error(skill_file: Path, exc: yaml.YAMLError, source: str) -> str:
+    """Render a developer-friendly explanation of a YAML front-matter error."""
+
+    lines = [f"Invalid YAML front-matter in {skill_file}: {exc}"]
+
+    mark = getattr(exc, "problem_mark", None)
+    source_lines = source.splitlines()
+    if mark is not None and 0 <= mark.line < len(source_lines):
+        offending = source_lines[mark.line]
+
+        # mark.line is 0-based within the front-matter body; +1 makes it
+        # 1-based, +1 more accounts for the leading `---` fence that the
+        # front-matter regex strips before yaml.safe_load sees it.
+        file_line_number = mark.line + 2
+        lines.append(f"  line {file_line_number}: {offending}")
+
+        if getattr(exc, "problem", "") == "mapping values are not allowed here" and ":" in offending:
+            key, _, value = offending.partition(":")
+            value = value.strip()
+            if value and value[0] not in {'"', "'", "|", ">", "[", "{"}:
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                lines.append(f'  hint: values containing ":" must be quoted, e.g. {key}: "{escaped}"')
+
+    return "\n".join(lines)
+
+
+def parse_allowed_tools(raw: object, skill_file: Path) -> tuple[str, ...] | None:
+    """Parse the optional allowed-tools frontmatter field.
+
+    Returns None when the field is omitted. Accepts the Agent Skills standard
+    space-separated string or a YAML sequence of strings. Known portable client
+    aliases normalize to DeerFlow runtime names. Unknown names and
+    command-scoped patterns remain literal because DeerFlow does not inspect
+    tool arguments. Returns an empty tuple for an explicit empty value. Raises
+    ValueError for malformed values.
     """
-    Parse a SKILL.md file and extract metadata.
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = _split_portable_allowed_tools(raw, skill_file)
+        normalize_tools = True
+    elif not isinstance(raw, list):
+        raise ValueError(f"allowed-tools in {skill_file} must be a space-separated string or list of strings")
+    else:
+        normalize_tools = False
+
+    allowed_tools: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise ValueError(f"allowed-tools in {skill_file} must contain only strings")
+        tool_name = item.strip()
+        if not tool_name:
+            raise ValueError(f"allowed-tools in {skill_file} cannot contain empty tool names")
+        allowed_tools.append(_normalize_unscoped_allowed_tool(tool_name) if normalize_tools else tool_name)
+    return tuple(allowed_tools)
+
+
+def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequirement, ...]:
+    """Parse the optional required-secrets frontmatter field (issue #3861).
+
+    Accepts a YAML sequence whose items are either a string (the secret / env
+    variable name) or a mapping (``{name, optional}``). Returns an empty tuple
+    when the field is omitted. Entries whose name is missing or is not a valid
+    environment-variable name are dropped with a warning, so one malformed
+    declaration does not invalidate the whole skill. Raises ValueError only when
+    the field is present but is not a list.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"required-secrets in {skill_file} must be a list")
+
+    secrets: list[SecretRequirement] = []
+    seen: set[str] = set()
+    for item in raw:
+        if isinstance(item, str):
+            name, optional = item.strip(), False
+        elif isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            optional = bool(item.get("optional", False))
+        else:
+            logger.warning("Ignoring malformed required-secrets entry in %s: %r", skill_file, item)
+            continue
+
+        if not _ENV_VAR_NAME_RE.match(name):
+            logger.warning("Ignoring required-secrets entry with invalid env var name in %s: %r", skill_file, name)
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        secrets.append(SecretRequirement(name=name, optional=optional))
+    return tuple(secrets)
+
+
+def parse_secrets_autonomous(raw: object, skill_file: Path) -> bool:
+    """Parse the optional ``secrets-autonomous`` frontmatter field (issue #3914).
+
+    ``True`` (the default) lets declared secrets bind while the skill is
+    in-context via an autonomous model load; ``False`` restricts binding to
+    explicit ``/slash`` activation. A malformed (non-boolean) value fails
+    closed to ``False`` — the safer, less-injection direction.
+    """
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    logger.warning("Ignoring malformed secrets-autonomous value in %s: %r (autonomous binding disabled)", skill_file, raw)
+    return False
+
+
+def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None) -> Skill | None:
+    """Parse a SKILL.md file and extract metadata.
 
     Args:
-        skill_file: Path to the SKILL.md file
-        category: Category of the skill ('public' or 'custom')
+        skill_file: Path to the SKILL.md file.
+        category: Category of the skill.
+        relative_path: Relative path from the category root to the skill
+            directory.  Defaults to the skill directory name when omitted.
 
     Returns:
-        Skill object if parsing succeeds, None otherwise
+        Skill object if parsing succeeds, None otherwise.
     """
-    if not skill_file.exists() or skill_file.name != "SKILL.md":
+    if not skill_file.exists() or skill_file.name != SKILL_MD_FILE:
         return None
 
     try:
         content = skill_file.read_text(encoding="utf-8")
 
-        # Extract YAML front matter
-        # Pattern: ---\nkey: value\n---
-        front_matter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
-
+        # Keep parser diagnostics richer than the pure helper's host-path-free
+        # error string; tests and authoring UX depend on the line-specific hint.
+        front_matter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n?", content, re.DOTALL)
         if not front_matter_match:
             return None
+        front_matter_text = front_matter_match.group(1)
+        try:
+            metadata = yaml.safe_load(front_matter_text)
+        except yaml.YAMLError as exc:
+            logger.error("%s", _format_yaml_error(skill_file, exc, front_matter_text))
+            return None
+        if not isinstance(metadata, dict):
+            logger.error("Invalid SKILL.md front-matter in %s: Frontmatter must be a YAML dictionary", skill_file)
+            return None
 
-        front_matter = front_matter_match.group(1)
-
-        # Parse YAML front matter with basic multiline string support
-        metadata = {}
-        lines = front_matter.split("\n")
-        current_key = None
-        current_value = []
-        is_multiline = False
-        multiline_style = None
-        indent_level = None
-
-        for line in lines:
-            if is_multiline:
-                if not line.strip():
-                    current_value.append("")
-                    continue
-
-                current_indent = len(line) - len(line.lstrip())
-
-                if indent_level is None:
-                    if current_indent > 0:
-                        indent_level = current_indent
-                        current_value.append(line[indent_level:])
-                        continue
-                elif current_indent >= indent_level:
-                    current_value.append(line[indent_level:])
-                    continue
-
-            # If we reach here, it's either a new key or the end of multiline
-            if current_key and is_multiline:
-                if multiline_style == "|":
-                    metadata[current_key] = "\n".join(current_value).rstrip()
-                else:
-                    text = "\n".join(current_value).rstrip()
-                    # Replace single newlines with spaces for folded blocks
-                    metadata[current_key] = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
-
-                current_key = None
-                current_value = []
-                is_multiline = False
-                multiline_style = None
-                indent_level = None
-
-            if not line.strip():
-                continue
-
-            if ":" in line:
-                # Handle nested dicts simply by ignoring indentation for now,
-                # or just extracting top-level keys
-                key, value = line.split(":", 1)
-                key = key.strip()
-                value = value.strip()
-
-                if value in (">", "|"):
-                    current_key = key
-                    is_multiline = True
-                    multiline_style = value
-                    current_value = []
-                    indent_level = None
-                else:
-                    metadata[key] = value
-
-        if current_key and is_multiline:
-            if multiline_style == "|":
-                metadata[current_key] = "\n".join(current_value).rstrip()
-            else:
-                text = "\n".join(current_value).rstrip()
-                metadata[current_key] = re.sub(r"(?<!\n)\n(?!\n)", " ", text)
-
-        # Extract required fields
+        # Extract required fields.  Both must be non-empty strings.
         name = metadata.get("name")
         description = metadata.get("description")
+
+        if not name or not isinstance(name, str):
+            return None
+        if not description or not isinstance(description, str):
+            return None
+
+        # Normalise: strip surrounding whitespace that YAML may preserve.
+        name = name.strip()
+        description = description.strip()
 
         if not name or not description:
             return None
 
         license_text = metadata.get("license")
+        if license_text is not None:
+            license_text = str(license_text).strip() or None
+
+        try:
+            allowed_tools = parse_allowed_tools(metadata.get("allowed-tools"), skill_file)
+        except ValueError as exc:
+            logger.error("Invalid allowed-tools in %s: %s", skill_file, exc)
+            return None
+
+        try:
+            required_secrets = parse_required_secrets(metadata.get("required-secrets"), skill_file)
+        except ValueError as exc:
+            logger.error("Invalid required-secrets in %s: %s", skill_file, exc)
+            return None
+
+        secrets_autonomous = parse_secrets_autonomous(metadata.get("secrets-autonomous"), skill_file)
 
         return Skill(
             name=name,
@@ -117,9 +262,12 @@ def parse_skill_file(skill_file: Path, category: str, relative_path: Path | None
             skill_file=skill_file,
             relative_path=relative_path or Path(skill_file.parent.name),
             category=category,
-            enabled=True,  # Default to enabled, actual state comes from config file
+            allowed_tools=allowed_tools,
+            enabled=True,  # Actual state comes from the extensions config file.
+            required_secrets=required_secrets,
+            secrets_autonomous=secrets_autonomous,
         )
 
-    except Exception as e:
-        logger.error("Error parsing skill file %s: %s", skill_file, e)
+    except Exception:
+        logger.exception("Unexpected error parsing skill file %s", skill_file)
         return None

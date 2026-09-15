@@ -2,55 +2,125 @@
 
 import asyncio
 import logging
-import os
+import threading
+from pathlib import Path
 
 from langchain_core.tools import BaseTool
+
+from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
+from deerflow.config.file_signature import get_config_signature as _get_config_signature
 
 logger = logging.getLogger(__name__)
 
 _mcp_tools_cache: list[BaseTool] | None = None
 _cache_initialized = False
-_initialization_lock = asyncio.Lock()
-_config_mtime: float | None = None  # Track config file modification time
+_init_lock = threading.RLock()  # Guards cache state transitions.
+_init_condition = threading.Condition(_init_lock)
+_initializing_generation: int | None = None
+_cache_generation = 0
+
+# Cache-invalidation key for the resolved extensions config file. We track the
+# resolved path *and* a ``(mtime, size, sha256)`` content signature — via the
+# shared ``deerflow.config.file_signature`` helper also used by
+# ``deerflow.config.app_config`` for the sibling runtime-editable config file —
+# rather than only the mtime. A strict mtime ``>`` comparison misses same-second
+# edits and mtime that stays put or moves backward (object-store / network
+# mounts, ``git checkout``, ``cp -p`` / backup restore, ``tar`` / ``rsync`` that
+# preserve timestamps), and tracking no path at all makes a switch to a
+# different config file with an equal-or-older mtime structurally invisible.
+_config_path: Path | None = None  # Resolved extensions config path at init time
+_config_signature: _ConfigSignature | None = None  # (mtime, size, sha256) at init time
 
 
-def _get_config_mtime() -> float | None:
-    """Get the modification time of the extensions config file.
+def _resolve_config_path() -> Path | None:
+    """Resolve the extensions config file path, or ``None`` when unconfigured.
 
-    Returns:
-        The modification time as a float, or None if the file doesn't exist.
+    ``ExtensionsConfig.resolve_config_path()`` raises ``FileNotFoundError``
+    when an explicit `config_path` or `DEER_FLOW_EXTENSIONS_CONFIG_PATH`
+    points at a file that does not exist. That is deliberate for callers that
+    load the config for actual use (e.g. ``ExtensionsConfig.from_file()`` via
+    ``get_mcp_tools()``): an operator-asserted explicit path going missing is
+    a real misconfiguration and must be surfaced loudly.
+
+    This helper is not one of those callers — it only backs the cache's own
+    staleness check (``_is_cache_stale``, via ``_current_config_state``),
+    which runs on every ``get_cached_mcp_tools()`` call and just wants to know
+    whether the previously loaded config is still current. If the file behind
+    a previously-valid explicit/env-var path becomes unreadable later
+    (deleted mid-run, a Docker mount hiccup, ...), raising here would crash
+    every subsequent call to that hot per-request path instead of leaving the
+    cache serving its last-known-good MCP tools. So this wrapper catches that
+    specific failure and treats it the same as "unconfigured", matching
+    ``_is_cache_stale()``'s existing fail-soft handling of a ``None`` config
+    state (see its docstring). Scoping the catch here — rather than making
+    ``resolve_config_path()`` itself return ``None`` for every caller — keeps
+    the loud failure intact for callers that actually need the file.
     """
     from deerflow.config.extensions_config import ExtensionsConfig
 
-    config_path = ExtensionsConfig.resolve_config_path()
-    if config_path and config_path.exists():
-        return os.path.getmtime(config_path)
-    return None
+    try:
+        return ExtensionsConfig.resolve_config_path()
+    except FileNotFoundError:
+        logger.debug(
+            "Extensions config path could not be resolved while checking MCP cache staleness; treating as unconfigured for this check.",
+            exc_info=True,
+        )
+        return None
+
+
+def _current_config_state() -> tuple[Path | None, _ConfigSignature | None]:
+    """Return the currently resolved extensions config path and its signature."""
+    config_path = _resolve_config_path()
+    if config_path is None:
+        return None, None
+    return config_path, _get_config_signature(config_path)
 
 
 def _is_cache_stale() -> bool:
     """Check if the cache is stale due to config file changes.
 
+    The cache is stale when the resolved extensions config path changed, or when
+    the ``(mtime, size, sha256)`` content signature differs from the one recorded
+    at initialization. Using content equality (``!=``) instead of a strict mtime
+    ``>`` comparison detects same-second edits and backward mtime moves, and
+    tracking the resolved path detects a switch to a different config file.
+
     Returns:
         True if the cache should be invalidated, False otherwise.
     """
-    global _config_mtime
-
     if not _cache_initialized:
         return False  # Not initialized yet, not stale
 
-    current_mtime = _get_config_mtime()
+    current_path, current_signature = _current_config_state()
 
-    # If we couldn't get mtime before or now, assume not stale
-    if _config_mtime is None or current_mtime is None:
+    # Preserve the original "config missing / not yet recorded" behavior: if
+    # there was no readable config when the cache was populated, or there is
+    # none now, do not invalidate. This also covers the config being deleted
+    # entirely after a successful init (current_signature flips to None): the
+    # cache intentionally keeps serving its last-known-good MCP tools rather
+    # than invalidating into an unconfigured state, matching the pre-fix
+    # mtime-only contract (which also returned False once the file could no
+    # longer be stat-ed). Treat this as a deliberate fail-soft choice, not an
+    # oversight — a future change that wants "config deleted" to tear down
+    # MCP tools needs its own explicit signal here, not an inferred one.
+    if _config_signature is None or current_signature is None:
         return False
 
-    # If the config file has been modified since we cached, it's stale
-    if current_mtime > _config_mtime:
-        logger.info(f"MCP config file has been modified (mtime: {_config_mtime} -> {current_mtime}), cache is stale")
+    if current_path != _config_path:
+        logger.info("MCP config path changed (%s -> %s), cache is stale", _config_path, current_path)
+        return True
+
+    if current_signature != _config_signature:
+        logger.info("MCP config content changed (signature %s -> %s), cache is stale", _config_signature, current_signature)
         return True
 
     return False
+
+
+def _wait_for_initialization(generation: int | None) -> None:
+    """Wait for an in-flight initialization without binding to any event loop."""
+    with _init_condition:
+        _init_condition.wait_for(lambda: _cache_initialized or _initializing_generation != generation)
 
 
 async def initialize_mcp_tools() -> list[BaseTool]:
@@ -61,22 +131,67 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     Returns:
         List of LangChain tools from all enabled MCP servers.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
+    global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
+    global _initializing_generation, _cache_generation
 
-    async with _initialization_lock:
-        if _cache_initialized:
-            logger.info("MCP tools already initialized")
-            return _mcp_tools_cache or []
+    while True:
+        with _init_condition:
+            if _cache_initialized:
+                logger.info("MCP tools already initialized")
+                return _mcp_tools_cache or []
 
-        from deerflow.mcp.tools import get_mcp_tools
+            if _initializing_generation is None:
+                pre_path, pre_sig = _current_config_state()
+                claim_generation = _cache_generation
+                _initializing_generation = claim_generation
+                break
 
+            waiting_generation = _initializing_generation
+
+        await asyncio.to_thread(_wait_for_initialization, waiting_generation)
+
+    from deerflow.mcp.tools import get_mcp_tools
+
+    loaded_tools = None
+    post_path = None
+    post_sig = None
+    init_succeeded = False
+    try:
         logger.info("Initializing MCP tools...")
-        _mcp_tools_cache = await get_mcp_tools()
-        _cache_initialized = True
-        _config_mtime = _get_config_mtime()  # Record config file mtime
-        logger.info(f"MCP tools initialized: {len(_mcp_tools_cache)} tool(s) loaded (config mtime: {_config_mtime})")
+        loaded_tools = await get_mcp_tools()
+        post_path, post_sig = _current_config_state()
+        init_succeeded = True
+    finally:
+        if not init_succeeded:
+            with _init_condition:
+                if _initializing_generation == claim_generation:
+                    _initializing_generation = None
+                _init_condition.notify_all()
 
-        return _mcp_tools_cache
+    retired_pool = None
+    with _init_condition:
+        try:
+            if _cache_generation != claim_generation:
+                logger.info("MCP cache was reset during initialization; discarding stale result")
+                return []
+
+            if (pre_path, pre_sig) != (post_path, post_sig):
+                logger.warning("MCP config changed during initialization; discarding stale result")
+                retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+            else:
+                _mcp_tools_cache = loaded_tools
+                _cache_initialized = True
+                _config_path, _config_signature = post_path, post_sig
+                logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
+                return _mcp_tools_cache
+        finally:
+            if _initializing_generation == claim_generation:
+                _initializing_generation = None
+            _init_condition.notify_all()
+
+    if retired_pool is not None:
+        retired_pool.close_all_sync()
+    return []
 
 
 def get_cached_mcp_tools() -> list[BaseTool]:
@@ -87,52 +202,115 @@ def get_cached_mcp_tools() -> list[BaseTool]:
 
     Also checks if the config file has been modified since last initialization,
     and re-initializes if needed. This ensures that changes made through the
-    Gateway API (which runs in a separate process) are reflected in the
-    LangGraph Server.
+    Gateway API are reflected in the Gateway-embedded LangGraph runtime.
 
     Returns:
         List of cached MCP tools.
     """
-    global _cache_initialized
+    while True:
+        retired_pool = None
+        with _init_lock:
+            if _is_cache_stale():
+                logger.info("MCP cache is stale, resetting for re-initialization...")
+                retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
 
-    # Check if cache is stale due to config file changes
-    if _is_cache_stale():
-        logger.info("MCP cache is stale, resetting for re-initialization...")
-        reset_mcp_tools_cache()
+            if _cache_initialized:
+                return _mcp_tools_cache or []
 
-    if not _cache_initialized:
+            if _initializing_generation is not None:
+                _init_condition.wait_for(lambda: _initializing_generation is None or _cache_initialized)
+                continue
+
+        if retired_pool is not None:
+            retired_pool.close_all_sync()
+
         logger.info("MCP tools not initialized, performing lazy initialization...")
         try:
-            # Try to initialize in the current event loop
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # If loop is already running (e.g., in LangGraph Studio),
-                # we need to create a new loop in a thread
                 import concurrent.futures
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(asyncio.run, initialize_mcp_tools())
                     future.result()
             else:
-                # If no loop is running, we can use the current loop
                 loop.run_until_complete(initialize_mcp_tools())
         except RuntimeError:
-            # No event loop exists, create one
-            asyncio.run(initialize_mcp_tools())
-        except Exception as e:
-            logger.error(f"Failed to lazy-initialize MCP tools: {e}")
+            try:
+                asyncio.run(initialize_mcp_tools())
+            except Exception:
+                logger.exception("Failed to lazy-initialize MCP tools")
+                return []
+        except Exception:
+            logger.exception("Failed to lazy-initialize MCP tools")
             return []
 
-    return _mcp_tools_cache or []
+        with _init_lock:
+            if _cache_initialized:
+                return _mcp_tools_cache or []
+
+
+def _reset_mcp_tools_cache_state() -> None:
+    """Reset cache state under ``_init_condition`` / ``_init_lock``."""
+    global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
+    global _cache_generation
+
+    _mcp_tools_cache = None
+    _cache_initialized = False
+    _config_path = None
+    _config_signature = None
+    _cache_generation += 1
+    _init_condition.notify_all()
+
+
+def _reset_mcp_tools_cache_state_and_retire_pool_locked():
+    """Retire the MCP session pool and reset cache state under one lock.
+
+    Tool wrappers close over the module-level session-pool singleton when they
+    are built. Any path that invalidates the tool cache must therefore swap the
+    singleton before waiters/fresh initializers can rebuild wrappers, including
+    automatic config-signature invalidation in ``get_cached_mcp_tools()``.
+    """
+    from deerflow.mcp.session_pool import reset_session_pool
+
+    retired_pool = reset_session_pool()
+    _reset_mcp_tools_cache_state()
+    return retired_pool
 
 
 def reset_mcp_tools_cache() -> None:
     """Reset the MCP tools cache.
 
     This is useful for testing or when you want to reload MCP tools.
+    Also closes all persistent MCP sessions so they are recreated on
+    the next tool load.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
-    _mcp_tools_cache = None
-    _cache_initialized = False
-    _config_mtime = None
+    # Close persistent sessions – they will be recreated by the next
+    # get_mcp_tools() call with the (possibly updated) connection config.
+    #
+    # close_all_sync() already picks the correct strategy per owning loop:
+    #   * sessions owned by the *current* running loop are only *signalled*
+    #     (their owner task runs __aexit__ once the loop regains control –
+    #     this is correct and leak-free, since the loop keeps the task alive),
+    #   * sessions on other threads' loops are torn down deterministically,
+    #   * idle/closed loops are handled or skipped.
+    # We deliberately do NOT try to synchronously wait for the current running
+    # loop to finish teardown here: that is a self-deadlock (the loop can only
+    # run the teardown after this synchronous call returns control to it).
+    try:
+        from deerflow.mcp.session_pool import reset_session_pool
+
+        with _init_condition:
+            # Retire the session-pool singleton before cache waiters can start a
+            # fresh initialization. Otherwise a concurrent initializer can build
+            # tool wrappers against the soon-to-be-detached pool and publish
+            # them after this reset replaces the singleton.
+            retired_pool = reset_session_pool()
+            _reset_mcp_tools_cache_state()
+
+        if retired_pool is not None:
+            retired_pool.close_all_sync()
+    except Exception:
+        logger.debug("Could not close MCP session pool on cache reset", exc_info=True)
+
     logger.info("MCP tools cache reset")

@@ -1,8 +1,14 @@
+import type { TokenUsageInlineMode } from "../messages/usage-model";
 import type { AgentThreadContext } from "../threads";
 
 export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   notification: {
     enabled: true,
+  },
+  projectsDisplayMode: "flat",
+  tokenUsage: {
+    headerTotal: true,
+    inlineMode: "per_turn",
   },
   context: {
     model_name: undefined,
@@ -18,9 +24,53 @@ function isBrowser(): boolean {
   return typeof window !== "undefined";
 }
 
+/**
+ * Best-effort localStorage facade.
+ *
+ * Safari private mode, Firefox strict containers, some embedded WebViews, and
+ * quotas already filled by sibling tabs throw ``SecurityError`` or
+ * ``QuotaExceededError`` from ``getItem``/``setItem``. Without a guard those
+ * exceptions bubble into React render handlers and break the composer /
+ * settings panel. This wrapper traps every storage exception so callers can
+ * always fall back to a sane default.
+ */
+export const safeLocalStorage = {
+  getItem(key: string): string | null {
+    if (!isBrowser()) return null;
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  setItem(key: string, value: string): boolean {
+    if (!isBrowser()) return false;
+    try {
+      window.localStorage.setItem(key, value);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  removeItem(key: string): boolean {
+    if (!isBrowser()) return false;
+    try {
+      window.localStorage.removeItem(key);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
+
 export interface LocalSettings {
   notification: {
     enabled: boolean;
+  };
+  projectsDisplayMode: "flat" | "grouped";
+  tokenUsage: {
+    headerTotal: boolean;
+    inlineMode: TokenUsageInlineMode;
   };
   context: Omit<
     AgentThreadContext,
@@ -44,10 +94,17 @@ function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
       ...DEFAULT_LOCAL_SETTINGS.context,
       ...settings?.context,
     },
+    tokenUsage: {
+      ...DEFAULT_LOCAL_SETTINGS.tokenUsage,
+      ...settings?.tokenUsage,
+    },
     notification: {
       ...DEFAULT_LOCAL_SETTINGS.notification,
       ...settings?.notification,
     },
+    projectsDisplayMode:
+      settings?.projectsDisplayMode ??
+      DEFAULT_LOCAL_SETTINGS.projectsDisplayMode,
   };
 }
 
@@ -59,7 +116,9 @@ export function getThreadModelName(threadId: string): string | undefined {
   if (!isBrowser()) {
     return undefined;
   }
-  return localStorage.getItem(getThreadModelStorageKey(threadId)) ?? undefined;
+  return (
+    safeLocalStorage.getItem(getThreadModelStorageKey(threadId)) ?? undefined
+  );
 }
 
 export function saveThreadModelName(
@@ -71,10 +130,10 @@ export function saveThreadModelName(
   }
   const key = getThreadModelStorageKey(threadId);
   if (!modelName) {
-    localStorage.removeItem(key);
+    safeLocalStorage.removeItem(key);
     return;
   }
-  localStorage.setItem(key, modelName);
+  safeLocalStorage.setItem(key, modelName);
 }
 
 export function applyThreadModelOverride(
@@ -97,7 +156,7 @@ export function getLocalSettings(): LocalSettings {
   if (!isBrowser()) {
     return DEFAULT_LOCAL_SETTINGS;
   }
-  const json = localStorage.getItem(LOCAL_SETTINGS_KEY);
+  const json = safeLocalStorage.getItem(LOCAL_SETTINGS_KEY);
   try {
     if (json) {
       const settings = JSON.parse(json) as Partial<LocalSettings>;
@@ -111,5 +170,5 @@ export function saveLocalSettings(settings: LocalSettings) {
   if (!isBrowser()) {
     return;
   }
-  localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(settings));
+  safeLocalStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(settings));
 }

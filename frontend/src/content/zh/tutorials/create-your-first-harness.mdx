@@ -1,0 +1,88 @@
+---
+title: 创建你的第一个 Harness
+description: 本教程介绍如何以编程方式使用 DeerFlow Harness Python SDK——直接在你的 Python 代码中导入和使用 DeerFlow，而不是通过 Web 界面。
+---
+
+# 创建你的第一个 Harness
+
+本教程介绍如何以编程方式使用 DeerFlow Harness Python SDK——直接在你的 Python 代码中导入和使用 DeerFlow，而不是通过 Web 界面。
+
+## 前置条件
+
+- Python 3.12+
+- 已安装 `uv`
+- 已克隆 DeerFlow 仓库
+
+## 安装
+
+```bash
+cd deer-flow/backend
+uv sync
+```
+
+## 创建配置
+
+创建一个最小的 `config.yaml`：
+
+```yaml
+config_version: 6
+
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+tools:
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+```
+
+## 编写代码
+
+创建 `my_agent.py`：
+
+```python
+import asyncio
+import os
+from deerflow.client import DeerFlowClient
+from deerflow.config import load_config
+
+# 设置 API Key
+os.environ["OPENAI_API_KEY"] = "sk-..."
+
+# 加载配置
+load_config()
+
+client = DeerFlowClient()
+
+async def main():
+    async for event in client.astream(
+        thread_id="my-first-thread",
+        message="用 Python 写一个斐波那契数列函数，包含文档字符串",
+        config={
+            "configurable": {
+                "model_name": "gpt-4o",
+            }
+        },
+    ):
+        print(event)
+
+asyncio.run(main())
+```
+
+## 运行
+
+```bash
+cd backend
+uv run python my_agent.py
+```
+
+## 下一步
+
+- [使用工具和技能](/docs/tutorials/use-tools-and-skills)
+- [快速上手](/docs/harness/quick-start)

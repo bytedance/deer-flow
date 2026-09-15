@@ -56,75 +56,48 @@ export OPENAI_API_KEY="your-api-key"
 ### Run the Development Server
 
 ```bash
-# Terminal 1: LangGraph server
+# Gateway API + embedded agent runtime
 make dev
-
-# Terminal 2: Gateway API
-make gateway
 ```
 
 ## Project Structure
 
 ```
-backend/src/
-├── agents/                  # Agent system
-│   ├── lead_agent/         # Main agent implementation
-│   │   └── agent.py        # Agent factory and creation
-│   ├── middlewares/        # Agent middlewares
-│   │   ├── thread_data_middleware.py
-│   │   ├── sandbox_middleware.py
-│   │   ├── title_middleware.py
-│   │   ├── uploads_middleware.py
-│   │   ├── view_image_middleware.py
-│   │   └── clarification_middleware.py
-│   └── thread_state.py     # Thread state definition
-│
-├── gateway/                 # FastAPI Gateway
-│   ├── app.py              # FastAPI application
-│   └── routers/            # Route handlers
-│       ├── models.py       # /api/models endpoints
-│       ├── mcp.py          # /api/mcp endpoints
-│       ├── skills.py       # /api/skills endpoints
-│       ├── artifacts.py    # /api/threads/.../artifacts
-│       └── uploads.py      # /api/threads/.../uploads
-│
-├── sandbox/                 # Sandbox execution
-│   ├── __init__.py         # Sandbox interface
-│   ├── local.py            # Local sandbox provider
-│   └── tools.py            # Sandbox tools (bash, file ops)
-│
-├── tools/                   # Agent tools
-│   └── builtins/           # Built-in tools
-│       ├── present_file_tool.py
-│       ├── ask_clarification_tool.py
-│       └── view_image_tool.py
-│
-├── mcp/                     # MCP integration
-│   └── manager.py          # MCP server management
-│
-├── models/                  # Model system
-│   └── factory.py          # Model factory
-│
-├── skills/                  # Skills system
-│   └── loader.py           # Skills loader
-│
-├── config/                  # Configuration
-│   ├── app_config.py       # Main app config
-│   ├── extensions_config.py # Extensions config
-│   └── summarization_config.py
-│
-├── community/               # Community tools
-│   ├── tavily/             # Tavily web search
-│   ├── jina/               # Jina web fetch
-│   ├── firecrawl/          # Firecrawl scraping
-│   └── aio_sandbox/        # Docker sandbox
-│
-├── reflection/              # Dynamic loading
-│   └── __init__.py         # Module resolution
-│
-└── utils/                   # Utilities
-    └── __init__.py
+backend/
+├── packages/harness/deerflow/  # deerflow-harness package (import: deerflow.*)
+│   ├── agents/                 # Agent system
+│   │   ├── lead_agent/         # Main agent (agent.py factory, prompt.py)
+│   │   ├── middlewares/        # Agent middleware chain
+│   │   ├── memory/             # Memory extraction & storage
+│   │   └── thread_state.py     # Thread state definition
+│   ├── sandbox/                # Sandbox execution
+│   │   ├── local/              # Local sandbox provider
+│   │   ├── sandbox.py          # Abstract interface
+│   │   ├── tools.py            # Sandbox tools (bash, file ops)
+│   │   └── middleware.py       # Sandbox lifecycle
+│   ├── subagents/              # Subagent delegation
+│   ├── tools/builtins/         # Built-in tools
+│   ├── mcp/                    # MCP integration
+│   ├── models/                 # Model factory
+│   ├── skills/                 # Skills system
+│   ├── config/                 # Configuration system
+│   ├── runtime/                # Embedded run execution (RunManager, StreamBridge)
+│   ├── persistence/            # Checkpointer/store engines & schema migrations
+│   ├── guardrails/             # Pre-tool-call authorization providers
+│   ├── tracing/                # Tracer factory & trace metadata
+│   ├── uploads/                # Uploads manager
+│   ├── tui/                    # Terminal UI (`deerflow` console script)
+│   ├── community/              # Community tools (tavily/, jina_ai/, firecrawl/, …)
+│   ├── reflection/             # Dynamic module loading
+│   └── utils/                  # Utilities
+└── app/                        # FastAPI Gateway + IM channels (import: app.*)
+    ├── gateway/                # Gateway API
+    │   ├── app.py              # FastAPI application
+    │   └── routers/            # Route handlers (threads, models, mcp, skills, uploads, …)
+    └── channels/               # IM channel integrations (Feishu, Slack, Telegram, …)
 ```
+
+See [AGENTS.md](AGENTS.md) for the full module-by-module breakdown.
 
 ## Code Style
 
@@ -192,8 +165,8 @@ feat: add support for Claude 3.5 model
 - Update model factory to handle Claude-specific settings
 - Add tests for new model
 ```
-
 Prefix types:
+
 - `feat:` - New feature
 - `fix:` - Bug fix
 - `docs:` - Documentation
@@ -303,29 +276,70 @@ tools:
 
 ```python
 # packages/harness/deerflow/agents/middlewares/my_middleware.py
-from langchain.agents.middleware import BaseMiddleware
-from langchain_core.runnables import RunnableConfig
+from langchain.agents import AgentState
+from langchain.agents.middleware import AgentMiddleware
+from langgraph.runtime import Runtime
 
-class MyMiddleware(BaseMiddleware):
+class MyMiddleware(AgentMiddleware[AgentState]):
     """Middleware description."""
 
-    def transform_state(self, state: dict, config: RunnableConfig) -> dict:
-        """Transform the state before agent execution."""
-        # Modify state as needed
-        return state
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Run before each model call."""
+        print(f"Model input contains {len(state.get('messages', []))} messages")
+        return None
+
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Run after each model call."""
+        messages = state.get("messages", [])
+        last_message = messages[-1] if messages else None
+        print(f"Last message type: {type(last_message).__name__ if last_message else 'none'}")
+        return None
 ```
 
-2. Register in `packages/harness/deerflow/agents/lead_agent/agent.py`:
+Lifecycle hooks can return a dictionary of state updates, which LangChain merges
+into the agent state, or `None` when they only observe state.
 
-```python
-middlewares = [
-    ThreadDataMiddleware(),
-    SandboxMiddleware(),
-    MyMiddleware(),  # Add your middleware
-    TitleMiddleware(),
-    ClarificationMiddleware(),
-]
+2. Register the middleware class in `config.yaml`. A class path uses the
+   zero-argument constructor; `{class, kwargs}` passes constructor arguments.
+   `kwargs` values must be JSON types (object, array, string, number, boolean,
+   or null); YAML dates and timestamps are coerced to ISO strings so they match JSON:
+
+```yaml
+extensions:
+  middlewares:
+    - deerflow.agents.middlewares.my_middleware:MyMiddleware
+    - class: deerflow.agents.middlewares.my_middleware:MyMiddleware
+      kwargs:
+        max_tool_calls: 5
 ```
+
+Configured middleware runs after the built-in middleware and optional loop/token
+guards. On the lead-agent pipeline, it runs before the terminal-response,
+model-length, safety, and clarification tail; subagents have no
+terminal-response, model-length, or clarification stage, so configured middleware is
+followed by the optional safety guard, `DurableContextMiddleware`, optional
+`SummarizationMiddleware`, then `SubagentDateContextMiddleware` and
+`SystemMessageCoalescingMiddleware`. Treat middleware class paths as trusted
+operator configuration because loading one executes Python code.
+Embedded callers can instead use `DeerFlowClient(middlewares=[...])`, which
+builds the full lead-agent chain and places middleware before its
+terminal-response, model-length, safety, and clarification tail.
+`create_deerflow_agent(extra_middleware=[...])` instead builds a smaller
+feature-based lead-agent chain; unanchored extras are placed immediately before
+`ClarificationMiddleware` (anchored extras follow their `@Next`/`@Prev`
+placement, but the anchor must be present in this smaller chain). Neither API
+forwards middleware to subagents.
+
+Choose the registration path by ownership and placement. The fixed-slot (not deprecated)
+`extensions.middlewares` list is accepted in `config.yaml` and
+`extensions_config.json` (`config.yaml` wins) and applies to both lead and
+subagent pipelines. Packaged extensions registered through the top-level
+`plugins:` list contribute middleware at semantic extension points. Contributor
+code that needs committed, programmatic lead-only wiring can use
+`build_middlewares(..., custom_middlewares=[MyMiddleware()])` at the
+`build_middlewares` call in
+`packages/harness/deerflow/agents/lead_agent/agent.py` (reached through
+`make_lead_agent`).
 
 ### Adding New API Endpoints
 

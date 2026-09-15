@@ -1,0 +1,437 @@
+"""JSONL file-backed RunEventStore implementation.
+
+Each run's events are stored in a single file:
+``.deer-flow/threads/{thread_id}/runs/{run_id}.jsonl``
+
+All categories (message, trace, lifecycle) are in the same file.
+This backend is suitable for lightweight single-node deployments.
+
+**Single-process guarantee**: the in-memory seq counter is process-local.
+Multi-process deployments sharing the same directory will produce duplicate
+or non-monotonic seq values. Use ``DbRunEventStore`` for multi-process or
+high-concurrency deployments.
+
+File I/O is offloaded to a thread pool via ``asyncio.to_thread`` so the
+event loop is never blocked. Per-thread ``asyncio.Lock`` objects serialise
+writes within a single process to prevent interleaved JSONL lines.
+
+Known trade-off: ``list_messages()`` must scan all run files for a
+thread since messages from multiple runs need unified seq ordering.
+``list_events()`` reads only one file -- the fast path.
+
+Read records using physical newline boundaries, not ``str.splitlines()``:
+Unicode line separators are valid JSON string content and must stay inside
+their record. ``read_text`` normalizes CRLF before the LF split.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from deerflow.runtime.events.message_identity import message_identity
+from deerflow.runtime.events.store.base import RunEventStore, match_ai_message_run_id, normalize_message_ids
+from deerflow.runtime.user_context import AUTO, _AutoSentinel
+from deerflow.utils.thread_id import validate_thread_id
+
+logger = logging.getLogger(__name__)
+
+_SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+class JsonlRunEventStore(RunEventStore):
+    def __init__(self, base_dir: str | Path | None = None):
+        self._base_dir = Path(base_dir) if base_dir else Path(".deer-flow")
+        self._seq_counters: dict[str, int] = {}  # thread_id -> current max seq
+        # Per-thread asyncio.Lock — serialises concurrent writes within one process.
+        self._write_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
+        return self._write_locks.setdefault(thread_id, asyncio.Lock())
+
+    async def _run_mutation[T](self, thread_id: str, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
+        """Drain an admitted mutation before propagating caller cancellation.
+
+        Cancelling ``to_thread`` only stops its awaiter, not the filesystem
+        worker. Keep the thread lock through I/O, rollback and bookkeeping,
+        even if the caller is cancelled repeatedly. Queued callers can still
+        cancel before acquiring the lock, without starting a mutation.
+        """
+        async with self._get_write_lock(thread_id):
+            task = asyncio.create_task(operation(), name=f"jsonl-mutation:{thread_id}")
+            cancellation: asyncio.CancelledError | None = None
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError as exc:
+                    if cancellation is None:
+                        cancellation = exc
+                except Exception:
+                    # Retrieve the failure below, after preserving any earlier
+                    # cancellation. The operation has already finished rollback.
+                    break
+            if cancellation is not None:
+                try:
+                    task.result()
+                except Exception as exc:
+                    raise cancellation from exc
+                raise cancellation
+            return task.result()
+
+    @staticmethod
+    def _validate_id(value: str, label: str) -> str:
+        """Validate that an ID is safe for use in filesystem paths."""
+        if not value or not _SAFE_ID_PATTERN.match(value):
+            raise ValueError(f"Invalid {label}: must be alphanumeric/dash/underscore, got {value!r}")
+        return value
+
+    def _thread_dir(self, thread_id: str) -> Path:
+        validate_thread_id(thread_id)
+        return self._base_dir / "threads" / thread_id / "runs"
+
+    def _run_file(self, thread_id: str, run_id: str) -> Path:
+        self._validate_id(run_id, "run_id")
+        return self._thread_dir(thread_id) / f"{run_id}.jsonl"
+
+    def _next_seq(self, thread_id: str) -> int:
+        self._seq_counters[thread_id] = self._seq_counters.get(thread_id, 0) + 1
+        return self._seq_counters[thread_id]
+
+    def _compute_max_seq(self, thread_id: str) -> int:
+        """Scan all run files for a thread and return the current max seq (blocking I/O)."""
+        max_seq = 0
+        thread_dir = self._thread_dir(thread_id)
+        if thread_dir.exists():
+            for f in thread_dir.glob("*.jsonl"):
+                for line in f.read_text(encoding="utf-8").strip().split("\n"):
+                    try:
+                        record = json.loads(line)
+                        max_seq = max(max_seq, record.get("seq", 0))
+                    except json.JSONDecodeError:
+                        logger.debug("Skipping malformed JSONL line in %s", f)
+        return max_seq
+
+    async def _ensure_seq_loaded(self, thread_id: str) -> None:
+        """Load max seq from existing files into the in-memory counter (non-blocking)."""
+        if thread_id in self._seq_counters:
+            return
+        max_seq = await asyncio.to_thread(self._compute_max_seq, thread_id)
+        self._seq_counters[thread_id] = max_seq
+
+    def _write_record(self, record: dict) -> None:
+        path = self._run_file(record["thread_id"], record["run_id"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+
+    def _read_thread_events(self, thread_id: str) -> list[dict]:
+        """Read all events for a thread, sorted by seq (blocking I/O)."""
+        events = []
+        thread_dir = self._thread_dir(thread_id)
+        if not thread_dir.exists():
+            return events
+        for f in sorted(thread_dir.glob("*.jsonl")):
+            for line in f.read_text(encoding="utf-8").strip().split("\n"):
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.debug("Skipping malformed JSONL line in %s", f)
+        events.sort(key=lambda e: e.get("seq", 0))
+        return events
+
+    def _read_run_events(self, thread_id: str, run_id: str) -> list[dict]:
+        """Read events for a specific run file (blocking I/O)."""
+        path = self._run_file(thread_id, run_id)
+        if not path.exists():
+            return []
+        events = []
+        for line in path.read_text(encoding="utf-8").strip().split("\n"):
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                logger.debug("Skipping malformed JSONL line in %s", path)
+        events.sort(key=lambda e: e.get("seq", 0))
+        return events
+
+    def _delete_thread_files(self, thread_id: str) -> None:
+        thread_dir = self._thread_dir(thread_id)
+        if thread_dir.exists():
+            for f in thread_dir.glob("*.jsonl"):
+                f.unlink()
+
+    def _delete_run_file(self, thread_id: str, run_id: str) -> None:
+        path = self._run_file(thread_id, run_id)
+        if path.exists():
+            path.unlink()
+
+    async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):
+        async def mutate():
+            await self._ensure_seq_loaded(thread_id)
+            seq = self._next_seq(thread_id)
+            record = {
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "event_type": event_type,
+                "category": category,
+                "content": content,
+                "metadata": metadata or {},
+                "seq": seq,
+                "created_at": created_at or datetime.now(UTC).isoformat(),
+            }
+            await asyncio.to_thread(self._write_record, record)
+            return record
+
+        return await self._run_mutation(thread_id, mutate)
+
+    async def put_batch(self, events):
+        """Persist a batch of events under a per-thread write lock.
+
+        All seq numbers for the batch are reserved under a single per-thread
+        write lock. Records are grouped by run_id and appended to their own
+        run files while that lock is held. If a write fails and rollback
+        succeeds, already-appended groups for the current thread are restored
+        so callers (e.g. worker.py's flush-retry path) may safely re-buffer
+        that thread's batch. When a batch contains multiple thread IDs, thread
+        groups are processed sequentially, so a later failure does not roll
+        back earlier thread groups. Cancellation drains the current thread group
+        before propagating, without starting subsequent groups. This rollback
+        does not make a multi-file batch crash-atomic.
+        """
+        if not events:
+            return []
+
+        # Group by thread_id; each thread has its own write lock and seq counter.
+        by_thread: dict[str, list[dict[str, Any]]] = {}
+        for ev in events:
+            by_thread.setdefault(ev["thread_id"], []).append(ev)
+
+        results: list[dict[str, Any]] = []
+        for thread_id, batch in by_thread.items():
+            records = await self._write_batch_async(thread_id, batch)
+            results.extend(records)
+        return results
+
+    async def put_if_absent(
+        self,
+        *,
+        thread_id,
+        run_id,
+        event_type,
+        category,
+        content="",
+        metadata=None,
+        created_at=None,
+    ):
+        async def mutate():
+            existing = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+            for event in existing:
+                if event.get("event_type") == event_type:
+                    return event, False
+            await self._ensure_seq_loaded(thread_id)
+            record = {
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "event_type": event_type,
+                "category": category,
+                "content": content,
+                "metadata": metadata or {},
+                "seq": self._next_seq(thread_id),
+                "created_at": created_at or datetime.now(UTC).isoformat(),
+            }
+            await asyncio.to_thread(self._write_record, record)
+            return record, True
+
+        return await self._run_mutation(thread_id, mutate)
+
+    async def _write_batch_async(self, thread_id: str, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        async def mutate():
+            await self._ensure_seq_loaded(thread_id)
+            records: list[dict[str, Any]] = []
+            for ev in batch:
+                seq = self._next_seq(thread_id)
+                record = {
+                    "thread_id": thread_id,
+                    "run_id": ev["run_id"],
+                    "event_type": ev["event_type"],
+                    "category": ev["category"],
+                    "content": ev.get("content", ""),
+                    "metadata": ev.get("metadata") or {},
+                    "seq": seq,
+                    "created_at": ev.get("created_at") or datetime.now(UTC).isoformat(),
+                }
+                records.append(record)
+            records_by_run: dict[str, list[dict[str, Any]]] = {}
+            for record in records:
+                records_by_run.setdefault(record["run_id"], []).append(record)
+            run_batches = [(self._run_file(thread_id, run_id), run_records) for run_id, run_records in records_by_run.items()]
+            await asyncio.to_thread(self._append_record_groups, run_batches)
+            return records
+
+        return await self._run_mutation(thread_id, mutate)
+
+    def _append_records(self, path: Path, records: list[dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = "".join(json.dumps(r, default=str, ensure_ascii=False) + "\n" for r in records)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(lines)
+
+    def _append_record_groups(self, groups: list[tuple[Path, list[dict[str, Any]]]]) -> None:
+        """Append run groups and restore their original sizes if one fails."""
+        original_sizes: dict[Path, int | None] = {}
+        try:
+            for path, records in groups:
+                original_sizes[path] = path.stat().st_size if path.exists() else None
+                self._append_records(path, records)
+        except Exception:
+            for path, original_size in original_sizes.items():
+                try:
+                    if original_size is None:
+                        if path.exists():
+                            path.unlink()
+                    else:
+                        with open(path, "r+b") as f:
+                            f.truncate(original_size)
+                except OSError:
+                    logger.error(
+                        "Failed to roll back JSONL batch append for %s; retrying the batch may create duplicate records",
+                        path,
+                        exc_info=True,
+                    )
+            raise
+
+    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
+        all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
+        messages = [e for e in all_events if e.get("category") == "message"]
+
+        if before_seq is not None:
+            messages = [e for e in messages if e["seq"] < before_seq]
+            return messages[-limit:]
+        elif after_seq is not None:
+            messages = [e for e in messages if e["seq"] > after_seq]
+            return messages[:limit]
+        else:
+            return messages[-limit:]
+
+    async def find_latest_ai_message_run_ids(
+        self,
+        thread_id: str,
+        message_ids: set[str],
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict[str, str]:
+        pending = normalize_message_ids(message_ids)
+        if not pending:
+            return {}
+
+        # Keep the one-pass view stable against this backend's supported
+        # single-process writers. Without the write lock, reading run files one
+        # by one can mix events from opposite sides of a concurrent append.
+        async with self._get_write_lock(thread_id):
+            events = await asyncio.to_thread(self._read_thread_events, thread_id)
+        result: dict[str, str] = {}
+        for event in reversed(events):
+            match = match_ai_message_run_id(event, pending)
+            if match is None:
+                continue
+            message_id, run_id = match
+            result[message_id] = run_id
+            pending.remove(message_id)
+            if not pending:
+                break
+        return result
+
+    async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
+        events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+        if event_types is not None:
+            events = [e for e in events if e.get("event_type") in event_types]
+        if task_id is not None:
+            events = [e for e in events if (e.get("metadata") or {}).get("task_id") == task_id]
+        if after_seq is not None:
+            events = [e for e in events if e.get("seq", 0) > after_seq]
+        return events[:limit]
+
+    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None):
+        events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+        filtered = [e for e in events if e.get("category") == "message"]
+        if before_seq is not None:
+            filtered = [e for e in filtered if e.get("seq", 0) < before_seq]
+        if after_seq is not None:
+            filtered = [e for e in filtered if e.get("seq", 0) > after_seq]
+        if after_seq is not None:
+            return filtered[:limit]
+        else:
+            return filtered[-limit:] if len(filtered) > limit else filtered
+
+    async def get_last_visible_ai_seq_by_run(self, thread_id, run_ids, *, user_id: str | None | _AutoSentinel = AUTO):
+        def _scan() -> dict[str, int]:
+            result: dict[str, int] = {}
+            for run_id in run_ids:
+                for event in reversed(self._read_run_events(thread_id, run_id)):
+                    caller = str((event.get("metadata") or {}).get("caller", ""))
+                    if event.get("category") == "message" and event.get("event_type") in {"llm.ai.response", "ai_message"} and not caller.startswith("middleware:"):
+                        result[run_id] = event["seq"]
+                        break
+            return result
+
+        return await asyncio.to_thread(_scan)
+
+    async def count_messages(self, thread_id):
+        all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
+        return sum(1 for e in all_events if e.get("category") == "message")
+
+    async def get_message_seqs(self, thread_id, identities, *, user_id: str | None | _AutoSentinel = AUTO):
+        wanted = set(identities)
+        if not wanted:
+            return {}
+        all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
+        found: dict[str, int] = {}
+        for event in all_events:
+            if event.get("category") != "message":
+                continue
+            content = event.get("content")
+            if not isinstance(content, dict):
+                continue
+            identity = message_identity(content)
+            # Earliest seq wins: a message re-persisted later keeps the position
+            # it first occupied in the feed.
+            if identity in wanted and identity not in found:
+                found[identity] = event["seq"]
+                # Later events can only be re-persisted copies that already lose
+                # that tiebreak, so the scan ends with the last wanted seq.
+                if len(found) == len(wanted):
+                    break
+        return found
+
+    async def delete_by_thread(self, thread_id):
+        async def mutate():
+            all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
+            count = len(all_events)
+            await asyncio.to_thread(self._delete_thread_files, thread_id)
+            self._seq_counters.pop(thread_id, None)
+            # Pop the lock inside the held mutation to minimise the window where a new caller
+            # could obtain a fresh lock while a waiting coroutine still holds the old one.
+            # Note: coroutines that already acquired a reference to this lock before the
+            # delete will still proceed after we release — this is an accepted narrow race.
+            self._write_locks.pop(thread_id, None)
+            return count
+
+        return await self._run_mutation(thread_id, mutate)
+
+    async def delete_by_run(self, thread_id, run_id):
+        async def mutate():
+            events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+            count = len(events)
+            await asyncio.to_thread(self._delete_run_file, thread_id, run_id)
+            return count
+
+        return await self._run_mutation(thread_id, mutate)

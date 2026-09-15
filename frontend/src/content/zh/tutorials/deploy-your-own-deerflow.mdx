@@ -1,0 +1,72 @@
+---
+title: 部署你的 DeerFlow
+description: 本教程引导你将 DeerFlow 部署到生产环境，使用 Docker Compose 进行多用户访问。
+---
+
+# 部署你的 DeerFlow
+
+本教程引导你将 DeerFlow 部署到生产环境，使用 Docker Compose 进行多用户访问。
+
+## 前置条件
+
+- 已安装 Docker 和 Docker Compose
+- 服务器或 VM（Linux 推荐）
+- LLM API Key
+
+## 步骤
+
+### 1. 克隆仓库
+
+```bash
+git clone https://github.com/bytedance/deer-flow.git
+cd deer-flow
+```
+
+### 2. 创建配置文件
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+编辑 `config.yaml` 添加你的模型配置。
+
+### 3. 创建环境变量文件
+
+```bash
+cat > .env << EOF
+OPENAI_API_KEY=sk-your-key-here
+DEER_FLOW_ROOT=$(pwd)
+BETTER_AUTH_SECRET=$(openssl rand -base64 32)
+BETTER_AUTH_URL=https://your-domain.com
+EOF
+```
+
+### 4. 启动服务
+
+```bash
+docker compose -f docker/docker-compose-dev.yaml up -d
+```
+
+### 5. 验证部署
+
+```bash
+# 检查所有服务健康状态
+curl http://localhost:2026/api/models
+
+# 查看服务日志
+docker compose -f docker/docker-compose-dev.yaml logs -f
+```
+
+访问 `http://your-server:2026` 开始使用。
+
+## 生产注意事项
+
+- 为 nginx 配置 HTTPS/TLS 证书
+- 将 `BETTER_AUTH_SECRET` 设置为强随机字符串
+- 配置防火墙只允许必要端口
+- 定期备份 `backend/.deer-flow/` 目录
+
+## 下一步
+
+- [部署指南（完整版）](/docs/application/deployment-guide)
+- [运维与排障](/docs/application/operations-and-troubleshooting)

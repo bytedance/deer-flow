@@ -16,9 +16,9 @@
 #### [`packages/harness/deerflow/agents/middlewares/title_middleware.py`](../packages/harness/deerflow/agents/middlewares/title_middleware.py) (新建)
 - ✅ 创建 `TitleMiddleware` 类
 - ✅ 实现 `_should_generate_title()` 检查是否需要生成
-- ✅ 实现 `_generate_title()` 调用 LLM 生成标题
-- ✅ 实现 `after_agent()` 钩子，在首次对话后自动触发
-- ✅ 包含 fallback 策略（LLM 失败时使用用户消息前几个词）
+- ✅ 默认使用本地 fallback 生成标题，避免流式回复结束前等待额外 LLM 调用；显式配置 `model_name` 时可使用 LLM 标题
+- ✅ 实现 `after_model()` / `aafter_model()` 钩子，在首次对话后自动触发
+- ✅ 包含 fallback 策略（LLM 未配置或失败时使用用户消息前几个字符）
 
 #### [`packages/harness/deerflow/config/app_config.py`](../packages/harness/deerflow/config/app_config.py)
 - ✅ 导入 `load_title_config_from_dict`
@@ -37,7 +37,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null
+  model_name: null  # null = 快速本地 fallback；填模型名才启用 LLM 标题
 ```
 
 ### 3. 文档
@@ -81,11 +81,13 @@ title:
   ↓
 Agent 处理并返回回复
   ↓
-TitleMiddleware.after_agent() 触发
+TitleMiddleware.after_model()/aafter_model() 触发
   ↓
 检查：是否首次对话？是否已有 title？
   ↓
-调用 LLM 生成 title
+默认从首条用户消息生成本地 fallback title
+  ↓
+如果显式配置 title.model_name，才调用 LLM 生成更精炼的 title
   ↓
 返回 {"title": "..."} 更新 state
   ↓
@@ -113,7 +115,7 @@ title:
   enabled: true
   max_words: 8      # 标题最多 8 个词
   max_chars: 80     # 标题最多 80 个字符
-  model_name: null  # 使用默认模型
+  model_name: null  # null = 快速本地 fallback；填模型名才启用 LLM 标题
 ```
 
 3. **配置持久化（可选）**
@@ -124,7 +126,7 @@ title:
 # checkpointer.py
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-checkpointer = SqliteSaver.from_conn_string("checkpoints.db")
+checkpointer = SqliteSaver.from_conn_string("deerflow.db")
 ```
 
 ```json
@@ -169,8 +171,8 @@ pytest
 ### Title 没有生成？
 
 1. 检查配置：`title.enabled = true`
-2. 查看日志：搜索 "Generated thread title"
-3. 确认是首次对话（1 个用户消息 + 1 个助手回复）
+2. 确认是首次对话（1 个用户消息 + 1 个助手回复）
+3. 如果显式配置了 `title.model_name`，检查标题模型是否可用；未配置时会走本地 fallback
 
 ### Title 生成但看不到？
 
@@ -184,26 +186,32 @@ pytest
 2. LangGraph Platform 会自动持久化
 3. 检查数据库确认 checkpointer 工作正常
 
+### 中断首轮后仍显示默认标题？
+
+1. `runtime/runs/worker.py` 会在 interrupted-run cleanup 中保持 run 处于 finalizing 状态，避免同线程新 run 在 fallback title 写入期间覆盖 checkpoint
+2. 如果取消发生在可用 checkpoint 写入前，worker 会使用本次 `graph_input` 中的首条用户消息生成本地 fallback title
+3. fallback title 写入前会重新读取 latest checkpoint；如果同线程状态已经前进，只对最新 snapshot 做 title-only 更新，避免旧消息重新成为 latest
+
 ---
 
 ## 📊 性能影响
 
-- **延迟增加**：约 0.5-1 秒（LLM 调用）
-- **并发安全**：在 `after_agent` 中运行，不阻塞主流程
+- **默认延迟**：默认 `title.model_name: null` 不会发起额外 LLM 调用，仅从首条用户消息生成本地 fallback title
+- **显式 LLM 标题延迟**：只有配置 `title.model_name` 时，首轮回复后才会等待一次标题模型调用
+- **并发安全**：在 `after_model()` / `aafter_model()` 中更新 state，不需要客户端额外请求
 - **资源消耗**：每个 thread 只生成一次
 
 ### 优化建议
 
-1. 使用更快的模型（如 `gpt-3.5-turbo`）
-2. 减少 `max_words` 和 `max_chars`
-3. 调整 prompt 使其更简洁
+1. 默认保持 `model_name: null`，避免流式回复结束前的额外 LLM 等待
+2. 如需更精炼标题，再显式配置较快的标题模型
+3. 减少 `max_words` 和 `max_chars`，并让 prompt 保持简洁
 
 ---
 
 ## 🚀 下一步
 
-- [ ] 添加集成测试（需要 mock LangGraph Runtime）
-- [ ] 支持自定义 prompt template
+- [ ] 补充 prompt template 的集成测试
 - [ ] 支持多语言 title 生成
 - [ ] 添加 title 重新生成功能
 - [ ] 监控 title 生成成功率和延迟

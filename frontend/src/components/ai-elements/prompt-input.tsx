@@ -499,6 +499,10 @@ export const PromptInput = ({
   // Keep a ref to files for cleanup on unmount (avoids stale closure)
   const filesRef = useRef(files);
   filesRef.current = files;
+  const providerTextRef = useRef("");
+  if (usingProvider) {
+    providerTextRef.current = controller.textInput.value;
+  }
 
   const openFileDialogLocal = useCallback(() => {
     inputRef.current?.click();
@@ -768,6 +772,24 @@ export const PromptInput = ({
     }
 
     // Convert blob URLs to data URLs asynchronously
+    const submittedFileIds = files.map((file) => file.id);
+    const clearSubmittedState = () => {
+      const currentFileIds = new Set(filesRef.current.map((file) => file.id));
+      const submittedFileIdsStillPresent = submittedFileIds.filter((id) =>
+        currentFileIds.has(id),
+      );
+      if (submittedFileIdsStillPresent.length === filesRef.current.length) {
+        clear();
+      } else {
+        for (const id of submittedFileIdsStillPresent) {
+          remove(id);
+        }
+      }
+      if (usingProvider && providerTextRef.current === text) {
+        controller.textInput.clear();
+      }
+    };
+
     Promise.all(
       files.map(async ({ id, ...item }) => {
         if (item.file instanceof File) {
@@ -793,20 +815,14 @@ export const PromptInput = ({
           if (result instanceof Promise) {
             result
               .then(() => {
-                clear();
-                if (usingProvider) {
-                  controller.textInput.clear();
-                }
+                clearSubmittedState();
               })
               .catch(() => {
                 // Don't clear on error - user may want to retry
               });
           } else {
             // Sync function completed without throwing, clear attachments
-            clear();
-            if (usingProvider) {
-              controller.textInput.clear();
-            }
+            clearSubmittedState();
           }
         } catch {
           // Don't clear on error - user may want to retry
@@ -865,6 +881,7 @@ export type PromptInputTextareaProps = ComponentProps<
 
 export const PromptInputTextarea = ({
   onChange,
+  onKeyDown,
   className,
   placeholder = "What would you like to know?",
   ...props
@@ -875,6 +892,10 @@ export const PromptInputTextarea = ({
   const [isComposing, setIsComposing] = useState(false);
 
   const handleKeyDown: KeyboardEventHandler<HTMLTextAreaElement> = (e) => {
+    onKeyDown?.(e);
+    if (e.defaultPrevented) {
+      return;
+    }
     if (e.key === "Enter") {
       if (isIMEComposing(e, isComposing)) {
         return;
@@ -894,19 +915,6 @@ export const PromptInputTextarea = ({
       }
 
       form?.requestSubmit();
-    }
-
-    // Remove last attachment when Backspace is pressed and textarea is empty
-    if (
-      e.key === "Backspace" &&
-      e.currentTarget.value === "" &&
-      attachments.files.length > 0
-    ) {
-      e.preventDefault();
-      const lastAttachment = attachments.files.at(-1);
-      if (lastAttachment) {
-        attachments.remove(lastAttachment.id);
-      }
     }
   };
 

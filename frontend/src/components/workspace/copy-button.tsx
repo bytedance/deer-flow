@@ -1,7 +1,9 @@
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { useCallback, useState, type ComponentProps } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 
 import { Tooltip } from "./tooltip";
@@ -15,13 +17,25 @@ export function CopyButton({
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const handleCopy = useCallback(() => {
-    void navigator.clipboard.writeText(clipboardData);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  }, [clipboardData]);
+    void (async () => {
+      const didCopy = await writeTextToClipboard(clipboardData);
+      if (!didCopy) {
+        toast.error(t.clipboard.failedToCopyToClipboard);
+        return;
+      }
+
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    })().catch(() => {
+      toast.error(t.clipboard.failedToCopyToClipboard);
+    });
+  }, [clipboardData, t.clipboard.failedToCopyToClipboard]);
   return (
     <Tooltip content={t.clipboard.copyToClipboard}>
       <Button
+        aria-label={
+          copied ? t.clipboard.copiedToClipboard : t.clipboard.copyToClipboard
+        }
         size="icon-sm"
         type="button"
         variant="ghost"

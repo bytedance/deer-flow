@@ -1,0 +1,894 @@
+"""Tests for ThreadMetaRepository (SQLAlchemy-backed)."""
+
+import asyncio
+import logging
+
+import pytest
+from sqlalchemy.exc import IntegrityError
+
+from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaRepository
+
+
+@pytest.fixture
+async def repo(tmp_path):
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    yield ThreadMetaRepository(get_session_factory())
+    await close_engine()
+
+
+class TestThreadMetaRepository:
+    @pytest.mark.anyio
+    async def test_create_and_get(self, repo):
+        record = await repo.create("t1")
+        assert record["thread_id"] == "t1"
+        assert record["status"] == "idle"
+        assert len(record["incarnation"]) == 32
+        assert "created_at" in record
+
+        fetched = await repo.get("t1")
+        assert fetched is not None
+        assert fetched["thread_id"] == "t1"
+        assert fetched["incarnation"] == record["incarnation"]
+
+    @pytest.mark.anyio
+    async def test_create_with_assistant_id(self, repo):
+        record = await repo.create("t1", assistant_id="agent1")
+        assert record["assistant_id"] == "agent1"
+
+    @pytest.mark.anyio
+    async def test_create_with_owner_and_display_name(self, repo):
+        record = await repo.create("t1", user_id="user1", display_name="My Thread")
+        assert record["user_id"] == "user1"
+        assert record["display_name"] == "My Thread"
+
+    @pytest.mark.anyio
+    async def test_create_with_metadata(self, repo):
+        record = await repo.create("t1", metadata={"key": "value"})
+        assert record["metadata"] == {"key": "value"}
+
+    @pytest.mark.anyio
+    async def test_duplicate_create_raises_integrity_error(self, repo):
+        await repo.create("t1", display_name="original")
+
+        with pytest.raises(IntegrityError):
+            await repo.create("t1", display_name="replacement")
+
+        record = await repo.get("t1")
+        assert record is not None
+        assert record["display_name"] == "original"
+
+    @pytest.mark.anyio
+    async def test_claim_unowned_only_updates_null_owner(self, repo):
+        legacy = await repo.create("legacy", user_id=None)
+        await repo.create("owned", user_id="original-owner")
+
+        assert await repo.claim_unowned("missing", "owner-a") is False
+        assert await repo.claim_unowned("owned", "owner-a") is False
+        assert await repo.claim_unowned("legacy", "owner-a") is True
+        assert await repo.claim_unowned("legacy", "owner-b") is False
+
+        owned = await repo.get("owned", user_id=None)
+        claimed = await repo.get("legacy", user_id=None)
+        assert owned["user_id"] == "original-owner"
+        assert claimed["user_id"] == "owner-a"
+        assert claimed["updated_at"] == legacy["updated_at"]
+
+    @pytest.mark.anyio
+    async def test_concurrent_claim_unowned_has_exactly_one_winner(self, repo):
+        await repo.create("legacy-race", user_id=None)
+
+        outcomes = await asyncio.gather(
+            repo.claim_unowned("legacy-race", "owner-a"),
+            repo.claim_unowned("legacy-race", "owner-b"),
+        )
+
+        assert sorted(outcomes) == [False, True]
+        record = await repo.get("legacy-race", user_id=None)
+        assert record["user_id"] in {"owner-a", "owner-b"}
+
+    @pytest.mark.anyio
+    async def test_update_display_name_can_remove_stale_metadata_atomically(self, repo):
+        await repo.create("t1", display_name="Original (2)", metadata={"branch_title_sequence": 2, "keep": True})
+
+        await repo.update_display_name(
+            "t1",
+            "Report Q4",
+            remove_metadata_keys=("branch_title_sequence",),
+        )
+
+        record = await repo.get("t1")
+        assert record is not None
+        assert record["display_name"] == "Report Q4"
+        assert record["metadata"] == {"keep": True}
+
+    @pytest.mark.anyio
+    async def test_get_nonexistent(self, repo):
+        assert await repo.get("nonexistent") is None
+
+    @pytest.mark.anyio
+    async def test_check_access_no_record_allows(self, repo):
+        assert await repo.check_access("unknown", "user1") is True
+
+    @pytest.mark.anyio
+    async def test_check_access_owner_matches(self, repo):
+        await repo.create("t1", user_id="user1")
+        assert await repo.check_access("t1", "user1") is True
+
+    @pytest.mark.anyio
+    async def test_check_access_owner_mismatch(self, repo):
+        await repo.create("t1", user_id="user1")
+        assert await repo.check_access("t1", "user2") is False
+
+    @pytest.mark.anyio
+    async def test_check_access_no_owner_allows_all(self, repo):
+        # Explicit user_id=None to bypass the new AUTO default that
+        # would otherwise pick up the test user from the autouse fixture.
+        await repo.create("t1", user_id=None)
+        assert await repo.check_access("t1", "anyone") is True
+
+    @pytest.mark.anyio
+    async def test_check_access_strict_missing_row_denied(self, repo):
+        """require_existing=True flips the missing-row case to *denied*.
+
+        Closes the delete-idempotence cross-user gap: after a thread is
+        deleted, the row is gone, and the permissive default would let any
+        caller "claim" it as untracked. The strict mode demands a row.
+        """
+        assert await repo.check_access("never-existed", "user1", require_existing=True) is False
+
+    @pytest.mark.anyio
+    async def test_check_access_strict_owner_match_allowed(self, repo):
+        await repo.create("t1", user_id="user1")
+        assert await repo.check_access("t1", "user1", require_existing=True) is True
+
+    @pytest.mark.anyio
+    async def test_check_access_strict_owner_mismatch_denied(self, repo):
+        await repo.create("t1", user_id="user1")
+        assert await repo.check_access("t1", "user2", require_existing=True) is False
+
+    @pytest.mark.anyio
+    async def test_check_access_strict_null_owner_still_allowed(self, repo):
+        """Even in strict mode, a row with NULL user_id stays shared.
+
+        The strict flag tightens the *missing row* case, not the *shared
+        row* case — legacy pre-auth rows that survived a clean migration
+        without an owner are still everyone's.
+        """
+        await repo.create("t1", user_id=None)
+        assert await repo.check_access("t1", "anyone", require_existing=True) is True
+
+    @pytest.mark.anyio
+    async def test_update_status(self, repo):
+        await repo.create("t1")
+        await repo.update_status("t1", "busy")
+        record = await repo.get("t1")
+        assert record["status"] == "busy"
+
+    @pytest.mark.anyio
+    async def test_delete(self, repo):
+        await repo.create("t1")
+        await repo.delete("t1")
+        assert await repo.get("t1") is None
+
+    @pytest.mark.anyio
+    async def test_delete_nonexistent_is_noop(self, repo):
+        await repo.delete("nonexistent")  # should not raise
+
+    @pytest.mark.anyio
+    async def test_update_metadata_merges(self, repo):
+        await repo.create("t1", metadata={"a": 1, "b": 2})
+        await repo.update_metadata("t1", {"b": 99, "c": 3})
+        record = await repo.get("t1")
+        # Existing key preserved, overlapping key overwritten, new key added
+        assert record["metadata"] == {"a": 1, "b": 99, "c": 3}
+
+    @pytest.mark.anyio
+    async def test_update_metadata_on_empty(self, repo):
+        await repo.create("t1")
+        await repo.update_metadata("t1", {"k": "v"})
+        record = await repo.get("t1")
+        assert record["metadata"] == {"k": "v"}
+
+    @pytest.mark.anyio
+    async def test_update_metadata_nonexistent_is_noop(self, repo):
+        await repo.update_metadata("nonexistent", {"k": "v"})  # should not raise
+
+    @pytest.mark.anyio
+    async def test_update_metadata_touches_updated_at_by_default(self, repo):
+        await repo.create("t1", metadata={"a": 1})
+        original = (await repo.get("t1"))["updated_at"]
+
+        await repo.update_metadata("t1", {"b": 2})
+
+        record = await repo.get("t1")
+        assert record["metadata"] == {"a": 1, "b": 2}
+        assert record["updated_at"] >= original
+
+    @pytest.mark.anyio
+    async def test_update_metadata_touch_false_preserves_updated_at(self, repo):
+        await repo.create("t1", metadata={"a": 1})
+        original = (await repo.get("t1"))["updated_at"]
+
+        # Pin/unpin style patch must not bump recency ordering.
+        await repo.update_metadata("t1", {THREAD_PINNED_METADATA_KEY: True}, touch=False)
+
+        record = await repo.get("t1")
+        assert record["metadata"] == {"a": 1, THREAD_PINNED_METADATA_KEY: True}
+        assert record["updated_at"] == original
+
+    @pytest.mark.anyio
+    async def test_concurrent_metadata_updates_preserve_disjoint_keys(self, repo):
+        for index in range(10):
+            thread_id = f"concurrent-{index}"
+            await repo.create(thread_id, metadata={"base": index}, user_id=None)
+
+            await asyncio.gather(
+                repo.update_metadata(thread_id, {"left": index}, user_id=None),
+                repo.update_metadata(thread_id, {"right": index}, user_id=None),
+            )
+
+            record = await repo.get(thread_id, user_id=None)
+            assert record["metadata"] == {"base": index, "left": index, "right": index}
+
+    @pytest.mark.anyio
+    async def test_search_orders_pinned_threads_before_newer_unpinned_threads(self, repo):
+        await repo.create("older-pinned", metadata={THREAD_PINNED_METADATA_KEY: True})
+        await repo.create("newer-unpinned")
+
+        results = await repo.search(limit=1)
+
+        assert [record["thread_id"] for record in results] == ["older-pinned"]
+
+    @pytest.mark.anyio
+    async def test_update_owner_with_bypass_moves_row(self, repo):
+        await repo.create("t1", user_id="default", metadata={"source": "channel"})
+        await repo.update_owner("t1", "owner-1", user_id=None)
+
+        owner_row = await repo.get("t1", user_id="owner-1")
+        default_row = await repo.get("t1", user_id="default")
+
+        assert owner_row is not None
+        assert owner_row["user_id"] == "owner-1"
+        assert owner_row["metadata"] == {"source": "channel"}
+        assert default_row is None
+
+    # --- search with metadata filter (SQL push-down) ---
+
+    @pytest.mark.anyio
+    async def test_search_metadata_filter_string(self, repo):
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "staging"})
+        await repo.create("t3", metadata={"env": "prod", "region": "us"})
+
+        results = await repo.search(metadata={"env": "prod"})
+        ids = {r["thread_id"] for r in results}
+        assert ids == {"t1", "t3"}
+
+    @pytest.mark.anyio
+    async def test_search_metadata_filter_numeric(self, repo):
+        await repo.create("t1", metadata={"priority": 1})
+        await repo.create("t2", metadata={"priority": 2})
+        await repo.create("t3", metadata={"priority": 1, "extra": "x"})
+
+        results = await repo.search(metadata={"priority": 1})
+        ids = {r["thread_id"] for r in results}
+        assert ids == {"t1", "t3"}
+
+    @pytest.mark.anyio
+    async def test_search_metadata_filter_multiple_keys(self, repo):
+        await repo.create("t1", metadata={"env": "prod", "region": "us"})
+        await repo.create("t2", metadata={"env": "prod", "region": "eu"})
+        await repo.create("t3", metadata={"env": "staging", "region": "us"})
+
+        results = await repo.search(metadata={"env": "prod", "region": "us"})
+        assert len(results) == 1
+        assert results[0]["thread_id"] == "t1"
+
+    @pytest.mark.anyio
+    async def test_search_metadata_no_match(self, repo):
+        await repo.create("t1", metadata={"env": "prod"})
+
+        results = await repo.search(metadata={"env": "dev"})
+        assert results == []
+
+    @pytest.mark.anyio
+    async def test_search_metadata_pagination_correct(self, repo):
+        """Regression: SQL push-down makes limit/offset exact even when most rows don't match."""
+        for i in range(30):
+            meta = {"target": "yes"} if i % 3 == 0 else {"target": "no"}
+            await repo.create(f"t{i:03d}", metadata=meta)
+
+        # Total matching rows: i in {0,3,6,9,12,15,18,21,24,27} = 10 rows
+        all_matches = await repo.search(metadata={"target": "yes"}, limit=100)
+        assert len(all_matches) == 10
+
+        # Paginate: first page
+        page1 = await repo.search(metadata={"target": "yes"}, limit=3, offset=0)
+        assert len(page1) == 3
+
+        # Paginate: second page
+        page2 = await repo.search(metadata={"target": "yes"}, limit=3, offset=3)
+        assert len(page2) == 3
+
+        # No overlap between pages
+        page1_ids = {r["thread_id"] for r in page1}
+        page2_ids = {r["thread_id"] for r in page2}
+        assert page1_ids.isdisjoint(page2_ids)
+
+        # Last page
+        page_last = await repo.search(metadata={"target": "yes"}, limit=3, offset=9)
+        assert len(page_last) == 1
+
+    @pytest.mark.anyio
+    async def test_search_metadata_with_status_filter(self, repo):
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "prod"})
+        await repo.update_status("t1", "busy")
+
+        results = await repo.search(metadata={"env": "prod"}, status="busy")
+        assert len(results) == 1
+        assert results[0]["thread_id"] == "t1"
+
+    @pytest.mark.anyio
+    async def test_search_without_metadata_still_works(self, repo):
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2")
+
+        results = await repo.search(limit=10)
+        assert len(results) == 2
+
+    @pytest.mark.anyio
+    async def test_search_metadata_missing_key_no_match(self, repo):
+        """Rows without the requested metadata key should not match."""
+        await repo.create("t1", metadata={"other": "val"})
+        await repo.create("t2", metadata={"env": "prod"})
+
+        results = await repo.search(metadata={"env": "prod"})
+        assert len(results) == 1
+        assert results[0]["thread_id"] == "t2"
+
+    @pytest.mark.anyio
+    async def test_search_metadata_all_unsafe_keys_raises(self, repo, caplog):
+        """When ALL metadata keys are unsafe, raises InvalidMetadataFilterError."""
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "staging"})
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
+            with pytest.raises(InvalidMetadataFilterError, match="rejected") as exc_info:
+                await repo.search(metadata={"bad;key": "x"})
+        assert any("bad;key" in r.message for r in caplog.records)
+        # Subclass of ValueError for backward compatibility
+        assert isinstance(exc_info.value, ValueError)
+
+    @pytest.mark.anyio
+    async def test_search_metadata_partial_unsafe_key_skipped(self, repo, caplog):
+        """Valid keys filter rows; only the invalid key is warned and skipped."""
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "staging"})
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
+            results = await repo.search(metadata={"env": "prod", "bad;key": "x"})
+        ids = {r["thread_id"] for r in results}
+        assert ids == {"t1"}
+        assert any("bad;key" in r.message for r in caplog.records)
+
+    @pytest.mark.anyio
+    async def test_search_metadata_filter_boolean(self, repo):
+        """True matches only boolean true, not integer 1."""
+        await repo.create("t1", metadata={"active": True})
+        await repo.create("t2", metadata={"active": False})
+        await repo.create("t3", metadata={"active": True, "extra": "x"})
+        await repo.create("t4", metadata={"active": 1})
+
+        results = await repo.search(metadata={"active": True})
+        ids = {r["thread_id"] for r in results}
+        assert ids == {"t1", "t3"}
+
+    @pytest.mark.anyio
+    async def test_search_metadata_filter_none(self, repo):
+        """Only rows with explicit JSON null match; missing key does not."""
+        await repo.create("t1", metadata={"tag": None})
+        await repo.create("t2", metadata={"tag": "present"})
+        await repo.create("t3", metadata={"other": "val"})
+
+        results = await repo.search(metadata={"tag": None})
+        ids = {r["thread_id"] for r in results}
+        assert ids == {"t1"}
+
+    @pytest.mark.anyio
+    async def test_search_metadata_non_string_key_skipped(self, repo, caplog):
+        """Non-string keys raise ValueError from isinstance check; should be warned and skipped."""
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "staging"})
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
+            with pytest.raises(InvalidMetadataFilterError, match="rejected"):
+                await repo.search(metadata={1: "x"})
+        assert any("1" in r.message for r in caplog.records)
+
+    @pytest.mark.anyio
+    async def test_search_metadata_unsupported_value_type_skipped(self, repo, caplog):
+        """Unsupported value types (list, dict) raise TypeError; should be warned and skipped."""
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "staging"})
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
+            with pytest.raises(InvalidMetadataFilterError, match="rejected"):
+                await repo.search(metadata={"env": ["prod", "staging"]})
+
+    @pytest.mark.anyio
+    async def test_search_metadata_dotted_key_raises(self, repo, caplog):
+        """Dotted keys are rejected; when ALL keys are dotted, raises ValueError."""
+        await repo.create("t1", metadata={"env": "prod"})
+        await repo.create("t2", metadata={"env": "staging"})
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.persistence.thread_meta.sql"):
+            with pytest.raises(InvalidMetadataFilterError, match="rejected"):
+                await repo.search(metadata={"a.b": "anything"})
+        assert any("a.b" in r.message for r in caplog.records)
+
+    # --- dialect-aware type-safe filtering edge cases ---
+
+    @pytest.mark.anyio
+    async def test_search_metadata_bool_vs_int_distinction(self, repo):
+        """True must not match 1; False must not match 0."""
+        await repo.create("bool_true", metadata={"flag": True})
+        await repo.create("bool_false", metadata={"flag": False})
+        await repo.create("int_one", metadata={"flag": 1})
+        await repo.create("int_zero", metadata={"flag": 0})
+
+        true_hits = {r["thread_id"] for r in await repo.search(metadata={"flag": True})}
+        assert true_hits == {"bool_true"}
+
+        false_hits = {r["thread_id"] for r in await repo.search(metadata={"flag": False})}
+        assert false_hits == {"bool_false"}
+
+    @pytest.mark.anyio
+    async def test_search_metadata_int_does_not_match_bool(self, repo):
+        """Integer 1 must not match boolean True."""
+        await repo.create("bool_true", metadata={"val": True})
+        await repo.create("int_one", metadata={"val": 1})
+
+        hits = {r["thread_id"] for r in await repo.search(metadata={"val": 1})}
+        assert hits == {"int_one"}
+
+    @pytest.mark.anyio
+    async def test_search_metadata_none_excludes_missing_key(self, repo):
+        """Filtering by None matches explicit JSON null only, not missing key or empty {}."""
+        await repo.create("explicit_null", metadata={"k": None})
+        await repo.create("missing_key", metadata={"other": "x"})
+        await repo.create("empty_obj", metadata={})
+
+        hits = {r["thread_id"] for r in await repo.search(metadata={"k": None})}
+        assert hits == {"explicit_null"}
+
+    @pytest.mark.anyio
+    async def test_search_metadata_float_value(self, repo):
+        await repo.create("t1", metadata={"score": 3.14})
+        await repo.create("t2", metadata={"score": 2.71})
+        await repo.create("t3", metadata={"score": 3.14})
+
+        hits = {r["thread_id"] for r in await repo.search(metadata={"score": 3.14})}
+        assert hits == {"t1", "t3"}
+
+    @pytest.mark.anyio
+    async def test_search_metadata_float_matches_integer_but_not_boolean(self, repo):
+        await repo.create("int", metadata={"score": 1})
+        await repo.create("float", metadata={"score": 1.0})
+        await repo.create("bool", metadata={"score": True})
+
+        bool_hits = {record["thread_id"] for record in await repo.search(metadata={"score": True})}
+        int_hits = {record["thread_id"] for record in await repo.search(metadata={"score": 1})}
+        float_hits = {record["thread_id"] for record in await repo.search(metadata={"score": 1.0})}
+
+        assert bool_hits == {"bool"}
+        assert int_hits == {"int"}
+        assert float_hits == {"float", "int"}
+
+    @pytest.mark.anyio
+    async def test_search_metadata_mixed_types_same_key(self, repo):
+        """Each type query only matches its own type, even when the key is shared."""
+        await repo.create("str_row", metadata={"x": "hello"})
+        await repo.create("int_row", metadata={"x": 42})
+        await repo.create("bool_row", metadata={"x": True})
+        await repo.create("null_row", metadata={"x": None})
+
+        assert {r["thread_id"] for r in await repo.search(metadata={"x": "hello"})} == {"str_row"}
+        assert {r["thread_id"] for r in await repo.search(metadata={"x": 42})} == {"int_row"}
+        assert {r["thread_id"] for r in await repo.search(metadata={"x": True})} == {"bool_row"}
+        assert {r["thread_id"] for r in await repo.search(metadata={"x": None})} == {"null_row"}
+
+    @pytest.mark.anyio
+    async def test_search_metadata_large_int_precision(self, repo):
+        """Integers beyond float precision (> 2**53) must match exactly."""
+        large = 2**53 + 1
+        await repo.create("t1", metadata={"id": large})
+        await repo.create("t2", metadata={"id": large - 1})
+
+        hits = {r["thread_id"] for r in await repo.search(metadata={"id": large})}
+        assert hits == {"t1"}
+
+    @pytest.mark.anyio
+    async def test_membership_exposed_via_reserved_metadata_key(self, repo):
+        from deerflow.persistence.thread_meta import THREAD_PROJECT_METADATA_KEY
+
+        record = await repo.create("t1", user_id="u1")
+        assert THREAD_PROJECT_METADATA_KEY not in record["metadata"]
+        # membership is set in Task 4; the raw column must never leak top-level
+        assert "project_id" not in record
+
+    @pytest.mark.anyio
+    async def test_row_to_dict_does_not_leak_reserved_key_into_stored_metadata(self, repo):
+        """Regression (Task 3 review): ``_row_to_dict`` must copy ``metadata_json``
+        before injecting the reserved project key. Without the copy the injected
+        dict IS the ORM row's ``metadata_json`` object, so reading a member
+        thread mutates the row in place and a later update in the same session
+        persists ``deerflow_project_id`` into stored user metadata."""
+        from deerflow.persistence.projects import ProjectRepository
+        from deerflow.persistence.thread_meta.model import ThreadMetaRow
+
+        projects = ProjectRepository(repo._sf)
+        p = await projects.create(name="P", user_id="u1")
+        await repo.create("t1", user_id="u1", metadata={"keep": 1})
+        # Assign membership directly on the row (store-level assignment is Task 4).
+        async with repo._sf() as session:
+            row = await session.get(ThreadMetaRow, "t1")
+            row.project_id = p["id"]
+            await session.commit()
+
+        record = await repo.get("t1", user_id="u1")
+        assert record["metadata"]["deerflow_project_id"] == p["id"]
+
+        # The review's failure mode is same-session: converting a row for read
+        # must not dirty the ORM row's stored dict, or a later update in that
+        # session persists the reserved key. ``repo.get`` never exposes its
+        # session, so replicate its conversion on a row from this session.
+        async with repo._sf() as session:
+            row = await session.get(ThreadMetaRow, "t1")
+            repo._row_to_dict(row)  # same conversion repo.get performs
+            assert "deerflow_project_id" not in row.metadata_json
+
+        await repo.update_metadata("t1", {"new": 2}, user_id="u1")
+
+        async with repo._sf() as session:
+            row = await session.get(ThreadMetaRow, "t1")
+            assert "deerflow_project_id" not in row.metadata_json
+            assert row.metadata_json["keep"] == 1
+            assert row.metadata_json["new"] == 2
+
+    @pytest.mark.anyio
+    async def test_set_project_moves_and_preserves_updated_at(self, repo):
+        from deerflow.persistence.projects import ProjectRepository
+
+        projects = ProjectRepository(repo._sf)
+        p = await projects.create(name="P", user_id="u1")
+        await repo.create("t1", user_id="u1")
+        before = (await repo.get("t1", user_id="u1"))["updated_at"]
+
+        assert await repo.set_project("t1", p["id"], user_id="u1") is True
+        record = await repo.get("t1", user_id="u1")
+        assert record["metadata"]["deerflow_project_id"] == p["id"]
+        assert record["updated_at"] == before  # G5: move must not bump recency
+
+        # move out
+        assert await repo.set_project("t1", None, user_id="u1") is True
+        assert "deerflow_project_id" not in (await repo.get("t1", user_id="u1"))["metadata"]
+
+    @pytest.mark.anyio
+    async def test_set_project_rejects_foreign_thread_foreign_project_archived(self, repo):
+        from deerflow.persistence.projects import ProjectRepository
+
+        projects = ProjectRepository(repo._sf)
+        mine = await projects.create(name="mine", user_id="u1")
+        await projects.create(name="theirs", user_id="u2")  # a foreign-owned project exists
+        archived = await projects.create(name="arch", user_id="u1")
+        await projects.set_status(archived["id"], "archived", user_id="u1")
+        await repo.create("t1", user_id="u1")
+        await repo.create("t2", user_id="u2")
+
+        assert await repo.set_project("t1", mine["id"], user_id="u2") is False  # foreign thread
+        assert await repo.set_project("t2", mine["id"], user_id="u2") is False  # foreign project
+        assert await repo.set_project("t1", archived["id"], user_id="u1") is False  # archived
+        assert await repo.set_project("t1", "missing", user_id="u1") is False  # missing
+        assert (await repo.get("t1", user_id="u1"))["metadata"].get("deerflow_project_id") is None
+
+    @pytest.mark.anyio
+    async def test_run_admission_never_seeds_project_membership(self, repo):
+        """Negative contract: run admission never writes thread→project membership.
+
+        A run admitted with the reserved ``deerflow_project_id`` metadata key
+        must leave the row's ``project_id`` column NULL, and the key must not
+        persist into ``metadata_json`` either — membership is written only by
+        POST /api/threads (create) and /threads/{id}/move.
+        """
+        from app.gateway.services import _ensure_thread_metadata
+        from deerflow.persistence.projects import ProjectRepository
+        from deerflow.persistence.thread_meta.model import ThreadMetaRow
+        from deerflow.runtime.runs.manager import RunRecord
+        from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
+        from deerflow.runtime.runs.worker import RunContext
+
+        projects = ProjectRepository(repo._sf)
+        project = await projects.create(name="P")
+        record = RunRecord(run_id="run-1", thread_id="t1", assistant_id="lead-agent", status=RunStatus.pending, on_disconnect=DisconnectMode.cancel, metadata={"deerflow_project_id": project["id"]})
+        run_ctx = RunContext(checkpointer=None, thread_store=repo)
+        await _ensure_thread_metadata(run_ctx, record, owner_user_id=None)
+
+        async with repo._sf() as session:
+            row = await session.get(ThreadMetaRow, "t1")
+        assert row is not None and row.project_id is None
+        assert "deerflow_project_id" not in row.metadata_json
+
+    @pytest.mark.anyio
+    async def test_create_with_project_assignment_and_rejection(self, repo):
+        from deerflow.persistence.projects import ProjectNotAssignableError, ProjectRepository
+
+        projects = ProjectRepository(repo._sf)
+        p = await projects.create(name="P", user_id="u1")
+        record = await repo.create("t1", user_id="u1", project_id=p["id"])
+        assert record["metadata"]["deerflow_project_id"] == p["id"]
+        assert len(record["incarnation"]) == 32
+
+        with pytest.raises(ProjectNotAssignableError):
+            await repo.create("t2", user_id="u1", project_id="missing")
+        assert await repo.get("t2", user_id="u1") is None  # no partial row
+
+    @pytest.mark.anyio
+    async def test_search_project_filter_three_states(self, repo):
+        from deerflow.persistence.projects import ProjectRepository
+        from deerflow.persistence.thread_meta.base import PROJECT_FILTER_UNSET
+
+        projects = ProjectRepository(repo._sf)
+        p = await projects.create(name="P", user_id="u1")
+        await repo.create("t1", user_id="u1", project_id=p["id"])
+        await repo.create("t2", user_id="u1")
+
+        all_rows = await repo.search(user_id="u1", project_id=PROJECT_FILTER_UNSET)
+        assert {r["thread_id"] for r in all_rows} == {"t1", "t2"}
+        unassigned = await repo.search(user_id="u1", project_id=None)
+        assert [r["thread_id"] for r in unassigned] == ["t2"]
+        in_project = await repo.search(user_id="u1", project_id=p["id"])
+        assert [r["thread_id"] for r in in_project] == ["t1"]
+
+    @pytest.mark.anyio
+    async def test_concurrent_move_vs_project_delete_never_dangles(self, repo):
+        """§5.2 race: move-vs-delete resolves to cleared membership or rejection."""
+        import asyncio
+
+        from deerflow.persistence.projects import ProjectRepository
+
+        projects = ProjectRepository(repo._sf)
+        for i in range(10):
+            p = await projects.create(name=f"P{i}", user_id="u1")
+            tid = f"trace-{i}"
+            await repo.create(tid, user_id="u1")
+            moved, deleted = await asyncio.gather(
+                repo.set_project(tid, p["id"], user_id="u1"),
+                projects.delete(p["id"], user_id="u1"),
+            )
+            record = await repo.get(tid, user_id="u1")
+            membership = record["metadata"].get("deerflow_project_id")
+            if moved and not deleted:
+                # delete lost the race before our read: membership may still be
+                # set only if the project row still exists
+                assert membership is None or await projects.get(membership, user_id="u1") is not None
+            else:
+                assert membership is None
+
+    @pytest.mark.anyio
+    async def test_concurrent_create_vs_project_delete_never_dangles(self, repo):
+        """§14.14 race: create-with-assignment vs delete resolves to a
+        rejected create or cleared membership — never a thread whose
+        metadata references a deleted project."""
+        import asyncio
+
+        from deerflow.persistence.projects import ProjectNotAssignableError, ProjectRepository
+
+        projects = ProjectRepository(repo._sf)
+
+        async def create_in_project(tid: str, project_id: str) -> bool:
+            try:
+                await repo.create(tid, user_id="u1", project_id=project_id)
+            except ProjectNotAssignableError:
+                return False
+            return True
+
+        for i in range(10):
+            p = await projects.create(name=f"P{i}", user_id="u1")
+            tid = f"trace-{i}"
+            await asyncio.gather(
+                create_in_project(tid, p["id"]),
+                projects.delete(p["id"], user_id="u1"),
+            )
+            record = await repo.get(tid, user_id="u1")
+            if record is not None:
+                membership = record["metadata"].get("deerflow_project_id")
+                if membership is not None:
+                    # A carried key is only valid while the project row exists.
+                    assert await projects.get(membership, user_id="u1") is not None
+
+
+class TestJsonMatchCompilation:
+    """Verify compiled SQL for both SQLite and PostgreSQL dialects."""
+
+    def test_json_match_compiles_sqlite(self):
+        from sqlalchemy import Column, MetaData, String, Table, create_engine
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+        engine = create_engine("sqlite://")
+
+        cases = [
+            (None, "json_type(t.data, '$.\"k\"') = 'null'"),
+            (True, "json_type(t.data, '$.\"k\"') = 'true'"),
+            (False, "json_type(t.data, '$.\"k\"') = 'false'"),
+        ]
+        for value, expected_fragment in cases:
+            expr = json_match(t.c.data, "k", value)
+            sql = expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})
+            assert str(sql) == expected_fragment, f"value={value!r}: {sql}"
+
+        # int: uses INTEGER cast for precision, type-check narrows to 'integer' only
+        int_expr = json_match(t.c.data, "k", 42)
+        sql = str(int_expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
+        assert "json_type" in sql
+        assert "= 'integer'" in sql
+        assert "INTEGER" in sql
+        assert "CAST" in sql
+
+        # float: uses REAL cast, type-check spans 'integer' and 'real'
+        float_expr = json_match(t.c.data, "k", 3.14)
+        sql = str(float_expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
+        assert "json_type" in sql
+        assert "IN ('integer', 'real')" in sql
+        assert "REAL" in sql
+
+        str_expr = json_match(t.c.data, "k", "hello")
+        sql = str(str_expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
+        assert "json_type" in sql
+        assert "'text'" in sql
+
+    def test_json_match_compiles_pg(self):
+        from sqlalchemy import Column, MetaData, String, Table
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+        dialect = postgresql.dialect()
+
+        cases = [
+            (None, "json_typeof(t.data -> 'k') = 'null'"),
+            (True, "(json_typeof(t.data -> 'k') = 'boolean' AND (t.data ->> 'k') = 'true')"),
+            (False, "(json_typeof(t.data -> 'k') = 'boolean' AND (t.data ->> 'k') = 'false')"),
+        ]
+        for value, expected_fragment in cases:
+            expr = json_match(t.c.data, "k", value)
+            sql = expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True})
+            assert str(sql) == expected_fragment, f"value={value!r}: {sql}"
+
+        # int: CASE guard prevents CAST error when 'number' also matches floats
+        int_expr = json_match(t.c.data, "k", 42)
+        sql = str(int_expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
+        assert "json_typeof" in sql
+        assert "'number'" in sql
+        assert "BIGINT" in sql
+        assert "CASE WHEN" in sql
+        assert "'^-?[0-9]+$'" in sql
+
+        # float: uses DOUBLE PRECISION cast
+        float_expr = json_match(t.c.data, "k", 3.14)
+        sql = str(float_expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
+        assert "json_typeof" in sql
+        assert "'number'" in sql
+        assert "DOUBLE PRECISION" in sql
+
+        str_expr = json_match(t.c.data, "k", "hello")
+        sql = str(str_expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
+        assert "json_typeof" in sql
+        assert "'string'" in sql
+
+    def test_json_match_rejects_unsafe_key(self):
+        from sqlalchemy import Column, MetaData, String, Table
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+
+        for bad_key in ["a.b", "with space", "bad'quote", 'bad"quote', "back\\slash", "semi;colon", ""]:
+            with pytest.raises(ValueError, match="JsonMatch key must match"):
+                json_match(t.c.data, bad_key, "x")
+
+        # Non-string keys must also raise ValueError (not TypeError from re.match)
+        for non_str_key in [42, None, ("k",)]:
+            with pytest.raises(ValueError, match="JsonMatch key must match"):
+                json_match(t.c.data, non_str_key, "x")
+
+    def test_json_match_rejects_unsupported_value_type(self):
+        from sqlalchemy import Column, MetaData, String, Table
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+
+        for bad_value in [[], {}, object()]:
+            with pytest.raises(TypeError, match="JsonMatch value must be"):
+                json_match(t.c.data, "k", bad_value)
+
+    def test_json_match_unsupported_dialect_raises(self):
+        from sqlalchemy import Column, MetaData, String, Table
+        from sqlalchemy.dialects import mysql
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+        expr = json_match(t.c.data, "k", "v")
+
+        with pytest.raises(NotImplementedError, match="mysql"):
+            str(expr.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True}))
+
+    def test_json_match_rejects_out_of_range_int(self):
+        from sqlalchemy import Column, MetaData, String, Table
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+
+        # boundary values must be accepted
+        json_match(t.c.data, "k", 2**63 - 1)
+        json_match(t.c.data, "k", -(2**63))
+
+        # one beyond each boundary must be rejected
+        for out_of_range in [2**63, -(2**63) - 1, 10**30]:
+            with pytest.raises(TypeError, match="out of signed 64-bit range"):
+                json_match(t.c.data, "k", out_of_range)
+
+    def test_compiler_raises_on_escaped_key(self):
+        """Compiler raises ValueError even when __init__ validation is bypassed."""
+        from sqlalchemy import Column, MetaData, String, Table, create_engine
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.types import JSON
+
+        from deerflow.persistence.json_compat import json_match
+
+        metadata = MetaData()
+        t = Table("t", metadata, Column("data", JSON), Column("id", String))
+        engine = create_engine("sqlite://")
+
+        elem = json_match(t.c.data, "k", "v")
+        elem.key = "bad.key"  # bypass __init__ to simulate -O stripping assert
+
+        with pytest.raises(ValueError, match="Key escaped validation"):
+            str(elem.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
+
+        with pytest.raises(ValueError, match="Key escaped validation"):
+            str(elem.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+
+class TestJsonValueMatches:
+    def test_distinguishes_missing_null_bool_int_and_float(self):
+        from deerflow.persistence.json_compat import json_value_matches
+
+        assert json_value_matches({}, "value", None) is False
+        assert json_value_matches({"value": None}, "value", None) is True
+        assert json_value_matches({"value": 1}, "value", True) is False
+        assert json_value_matches({"value": True}, "value", 1) is False
+        assert json_value_matches({"value": 1.0}, "value", 1) is False
+        assert json_value_matches({"value": 1}, "value", 1.0) is True
+        assert json_value_matches({"value": 1.0}, "value", 1.0) is True

@@ -4,9 +4,12 @@ Sets up sys.path and pre-mocks modules that would cause circular import
 issues when unit-testing lightweight config/registry code in isolation.
 """
 
+from __future__ import annotations
+
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -51,5 +54,131 @@ def provisioner_module():
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    previous_module = sys.modules.get(spec.name)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        yield module
+    finally:
+        if previous_module is None:
+            sys.modules.pop(spec.name, None)
+        else:
+            sys.modules[spec.name] = previous_module
+
+
+# ---------------------------------------------------------------------------
+# Auto-set user context for every test unless marked no_auto_user
+# ---------------------------------------------------------------------------
+#
+# Repository methods read ``user_id`` from a contextvar by default
+# (see ``deerflow.runtime.user_context``). Without this fixture, every
+# pre-existing persistence test would raise RuntimeError because the
+# contextvar is unset. The fixture sets a default test user on every
+# test; tests that explicitly want to verify behaviour *without* a user
+# context should mark themselves ``@pytest.mark.no_auto_user``.
+
+
+@pytest.fixture(autouse=True)
+def _reset_skill_storage_singleton():
+    """Reset the SkillStorage singleton between tests to prevent cross-test contamination."""
+    try:
+        from deerflow.skills.storage import reset_skill_storage
+    except ImportError:
+        yield
+        return
+    reset_skill_storage()
+    try:
+        yield
+    finally:
+        reset_skill_storage()
+
+
+@pytest.fixture(autouse=True)
+def _reset_frozen_checkpoint_channel_mode(monkeypatch):
+    """Reset the process-global frozen checkpoint channel mode between tests.
+
+    Production treats ``checkpoint_channel_mode`` (and the delta
+    ``snapshot_frequency`` frozen alongside it) as restart-required: the
+    first client/app freezes it for the process. The test suite builds many
+    clients and apps with different modes in one process, so the freeze must
+    not leak across tests. Mirrors the per-test ``monkeypatch.setattr``
+    resets already used in test_client.py / test_lead_agent_model_resolution.py.
+    """
+    from deerflow.runtime import checkpoint_mode
+
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _restore_title_config_singleton():
+    """Reset ``_title_config`` to its pristine default after every test.
+
+    ``AppConfig.from_file()`` writes the on-disk ``title`` block into the
+    module-level singleton (``config/app_config.py`` calls
+    ``load_title_config_from_dict``). Any test that loads the real
+    ``config.yaml`` therefore leaves the singleton in a state that
+    ``test_title_middleware_core_logic.py`` does not expect; that suite
+    relies on the pristine ``TitleConfig()`` default (``enabled=True``).
+    We restore the default after every test so test files stay
+    independent regardless of order.
+    """
+    try:
+        from deerflow.config.title_config import reset_title_config
+    except ImportError:
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        reset_title_config()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_trace_context():
+    """Give every test an unbound request trace context.
+
+    Entry points bind a trace id unconditionally, and ``ensure_trace_id()``
+    binds one for the remainder of whatever context it is called in. pytest
+    runs the whole session in a single context, so without this reset one
+    test's trace would leak into the next and quietly satisfy assertions
+    about ids the test under exercise never bound.
+    """
+    from deerflow.trace_context import bind_trace_id, reset_trace_id
+
+    token = bind_trace_id(None)
+    try:
+        yield
+    finally:
+        reset_trace_id(token)
+
+
+@pytest.fixture(autouse=True)
+def _auto_user_context(request):
+    """Inject a default ``test-user-autouse`` into the contextvar.
+
+    Opt-out via ``@pytest.mark.no_auto_user``. Uses lazy import so that
+    tests which don't touch the persistence layer never pay the cost
+    of importing runtime.user_context.
+    """
+    if request.node.get_closest_marker("no_auto_user"):
+        yield
+        return
+
+    try:
+        from deerflow.runtime.user_context import (
+            reset_current_user,
+            set_current_user,
+        )
+    except ImportError:
+        yield
+        return
+
+    user = SimpleNamespace(id="test-user-autouse", email="test@local")
+    token = set_current_user(user)
+    try:
+        yield
+    finally:
+        reset_current_user(token)

@@ -1,0 +1,388 @@
+"""Unit tests for scripts/detect_uv_extras.py.
+
+The detector resolves uv extras for `make dev` so that postgres (and any
+future opt-in extras) are not wiped on every restart — see Issue #2754.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DETECT_SCRIPT_PATH = REPO_ROOT / "scripts" / "detect_uv_extras.py"
+
+
+spec = importlib.util.spec_from_file_location("deerflow_detect_uv_extras", DETECT_SCRIPT_PATH)
+assert spec is not None and spec.loader is not None
+detect = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(detect)
+
+
+@pytest.fixture
+def isolated_cwd(tmp_path, monkeypatch):
+    """Isolate `find_config_file()` from the real repo by chdir + clearing env."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("UV_EXTRAS", raising=False)
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", raising=False)
+    return tmp_path
+
+
+def test_parse_env_extras_supports_comma_and_whitespace():
+    assert detect.parse_env_extras("postgres") == ["postgres"]
+    assert detect.parse_env_extras("postgres,ollama") == ["postgres", "ollama"]
+    assert detect.parse_env_extras("postgres ollama") == ["postgres", "ollama"]
+    assert detect.parse_env_extras(" postgres ,  ollama ,") == ["postgres", "ollama"]
+    assert detect.parse_env_extras("") == []
+
+
+def test_parse_env_extras_drops_shell_metacharacters(capsys):
+    """A `.env` value containing shell injection bait must not pass through.
+
+    The whitelist guarantees the *bytes* that reach `uv sync` cannot include
+    shell metacharacters. Any name that looks identifier-like still survives
+    (uv itself will reject unknown extras with its own error), but `;`, `&`,
+    backticks, parentheses, slashes, etc. are stripped.
+    """
+    # Pure-metacharacter inputs collapse to empty.
+    assert detect.parse_env_extras(";") == []
+    assert detect.parse_env_extras("$(whoami)") == []
+    assert detect.parse_env_extras("`echo bad`") == []
+    assert detect.parse_env_extras("postgres;evil") == []  # single token, contains `;`
+    # Splitting on whitespace yields ['rm'] which is identifier-shaped, but the
+    # destructive bits (`;`, `-rf`, `/`) are dropped.
+    assert detect.parse_env_extras("; rm -rf /") == ["rm"]
+    err = capsys.readouterr().err
+    assert "ignoring invalid UV_EXTRAS entry" in err
+    assert "';'" in err  # confirms the dangerous token was reported and dropped
+
+
+def test_parse_env_extras_rejects_leading_digits_and_punctuation():
+    """Names must start with a letter — pyproject extras follow this shape."""
+    assert detect.parse_env_extras("1postgres") == []
+    assert detect.parse_env_extras("-postgres") == []
+    # Hyphens and underscores inside the name are fine.
+    assert detect.parse_env_extras("post_gres") == ["post_gres"]
+    assert detect.parse_env_extras("post-gres") == ["post-gres"]
+
+
+def test_format_flags_emits_one_flag_per_extra():
+    assert detect.format_flags([]) == ""
+    assert detect.format_flags(["postgres"]) == "--extra postgres"
+    assert detect.format_flags(["postgres", "ollama"]) == "--extra postgres --extra ollama"
+
+
+def test_strip_comment_preserves_quoted_hash():
+    assert detect._strip_comment("backend: postgres  # trailing") == "backend: postgres"
+    assert detect._strip_comment('name: "value#with-hash"') == 'name: "value#with-hash"'
+    assert detect._strip_comment("# whole line comment") == ""
+
+
+def test_section_value_finds_nested_key():
+    yaml_lines = [
+        "database:",
+        "  backend: postgres",
+        "  postgres_url: $DATABASE_URL",
+        "",
+        "checkpointer:",
+        "  type: sqlite",
+    ]
+    assert detect.section_value(yaml_lines, "database", "backend") == "postgres"
+    assert detect.section_value(yaml_lines, "checkpointer", "type") == "sqlite"
+    assert detect.section_value(yaml_lines, "database", "missing") is None
+    assert detect.section_value(yaml_lines, "absent_section", "anything") is None
+
+
+def test_section_value_ignores_commented_lines():
+    yaml_lines = [
+        "# database:",
+        "#   backend: postgres",
+        "database:",
+        "  backend: sqlite",
+    ]
+    assert detect.section_value(yaml_lines, "database", "backend") == "sqlite"
+
+
+def test_section_value_strips_quotes():
+    yaml_lines = [
+        "database:",
+        '  backend: "postgres"',
+    ]
+    assert detect.section_value(yaml_lines, "database", "backend") == "postgres"
+
+
+def test_section_value_does_not_descend_into_grandchildren():
+    yaml_lines = [
+        "database:",
+        "  backend: sqlite",
+        "  nested:",
+        "    backend: postgres",
+    ]
+    # Only the immediate child level counts — keeps the parser predictable.
+    assert detect.section_value(yaml_lines, "database", "backend") == "sqlite"
+
+
+def test_detect_from_config_postgres_via_database(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: postgres\n  postgres_url: $DATABASE_URL\n")
+    assert detect.detect_from_config(cfg) == ["postgres"]
+
+
+def test_detect_from_config_postgres_via_checkpointer(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("checkpointer:\n  type: postgres\n  connection_string: postgresql://localhost/db\n")
+    assert detect.detect_from_config(cfg) == ["postgres"]
+
+
+def test_detect_from_config_sqlite_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: sqlite\n  sqlite_dir: .deer-flow/data\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_redis_via_stream_bridge(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("stream_bridge:\n  type: redis\n  redis_url: redis://localhost:6379/0\n")
+    assert detect.detect_from_config(cfg) == ["redis"]
+
+
+def test_detect_from_config_browser_via_browser_navigate_tool(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "tools:\n  - name: browser_navigate\n    group: browser\n    use: deerflow.community.browser_automation.tools:browser_navigate_tool\n",
+    )
+    assert detect.detect_from_config(cfg) == ["browser"]
+
+
+def test_detect_from_config_browser_via_indentless_tools_list(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "tools:\n- name: web_fetch\n  group: web\n- name: browser_navigate\n  group: browser\n",
+    )
+    assert detect.detect_from_config(cfg) == ["browser"]
+
+
+def test_detect_from_config_ignores_commented_browser_tool(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "tools:\n  # - name: browser_navigate\n  #   group: browser\n  - name: web_fetch\n    group: web\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_buzz_via_channels_enabled(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "channels:\n  buzz:\n    enabled: true\n    relay_url: wss://buzz.example.com\n",
+    )
+    assert detect.detect_from_config(cfg) == ["buzz"]
+
+
+def test_detect_from_config_buzz_disabled_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("channels:\n  buzz:\n    enabled: false\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_no_channels_section_returns_no_buzz_extra(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: sqlite\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ignores_commented_buzz_block(tmp_path):
+    """Mirrors the fully-commented example block shipped in config.example.yaml."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "# channels:\n#   buzz:\n#     enabled: true\n#     relay_url: wss://buzz.example.com\ndatabase:\n  backend: sqlite\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("stream_bridge:\n  type: memory\n  queue_maxsize: 256\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ollama_via_model_use(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: qwen3-local\n    use: langchain_ollama:ChatOllama\n    model: qwen3:32b\n    base_url: http://localhost:11434\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ollama_when_use_is_the_first_key(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  - use: langchain_ollama:ChatOllama\n    name: qwen3-local\n")
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ignores_commented_ollama_block(tmp_path):
+    """config.example.yaml ships the Ollama models fully commented out."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  # - name: qwen3-local\n  #   use: langchain_ollama:ChatOllama\n  #   base_url: http://localhost:11434\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ignores_use_in_nested_model_mapping(tmp_path):
+    """A `use` inside a sub-mapping is not the model's own provider.
+
+    `when_thinking_enabled` / `when_thinking_disabled` blocks are common in
+    config.example.yaml, so matching `use:` at any depth would misread them.
+    """
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: doubao\n    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek\n    when_thinking_enabled:\n      use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ollama_in_setup_wizard_output(tmp_path):
+    """`make setup` writes config.yaml with yaml.safe_dump, which leaves list items unindented."""
+    from wizard.writer import build_minimal_config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        build_minimal_config(
+            provider_use="langchain_ollama:ChatOllama",
+            model_name="qwen3:32b",
+            display_name="Qwen3 32B (Ollama)",
+            api_key_field="api_key",
+            env_var=None,
+            base_url="http://localhost:11434",
+        ),
+        encoding="utf-8",
+    )
+    # Pin the layout under test, so a writer change fails here rather than silently passing.
+    assert "\nmodels:\n- " in cfg.read_text(encoding="utf-8")
+    assert "ollama" in detect.detect_from_config(cfg)
+
+
+def test_detect_from_config_ollama_via_indentless_models_list(tmp_path):
+    """Same shape as the setup wizard, and as scripts/config-upgrade.sh emits."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n- name: qwen3-local\n  use: langchain_ollama:ChatOllama\n  model: qwen3:32b\n")
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ollama_when_use_follows_a_nested_list(tmp_path):
+    """A sequence inside a model option must not move the key indent; key order is irrelevant."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n  - name: local\n    model: qwen3:32b\n    stop:\n      - END\n    use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama"]
+
+
+def test_detect_from_config_ignores_use_in_nested_indentless_sequence(tmp_path):
+    """A `- use:` item inside a model option is not that model's provider."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "models:\n- name: x\n  use: deerflow.models.patched_deepseek:PatchedChatDeepSeek\n  fallbacks:\n  - use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_non_ollama_model_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  - name: gpt\n    use: langchain_openai:ChatOpenAI\n    model: gpt-4o\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_combines_ollama_and_postgres(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "database:\n  backend: postgres\nmodels:\n  - name: qwen3-local\n    use: langchain_ollama:ChatOllama\n",
+    )
+    assert detect.detect_from_config(cfg) == ["ollama", "postgres"]
+
+
+def test_detect_from_config_combines_postgres_and_redis(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: postgres\nstream_bridge:\n  type: redis\n")
+    # Sorted unique extras across all detectors.
+    assert detect.detect_from_config(cfg) == ["postgres", "redis"]
+
+
+def test_detect_from_config_dedupes_when_both_present(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("checkpointer:\n  type: postgres\ndatabase:\n  backend: postgres\n")
+    # Sorted unique extras, no double-counting.
+    assert detect.detect_from_config(cfg) == ["postgres"]
+
+
+def test_detect_from_config_combines_buzz_with_postgres(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: postgres\nchannels:\n  buzz:\n    enabled: true\n")
+    # Existing postgres/redis/browser detection is unaffected by the new rule.
+    assert detect.detect_from_config(cfg) == ["buzz", "postgres"]
+
+
+def test_detect_from_config_missing_file_returns_empty(tmp_path):
+    assert detect.detect_from_config(tmp_path / "does-not-exist.yaml") == []
+
+
+def test_resolve_extras_env_overrides_config(isolated_cwd, monkeypatch):
+    cfg = isolated_cwd / "config.yaml"
+    cfg.write_text("database:\n  backend: sqlite\n")
+    monkeypatch.setenv("UV_EXTRAS", "postgres")
+
+    assert detect.resolve_extras() == ["postgres"]
+
+
+def test_resolve_extras_env_supports_multiple(isolated_cwd, monkeypatch):
+    monkeypatch.setenv("UV_EXTRAS", "postgres,ollama")
+    assert detect.resolve_extras() == ["postgres", "ollama"]
+
+
+def test_resolve_extras_detects_redis_url_env_without_config(isolated_cwd, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
+    assert detect.resolve_extras() == ["redis"]
+
+
+def test_resolve_extras_combines_uv_extras_with_redis_url_env(isolated_cwd, monkeypatch):
+    monkeypatch.setenv("UV_EXTRAS", "postgres")
+    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
+    assert detect.resolve_extras() == ["postgres", "redis"]
+
+
+def test_resolve_extras_falls_back_to_config(isolated_cwd):
+    (isolated_cwd / "config.yaml").write_text("database:\n  backend: postgres\n")
+    assert detect.resolve_extras() == ["postgres"]
+
+
+def test_resolve_extras_respects_explicit_config_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("UV_EXTRAS", raising=False)
+    elsewhere = tmp_path / "elsewhere.yaml"
+    elsewhere.write_text("database:\n  backend: postgres\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(elsewhere))
+
+    assert detect.resolve_extras() == ["postgres"]
+
+
+def test_resolve_extras_no_config_no_env(isolated_cwd):
+    assert detect.resolve_extras() == []
+
+
+def test_resolve_extras_finds_backend_subdir_config(isolated_cwd):
+    sub = isolated_cwd / "backend"
+    sub.mkdir()
+    (sub / "config.yaml").write_text("database:\n  backend: postgres\n")
+    assert detect.resolve_extras() == ["postgres"]
+
+
+def test_resolve_extras_root_config_takes_precedence(isolated_cwd):
+    (isolated_cwd / "config.yaml").write_text("database:\n  backend: sqlite\n")
+    sub = isolated_cwd / "backend"
+    sub.mkdir()
+    (sub / "config.yaml").write_text("database:\n  backend: postgres\n")
+    # Root config.yaml is checked first, matching the precedence in serve.sh.
+    assert detect.resolve_extras() == []

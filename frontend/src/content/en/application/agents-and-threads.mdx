@@ -1,3 +1,142 @@
+---
+title: Agents and Threads
+description: DeerFlow App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
+---
+
+import { Callout, Steps } from "nextra/components";
+
 # Agents and Threads
 
-TBD
+DeerFlow App supports multiple named agents and maintains conversation state across sessions through threads and checkpointing.
+
+## Agents
+
+### The default agent
+
+The default agent is the Lead Agent with no custom configuration. It loads all globally enabled skills, has access to all configured tools, and uses the first model in `config.yaml` as its default.
+
+### Custom agents
+
+Custom agents are named variants of the Lead Agent. Each one can have:
+
+- a unique ASCII **name** used by the API, routes, and storage
+- a specific **model** to use by default
+- a restricted set of **skills** (or all globally enabled skills if unspecified)
+- a restricted set of **tool groups**
+- a custom **system prompt** or agent-specific instructions
+
+Custom agents are created and managed through:
+
+- **The App UI**: open the Agents section in the settings panel.
+- **The Gateway API**: `POST /api/agents` with the agent definition.
+
+Both paths require `agents_api.enabled: true` in `config.yaml`. The management API is disabled by default and should be exposed only within a trusted boundary.
+
+The `name` must match `^[A-Za-z0-9-]+$` and be unique per user. The backend stores it in lowercase. Use `/api/agents/check?name={name}` to validate a name and check whether it is available before creating the agent.
+
+With the default `agent_storage.backend: file`, agent configuration is stored per user at `{base_dir}/users/{user_id}/agents/{name}/config.yaml`, where `{base_dir}` is `DEER_FLOW_HOME` (default: `backend/.deer-flow`). The older `{base_dir}/agents/{name}/` layout remains a read-only fallback for installations that have not yet run `backend/scripts/migrate_user_isolation.py`. With `agent_storage.backend: db`, definitions are stored in the shared SQL database instead; it requires `database.backend: sqlite` or `database.backend: postgres`. Use `backend/scripts/migrate_agents_to_db.py` to migrate existing file-backed definitions.
+
+For the file backend, you can edit these files directly; changes are picked up on the agent's next invocation, with no restart needed.
+
+### Restricting agent capabilities
+
+To restrict a custom agent to specific skills:
+
+```yaml
+# {base_dir}/users/{user_id}/agents/my-researcher/config.yaml
+name: my-researcher
+skills:
+  - deep-research
+  - academic-paper-review
+# Omit skills key entirely to inherit all globally enabled skills
+# Set skills: [] to disable all skills for this agent
+```
+
+To restrict to specific tool groups:
+
+```yaml
+tool_groups:
+  - research # only tools in the 'research' group are available
+```
+
+## Threads
+
+A **thread** is a persistent conversation session. Each thread has:
+
+- a unique thread ID
+- a message history
+- accumulated artifacts (output files)
+- a title (auto-generated after the first exchange)
+- a reference to the agent used
+
+Threads are listed in the sidebar. Clicking a thread resumes the conversation from where it left off.
+
+### Thread lifecycle
+
+<Steps>
+
+#### Create
+
+A new thread is created when you start a conversation. The thread ID is generated and the initial configuration (model, agent, skills) is recorded.
+
+#### Run
+
+Each user message triggers an agent run. The run streams tokens and tool calls back to the browser in real time. The thread state (messages, artifacts) is updated after each turn.
+
+#### Checkpoint
+
+The configured persistence backend stores thread state after each turn. This means the conversation survives process restarts when a persistent backend is used.
+
+#### Resume
+
+Opening a thread from the sidebar loads its full history from persisted state. The agent picks up from where it left off.
+
+</Steps>
+
+### Thread persistence configuration
+
+The `database` section controls the default persistence backend for thread state and application data:
+
+```yaml
+# SQLite (local development and single-user deployments)
+database:
+  backend: sqlite
+  sqlite_dir: .deer-flow/data
+
+# Postgres (production and multi-user deployments)
+# database:
+#   backend: postgres
+#   postgres_url: $DATABASE_URL
+#
+# run_events:
+#   backend: db
+```
+
+<Callout type="info">
+  The legacy <code>checkpointer</code> section is still accepted for LangGraph
+  state compatibility and takes precedence when configured. Prefer{" "}
+  <code>database</code> for new deployments.
+</Callout>
+
+### Thread data storage
+
+Working files produced during a thread (uploads, intermediate files, output artifacts) are stored under:
+
+```
+backend/.deer-flow/threads/{thread_id}/user-data/
+```
+
+This directory is mounted into the sandbox as `/mnt/user-data/` for the agent to read and write.
+
+In Docker deployments, this path is bind-mounted from the host so that thread data persists across container restarts. Set `DEER_FLOW_ROOT` to the absolute path of your deer-flow repository root to ensure the correct host path is used.
+
+<Cards num={2}>
+  <Cards.Card
+    title="Workspace Usage"
+    href="/docs/application/workspace-usage"
+  />
+  <Cards.Card
+    title="Operations & Troubleshooting"
+    href="/docs/application/operations-and-troubleshooting"
+  />
+</Cards>

@@ -1,0 +1,57 @@
+schema_version: 1
+protocol_id: deermem-hybrid-v1-pr4789-reproduction-v1
+required_policy_version: hybrid-v1
+evaluation_time: "2026-08-13T00:00:00Z"
+
+dataset:
+  repository: xiaowu0162/longmemeval-cleaned
+  revision: 98d7416c24c778c2fee6e6f3006e7a073259d48f
+  filename: longmemeval_oracle.json
+  sha256: 821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c
+
+pool:
+  size: 10
+  capacities: [5, 7, 9]
+  qa_capacity: 7
+  distractors: 9
+  distractor_bank_size: 40
+  distractor_types: [single-session-user, single-session-preference]
+  distractor_min_evidence_chars: 40
+  distractor_max_evidence_chars: 700
+  offset_namespace: deermem-medium-v1
+  fact_order: fact-id
+
+policies:
+  confidence:
+    policy: confidence
+  hybrid_v1:
+    policy: hybrid-v1
+    weights:
+      confidence: 0.65
+      confirmation: 0.25
+      access: 0.10
+    confirmation_half_life_days: 90
+    access_half_life_days: 30
+    correction_reserved_fraction: 0.10
+    correction_reserved_max: 10
+
+qa:
+  answer_prompt:
+    path: prompts/answer-v1.txt
+    sha256: 2bd4f166219946ccff7ac86f52a053c6dbf8be6d27e178c398d6bf70cf8a7423
+  grader_version: deterministic-overlap-v1
+  provider: openai-compatible
+  api_key_env: DEERMEM_EVAL_ANSWER_API_KEY
+  base_url_env: DEERMEM_EVAL_ANSWER_BASE_URL
+  model: deepseek-v4-flash
+  temperature: 0
+  max_tokens: 2048
+  stream: false
+  timeout_seconds: 120
+  max_attempts: 3
+  workers: 3
+
+statistics:
+  bootstrap_seed: 4789
+  bootstrap_iterations: 10000
+  alpha: 0.05

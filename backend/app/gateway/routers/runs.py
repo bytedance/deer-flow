@@ -7,17 +7,18 @@ is reused so that conversation history is preserved across calls.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import uuid
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.gateway.deps import get_checkpointer, get_run_manager, get_stream_bridge
-from app.gateway.routers.thread_runs import RunCreateRequest
-from app.gateway.services import sse_consumer, start_run
-from deerflow.runtime import serialize_channel_values
+from app.gateway.authz import require_permission
+from app.gateway.deps import get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.pagination import trim_run_message_page
+from app.gateway.run_models import RunCreateRequest
+from app.gateway.services import abuild_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from deerflow.runtime import serialize_channel_values_for_api
+from deerflow.utils.thread_id import resolve_thread_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -25,13 +26,12 @@ router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 def _resolve_thread_id(body: RunCreateRequest) -> str:
     """Return the thread_id from the request body, or generate a new one."""
-    thread_id = (body.config or {}).get("configurable", {}).get("thread_id")
-    if thread_id:
-        return str(thread_id)
-    return str(uuid.uuid4())
+    thread_id = ((body.config or {}).get("configurable") or {}).get("thread_id")
+    return resolve_thread_id(thread_id)
 
 
 @router.post("/stream")
+@require_permission("runs", "create")
 async def stateless_stream(body: RunCreateRequest, request: Request) -> StreamingResponse:
     """Create a run and stream events via SSE.
 
@@ -57,6 +57,7 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
 
 
 @router.post("/wait", response_model=dict)
+@require_permission("runs", "create")
 async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
     """Create a run and block until completion.
 
@@ -65,23 +66,80 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
     Otherwise a new temporary thread is created.
     """
     thread_id = _resolve_thread_id(body)
+    bridge = get_stream_bridge(request)
+    run_mgr = get_run_manager(request)
     record = await start_run(body, thread_id, request)
 
+    completed = True
     if record.task is not None:
-        try:
-            await record.task
-        except asyncio.CancelledError:
-            pass
+        completed = await wait_for_run_completion(bridge, record, request, run_mgr)
 
-    checkpointer = get_checkpointer(request)
-    config = {"configurable": {"thread_id": thread_id}}
-    try:
-        checkpoint_tuple = await checkpointer.aget_tuple(config)
-        if checkpoint_tuple is not None:
-            checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-            channel_values = checkpoint.get("channel_values", {})
-            return serialize_channel_values(channel_values)
-    except Exception:
-        logger.exception("Failed to fetch final state for run %s", record.run_id)
+    if completed:
+        try:
+            accessor, config = await abuild_checkpoint_state_accessor(
+                request,
+                thread_id=thread_id,
+                assistant_id=body.assistant_id,
+            )
+            snapshot = await accessor.aget(config)
+            snapshot_config = snapshot.config or {}
+            if snapshot_config.get("configurable", {}).get("checkpoint_id"):
+                return serialize_channel_values_for_api(snapshot.values)
+        except Exception:
+            logger.exception("Failed to fetch final state for run %s", record.run_id)
 
     return {"status": record.status.value, "error": record.error}
+
+
+# ---------------------------------------------------------------------------
+# Run-scoped read endpoints
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_run(run_id: str, request: Request) -> dict:
+    """Fetch run by run_id with user ownership check. Raises 404 if not found."""
+    run_store = get_run_store(request)
+    record = await run_store.get(run_id)  # user_id=AUTO filters by contextvar
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return record
+
+
+@router.get("/{run_id}/messages")
+@require_permission("runs", "read")
+async def run_messages(
+    run_id: str,
+    request: Request,
+    limit: int = Query(default=50, le=200, ge=1),
+    before_seq: int | None = Query(default=None, ge=1),
+    after_seq: int | None = Query(default=None, ge=1),
+) -> dict:
+    """Return paginated messages for a run (cursor-based).
+
+    Pagination:
+    - after_seq: messages with seq > after_seq (forward)
+    - before_seq: messages with seq < before_seq (backward)
+    - neither: latest messages
+
+    Response: { data: [...], has_more: bool }
+    """
+    run = await _resolve_run(run_id, request)
+    event_store = get_run_event_store(request)
+    rows = await event_store.list_messages_by_run(
+        run["thread_id"],
+        run_id,
+        limit=limit + 1,
+        before_seq=before_seq,
+        after_seq=after_seq,
+    )
+    data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
+    return {"data": data, "has_more": has_more}
+
+
+@router.get("/{run_id}/feedback")
+@require_permission("runs", "read")
+async def run_feedback(run_id: str, request: Request) -> list[dict]:
+    """Return all feedback for a run."""
+    run = await _resolve_run(run_id, request)
+    feedback_repo = get_feedback_repo(request)
+    return await feedback_repo.list_by_run(run["thread_id"], run_id)

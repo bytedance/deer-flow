@@ -53,6 +53,12 @@ pnpm lint
 # Run unit tests
 pnpm test
 
+# One-time setup: install Playwright Chromium browser
+pnpm exec playwright install chromium
+
+# Run E2E tests (builds and starts production server automatically)
+pnpm test:e2e
+
 # Build for production
 pnpm build
 
@@ -76,20 +82,22 @@ pnpm start
 Key environment variables (see `.env.example` for full list):
 
 ```bash
-# Backend API URLs (optional, uses nginx proxy by default)
+# Backend API URL (optional, uses local Next.js/nginx proxy by default)
 NEXT_PUBLIC_BACKEND_BASE_URL="http://localhost:8001"
-# LangGraph API URLs (optional, uses nginx proxy by default)
-NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:2024"
+# LangGraph-compatible API URL (optional, uses local Next.js/nginx proxy by default)
+NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:8001/api"
 ```
 
 ## Project Structure
 
 ```
 tests/
+├── e2e/                    # E2E tests (Playwright, Chromium, mocked backend)
 └── unit/                   # Unit tests (mirrors src/ layout)
 src/
 ├── app/                    # Next.js App Router pages
 │   ├── api/                # API routes
+│   ├── showcase/           # Allowlisted public read-only demos
 │   ├── workspace/          # Main workspace pages
 │   └── mock/               # Mock/demo pages
 ├── components/             # React components
@@ -119,23 +127,24 @@ src/
 
 ## Scripts
 
-| Command             | Description                             |
-| ------------------- | --------------------------------------- |
-| `pnpm dev`          | Start development server with Turbopack |
-| `pnpm build`        | Build for production                    |
-| `pnpm start`        | Start production server                 |
-| `pnpm test`         | Run unit tests with Vitest              |
-| `pnpm format`       | Check formatting with Prettier          |
-| `pnpm format:write` | Apply formatting with Prettier          |
-| `pnpm lint`         | Run ESLint                              |
-| `pnpm lint:fix`     | Fix ESLint issues                       |
-| `pnpm typecheck`    | Run TypeScript type checking            |
-| `pnpm check`        | Run both lint and typecheck             |
+| Command             | Description                           |
+| ------------------- | ------------------------------------- |
+| `pnpm dev`          | Start development server with Webpack |
+| `pnpm build`        | Build for production                  |
+| `pnpm start`        | Start production server               |
+| `pnpm test`         | Run unit tests with Rstest            |
+| `pnpm test:e2e`     | Run E2E tests with Playwright         |
+| `pnpm format`       | Check formatting with Prettier        |
+| `pnpm format:write` | Apply formatting with Prettier        |
+| `pnpm lint`         | Run ESLint                            |
+| `pnpm lint:fix`     | Fix ESLint issues                     |
+| `pnpm typecheck`    | Run TypeScript type checking          |
+| `pnpm check`        | Run both lint and typecheck           |
 
 ## Development Notes
 
 - Uses pnpm workspaces (see `packageManager` in package.json)
-- Turbopack enabled by default in development for faster builds
+- Webpack is the default development bundler until the upstream Turbopack PostCSS worker leak is fixed in a stable Next.js release (#5132). Set `DEER_FLOW_DEV_BUNDLER=turbo` to opt in to Turbopack for local diagnosis, or `DEER_FLOW_DEV_BUNDLER=webpack` to select Webpack explicitly. Reconsider the default after the stable fix is verified on macOS arm64 and Linux.
 - Environment validation can be skipped with `SKIP_ENV_VALIDATION=1` (useful for Docker)
 - Backend API URLs are optional; nginx proxy is used by default in development
 

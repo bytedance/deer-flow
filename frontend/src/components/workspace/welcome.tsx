@@ -10,6 +10,14 @@ import { AuroraText } from "../ui/aurora-text";
 
 let waved = false;
 
+function WelcomeDescription({ children }: { children: string }) {
+  return (
+    <p className="max-w-full text-wrap break-words whitespace-pre-line">
+      {children}
+    </p>
+  );
+}
+
 export function Welcome({
   className,
   mode,
@@ -32,15 +40,15 @@ export function Welcome({
   return (
     <div
       className={cn(
-        "mx-auto flex w-full flex-col items-center justify-center gap-2 px-8 py-4 text-center",
+        "mx-auto flex w-full max-w-full flex-col items-center justify-center gap-2 px-4 py-4 text-center sm:px-8",
         className,
       )}
     >
-      <div className="text-2xl font-bold">
+      <div className="max-w-full text-2xl font-bold">
         {searchParams.get("mode") === "skill" ? (
           `✨ ${t.welcome.createYourOwnSkill} ✨`
         ) : (
-          <div className="flex items-center gap-2">
+          <div className="flex max-w-full flex-wrap items-center justify-center gap-2">
             <div className={cn("inline-block", !waved ? "animate-wave" : "")}>
               {isUltra ? "🚀" : "👋"}
             </div>
@@ -49,24 +57,14 @@ export function Welcome({
         )}
       </div>
       {searchParams.get("mode") === "skill" ? (
-        <div className="text-muted-foreground text-sm">
-          {t.welcome.createYourOwnSkillDescription.includes("\n") ? (
-            <pre className="font-sans whitespace-pre">
-              {t.welcome.createYourOwnSkillDescription}
-            </pre>
-          ) : (
-            <p>{t.welcome.createYourOwnSkillDescription}</p>
-          )}
+        <div className="text-muted-foreground max-w-full text-sm">
+          <WelcomeDescription>
+            {t.welcome.createYourOwnSkillDescription}
+          </WelcomeDescription>
         </div>
       ) : (
-        <div className="text-muted-foreground text-sm">
-          {t.welcome.description.includes("\n") ? (
-            <pre className="font-sans whitespace-pre">
-              {t.welcome.description}
-            </pre>
-          ) : (
-            <p>{t.welcome.description}</p>
-          )}
+        <div className="text-muted-foreground max-w-full text-sm">
+          <WelcomeDescription>{t.welcome.description}</WelcomeDescription>
         </div>
       )}
     </div>

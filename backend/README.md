@@ -1,5 +1,7 @@
 # DeerFlow Backend
 
+**Language:** English | [简体中文](README_zh.md)
+
 DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent memory, and extensible tool integration. The backend enables AI agents to execute code, browse the web, manage files, delegate tasks to subagents, and retain context across conversations - all in isolated, per-thread environments.
 
 ---
@@ -11,31 +13,26 @@ DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent 
                         │          Nginx (Port 2026)           │
                         │      Unified reverse proxy           │
                         └───────┬──────────────────┬───────────┘
-                                │                  │
-              /api/langgraph/*  │                  │  /api/* (other)
-                                ▼                  ▼
-               ┌────────────────────┐  ┌────────────────────────┐
-               │ LangGraph Server   │  │   Gateway API (8001)   │
-               │    (Port 2024)     │  │   FastAPI REST         │
-               │                    │  │                        │
-               │ ┌────────────────┐ │  │ Models, MCP, Skills,   │
-               │ │  Lead Agent    │ │  │ Memory, Uploads,       │
-               │ │  ┌──────────┐  │ │  │ Artifacts              │
-               │ │  │Middleware│  │ │  └────────────────────────┘
-               │ │  │  Chain   │  │ │
-               │ │  └──────────┘  │ │
-               │ │  ┌──────────┐  │ │
-               │ │  │  Tools   │  │ │
-               │ │  └──────────┘  │ │
-               │ │  ┌──────────┐  │ │
-               │ │  │Subagents │  │ │
-               │ │  └──────────┘  │ │
-               │ └────────────────┘ │
-               └────────────────────┘
+                                │
+            /api/langgraph/*    │    /api/* (other)
+            rewritten to /api/* │
+                                ▼
+               ┌────────────────────────────────────────┐
+               │        Gateway API (8001)              │
+               │        FastAPI REST + agent runtime    │
+               │                                        │
+               │ Models, MCP, Skills, Memory, Uploads,  │
+               │ Artifacts, Threads, Runs, Streaming    │
+               │                                        │
+               │ ┌────────────────────────────────────┐ │
+               │ │ Lead Agent                         │ │
+               │ │ Middleware Chain, Tools, Subagents │ │
+               │ └────────────────────────────────────┘ │
+               └────────────────────────────────────────┘
 ```
 
 **Request Routing** (via Nginx):
-- `/api/langgraph/*` → LangGraph Server - agent interactions, threads, streaming
+- `/api/langgraph/*` → Gateway LangGraph-compatible API - agent interactions, threads, streaming
 - `/api/*` (other) → Gateway API - models, MCP, skills, memory, artifacts, uploads, thread-local cleanup
 - `/` (non-API) → Frontend - Next.js web interface
 
@@ -64,22 +61,29 @@ Middlewares execute in strict order, each handling a specific concern:
 | 3 | **SandboxMiddleware** | Acquires sandbox environment for code execution |
 | 4 | **SummarizationMiddleware** | Reduces context when approaching token limits (optional) |
 | 5 | **TodoListMiddleware** | Tracks multi-step tasks in plan mode (optional) |
-| 6 | **TitleMiddleware** | Auto-generates conversation titles after first exchange |
+| 6 | **TitleMiddleware** | Auto-generates conversation titles from the original user request after first exchange; attachment-only messages use a sanitized file name (or `N files uploaded` for multiple attachments) |
 | 7 | **MemoryMiddleware** | Queues conversations for async memory extraction |
 | 8 | **ViewImageMiddleware** | Injects image data for vision-capable models (conditional) |
 | 9 | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
+
+When `loop_detection.enabled` is set, loop detection checks both repeated
+tool-call sets and per-tool frequency. Warnings do not skip the rest of a
+tool-call batch: any hard limit reached takes precedence and stops the entire
+batch before tool execution. Warning-only batches remain fully counted and
+receive a transient hint on the next model request.
 
 ### Sandbox System
 
 Per-thread isolated execution with virtual path translation:
 
 - **Abstract interface**: `execute_command`, `read_file`, `write_file`, `list_dir`
-- **Providers**: `LocalSandboxProvider` (filesystem) and `AioSandboxProvider` (Docker, in community/)
+- **Providers**: `LocalSandboxProvider` (filesystem) and `AioSandboxProvider` (Docker, in community/). Async runtime paths use async sandbox lifecycle hooks so startup, readiness polling, and release do not block the event loop. `AioSandboxProvider` validates active-cache and warm-pool containers during acquire/reuse, dropping definitively dead entries so a thread can provision a fresh sandbox after an unexpected container exit while keeping `get()` as an in-memory lookup. Backend health-check failures are treated as unknown, not dead, and a container that cannot be verified during discovery is simply not adopted (acquire falls through to create instead of failing).
 - **Virtual paths**: `/mnt/user-data/{workspace,uploads,outputs}` → thread-specific physical directories
 - **Skills path**: `/mnt/skills` → `deer-flow/skills/` directory
 - **Skills loading**: Recursively discovers nested `SKILL.md` files under `skills/{public,custom}` and preserves nested container paths
+- **SkillScan**: Native offline deterministic scanning runs before the LLM skill scanner on installs and agent-managed skill writes; `CRITICAL` findings block and warning findings become LLM context
 - **File-write safety**: `str_replace` serializes read-modify-write per `(sandbox.id, path)` so isolated sandboxes keep concurrency even when virtual paths match
-- **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace` (`bash` is disabled by default when using `LocalSandboxProvider`; use `AioSandboxProvider` for isolated shell access)
+- **Tools**: `bash`, `ls`, `read_file`, `write_file`, `str_replace` (`write_file` overwrites by default and exposes `append` for end-of-file writes; `bash` is disabled by default when using `LocalSandboxProvider`; use `AioSandboxProvider` for isolated shell access)
 
 ### Subagent System
 
@@ -95,9 +99,13 @@ Async task delegation with concurrent execution:
 LLM-powered persistent context retention across conversations:
 
 - **Automatic extraction**: Analyzes conversations for user context, facts, and preferences
+- **Scope-safe writes**: Middleware extraction stores only durable, descriptive user-level facts; global summaries also require descriptive authority, while contradiction removals and consolidated facts fail closed when scope metadata is missing or task/project-local
+- **Atomic replacements**: A contradiction removal linked to a replacement runs only after the replacement survives scope/confidence gates, deduplication, and fact-limit trimming
 - **Structured storage**: User context (work, personal, top-of-mind), history, and confidence-scored facts
 - **Debounced updates**: Batches updates to minimize LLM calls (configurable wait time)
 - **System prompt injection**: Top facts + context injected into agent prompts
+- **Run-level memory identity**: `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory` returns the SHA-256 identity of the effective hidden memory block without copying memory text into the event store
+- **Read failures**: Strict backend policies (including legacy `fail_closed`) stop the turn, including at the 5-second async injection deadline. Fail-open reads continue without new context. Timeout handling does not wait for a free worker; a timed-out read may still occupy its worker until the backend returns.
 - **Storage**: JSON file with mtime-based cache invalidation
 
 ### Tool Ecosystem
@@ -106,7 +114,7 @@ LLM-powered persistent context retention across conversations:
 |----------|-------|
 | **Sandbox** | `bash`, `ls`, `read_file`, `write_file`, `str_replace` |
 | **Built-in** | `present_files`, `ask_clarification`, `view_image`, `task` (subagent) |
-| **Community** | Tavily (web search), Jina AI (web fetch), Firecrawl (scraping), DuckDuckGo (image search) |
+| **Community** | Tavily (web search), Jina AI (web fetch), Crawl4AI (web fetch), Firecrawl (scraping), fastCRW (scraping), DuckDuckGo (image search) |
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
 
@@ -118,22 +126,26 @@ FastAPI application providing REST endpoints for frontend integration:
 |-------|---------|
 | `GET /api/models` | List available LLM models |
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
+| `POST /api/mcp/cache/reset` | Reset cached MCP tools so they reload on next use |
 | `GET/PUT /api/skills` | List and manage skills |
 | `POST /api/skills/install` | Install skill from `.skill` archive |
 | `GET /api/memory` | Retrieve memory data |
 | `POST /api/memory/reload` | Force memory reload |
 | `GET /api/memory/config` | Memory configuration |
 | `GET /api/memory/status` | Combined config + data |
-| `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths) |
+| `GET /api/threads/{id}/runs/{run_id}/events` | Debug/audit events for one run; filter `event_types=context:memory` for effective memory identity |
+| `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths, auto-renames duplicate filenames in one request) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
 
 ### IM Channels
 
-The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram still use the final `runs.wait()` response path, while Feishu now streams through `runs.stream(["messages-tuple", "values"])` and updates a single in-thread card in place.
+The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram still use the final `runs.wait()` response path, while Feishu now streams through `runs.stream(["messages-tuple", "values"])`, serializes rapid same-thread turns inside the channel manager, and updates a single in-thread card per source message in place.
 
-For Feishu card updates, DeerFlow stores the running card's `message_id` per inbound message and patches that same card until the run finishes, preserving the existing `OK` / `DONE` reaction flow.
+Discord registers each typing-indicator loop before inbound message handling yields and refuses to start new typing work after the channel stops. Typing tasks are owned by the dedicated Discord event loop, so normal shutdown schedules bounded cancellation, awaiting, and map cleanup on that loop before closing the client. The Discord worker also drains the tasks in its `finally` block while its loop is still usable, covering disconnect and exception exits; if `stop()` encounters an already-stopped foreign loop, it never awaits those loop-bound tasks from the main loop. This serializes registration and cleanup across the main and Discord threads while preventing shutdown hangs and cross-loop `RuntimeError`s.
+
+For Feishu card updates, DeerFlow stores the running card's `message_id` per inbound message and patches that same card until the run finishes, preserving the existing `OK` / `DONE` reaction flow. When a follow-up arrives inside an existing Feishu topic while another turn is still running, the later message now waits on the mapped DeerFlow `thread_id`, receives a queued/running card on that exact source message, and keeps a compact source-message blockquote in subsequent patches so rapid consecutive questions remain distinguishable.
 
 ---
 
@@ -193,7 +205,7 @@ export OPENAI_API_KEY="your-api-key-here"
 **Full Application** (from project root):
 
 ```bash
-make dev  # Starts LangGraph + Gateway + Frontend + Nginx
+make dev  # Starts Gateway + Frontend + Nginx
 ```
 
 Access at: http://localhost:2026
@@ -201,14 +213,24 @@ Access at: http://localhost:2026
 **Backend Only** (from backend directory):
 
 ```bash
-# Terminal 1: LangGraph server
+# Gateway API + embedded agent runtime
 make dev
-
-# Terminal 2: Gateway API
-make gateway
 ```
 
-Direct access: LangGraph at http://localhost:2024, Gateway at http://localhost:8001
+Direct access: Gateway at http://localhost:8001
+
+**Terminal Workbench (TUI)** — a terminal-native UI over the embedded harness,
+no services required:
+
+```bash
+uv pip install 'deerflow-harness[tui]'   # optional 'textual' dependency
+deerflow                                 # launch the TUI
+deerflow --print "summarize this repo"   # headless one-shot
+deerflow --recursion-limit 250 --print "run a longer task"
+```
+
+Sessions opened in the TUI appear in the Web UI sidebar (it writes the shared
+`threads_meta` store under the local default user). See [docs/TUI.md](docs/TUI.md).
 
 ---
 
@@ -216,39 +238,75 @@ Direct access: LangGraph at http://localhost:2024, Gateway at http://localhost:8
 
 ```
 backend/
-├── src/
-│   ├── agents/                  # Agent system
-│   │   ├── lead_agent/         # Main agent (factory, prompts)
-│   │   ├── middlewares/        # 9 middleware components
-│   │   ├── memory/             # Memory extraction & storage
-│   │   └── thread_state.py    # ThreadState schema
-│   ├── gateway/                # FastAPI Gateway API
-│   │   ├── app.py             # Application setup
-│   │   └── routers/           # 6 route modules
-│   ├── sandbox/                # Sandbox execution
-│   │   ├── local/             # Local filesystem provider
-│   │   ├── sandbox.py         # Abstract interface
-│   │   ├── tools.py           # bash, ls, read/write/str_replace
-│   │   └── middleware.py      # Sandbox lifecycle
-│   ├── subagents/              # Subagent delegation
-│   │   ├── builtins/          # general-purpose, bash agents
-│   │   ├── executor.py        # Background execution engine
-│   │   └── registry.py        # Agent registry
-│   ├── tools/builtins/         # Built-in tools
-│   ├── mcp/                    # MCP protocol integration
-│   ├── models/                 # Model factory
-│   ├── skills/                 # Skill discovery & loading
-│   ├── config/                 # Configuration system
-│   ├── community/              # Community tools & providers
-│   ├── reflection/             # Dynamic module loading
-│   └── utils/                  # Utilities
+├── packages/harness/           # deerflow-harness package (import: deerflow.*)
+│   └── deerflow/
+│       ├── agents/             # Agent system
+│       │   ├── lead_agent/     # Main agent (factory, prompts)
+│       │   ├── middlewares/    # Middleware components
+│       │   ├── memory/         # Memory extraction & storage
+│       │   └── thread_state.py # ThreadState schema
+│       ├── sandbox/            # Sandbox execution
+│       │   ├── local/          # Local filesystem provider
+│       │   ├── sandbox.py      # Abstract interface
+│       │   ├── tools.py        # bash, ls, read/write/str_replace
+│       │   └── middleware.py   # Sandbox lifecycle
+│       ├── subagents/          # Subagent delegation
+│       │   ├── builtins/       # general-purpose, bash agents
+│       │   ├── executor.py     # Background execution engine
+│       │   └── registry.py     # Agent registry
+│       ├── tools/builtins/     # Built-in tools
+│       ├── mcp/                # MCP protocol integration
+│       ├── models/             # Model factory
+│       ├── skills/             # Skill discovery & loading
+│       ├── config/             # Configuration system
+│       ├── runtime/            # Embedded run execution (RunManager, StreamBridge)
+│       ├── persistence/        # Checkpointer/store engines & schema migrations
+│       ├── guardrails/         # Pre-tool-call authorization providers
+│       ├── tracing/            # Tracer factory & trace metadata
+│       ├── uploads/            # Uploads manager
+│       ├── tui/                # Terminal UI (`deerflow` console script)
+│       ├── community/          # Community tools & providers
+│       ├── reflection/         # Dynamic module loading
+│       └── utils/              # Utilities
+├── app/                        # FastAPI Gateway + IM channels (import: app.*)
+│   ├── gateway/                # Gateway API
+│   │   ├── app.py              # Application setup
+│   │   └── routers/            # Route modules
+│   └── channels/               # IM channel integrations
 ├── docs/                       # Documentation
 ├── tests/                      # Test suite
-├── langgraph.json              # LangGraph server configuration
+├── langgraph.json              # LangGraph graph registry for tooling/Studio compatibility
 ├── pyproject.toml              # Python dependencies
 ├── Makefile                    # Development commands
 └── Dockerfile                  # Container build
 ```
+
+`langgraph.json` is not the default service entrypoint.  The scripts and Docker
+deployments run the Gateway embedded runtime; the file is kept for LangGraph
+tooling, Studio, or direct LangGraph Server compatibility.
+
+To start the optional standalone development server and open its Studio URL:
+
+```bash
+cd backend
+uv run langgraph dev --allow-blocking
+```
+
+Run it from `backend/` so the CLI discovers `langgraph.json`. The in-memory
+server is intended for development and testing, not production deployment. The
+flag permits DeerFlow's synchronous configuration and graph-factory setup
+during local Studio requests; it is not a production-server setting. Its local
+Studio authentication and registered graph discovery are handled automatically;
+no custom connection headers are required. Assistant ownership/provenance is
+stamped by the server, and normal assistant-version selection remains available.
+Before the locked local runtime loads its persisted development store, DeerFlow
+repairs legacy assistant rows and version history so older metadata cannot
+reactivate server-only privileges or be discarded by runtime startup cleanup.
+Run `uv sync` after dependency changes; this compatibility path requires the
+declared LangGraph runtime versions and warns when the persisted-store contract
+does not match its expectations.
+The same file-based custom-app loading path used by this command is covered by
+the backend regression suite.
 
 ---
 
@@ -298,6 +356,26 @@ MCP servers and skill states in a single file:
         "client_id": "$MCP_OAUTH_CLIENT_ID",
         "client_secret": "$MCP_OAUTH_CLIENT_SECRET"
       }
+    },
+    "postgres": {
+      "enabled": false,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"],
+      "description": "PostgreSQL database access",
+      "routing": {
+        "mode": "prefer",
+        "priority": 50,
+        "keywords": ["orders", "users", "SQL", "database", "table"]
+      },
+      "tools": {
+        "query": {
+          "routing": {
+            "priority": 100,
+            "keywords": ["query database", "orders table", "metrics"]
+          }
+        }
+      }
     }
   },
   "skills": {
@@ -305,6 +383,12 @@ MCP servers and skill states in a single file:
   }
 }
 ```
+
+`routing` adds soft MCP preference hints to the agent prompt. It helps the
+model prefer a configured MCP tool for matching requests without forbidding
+other tools. When `tool_search.enabled=true` defers MCP schemas, matching
+routing metadata can auto-promote up to `tool_search.auto_promote_top_k`
+deferred schemas before the model call.
 
 ### Environment Variables
 
@@ -362,11 +446,45 @@ If a provider is explicitly enabled but required credentials are missing, or the
 
 ```bash
 make install    # Install dependencies
-make dev        # Run LangGraph server (port 2024)
-make gateway    # Run Gateway API (port 8001)
+make dev        # Run Gateway API + embedded agent runtime with safe reload (port 8001)
+make gateway    # Run Gateway API without reload (port 8001)
 make lint       # Run linter (ruff)
 make format     # Format code (ruff)
+make detect-blocking-io  # Inventory blocking IO that may block the backend event loop
+make migrate-rev MSG="..."  # Autogenerate a new alembic revision against the live ORM models
 ```
+
+`make dev` pre-creates and excludes `DEER_FLOW_HOME` (by default
+`backend/.deer-flow`) and `backend/sandbox` from Uvicorn's reload watcher. Use
+this target instead of a bare `uvicorn --reload`: agent tasks write Python and
+other runtime files under `DEER_FLOW_HOME`, and watching that directory can
+restart the Gateway during an active run.
+
+### Schema Migrations
+
+DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`,
+`run_events`, and the `channel_*` tables) are owned by alembic. The Gateway
+runs `alembic upgrade head` automatically on startup via
+`bootstrap_schema(engine, backend=...)`, so operators do not run `alembic`
+manually in production. Bootstrap is concurrency-safe (Postgres advisory lock
+across processes; per-engine `asyncio.Lock` inside one SQLite process) and
+idempotent against pre-existing schemas (empty / legacy / versioned).
+
+When you add or change an ORM model, ship the change as a new revision under
+`packages/harness/deerflow/persistence/migrations/versions/`:
+
+```bash
+make migrate-rev MSG="add foo column to runs"
+```
+
+The target invokes `scripts/_autogen_revision.py`, which builds a fresh temp
+SQLite at `head` and diffs the live models against it — so a clean checkout
+does not need a pre-existing `./data/deerflow.db`. Review the generated file
+and switch raw `op.add_column` / `op.drop_column` calls to the idempotent
+helpers in `migrations/_helpers.py` before committing. There is no
+`make migrate` / `make migrate-stamp` target on purpose — Gateway startup is
+the only execution path, which keeps operational mistakes off the table. See
+`backend/CLAUDE.md` (Schema Migrations) for the full design.
 
 ### Code Style
 
@@ -379,8 +497,33 @@ make format     # Format code (ruff)
 ### Testing
 
 ```bash
-uv run pytest
+# Default offline backend suite (live external-API and blocking-I/O tests are excluded)
+make test
+
+# Strict blocking-I/O suite
+make test-blocking-io
+
+# Explicit real-API DeerFlowClient integration suite
+make test-live
 ```
+
+The live suite requires a valid root `config.yaml` and API credentials. It may
+incur API costs or create local sandboxes, artifacts, and files, so it is not
+part of default test runs or CI. Direct pytest invocation of
+`tests/test_client_live.py` also requires
+`DEER_FLOW_RUN_LIVE_TESTS=1`.
+
+`make detect-blocking-io` statically scans backend business code for blocking
+IO that may run on the backend event loop and is not test-coverage-bound. It
+prints a concise summary for human review and writes complete JSON findings to
+`.deer-flow/blocking-io-findings.json` at the repository root (regardless of
+whether the target is invoked from the repo root or from `backend/`). JSON
+findings include both broad IO category and review-oriented fields such as
+`priority`, `location`, `blocking_call`, `event_loop_exposure`, `reason`, and
+`code`. `priority` is a deterministic review ordering from the operation type,
+not proof of a bug. Bare-name same-file calls are resolved by function name,
+so duplicate helper names in one file can conservatively over-report async
+reachability.
 
 ---
 

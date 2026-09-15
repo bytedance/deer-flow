@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""Resolve uv extras for local `uv sync` based on environment + config.yaml.
+
+Order of resolution:
+1. `UV_EXTRAS` env var. Comma- or whitespace-separated names so multiple
+   extras can be layered (e.g. ``UV_EXTRAS=postgres,ollama``). The same
+   parsing semantics apply in the Docker dev container via
+   ``docker/dev-entrypoint.sh`` and in the production Docker image build via
+   ``backend/Dockerfile``.
+2. Auto-detection from config.yaml — currently maps:
+   - database.backend == postgres        -> postgres
+   - checkpointer.type == postgres       -> postgres
+   - stream_bridge.type == redis         -> redis
+   - tools[].name == browser_navigate    -> browser
+   - sandbox.ownership.type == redis     -> redis
+   - channels.buzz.enabled == true       -> buzz
+   - models[].use == langchain_ollama:*  -> ollama
+3. Runtime environment toggles that enable optional backends:
+   - DEER_FLOW_STREAM_BRIDGE_REDIS_URL   -> redis
+   - DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL -> redis
+
+Each extra name is validated against ``^[A-Za-z][A-Za-z0-9_-]*$`` (the same
+shape uv enforces for `[project.optional-dependencies]` keys). Anything else
+is dropped with a stderr warning so a stray shell metacharacter in `.env`
+cannot reach the `uv sync` invocation downstream.
+
+Output: space-separated `--extra <name>` flags ready for splat into
+`uv sync`, e.g. `--extra postgres`. Empty output means "no extras".
+
+Intentionally implemented with the standard library only: this script must run
+*before* `uv sync` has populated the venv, so it cannot depend on PyYAML.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+from pathlib import Path
+
+# Mirrors uv's accepted shape for extra names — keeps the eventual
+# `uv sync --extra <name>` invocation free of shell metacharacters even when
+# `UV_EXTRAS` comes from `.env` or another semi-trusted source.
+_EXTRA_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+
+def _validate_extras(names: list[str]) -> list[str]:
+    valid: list[str] = []
+    for name in names:
+        if _EXTRA_NAME_RE.match(name):
+            valid.append(name)
+        else:
+            print(
+                f"detect_uv_extras: ignoring invalid UV_EXTRAS entry {name!r} (must match [A-Za-z][A-Za-z0-9_-]*)",
+                file=sys.stderr,
+            )
+    return valid
+
+
+def parse_env_extras(value: str) -> list[str]:
+    """Split UV_EXTRAS into a list, accepting comma or whitespace separators."""
+    parts = re.split(r"[\s,]+", value.strip())
+    return _validate_extras([p for p in parts if p])
+
+
+def find_config_file() -> Path | None:
+    """Locate config.yaml using the same precedence as serve.sh."""
+    explicit = os.environ.get("DEER_FLOW_CONFIG_PATH")
+    if explicit:
+        candidate = Path(explicit)
+        if candidate.is_file():
+            return candidate
+    for path in (Path("config.yaml"), Path("backend/config.yaml")):
+        if path.is_file():
+            return path
+    return None
+
+
+_SECTION_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*$")
+_INDENTED_SECTION_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*$")
+_KEY_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*(\S.*?)\s*$")
+_LIST_ITEM_NAME_RE = re.compile(r"^\s*-\s+name\s*:\s*(\S.*?)\s*$")
+# `use:` on a models list item, whether it is the first key (`- use: X`) or a
+# later one (`  use: X`). Leading whitespace is optional because
+# `yaml.safe_dump` (the setup wizard, config-upgrade.sh) writes list items
+# unindented. The caller pins matching to the model's own key indent, so a
+# `use` nested in a sub-mapping (e.g. `when_thinking_enabled`) is not mistaken
+# for the model's provider.
+_MODEL_USE_RE = re.compile(r"^\s*(?:-\s+)?use\s*:\s*(\S.*?)\s*$")
+# A sequence item: group 1 is the dash's indent, group 2 the dash plus the
+# spaces before the item's first key, so their combined length is where that
+# item's keys sit.
+_LIST_ITEM_RE = re.compile(r"^(\s*)(-\s+)\S")
+
+# Provider module (the part before `:` in `models[].use`) -> uv extra that
+# ships it. Mirrors `[project.optional-dependencies]` in the harness package.
+_PROVIDER_EXTRAS = {"langchain_ollama": "ollama"}
+
+
+def _strip_comment(line: str) -> str:
+    """Drop trailing `#` comments while preserving `#` inside quoted strings."""
+    in_quote: str | None = None
+    out: list[str] = []
+    for ch in line:
+        if in_quote is not None:
+            out.append(ch)
+            if ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ("'", '"'):
+            in_quote = ch
+            out.append(ch)
+        elif ch == "#":
+            break
+        else:
+            out.append(ch)
+    return "".join(out).rstrip()
+
+
+def _unquote(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+def section_value(lines: list[str], section: str, key: str) -> str | None:
+    """Return the value of `section.key` from a flat-ish YAML, or None.
+
+    Only handles the shallow shape DeerFlow uses for these settings:
+        database:
+          backend: postgres
+    Nested mappings deeper than the immediate child level are ignored on
+    purpose — that keeps this parser predictable without a full YAML stack.
+    """
+    inside = False
+    child_indent: int | None = None
+    for raw in lines:
+        line = _strip_comment(raw)
+        if not line.strip():
+            continue
+        sect_match = _SECTION_RE.match(line)
+        if sect_match:
+            inside = sect_match.group(1) == section
+            child_indent = None
+            continue
+        if not inside:
+            continue
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if indent == 0:
+            inside = False
+            continue
+        if child_indent is None:
+            child_indent = indent
+        if indent < child_indent:
+            inside = False
+            continue
+        if indent != child_indent:
+            continue
+        key_match = _KEY_RE.match(line)
+        if key_match and key_match.group(1) == key:
+            return _unquote(key_match.group(2).strip())
+    return None
+
+
+def nested_section_value(lines: list[str], section_path: str, key: str) -> str | None:
+    """Return the value of a nested YAML key like ``channels.discord.enabled``.
+
+    Handles two levels of nesting:
+        channels:
+          discord:
+            enabled: true
+    """
+    parts = section_path.split(".")
+    if len(parts) != 2:
+        return None
+    parent_section, child_section = parts
+
+    inside_parent = False
+    inside_child = False
+    parent_indent: int | None = None
+    child_indent: int | None = None
+
+    for raw in lines:
+        line = _strip_comment(raw)
+        if not line.strip():
+            continue
+
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+
+        # Top-level section match
+        sect_match = _SECTION_RE.match(line)
+        if sect_match:
+            if indent == 0:
+                inside_parent = sect_match.group(1) == parent_section
+            inside_child = False
+            parent_indent = None
+            child_indent = None
+            continue
+
+        if not inside_parent:
+            continue
+
+        # Track parent indent from first child
+        if parent_indent is None and indent > 0:
+            parent_indent = indent
+
+        # If indent goes back to 0, we left the parent section
+        if indent == 0:
+            inside_parent = False
+            inside_child = False
+            continue
+
+        # Check if we're at the parent's child level (subsection)
+        if parent_indent is not None and indent == parent_indent:
+            # This could be a subsection or a direct key of parent
+            sub_match = _INDENTED_SECTION_RE.match(line)
+            if sub_match and sub_match.group(1) == child_section:
+                inside_child = True
+                child_indent = None
+                continue
+            else:
+                inside_child = False
+                continue
+
+        if not inside_child:
+            continue
+
+        # We're inside the subsection — track child indent
+        if child_indent is None and indent > (parent_indent or 0):
+            child_indent = indent
+
+        if child_indent is not None and indent != child_indent:
+            continue
+
+        key_match = _KEY_RE.match(line)
+        if key_match and key_match.group(1) == key:
+            return _unquote(key_match.group(2).strip())
+
+    return None
+
+
+def tools_include_name(lines: list[str], tool_name: str) -> bool:
+    """Return True when the top-level tools list has an active item name."""
+    inside = False
+    for raw in lines:
+        line = _strip_comment(raw)
+        if not line.strip():
+            continue
+        sect_match = _SECTION_RE.match(line)
+        if sect_match:
+            inside = sect_match.group(1) == "tools"
+            continue
+        if not inside:
+            continue
+        name_match = _LIST_ITEM_NAME_RE.match(line)
+        if name_match:
+            if _unquote(name_match.group(1).strip()) == tool_name:
+                return True
+            continue
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if indent == 0:
+            inside = False
+            continue
+    return False
+
+
+def models_use_providers(lines: list[str]) -> set[str]:
+    """Return provider modules referenced by `models[].use`.
+
+    Only each model's own `use` counts. The first sequence item under `models:`
+    fixes the indent of the model list; later items at that indent start a new
+    model and set where its keys sit. That handles both the indented layout in
+    config.example.yaml and the unindented one `yaml.safe_dump` emits. Deeper
+    content — a sub-mapping such as `when_thinking_enabled`, or a sequence
+    inside a model option such as `stop:` — is skipped and never moves the key
+    indent, so key order within a model does not change the result.
+
+    Commented-out example blocks are dropped by ``_strip_comment`` before
+    matching, which keeps the fully-commented `models:` section shipped in
+    config.example.yaml from enabling an extra.
+    """
+    inside = False
+    item_indent: int | None = None
+    key_indent: int | None = None
+    providers: set[str] = set()
+    for raw in lines:
+        line = _strip_comment(raw)
+        if not line.strip():
+            continue
+        sect_match = _SECTION_RE.match(line)
+        if sect_match:
+            inside = sect_match.group(1) == "models"
+            item_indent = key_indent = None
+            continue
+        if not inside:
+            continue
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        item_match = _LIST_ITEM_RE.match(line)
+        if item_match and (item_indent is None or len(item_match.group(1)) == item_indent):
+            # A model entry. Checked before the section-end test below because
+            # `yaml.safe_dump` puts these at column 0.
+            item_indent = len(item_match.group(1))
+            key_indent = item_indent + len(item_match.group(2))
+        elif indent == 0 or (item_indent is not None and indent <= item_indent):
+            # A new top-level key, or a dedent past the model list.
+            inside = False
+            item_indent = key_indent = None
+            continue
+        elif item_match or indent != key_indent:
+            # A sequence item inside a model option, or content nested deeper
+            # than the model's own keys. Neither is the model's provider.
+            continue
+        use_match = _MODEL_USE_RE.match(line)
+        if use_match:
+            target = _unquote(use_match.group(1).strip())
+            providers.add(target.split(":", 1)[0].split(".", 1)[0])
+    return providers
+
+
+def detect_from_config(path: Path) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    lines = text.splitlines()
+    extras: set[str] = set()
+    if (section_value(lines, "database", "backend") or "").lower() == "postgres":
+        extras.add("postgres")
+    if (section_value(lines, "checkpointer", "type") or "").lower() == "postgres":
+        extras.add("postgres")
+    if (section_value(lines, "stream_bridge", "type") or "").lower() == "redis":
+        extras.add("redis")
+    if (nested_section_value(lines, "sandbox.ownership", "type") or "").lower() == "redis":
+        extras.add("redis")
+    if (nested_section_value(lines, "channels.discord", "enabled") or "").lower() == "true":
+        extras.add("discord")
+    if (nested_section_value(lines, "channels.buzz", "enabled") or "").lower() == "true":
+        extras.add("buzz")
+    if tools_include_name(lines, "browser_navigate"):
+        extras.add("browser")
+    for provider in models_use_providers(lines):
+        extra = _PROVIDER_EXTRAS.get(provider)
+        if extra is not None:
+            extras.add(extra)
+    return sorted(extras)
+
+
+def detect_from_runtime_env() -> list[str]:
+    extras: set[str] = set()
+    if os.environ.get("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "").strip():
+        extras.add("redis")
+    if os.environ.get("DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL", "").strip():
+        extras.add("redis")
+    return sorted(extras)
+
+
+def merge_extras(*groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for extra in group:
+            if extra in seen:
+                continue
+            seen.add(extra)
+            merged.append(extra)
+    return merged
+
+
+def resolve_extras() -> list[str]:
+    runtime_env_extras = detect_from_runtime_env()
+    env = os.environ.get("UV_EXTRAS", "")
+    if env.strip():
+        return merge_extras(parse_env_extras(env), runtime_env_extras)
+    config = find_config_file()
+    if config is None:
+        return runtime_env_extras
+    return merge_extras(detect_from_config(config), runtime_env_extras)
+
+
+def format_flags(extras: list[str]) -> str:
+    return " ".join(f"--extra {e}" for e in extras)
+
+
+def main() -> int:
+    extras = resolve_extras()
+    if extras:
+        sys.stdout.write(format_flags(extras))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

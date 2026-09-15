@@ -2,7 +2,9 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from deerflow.config.postgres_schema import POSTGRES_SCHEMA_PATTERN, validate_postgres_schema
 
 CheckpointerType = Literal["memory", "sqlite", "postgres"]
 
@@ -14,15 +16,25 @@ class CheckpointerConfig(BaseModel):
         description="Checkpointer backend type. "
         "'memory' is in-process only (lost on restart). "
         "'sqlite' persists to a local file (requires langgraph-checkpoint-sqlite). "
-        "'postgres' persists to PostgreSQL (requires langgraph-checkpoint-postgres)."
+        "'postgres' persists to PostgreSQL (install with deerflow-harness[postgres])."
     )
     connection_string: str | None = Field(
         default=None,
         description="Connection string for sqlite (file path) or postgres (DSN). "
-        "Required for sqlite and postgres types. "
+        "Optional for sqlite and defaults to 'store.db' when omitted. "
+        "Required for postgres. "
         "For sqlite, use a file path like '.deer-flow/checkpoints.db' or ':memory:' for in-memory. "
         "For postgres, use a DSN like 'postgresql://user:pass@localhost:5432/db'.",
     )
+    postgres_schema: str = Field(
+        default="",
+        description=(f"PostgreSQL schema for legacy checkpointer/store tables (postgres only). Empty string keeps the server default search_path (usually 'public'). Only plain identifiers are allowed: {POSTGRES_SCHEMA_PATTERN}."),
+    )
+
+    @field_validator("postgres_schema")
+    @classmethod
+    def _validate_postgres_schema(cls, value: str) -> str:
+        return validate_postgres_schema(value)
 
 
 # Global configuration instance — None means no checkpointer is configured.
@@ -40,7 +52,24 @@ def set_checkpointer_config(config: CheckpointerConfig | None) -> None:
     _checkpointer_config = config
 
 
-def load_checkpointer_config_from_dict(config_dict: dict) -> None:
+def ensure_config_loaded() -> None:
+    """Lazily load app config when checkpointer config has not been initialized."""
+    from deerflow.config.app_config import _app_config, get_app_config
+
+    config = get_checkpointer_config()
+    if config is not None or _app_config is not None:
+        return
+
+    try:
+        get_app_config()
+    except FileNotFoundError:
+        pass
+
+
+def load_checkpointer_config_from_dict(config_dict: dict | None) -> None:
     """Load checkpointer configuration from a dictionary."""
     global _checkpointer_config
+    if config_dict is None:
+        _checkpointer_config = None
+        return
     _checkpointer_config = CheckpointerConfig(**config_dict)

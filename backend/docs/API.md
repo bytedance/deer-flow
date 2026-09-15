@@ -6,16 +6,159 @@ This document provides a complete reference for the DeerFlow backend APIs.
 
 DeerFlow backend exposes two sets of APIs:
 
-1. **LangGraph API** - Agent interactions, threads, and streaming (`/api/langgraph/*`)
+1. **LangGraph-compatible API** - Agent interactions, threads, and streaming (`/api/langgraph/*`)
 2. **Gateway API** - Models, MCP, skills, uploads, and artifacts (`/api/*`)
 
 All APIs are accessed through the Nginx reverse proxy at port 2026.
 
-## LangGraph API
+For agent conversations, clients can either pre-create a thread
+(`POST /api/langgraph/threads`) or start immediately with the stateless stream
+endpoint (`POST /api/langgraph/runs/stream`). The latter auto-creates a thread
+and returns `thread_id` and `run_id` in the response `Content-Location` header.
+
+## Authentication
+
+Browser sessions authenticate with the `access_token` session cookie issued at
+login. Programmatic clients can instead use a **personal access token (PAT)**
+sent as a Bearer credential:
+
+```http
+POST /api/threads/search
+Authorization: Bearer dfp_...
+Content-Type: application/json
+
+{}
+```
+
+PATs require a configured database backend (SQLite/PostgreSQL) — on the
+memory-only backend, Bearer credentials are rejected and PAT management routes
+return `503`.
+
+### Account Preferences
+
+`GET /api/v1/auth/preferences` returns the signed-in browser user's four
+preferences. `PATCH` updates only explicitly supplied fields and returns `204`.
+Both require `X-Expected-User-Id` matching the session user; PATCH also requires
+the normal `X-CSRF-Token` header. The expected ID is a stale-tab guard, not an
+authorization credential. PAT, internal, and auth-disabled callers receive
+`403`; a different session user receives `409`.
+
+```json
+{
+  "notification_enabled": false,
+  "model_name": "my-model",
+  "mode": "pro",
+  "reasoning_effort": "high"
+}
+```
+
+All four fields accept `null` to restore the default. `mode` accepts `flash`,
+`thinking`, `pro`, or `ultra`; `reasoning_effort` accepts `minimal`, `low`,
+`medium`, or `high`; model names are at most 200 characters. Unknown fields and
+invalid values return `422`. Missing preferences read as `null`. Separate-field
+patches preserve each other's changes, and same-field writes are last-commit-wins.
+Storage requires SQLite or PostgreSQL (`503` when unavailable). Browser
+notification permission remains device-local and is not changed by this API.
+
+### Personal Access Tokens
+
+Base URL: `/api/v1/auth`
+
+PAT management requires an **interactive session** (a PAT cannot manage PATs
+or change passwords, so a leaked automation token cannot mint fresh
+credentials). The raw token is returned **exactly once** at creation; only its
+SHA-256 digest is stored server-side.
+
+#### Create Token
+
+```http
+POST /api/v1/auth/pats
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "name": "ci-runner",
+  "scopes": ["threads:read", "runs:create", "runs:read"],
+  "expires_in_days": 90
+}
+```
+
+- `scopes` — subset of the route permissions: `threads:read`, `threads:write`,
+  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`. A PAT can only
+  *narrow* its owning user's permissions, never widen them.
+- `expires_in_days` — optional (`1`–`365`); omitted means the token never expires.
+
+**Response (`201`):**
+```json
+{
+  "id": "0f0c6e6a-...",
+  "name": "ci-runner",
+  "scopes": ["runs:create", "runs:read", "threads:read"],
+  "expires_at": "2026-11-25T10:30:00Z",
+  "created_at": "2026-08-27T10:30:00Z",
+  "token": "dfp_..."
+}
+```
+
+Save `token` immediately — it cannot be retrieved again.
+
+#### List Tokens
+
+```http
+GET /api/v1/auth/pats
+```
+
+Returns the caller's tokens with `last_used_at` / `revoked_at` audit fields;
+never returns digests or raw tokens.
+
+#### Revoke Token
+
+```http
+DELETE /api/v1/auth/pats/{pat_id}
+```
+
+Revocation is immediate.
+
+### PAT Constraints
+
+- A request carrying an `Authorization` header that fails validation gets a
+  hard `401` — it never falls back to the session cookie.
+- **Cancel capability requires `runs:cancel` on every request dimension that
+  carries it**, not just the dedicated cancel route: `?action=interrupt|rollback`
+  on `POST /api/threads/{thread_id}/runs/{run_id}/stream` (action-less joins
+  stay at `runs:read`), and `multitask_strategy=interrupt|rollback` on run
+  creation (the default `reject` stays at `runs:create`). Joining a run's
+  stream is pure observation — an observer disconnecting never cancels the run.
+- **Route-level default-deny:** PAT requests are admitted only to the
+  thread/run lifecycle routes the v1 scopes govern — `POST /api/threads`
+  (create), `POST /api/threads/search` (list), `GET/PATCH/DELETE
+  /api/threads/{thread_id}`, the thread `goal`/`state`/`compact`/`history`/
+  `branches` subroutes, and exactly the implemented `/runs` subroutes
+  (`GET|POST /api/threads/{thread_id}/runs`, the POST-only `stream`, `wait`,
+  `regenerate/prepare`, and `edit-regenerate/prepare` collection endpoints,
+  `GET /api/threads/{thread_id}/runs/{run_id}` plus its `cancel` (POST),
+  `join`/`messages`/`events`/`workspace-changes` (GET), and
+  `GET|POST .../runs/{run_id}/stream`), plus `POST /api/runs/stream|wait` and
+  `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
+  denied until explicitly added to the policy.
+  Every other authenticated route — memory, agents, models, MCP/skills
+  config, integrations, channels, uploads — answers `403` to PAT callers
+  regardless of scopes. Scope enforcement alone only constrains
+  permission-decorated routes, so the allowlist is the outer boundary;
+  session-cookie callers are unaffected.
+- PAT credentials never carry admin capability, even when the owning user is
+  an admin. This includes extension-contributed admin routes: the extension
+  principal projection suppresses every admin signal for PAT callers.
+- Revoking or deleting the owning user invalidates their PATs on the next
+  request.
+
+## LangGraph-compatible API
 
 Base URL: `/api/langgraph`
 
-The LangGraph API is provided by the LangGraph server and follows the LangGraph SDK conventions.
+The public LangGraph-compatible API follows LangGraph SDK conventions. In the unified nginx deployment, Gateway owns `/api/langgraph/*` and translates those paths to its native `/api/*` run, thread, and streaming routers.
 
 ### Threads
 
@@ -72,7 +215,37 @@ Execute the agent with input.
 ```http
 POST /api/langgraph/threads/{thread_id}/runs
 Content-Type: application/json
+Idempotency-Key: <unique key for this logical request>  # optional
 ```
+
+The thread-scoped create, stream, and wait endpoints accept an optional
+`Idempotency-Key` header. Retrying with the same authenticated user, `thread_id`,
+and key reuses the existing run instead of executing the input again. The key is
+shared across `/runs`, `/runs/stream`, and `/runs/wait` for a given user and
+thread, so the same key string cannot back two different calls even across those
+endpoints. Reuse is bound to the original `input`, `assistant_id` and
+`conversation_references`; a retry that changes them returns 409. Generate a new key for every intentional user
+action; reuse a key only when retrying that same action after an uncertain HTTP
+result. Keys may be at most 255 characters. Stateless `/api/langgraph/runs/*`
+endpoints do not support this header because requests without an explicit thread
+create a new temporary conversation.
+
+Retrying a still-running run that this worker cannot stream returns 409 from
+`/runs/stream` (`Run ... is not active on this worker and cannot be streamed`)
+with no `Retry-After`. The same shape on `/runs/wait` returns 200
+`{"status": "<durable status>", "error": ...}` without blocking for a final
+state. Retrying a finished run through `/runs/wait` also returns that durable
+status payload rather than the latest thread checkpoint: a later run on the
+same thread may have advanced the head, and `/wait` does not claim that head
+as this run's result. That status is the durable row after completion, not
+the hydrated record from admission time. The original creating `/wait` still
+returns this run's checkpoint even if a retry overlaps while it is waiting. Retrying a finished run whose SSE log is gone emits a `gap` frame
+(`stream_replay_gap`, `recovery: reload_durable_state`) on the creating
+`/runs/stream` endpoint and closes without an `end` frame; reload durable
+thread/run state instead of treating the stream as empty. Observer joins of
+that same run still end with `end`. Stateless `/api/langgraph/runs/stream`
+does not accept this header and keeps the existing missing-stream close of
+`end`; the `gap` signal is only on a thread-scoped creating retry.
 
 **Request Body:**
 ```json
@@ -98,23 +271,39 @@ Content-Type: application/json
 ```
 
 **Stream Mode Compatibility:**
-- Use: `values`, `messages-tuple`, `custom`, `updates`, `events`, `debug`, `tasks`, `checkpoints`
-- Do not use: `tools` (deprecated/invalid in current `langgraph-api` and will trigger schema validation errors)
+- Use: `values`, `messages-tuple`, `custom`, `updates`, `debug`, `tasks`, `checkpoints`
+- Unsupported modes, including `messages`, `events`, and `tools`, return `422` before a run is created. DeerFlow never substitutes `values` for an unsupported mode.
+
+**Run Option Compatibility:**
+- Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
+- Compatibility default: `if_not_exists="create"`; this matches DeerFlow's current behavior
+- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
+- Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
+- `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
+- Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
+
+When outputs changed during the run, `run.delivery` events retain the Slice 1
+facts (`presented`, `paths`, and `by_tool`) and add `produced_paths`,
+`presented_paths`, `matched_paths`, plus an explicit verdict: `verification`,
+`stage` (`presented`, `mismatched`, or `not_started`), and `satisfied`. Receipts
+for runs without changed outputs keep their existing shape.
 
 **Recursion Limit:**
 
 `config.recursion_limit` caps the number of graph steps LangGraph will execute
-in a single run. The `/api/langgraph/*` endpoints go straight to the LangGraph
-server and therefore inherit LangGraph's native default of **25**, which is
-too low for plan-mode or subagent-heavy runs — the agent typically errors out
-with `GraphRecursionError` after the first round of subagent results comes
-back, before the lead agent can synthesize the final answer.
-
-DeerFlow's own Gateway and IM-channel paths mitigate this by defaulting to
-`100` in `build_run_config` (see `backend/app/gateway/services.py`), but
-clients calling the LangGraph API directly must set `recursion_limit`
-explicitly in the request body. `100` matches the Gateway default and is a
-safe starting point; increase it if you run deeply nested subagent graphs.
+in a single run. The unified Gateway path uses the top-level `recursion_limit`
+from `config.yaml` (default `100`) when a request does not provide one. Clients
+can still set `recursion_limit` explicitly in the request body, and a valid
+request value takes precedence. Scheduled-task launches do not take a client body: they
+use `scheduler.recursion_limit` from `config.yaml` (default `1000`, matching
+the web UI). For safety, the Gateway clamps any supplied
+or configured value to a server ceiling (`max_recursion_limit` in `config.yaml`,
+default `1000`) so a single run cannot execute unbounded graph steps (runaway
+LLM cost / DoS); invalid or non-positive request values fall back to the
+configured default. Both top-level fields are read per run, so edits apply to
+the next request without restarting the Gateway. This top-level setting applies
+to Gateway API runs only; IM channel and embedded `DeerFlowClient` runs retain
+their own defaults and override paths.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
@@ -133,6 +322,81 @@ data: {"content": "Hello! I'd be happy to help.", "role": "assistant"}
 event: end
 data: {}
 ```
+
+#### Referencing a previous conversation
+
+With `read_conversation` enabled in `config.yaml` (see [configuration](CONFIGURATION.md#reading-referenced-conversations)),
+Gateway API callers can attach up to three explicit references to create/stream/wait requests:
+
+```json
+{
+  "input": {"messages": [{"role": "user", "content": "Use the requirements agreed in the referenced conversation."}]},
+  "conversation_references": ["https://deerflow.example/workspace/chats/source-thread"]
+}
+```
+
+A reference is a valid thread ID or an absolute `/workspace/chats/{thread_id}` URL
+(also `/workspace/agents/{agent_name}/chats/{thread_id}` for custom agents)
+with the same scheme and authority as the run request, without query or fragment.
+URLs are parsed as local selectors and are never fetched. For split-origin clients
+or internal proxies, pass the thread ID. The field is separate from message text:
+links in pasted documents, tool results, or previous messages grant no access.
+The server supplies source IDs to the model as background user-role data and
+binds the reader to this run's references and authenticated identity.
+
+The request requires `runs:read` as well as the normal run-creation permission.
+The tool rechecks source ownership on each read; foreign, deleted and unowned
+legacy threads are unavailable. `read_conversation(thread_id, cursor?, limit?)`
+reads newest-first pages (messages within each page are chronological), at most
+50 visible user/assistant messages, 4,000 characters per message and 20,000 text
+characters per page. Each page also stays within the tool-output budget that
+applies to `read_conversation` (`tool_output.tool_overrides.read_conversation`,
+else `externalize_min_chars`, and `fallback_max_chars`; 12,000 serialized
+characters by default), so results reach the model inline instead of being
+externalized to a file. A message that does not fit starts the next page intact.
+Only a message longer than 4,000 characters, or one whose serialized form alone
+exceeds the budget, is truncated. Such a message carries
+`continuation: {"message_seq", "offset"}`; `read_conversation(thread_id,
+message_seq=..., offset=...)` without a cursor returns the next part of that one
+message (at most 20,000 text characters, sized to the same budget) with its
+`offset`, `text_length` and, while text remains, a new continuation. Offsets
+refer to the source's current text: an offset past its end returns
+`invalid_request`, and a message that is no longer visible is unavailable. If the
+`read_conversation` budget is too small to return any text (below roughly 800
+serialized characters), the result is `output_budget_too_small` rather than a
+continuation that makes no progress.
+Results include message IDs, sequence numbers, continuation, truncation and
+unavailability. Hidden messages, reasoning blocks, raw tool
+results and subagent internals are excluded. Source data is not changed.
+
+**Live reads and retained copies.** Each call reads the source's current visible
+history. Editing or regenerating the source can change subsequent reads, including
+later pages; a reference does not pin an immutable transcript. Text already returned
+to the destination is a copy and is not automatically refreshed by source changes.
+
+Read permission lasts only for this run, including its internal continuation steps.
+Every new run, including resume, regenerate or edit replay, must submit references
+again; checkpoints and old hints never restore permission. A resume can reuse
+IDs already visible in the interrupted conversation, but needs the explicit
+request field again. Missing/expired transcripts are not reconstructed from
+checkpoints or memory.
+
+Permission expiry does not erase excerpts already stored in the destination
+conversation or conclusions derived from them. Deleting the source does not
+retroactively erase those copies either; they follow the destination's own
+retention and deletion behavior. Once the source is unavailable, further source
+reads report unavailability rather than reconstructing it from destination copies.
+
+**Incomplete requirements.** When `truncated` is true, the tool's notice tells
+the agent to read the rest through each cut message's continuation before relying
+on it, and to acknowledge the omission and request the missing material if that
+read is unavailable. `has_more: false` means there are no older messages to page
+through, not that every returned message is complete. This is model guidance, not
+a new confirmation mechanism or a guarantee of model compliance.
+
+This first version adds no frontend picker or link-to-reference conversion. The
+tool is unavailable to bootstrap agents, subagents and embedded clients without
+a host-provided reader. Active tool/skill policies continue to apply.
 
 #### Get Run History
 
@@ -160,9 +424,82 @@ Stream responses in real-time.
 ```http
 POST /api/langgraph/threads/{thread_id}/runs/stream
 Content-Type: application/json
+Idempotency-Key: <unique key for this logical request>  # optional
 ```
 
 Same request body as Create Run. Returns SSE stream.
+
+#### Stateless Stream Run
+
+Start a conversation without creating a thread first. Gateway auto-creates a
+thread when `config.configurable.thread_id` is omitted, and returns both
+identifiers in the response `Content-Location` header.
+
+```http
+POST /api/langgraph/runs/stream
+Content-Type: application/json
+Accept: text/event-stream
+```
+
+Through Nginx, `/api/langgraph/runs/stream` is rewritten to the native Gateway
+path `POST /api/runs/stream`.
+
+**Request Body:** Same as [Create Run](#create-run). Omit `thread_id` to start a
+new conversation; include it to continue an existing one:
+
+```json
+{
+  "input": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello, can you help me?"
+      }
+    ]
+  },
+  "config": {
+    "recursion_limit": 100,
+    "configurable": {
+      "model_name": "gpt-4",
+      "thinking_enabled": false,
+      "is_plan_mode": false
+    }
+  },
+  "stream_mode": ["values", "messages-tuple", "custom"]
+}
+```
+
+**Response:** Server-Sent Events (SSE) stream with a `Content-Location` header:
+
+```http
+Content-Location: /api/threads/{thread_id}/runs/{run_id}
+```
+
+Clients should parse `thread_id` and `run_id` from this header (the path ends
+with `/runs/{run_id}`). Persist `thread_id` and send it back on the next turn
+via `config.configurable.thread_id` to keep conversation history.
+
+**Continuing a conversation:**
+
+```json
+{
+  "input": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "What did I just ask?"
+      }
+    ]
+  },
+  "config": {
+    "configurable": {
+      "thread_id": "abc123",
+      "model_name": "gpt-4"
+    }
+  },
+  "stream_mode": ["values", "messages-tuple", "custom"]
+}
+```
 
 ---
 
@@ -234,10 +571,16 @@ Get current MCP server configurations.
 GET /api/mcp/config
 ```
 
+Requires an authenticated admin session. Sensitive env/header/OAuth secret
+values are masked in the response. Environment placeholders outside secret
+containers are returned in their raw form so editing cannot expose or persist
+their expanded values. Invalid operator-authored JSON/config shapes return
+`400` instead of being reported as a Gateway fault.
+
 **Response:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
       "enabled": true,
       "type": "stdio",
@@ -247,13 +590,6 @@ GET /api/mcp/config
         "GITHUB_TOKEN": "***"
       },
       "description": "GitHub operations"
-    },
-    "filesystem": {
-      "enabled": false,
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem"],
-      "description": "File system access"
     }
   }
 }
@@ -268,10 +604,15 @@ PUT /api/mcp/config
 Content-Type: application/json
 ```
 
+Requires an authenticated admin session. API-managed `stdio` MCP servers may
+only use allowed executable names for `command` (default: `npx`, `uvx`). Set
+`DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST` to a comma-separated list when a
+deployment needs additional trusted launchers.
+
 **Request Body:**
 ```json
 {
-  "mcpServers": {
+  "mcp_servers": {
     "github": {
       "enabled": true,
       "type": "stdio",
@@ -289,8 +630,125 @@ Content-Type: application/json
 **Response:**
 ```json
 {
+  "mcp_servers": {
+    "github": {
+      "enabled": true,
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "***"
+      },
+      "description": "GitHub operations"
+    }
+  }
+}
+```
+
+#### Update One MCP Server State
+
+Enable or disable one configured MCP server without replacing the full
+extensions configuration.
+
+```http
+PATCH /api/mcp/config
+Content-Type: application/json
+```
+
+Requires an authenticated admin session. Enabling a `stdio` server validates
+that server's `command` against the same allowlist used by the full `PUT`
+endpoint. Disabling a server does not require its command to be allowlisted, and
+invalid commands on other servers do not block the update. The endpoint
+preserves secrets, environment-variable placeholders, skills, custom server
+fields, and other top-level extensions config. SSE/HTTP targets may use either
+DeerFlow's `type` field or the MCP-spec `transport` field.
+
+**Request Body:**
+```json
+{
+  "server_name": "semantic-scholar",
+  "enabled": false
+}
+```
+
+The response is the full masked MCP configuration, matching `GET` and `PUT`.
+An unknown `server_name` returns `404`; attempting to enable a server with a
+disallowed `stdio` command returns `400`.
+
+#### Add MCP Servers
+
+Add one or more servers without replacing existing entries. The Gateway
+re-reads the file under the shared configuration lock, so concurrent sibling
+changes are preserved. Existing names return `409`.
+
+```http
+POST /api/mcp/config/servers
+Content-Type: application/json
+```
+
+The request body uses the same `mcp_servers` map as the full `PUT` endpoint.
+
+#### Replace One MCP Server
+
+Completely replace one existing server while preserving sibling entries.
+Omitted ordinary fields are deleted or reset; explicit `***` placeholders
+restore the corresponding stored secret.
+
+A disabled `stdio` replacement may keep a syntactically valid command outside
+the allowlist for offline editing. Command-shape and code-injecting environment
+variable checks still run when saving; the allowlist and executable-argument
+policy run when the server is enabled.
+
+```http
+PUT /api/mcp/config/server
+Content-Type: application/json
+```
+
+```json
+{
+  "server_name": "github",
+  "server": {
+    "enabled": true,
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env": {"GITHUB_TOKEN": "***"}
+  }
+}
+```
+
+#### Delete One MCP Server
+
+Delete one server without replacing sibling entries. The server name is a
+path parameter and the DELETE request has no body. Percent-encode names before
+placing them in the URL; the path converter also keeps legacy empty and
+slash-containing names addressable.
+
+```http
+DELETE /api/mcp/config/servers/{server_name}
+```
+
+All targeted mutations return the full masked MCP configuration. Before any
+write, the Gateway resolves environment variables in a copy and validates the
+same expanded document the runtime will load while persisting the original raw
+placeholders.
+
+#### Reset MCP Tools Cache
+
+Clear cached MCP tools and persistent MCP sessions process-wide. This affects
+all threads and users in the current Gateway process. Tools are loaded again
+from configured MCP servers on the next agent run or tool lookup.
+
+```http
+POST /api/mcp/cache/reset
+```
+
+Requires an authenticated admin session.
+
+**Response:**
+```json
+{
   "success": true,
-  "message": "MCP configuration updated"
+  "message": "MCP tools cache reset. Tools will reload on next use."
 }
 ```
 
@@ -400,6 +858,62 @@ Content-Type: multipart/form-data
   }
 }
 ```
+
+#### Export a Custom Skill
+
+Admin session authentication is required for both requests. PAT credentials cannot export. Only the current user's custom skill is eligible; public, legacy and integration fallback is never used. A disabled custom skill remains eligible.
+
+1. `GET /api/skills/custom/{skill_name}/export-manifest` returns `skill_name`, `revision` (SHA-256 or null), `can_export`, `file_count`, `directory_count`, `total_bytes`, `files` (`path`, `type`, `size`, `executable`), `requirements` (`compatibility`, `allowed_tools`, `required_secrets` names and optional flags), and structured `warnings`/`blockers`. Paths are relative; `.` is the package root, counted in directory/entry totals. Structural blockers return a non-downloadable manifest. Declarations are not credential values or dependency verification.
+2. `GET /api/skills/custom/{skill_name}/export?expected_revision=<64 lowercase hex characters>` recaptures content and rejects stale previews with 409 before sending ZIP headers. Successful responses carry `application/zip`, attachment `<skill_name>.skill`, accurate `Content-Length`, `Cache-Control: private, no-store`, and `X-Content-Type-Options: nosniff`.
+
+Error `detail` contains a safe `code`, `message`, and optional relative `path`. Codes/statuses: `skill_not_found` 404, `skill_changed` 409, `skill_export_limit_exceeded` 413, `skill_export_unsupported` 422, `skill_export_busy` 429, `skill_export_timeout` 503, `skill_export_failed` 500; existing 401/403 auth behavior applies. Limits are 4096 entries including directories, 64 MiB/file, 100 MiB raw/ZIP, 1 MiB frontmatter, 1024 UTF-8 bytes per ZIP path and depth 32. Frontmatter preflight rejects YAML aliases and bounds structure to 32 nesting levels / 16384 parser events before constructing YAML objects. A 5-second lock wait and 60-second cooperative worker deadline bound work; blocking OS calls cannot be forcibly interrupted. Two export slots are shared across all users in each Gateway process; both previews and downloads use them, and 429 means that process-wide capacity is occupied. Slots remain held through worker drain and temporary-file cleanup. The streaming phase has a separate 120-second inactivity deadline, reset after each successful ASGI send. A continuously progressing transfer may exceed 120 seconds overall; a stalled send does not reset the deadline. Expiry aborts the incomplete download (no replacement JSON after ZIP headers); clients must retry. Client disconnect during preparation cancels and drains the worker, then exits the handler normally rather than leaking a synthetic task cancellation. No export cache, persistent job or sharing URL is created.
+
+Raw skill files, sidecars and empty directories are preserved. No hooks/scripts run during export and no secrets are redacted from package files. Import still uses normal security scanning and conflict checks. Export requires no-follow descriptor-relative host filesystem operations; unsupported platforms receive 422 rather than following links unsafely.
+
+#### Reload Skills
+
+Invalidate the skill prompt caches for every user in the current Gateway
+process. Subsequent runs rescan the configured public, custom, and legacy skill
+directories; runs that have already started keep their existing skill snapshot.
+
+```http
+POST /api/skills/reload
+```
+
+The request has no body and requires an authenticated administrator. For a
+cookie-authenticated request, send the CSRF cookie value in the matching header:
+
+```bash
+curl -X POST http://localhost:2026/api/skills/reload \
+  -b cookies.txt \
+  -H "X-CSRF-Token: <csrf_token-cookie-value>"
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "scope": "process",
+  "message": "Skill caches invalidated; subsequent runs in this Gateway process will rescan the latest skills."
+}
+```
+
+`success` confirms cache invalidation, not that every file on disk was valid:
+malformed skills retain the existing parser behavior of being skipped and
+logged. The endpoint returns `401` for unauthenticated callers, `403` for
+non-admin users, and a generic `500` if the invalidation mechanism itself
+fails or the process-local background scan does not finish within the cache
+refresh timeout. A loader-level failure, such as an unavailable mounted root,
+does not publish an empty catalog: the last successfully loaded process cache
+remains available. A timed-out scan continues in its daemon worker and can
+still populate the process cache when it finishes.
+
+The scope is deliberately process-local. Each Uvicorn worker or Kubernetes Pod
+must be called directly; repeated requests through a load-balanced Service do
+not guarantee that every instance is reached. External MinIO/NFS/CSI writes
+bypass the validation, SkillScan, and history used by the install/edit APIs, so
+the mounted directory must be writable only by trusted operators.
 
 ### File Uploads
 
@@ -517,7 +1031,7 @@ GET /api/threads/{thread_id}/artifacts/{path}
 **Query Parameters:**
 - `download` (boolean): If `true`, force download with Content-Disposition header
 
-**Response:** File content with appropriate Content-Type
+**Response:** File content with appropriate Content-Type. HTML and XML documents (`.html`, `.xml`, `.xhtml`, `.svg`, and other `+xml` types) are always returned as attachments, regardless of `download`, so generated markup never renders in the application origin.
 
 ---
 
@@ -541,14 +1055,58 @@ All APIs return errors in a consistent format:
 
 ## Authentication
 
-Currently, DeerFlow does not implement authentication. All APIs are accessible without credentials.
+DeerFlow supports four HTTP identity sources. They share the same thread/run isolation rules but differ in whether a row is created in `users` and how external identities are mapped. See [AUTH_DESIGN.md](AUTH_DESIGN.md) for the full design.
 
-Note: This is about DeerFlow API authentication. MCP outbound connections can still use OAuth for configured HTTP/SSE MCP servers.
+| Model | Entry | `users` table | Isolation key |
+|---|---|---|---|
+| Browser session | `access_token` cookie after login/register | Yes | `users.id` |
+| OIDC / SSO | OAuth callback → cookie | Yes | `users.id` (see [SSO.md](SSO.md)) |
+| IM channel binding | Connect code + `channel_connections` | Bound to registered user | `channel_connections.owner_user_id` |
+| **Internal Auth** | `X-DeerFlow-Internal-Token` + `X-DeerFlow-Owner-User-Id` | **No** | Owner string on `threads_meta.user_id` |
 
-For production deployments, it is recommended to:
-1. Use Nginx for basic auth or OAuth integration
-2. Deploy behind a VPN or private network
-3. Implement custom authentication middleware
+**IM channel binding** and **Internal Auth** are both *platform-trust* integrations: DeerFlow trusts the channel/platform to authenticate end users. IM bindings persist the mapping in `channel_connections` / `channel_conversations` and require a DeerFlow `users` row. Internal Auth lets a platform call the Gateway API directly with a deployment-shared token and a per-request owner header—no `users` row, but thread/run/checkpoint isolation works the same way.
+
+### Browser session (default)
+
+DeerFlow enforces authentication for all non-public HTTP routes. Public routes are limited to health/docs metadata and these public auth endpoints:
+
+- `POST /api/v1/auth/initialize` creates the first admin account when no admin exists.
+- `POST /api/v1/auth/login/local` logs in with email/password and sets an HttpOnly `access_token` cookie.
+- `POST /api/v1/auth/register` creates a regular `user` account and sets the session cookie.
+- `POST /api/v1/auth/logout` clears the session cookie.
+- `GET /api/v1/auth/setup-status` reports whether the first admin still needs to be created.
+
+The authenticated auth endpoints are:
+
+- `GET /api/v1/auth/me` returns the current user.
+- `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie.
+
+Protected state-changing requests also require the CSRF double-submit token: send the `csrf_token` cookie value as the `X-CSRF-Token` header. Login/register/initialize/logout are bootstrap auth endpoints: they are exempt from the double-submit token but still reject hostile browser `Origin` headers.
+
+User isolation is enforced from the authenticated user context:
+
+- Thread metadata is scoped by `threads_meta.user_id`; search/read/write/delete APIs only expose the current user's threads.
+- Thread files live under `{base_dir}/users/{user_id}/threads/{thread_id}/user-data/` and are exposed inside the sandbox as `/mnt/user-data/`.
+- Memory and custom agents are stored under `{base_dir}/users/{user_id}/...`.
+
+Note: MCP outbound connections can still use OAuth for configured HTTP/SSE MCP servers; that is separate from DeerFlow API authentication.
+
+### Internal Auth (platform HTTP integration)
+
+For server-to-server integrations (e.g. a Feishu or WeCom/Enterprise WeChat bot backend), configure:
+
+```bash
+export DEER_FLOW_INTERNAL_AUTH_TOKEN="<long-random-secret>"
+```
+
+| Header | Required | Description |
+|---|---|---|
+| `X-DeerFlow-Internal-Token` | Yes | Must match `DEER_FLOW_INTERNAL_AUTH_TOKEN`; missing/invalid → `401` |
+| `X-DeerFlow-Owner-User-Id` | Yes for per-user isolation | Platform user id (e.g. `feishu_ou_alice`, `wecom_user_bob`); omit → `default` bucket |
+
+Does **not** use browser cookies or CSRF tokens. Does **not** insert into `users`; sets `threads_meta.user_id` / `runs.user_id` from the owner header. DeerFlow validates only the platform token—not whether the owner id represents a real end user; user validity is entirely the platform's responsibility. See [AUTH_DESIGN.md — Internal Auth](AUTH_DESIGN.md#internal-auth-direct-http) for trust boundaries, persistence, and security notes.
+
+Use the standard Gateway thread/run endpoints (`POST /api/threads`, `POST /api/threads/{thread_id}/runs/stream`, etc.) with the headers above on every request.
 
 ---
 
@@ -567,13 +1125,55 @@ location /api/ {
 
 ---
 
-## WebSocket Support
+## Streaming Support
 
-The LangGraph server supports WebSocket connections for real-time streaming. Connect to:
+Gateway's LangGraph-compatible API streams run events with Server-Sent Events (SSE).
+
+**Thread-scoped streaming** (thread must exist):
+
+```http
+POST /api/langgraph/threads/{thread_id}/runs/stream
+Accept: text/event-stream
+```
+
+**Stateless streaming** (no pre-created thread; Gateway auto-creates one):
+
+```http
+POST /api/langgraph/runs/stream
+Accept: text/event-stream
+```
+
+Both endpoints return `Content-Location: /api/threads/{thread_id}/runs/{run_id}`.
+The DeerFlow web UI and LangGraph SDK clients rely on this header to discover the
+assigned `thread_id` and `run_id` on the first message of a new chat.
+
+### SSE replay retention and gaps
+
+Clients may reconnect to a run stream with `Last-Event-ID`. Replay history is
+bounded by `stream_bridge.queue_maxsize` (default `256`) and, for Redis, by the
+rolling `stream_ttl_seconds`. A retained cursor resumes after that event with no
+additional control frame.
+
+When a syntactically valid cursor is older than the retained watermark, the
+server sends exactly one `gap` event before any retained data and closes that
+subscription without an `end` event:
+
+```text
+event: gap
+data: {"code":"stream_replay_gap","run_id":"run-123","requested_event_id":"1718000000000-1","earliest_available_event_id":"1718000000100-42","latest_available_event_id":"1718000000200-84","recovery":"reload_durable_state"}
 
 ```
-ws://localhost:2026/api/langgraph/threads/{thread_id}/runs/stream
-```
+
+The frame deliberately has no SSE `id:`. Both `earliest_available_event_id` and
+`latest_available_event_id` are `string | null` (they are `null` when no events
+are retained in the buffer). Consumers must reload durable thread state and
+persisted run events/messages, then may reconnect from `latest_available_event_id`
+to follow newer live events, or rejoin without a cursor when the buffer is empty
+(`latest_available_event_id` is `null`). A gap does not cancel the active run.
+The same signal applies when a no-cursor subscriber has already established an
+empty-stream wait but the first Redis wake-up falls behind before delivery; in
+that case `requested_event_id` is `null`. Malformed cursor handling is
+backend-specific and is not the same as a valid cursor that was evicted.
 
 ---
 
@@ -585,17 +1185,50 @@ ws://localhost:2026/api/langgraph/threads/{thread_id}/runs/stream
 from langgraph_sdk import get_client
 
 client = get_client(url="http://localhost:2026/api/langgraph")
+run_meta: dict[str, str] = {}
 
-# Create thread
+
+def on_run_created(meta) -> None:
+    # langgraph-sdk 0.3.x parses Content-Location only when this callback is set.
+    if meta.thread_id:
+        run_meta["thread_id"] = meta.thread_id
+    run_meta["run_id"] = meta.run_id
+
+
+# Option A: stateless stream — no thread pre-creation
+# Gateway auto-creates a thread and returns thread_id/run_id in Content-Location.
+async for event in client.runs.stream(
+    None,
+    "lead_agent",
+    input={"messages": [{"role": "user", "content": "Hello"}]},
+    config={"configurable": {"model_name": "gpt-4"}},
+    stream_mode=["values", "messages-tuple", "custom"],
+    on_run_created=on_run_created,
+):
+    print(event)
+
+thread_id = run_meta["thread_id"]  # persist before the next turn
+
+# Option A (continued): same thread on the next turn
+async for event in client.runs.stream(
+    None,
+    "lead_agent",
+    input={"messages": [{"role": "user", "content": "What did I just ask?"}]},
+    config={"configurable": {"thread_id": thread_id, "model_name": "gpt-4"}},
+    stream_mode=["values", "messages-tuple", "custom"],
+    on_run_created=on_run_created,
+):
+    print(event)
+
+# Option B: thread-scoped stream — create thread first, then stream
 thread = await client.threads.create()
-
-# Run agent
 async for event in client.runs.stream(
     thread["thread_id"],
     "lead_agent",
     input={"messages": [{"role": "user", "content": "Hello"}]},
     config={"configurable": {"model_name": "gpt-4"}},
     stream_mode=["values", "messages-tuple", "custom"],
+    on_run_created=on_run_created,
 ):
     print(event)
 ```
@@ -608,13 +1241,60 @@ const response = await fetch('/api/models');
 const data = await response.json();
 console.log(data.models);
 
-// Using EventSource for streaming
-const eventSource = new EventSource(
-  `/api/langgraph/threads/${threadId}/runs/stream`
-);
-eventSource.onmessage = (event) => {
-  console.log(JSON.parse(event.data));
-};
+function parseRunLocation(contentLocation: string | null) {
+  if (!contentLocation) return null;
+  const match = /\/threads\/([^/]+)\/runs\/([^/]+)/.exec(contentLocation);
+  if (!match) return null;
+  return { threadId: match[1], runId: match[2] };
+}
+
+// Option A: stateless stream — no thread pre-creation
+let threadId: string | undefined;
+const firstResponse = await fetch("/api/langgraph/runs/stream", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  },
+  body: JSON.stringify({
+    input: { messages: [{ role: "user", content: "Hello" }] },
+    stream_mode: ["values", "messages-tuple", "custom"],
+  }),
+});
+
+const created = parseRunLocation(firstResponse.headers.get("Content-Location"));
+threadId = created?.threadId;
+console.log("thread_id:", created?.threadId, "run_id:", created?.runId);
+
+// Option B: continue the same thread on the next turn
+const followUpResponse = await fetch("/api/langgraph/runs/stream", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  },
+  body: JSON.stringify({
+    input: { messages: [{ role: "user", content: "What did I just ask?" }] },
+    config: { configurable: { thread_id: threadId } },
+    stream_mode: ["values", "messages-tuple", "custom"],
+  }),
+});
+
+// Option C: thread-scoped stream when you already have a thread_id
+const streamResponse = await fetch(`/api/langgraph/threads/${threadId}/runs/stream`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  },
+  body: JSON.stringify({
+    input: { messages: [{ role: "user", content: "Hello" }] },
+    stream_mode: ["values", "messages-tuple", "custom"],
+  }),
+});
+
+const reader = streamResponse.body?.getReader();
+// Decode and parse SSE frames from reader in your client code.
 ```
 
 ### cURL Examples
@@ -633,23 +1313,67 @@ curl -X POST http://localhost:2026/api/threads/abc123/uploads \
 # Enable skill
 curl -X POST http://localhost:2026/api/skills/pdf-processing/enable
 
-# Create thread and run agent
-curl -X POST http://localhost:2026/api/langgraph/threads \
+# Stateless stream — no thread pre-creation
+curl -s -D - -N -X POST http://localhost:2026/api/langgraph/runs/stream \
   -H "Content-Type: application/json" \
-  -d '{}'
-
-curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs \
-  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
   -d '{
     "input": {"messages": [{"role": "user", "content": "Hello"}]},
     "config": {
       "recursion_limit": 100,
       "configurable": {"model_name": "gpt-4"}
-    }
+    },
+    "stream_mode": ["values", "messages-tuple", "custom"]
+  }'
+# Read Content-Location: /api/threads/{thread_id}/runs/{run_id} from the headers.
+
+# Continue the same thread on the next turn
+curl -s -N -X POST http://localhost:2026/api/langgraph/runs/stream \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "input": {"messages": [{"role": "user", "content": "What did I just ask?"}]},
+    "config": {
+      "configurable": {"thread_id": "abc123", "model_name": "gpt-4"}
+    },
+    "stream_mode": ["values", "messages-tuple", "custom"]
+  }'
+
+# Thread-scoped flow — create thread first, then stream
+curl -X POST http://localhost:2026/api/langgraph/threads \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs/stream \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "input": {"messages": [{"role": "user", "content": "Hello"}]},
+    "config": {
+      "recursion_limit": 100,
+      "configurable": {"model_name": "gpt-4"}
+    },
+    "stream_mode": ["values", "messages-tuple", "custom"]
   }'
 ```
 
-> The `/api/langgraph/*` endpoints bypass DeerFlow's Gateway and inherit
-> LangGraph's native `recursion_limit` default of 25, which is too low for
-> plan-mode or subagent runs. Set `config.recursion_limit` explicitly — see
-> the [Create Run](#create-run) section for details.
+> The unified Gateway path defaults `config.recursion_limit` to 100 for
+> plan-mode and subagent-heavy runs. Clients may still set
+> `config.recursion_limit` explicitly — see the [Create Run](#create-run)
+> section for details. Scheduled-task launches use
+> `scheduler.recursion_limit` from `config.yaml` instead of a client body.
+
+## Chat archive and restore
+
+`POST /api/threads/search` accepts `archived: true` for archived chats or
+`archived: false` for recent chats (including legacy rows without an archive flag).
+Omit the field or use null to include both. Filtering applies before `limit` and
+`offset` and is scoped to the authenticated user. Combine it with the existing
+`metadata` and `status` filters when needed.
+
+Archive with `PATCH /api/threads/{thread_id}` and body
+`{"metadata":{"deerflow_archived":true}}`; use false to restore. The flag must be
+a JSON boolean. Writes containing only boolean pin/archive flags preserve
+`updated_at` and all other metadata. The owner-checked endpoint returns the normal
+thread metadata response; original thread and artifact URLs remain available.
+Archiving does not cancel runs, pause schedules, or change retention.

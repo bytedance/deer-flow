@@ -20,6 +20,12 @@ __pycache__/
 .venv
 venv/
 
+# Benchmark outputs
+bench_results.jsonl
+bench_optimized.jsonl
+results.jsonl
+backend/scripts/benchmark/*.jsonl
+
 # Environment variables
 .env
 
@@ -40,6 +46,7 @@ coverage/
 skills/custom/*
 logs/
 log/
+debug.log
 
 # Local git hooks (keep only on this machine, do not push)
 .githooks/
@@ -55,5 +62,10 @@ web/
 backend/Dockerfile.langgraph
 config.yaml.bak
 .playwright-mcp
+/frontend/test-results/
+/frontend/playwright-report/
 .gstack/
 .worktrees
+
+# Monocle agent-observability trace output (local file exporter)
+.monocle/

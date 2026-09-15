@@ -1,19 +1,18 @@
-"use client";
+import { ChatProviders } from "@/components/workspace/chats/chat-providers";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
+import { DEMO_THREAD_IDS } from "@/core/threads/static-demo";
 
-import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
-import { ArtifactsProvider } from "@/components/workspace/artifacts";
-import { SubtasksProvider } from "@/core/tasks/context";
+export function generateStaticParams() {
+  if (!isStaticWebsiteOnly()) {
+    return [];
+  }
+  return DEMO_THREAD_IDS.map((thread_id) => ({ thread_id }));
+}
 
 export default function ChatLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  return (
-    <SubtasksProvider>
-      <ArtifactsProvider>
-        <PromptInputProvider>{children}</PromptInputProvider>
-      </ArtifactsProvider>
-    </SubtasksProvider>
-  );
+  return <ChatProviders>{children}</ChatProviders>;
 }

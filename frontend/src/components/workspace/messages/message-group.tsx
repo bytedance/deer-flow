@@ -2,17 +2,20 @@ import type { Message } from "@langchain/langgraph-sdk";
 import {
   BookOpenTextIcon,
   ChevronUp,
+  CoinsIcon,
   FolderOpenIcon,
   GlobeIcon,
   LightbulbIcon,
   ListTodoIcon,
   MessageCircleQuestionMarkIcon,
+  MessageSquareTextIcon,
+  MonitorIcon,
   NotebookPenIcon,
   SearchIcon,
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import {
   ChainOfThought,
@@ -23,31 +26,49 @@ import {
 } from "@/components/ai-elements/chain-of-thought";
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
-import { useI18n } from "@/core/i18n/hooks";
 import {
+  buildWriteFileArtifactURL,
+  resolveArtifactURL,
+} from "@/core/artifacts/utils";
+import { useI18n } from "@/core/i18n/hooks";
+import { formatTokenCount } from "@/core/messages/usage";
+import type { TokenDebugStep } from "@/core/messages/usage-model";
+import {
+  extractContentFromMessage,
   extractReasoningContentFromMessage,
-  findToolCallResult,
+  extractTextFromMessage,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { useArtifacts } from "../artifacts";
+import { useMaybeBrowserView } from "../browser-view";
 import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
+import { ToolCallDetails } from "./tool-call-details";
 
-export function MessageGroup({
-  className,
-  messages,
-  isLoading = false,
-}: {
+interface MessageGroupProps {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
-}) {
+  deferBrowserPreviews?: boolean;
+  tokenDebugSteps?: TokenDebugStep[];
+  showTokenDebugSummaries?: boolean;
+  threadId?: string;
+}
+
+function MessageGroupComponent({
+  className,
+  messages,
+  isLoading = false,
+  deferBrowserPreviews = false,
+  tokenDebugSteps = [],
+  showTokenDebugSummaries = false,
+  threadId,
+}: MessageGroupProps) {
   const { t } = useI18n();
   const [showAbove, setShowAbove] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
@@ -56,33 +77,250 @@ export function MessageGroup({
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
   const steps = useMemo(() => convertToSteps(messages), [messages]);
+  const stepIndexByStep = useMemo(
+    () => new Map(steps.map((step, index) => [step, index] as const)),
+    [steps],
+  );
+  const debugStepByMessageId = useMemo(
+    () =>
+      new Map(
+        tokenDebugSteps.map(
+          (step) => [step.messageId || step.id, step] as const,
+        ),
+      ),
+    [tokenDebugSteps],
+  );
+  const toolCallCountByMessageId = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    for (const step of steps) {
+      if (step.type !== "toolCall" || !step.messageId) {
+        continue;
+      }
+
+      counts.set(step.messageId, (counts.get(step.messageId) ?? 0) + 1);
+    }
+
+    return counts;
+  }, [steps]);
   const lastToolCallStep = useMemo(() => {
     const filteredSteps = steps.filter((step) => step.type === "toolCall");
     return filteredSteps[filteredSteps.length - 1];
   }, [steps]);
   const aboveLastToolCallSteps = useMemo(() => {
     if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
+      const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
       return steps.slice(0, index);
     }
     return [];
-  }, [lastToolCallStep, steps]);
+  }, [lastToolCallStep, stepIndexByStep, steps]);
+  const afterLastToolCallAssistantTextSteps = useMemo(() => {
+    if (!lastToolCallStep) {
+      return [];
+    }
+    const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
+    return steps
+      .slice(index + 1)
+      .filter((step) => step.type === "assistantText");
+  }, [lastToolCallStep, stepIndexByStep, steps]);
+  const collapsibleAboveLastToolCallSteps = useMemo(
+    () =>
+      aboveLastToolCallSteps.filter((step) => step.type !== "assistantText"),
+    [aboveLastToolCallSteps],
+  );
   const lastReasoningStep = useMemo(() => {
     if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
+      const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
       return steps.slice(index + 1).find((step) => step.type === "reasoning");
     } else {
       const filteredSteps = steps.filter((step) => step.type === "reasoning");
       return filteredSteps[filteredSteps.length - 1];
     }
-  }, [lastToolCallStep, steps]);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  }, [lastToolCallStep, stepIndexByStep, steps]);
+  // Assistant text emitted after the trailing reasoning is the answer that
+  // reasoning produced, so it renders below the reasoning disclosure. The
+  // settled assistant bubble always paints reasoning above content, and the
+  // streaming processing group has to agree or the two swap places the moment
+  // the turn ends (#4576). Text emitted before that reasoning keeps its
+  // earlier position.
+  const belowLastReasoningAssistantTextSteps = useMemo(() => {
+    if (!lastReasoningStep) {
+      return [];
+    }
+    const index = stepIndexByStep.get(lastReasoningStep) ?? -1;
+    return steps
+      .slice(index + 1)
+      .filter((step) => step.type === "assistantText");
+  }, [lastReasoningStep, stepIndexByStep, steps]);
+  const belowLastReasoningSteps = useMemo(
+    () => new Set<CoTStep>(belowLastReasoningAssistantTextSteps),
+    [belowLastReasoningAssistantTextSteps],
+  );
+  const firstEligibleDebugSummaryStepIndexByMessageId = useMemo(() => {
+    const firstIndices = new Map<string, number>();
+
+    if (!showTokenDebugSummaries) {
+      return firstIndices;
+    }
+
+    for (const [index, step] of steps.entries()) {
+      const messageId = step.messageId;
+      if (!messageId || firstIndices.has(messageId)) {
+        continue;
+      }
+
+      const debugStep = debugStepByMessageId.get(messageId);
+      if (!debugStep) {
+        continue;
+      }
+
+      const toolCallCount = toolCallCountByMessageId.get(messageId) ?? 0;
+      if (!debugStep.sharedAttribution && toolCallCount > 0) {
+        continue;
+      }
+      if (
+        !debugStep.sharedAttribution &&
+        toolCallCount === 0 &&
+        debugStep.label === t.common.thinking &&
+        debugStep.secondaryLabels.length === 0
+      ) {
+        continue;
+      }
+
+      firstIndices.set(messageId, index);
+    }
+
+    return firstIndices;
+  }, [
+    debugStepByMessageId,
+    showTokenDebugSummaries,
+    steps,
+    t.common.thinking,
+    toolCallCountByMessageId,
+  ]);
+
+  const renderDebugSummary = (
+    messageId: string | undefined,
+    stepIndex: number,
+  ) => {
+    if (!showTokenDebugSummaries || !messageId) {
+      return null;
+    }
+
+    const debugStep = debugStepByMessageId.get(messageId);
+    if (!debugStep) {
+      return null;
+    }
+    if (
+      firstEligibleDebugSummaryStepIndexByMessageId.get(messageId) !== stepIndex
+    ) {
+      return null;
+    }
+
+    return (
+      <ChainOfThoughtStep
+        key={`token-debug-${messageId}`}
+        icon={CoinsIcon}
+        label={
+          <DebugStepLabel
+            label={debugStep.label}
+            token={formatDebugToken(debugStep, t)}
+          />
+        }
+        description={
+          debugStep.sharedAttribution
+            ? t.tokenUsage.sharedAttribution
+            : undefined
+        }
+      >
+        {debugStep.secondaryLabels.length > 0 && (
+          <ChainOfThoughtSearchResults>
+            {debugStep.secondaryLabels.map((label, index) => (
+              <ChainOfThoughtSearchResult
+                key={`${debugStep.id}-${index}-${label}`}
+              >
+                {label}
+              </ChainOfThoughtSearchResult>
+            ))}
+          </ChainOfThoughtSearchResults>
+        )}
+      </ChainOfThoughtStep>
+    );
+  };
+
+  const renderToolCall = (
+    step: CoTToolCallStep,
+    options?: { isLast?: boolean },
+  ) => {
+    const debugStep =
+      showTokenDebugSummaries && step.messageId
+        ? debugStepByMessageId.get(step.messageId)
+        : undefined;
+
+    return (
+      <ToolCall
+        key={step.id}
+        {...step}
+        threadId={threadId}
+        isLast={options?.isLast}
+        isLoading={isLoading}
+        deferBrowserPreview={deferBrowserPreviews}
+        showDetails={showTokenDebugSummaries}
+        tokenDebugStep={
+          debugStep && !debugStep.sharedAttribution ? debugStep : undefined
+        }
+      />
+    );
+  };
+
+  const renderAssistantText = (step: CoTAssistantTextStep) => (
+    <ChainOfThoughtStep
+      key={step.id}
+      icon={MessageSquareTextIcon}
+      label={<MarkdownContent content={step.content} isLoading={isLoading} />}
+    ></ChainOfThoughtStep>
+  );
+
+  const renderStep = (step: CoTStep) => {
+    const stepIndex = stepIndexByStep.get(step) ?? -1;
+    if (step.type === "assistantText") {
+      return [
+        renderDebugSummary(step.messageId, stepIndex),
+        renderAssistantText(step),
+      ];
+    }
+    if (step.type === "reasoning") {
+      return [
+        renderDebugSummary(step.messageId, stepIndex),
+        <ChainOfThoughtStep
+          key={step.id}
+          label={
+            <MarkdownContent
+              content={step.reasoning ?? ""}
+              isLoading={isLoading}
+            />
+          }
+        ></ChainOfThoughtStep>,
+      ];
+    }
+
+    return [
+      renderDebugSummary(step.messageId, stepIndex),
+      renderToolCall(step),
+    ];
+  };
+
+  const lastReasoningDebugStep =
+    showTokenDebugSummaries && lastReasoningStep?.messageId
+      ? debugStepByMessageId.get(lastReasoningStep.messageId)
+      : undefined;
+
   return (
     <ChainOfThought
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
       open={true}
     >
-      {aboveLastToolCallSteps.length > 0 && (
+      {collapsibleAboveLastToolCallSteps.length > 0 && (
         <Button
           key="above"
           className="w-full items-start justify-start text-left"
@@ -94,7 +332,9 @@ export function MessageGroup({
               <span className="opacity-60">
                 {showAbove
                   ? t.toolCalls.lessSteps
-                  : t.toolCalls.moreSteps(aboveLastToolCallSteps.length)}
+                  : t.toolCalls.moreSteps(
+                      collapsibleAboveLastToolCallSteps.length,
+                    )}
               </span>
             }
             icon={
@@ -108,39 +348,46 @@ export function MessageGroup({
           ></ChainOfThoughtStep>
         </Button>
       )}
-      {lastToolCallStep && (
+      {(lastToolCallStep ??
+        steps.some(
+          (step) =>
+            step.type === "assistantText" && !belowLastReasoningSteps.has(step),
+        )) && (
         <ChainOfThoughtContent className="px-4 pb-2">
-          {showAbove &&
-            aboveLastToolCallSteps.map((step) =>
-              step.type === "reasoning" ? (
-                <ChainOfThoughtStep
-                  key={step.id}
-                  label={
-                    <MarkdownContent
-                      content={step.reasoning ?? ""}
-                      isLoading={isLoading}
-                      rehypePlugins={rehypePlugins}
-                    />
-                  }
-                ></ChainOfThoughtStep>
-              ) : (
-                <ToolCall key={step.id} {...step} isLoading={isLoading} />
-              ),
-            )}
+          {(lastToolCallStep
+            ? showAbove
+              ? aboveLastToolCallSteps
+              : aboveLastToolCallSteps.filter(
+                  (step) => step.type === "assistantText",
+                )
+            : steps.filter(
+                (step) =>
+                  step.type === "assistantText" &&
+                  !belowLastReasoningSteps.has(step),
+              )
+          ).flatMap(renderStep)}
           {lastToolCallStep && (
-            <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-              <ToolCall
-                key={lastToolCallStep.id}
-                {...lastToolCallStep}
-                isLast={true}
-                isLoading={isLoading}
-              />
-            </FlipDisplay>
+            <>
+              {renderDebugSummary(
+                lastToolCallStep.messageId,
+                stepIndexByStep.get(lastToolCallStep) ?? -1,
+              )}
+              <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
+                {renderToolCall(lastToolCallStep, { isLast: true })}
+              </FlipDisplay>
+              {afterLastToolCallAssistantTextSteps
+                .filter((step) => !belowLastReasoningSteps.has(step))
+                .flatMap(renderStep)}
+            </>
           )}
         </ChainOfThoughtContent>
       )}
       {lastReasoningStep && (
         <>
+          {renderDebugSummary(
+            lastReasoningStep.messageId,
+            stepIndexByStep.get(lastReasoningStep) ?? -1,
+          )}
           <Button
             key={lastReasoningStep.id}
             className="w-full items-start justify-start text-left"
@@ -150,7 +397,22 @@ export function MessageGroup({
             <div className="flex w-full items-center justify-between">
               <ChainOfThoughtStep
                 className="font-normal"
-                label={t.common.thinking}
+                label={
+                  <DebugStepLabel
+                    label={t.common.thinking}
+                    token={shouldInlineThinkingToken({
+                      debugStep: lastReasoningDebugStep,
+                      toolCallCount: lastReasoningStep.messageId
+                        ? (toolCallCountByMessageId.get(
+                            lastReasoningStep.messageId,
+                          ) ?? 0)
+                        : 0,
+                      enabled: showTokenDebugSummaries,
+                      thinkingLabel: t.common.thinking,
+                      t,
+                    })}
+                  />
+                }
                 icon={LightbulbIcon}
               ></ChainOfThoughtStep>
               <div>
@@ -171,16 +433,164 @@ export function MessageGroup({
                   <MarkdownContent
                     content={lastReasoningStep.reasoning ?? ""}
                     isLoading={isLoading}
-                    rehypePlugins={rehypePlugins}
                   />
                 }
               ></ChainOfThoughtStep>
+            </ChainOfThoughtContent>
+          )}
+          {belowLastReasoningAssistantTextSteps.length > 0 && (
+            <ChainOfThoughtContent className="px-4 pb-2">
+              {belowLastReasoningAssistantTextSteps.flatMap(renderStep)}
             </ChainOfThoughtContent>
           )}
         </>
       )}
     </ChainOfThought>
   );
+}
+
+export const MessageGroup = memo(
+  MessageGroupComponent,
+  areMessageGroupPropsEqual,
+);
+MessageGroup.displayName = "MessageGroup";
+
+function areMessageGroupPropsEqual(
+  previous: MessageGroupProps,
+  next: MessageGroupProps,
+): boolean {
+  if (next.isLoading) {
+    return false;
+  }
+  return (
+    previous.className === next.className &&
+    Boolean(previous.isLoading) === Boolean(next.isLoading) &&
+    Boolean(previous.deferBrowserPreviews) ===
+      Boolean(next.deferBrowserPreviews) &&
+    Boolean(previous.showTokenDebugSummaries) ===
+      Boolean(next.showTokenDebugSummaries) &&
+    previous.threadId === next.threadId &&
+    sameReferences(previous.messages, next.messages) &&
+    sameReferences(previous.tokenDebugSteps, next.tokenDebugSteps)
+  );
+}
+
+function sameReferences<T>(
+  previous: readonly T[] | undefined,
+  next: readonly T[] | undefined,
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  const previousItems = previous ?? [];
+  const nextItems = next ?? [];
+  return (
+    previousItems.length === nextItems.length &&
+    previousItems.every((item, index) => item === nextItems[index])
+  );
+}
+
+function formatDebugToken(
+  debugStep: TokenDebugStep,
+  t: ReturnType<typeof useI18n>["t"],
+) {
+  return debugStep.usage
+    ? `${formatTokenCount(debugStep.usage.totalTokens)} ${t.tokenUsage.label}`
+    : t.tokenUsage.unavailableShort;
+}
+
+function shouldInlineThinkingToken({
+  debugStep,
+  toolCallCount,
+  enabled,
+  thinkingLabel,
+  t,
+}: {
+  debugStep?: TokenDebugStep;
+  toolCallCount: number;
+  enabled: boolean;
+  thinkingLabel: string;
+  t: ReturnType<typeof useI18n>["t"];
+}) {
+  if (
+    !enabled ||
+    !debugStep ||
+    debugStep.sharedAttribution ||
+    toolCallCount > 0 ||
+    debugStep.label !== thinkingLabel
+  ) {
+    return null;
+  }
+
+  return formatDebugToken(debugStep, t);
+}
+
+function DebugStepLabel({
+  label,
+  token,
+}: {
+  label: React.ReactNode;
+  token?: string | null;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="min-w-0 flex-1">{label}</div>
+      {token ? (
+        <div className="text-muted-foreground shrink-0 font-mono text-[11px]">
+          {token}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function browserToolLabel(
+  name: string,
+  args: Record<string, unknown>,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  switch (name) {
+    case "browser_navigate":
+      return typeof args.url === "string"
+        ? t.toolCalls.browserNavigate(args.url)
+        : t.toolCalls.browserNavigateGeneric;
+    case "browser_click":
+      return t.toolCalls.browserClick;
+    case "browser_type":
+      return t.toolCalls.browserType;
+    case "browser_snapshot":
+      return t.toolCalls.browserSnapshot;
+    case "browser_get_text":
+      return t.toolCalls.browserGetText;
+    case "browser_back":
+      return t.toolCalls.browserBack;
+    case "browser_screenshot":
+      return t.toolCalls.browserScreenshot;
+    case "browser_close":
+      return t.toolCalls.browserClose;
+    default:
+      return t.toolCalls.useTool(name);
+  }
+}
+
+// Shared routing for result conversion and specialized rendering.
+function getToolCallKind(name: string) {
+  if (name.startsWith("browser_")) return "browser";
+  switch (name) {
+    case "web_search":
+    case "image_search":
+    case "web_fetch":
+    case "ls":
+    case "read_file":
+    case "write_file":
+    case "str_replace":
+    case "bash":
+    case "ask_clarification":
+    case "write_todos":
+      return name;
+    default:
+      return "generic";
+  }
 }
 
 function ToolCall({
@@ -191,6 +601,12 @@ function ToolCall({
   result,
   isLast = false,
   isLoading = false,
+  deferBrowserPreview = false,
+  tokenDebugStep,
+  showDetails = false,
+  resultMessage,
+  browserView,
+  threadId,
 }: {
   id?: string;
   messageId?: string;
@@ -199,18 +615,120 @@ function ToolCall({
   result?: string | Record<string, unknown>;
   isLast?: boolean;
   isLoading?: boolean;
+  deferBrowserPreview?: boolean;
+  tokenDebugStep?: TokenDebugStep;
+  showDetails?: boolean;
+  resultMessage?: Extract<Message, { type: "tool" }>;
+  browserView?: BrowserViewMeta;
+  threadId?: string;
 }) {
   const { t } = useI18n();
+  const kind = getToolCallKind(name);
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
+  const browserViewPanel = useMaybeBrowserView();
+  const tokenLabel = tokenDebugStep
+    ? formatDebugToken(tokenDebugStep, t)
+    : null;
+  const resolveLabel = (fallback: React.ReactNode) =>
+    tokenDebugStep ? (
+      <DebugStepLabel label={tokenDebugStep.label} token={tokenLabel} />
+    ) : (
+      fallback
+    );
+  const writeFilePath =
+    (kind === "write_file" || kind === "str_replace") &&
+    typeof args.path === "string"
+      ? args.path
+      : undefined;
+  const writeFileArtifactUrl = writeFilePath
+    ? buildWriteFileArtifactURL({
+        filepath: writeFilePath,
+        messageId,
+        toolCallId: id,
+      })
+    : null;
+  const autoOpenArtifactUrl =
+    isLoading &&
+    isLast &&
+    autoOpen &&
+    autoSelect &&
+    writeFileArtifactUrl &&
+    !result
+      ? writeFileArtifactUrl
+      : null;
 
-  if (name === "web_search") {
+  useEffect(() => {
+    if (!autoOpenArtifactUrl || selectedArtifact === autoOpenArtifactUrl) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      select(autoOpenArtifactUrl, true);
+      setOpen(true);
+    }, 100);
+
+    return () => window.clearTimeout(timeout);
+  }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
+
+  if (kind === "browser") {
+    const shot = browserView?.screenshot;
+    const previewUrl =
+      shot && threadId ? resolveArtifactURL(shot, threadId) : undefined;
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(browserToolLabel(name, args, t))}
+        icon={MonitorIcon}
+      >
+        {previewUrl && !deferBrowserPreview && (
+          <button
+            type="button"
+            className="border-border mt-1 block w-full max-w-md cursor-pointer overflow-hidden rounded-lg border"
+            onClick={() => {
+              if (!shot) {
+                return;
+              }
+              if (browserViewPanel) {
+                browserViewPanel.pushFrame({
+                  screenshot: shot,
+                  url: browserView?.url,
+                  title: browserView?.title,
+                });
+                browserViewPanel.openPanel();
+              } else {
+                select(shot);
+                setOpen(true);
+              }
+            }}
+          >
+            <img
+              className="w-full object-contain"
+              src={previewUrl}
+              alt={browserView?.title ?? "browser view"}
+              loading="lazy"
+              decoding="async"
+            />
+            {browserView?.url && (
+              <div className="text-muted-foreground bg-muted/40 truncate px-2 py-1 text-left text-[11px]">
+                {browserView.url}
+              </div>
+            )}
+          </button>
+        )}
+      </ChainOfThoughtStep>
+    );
+  } else if (kind === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchOnWebFor(args.query);
     }
     return (
-      <ChainOfThoughtStep key={id} label={label} icon={SearchIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(label)}
+        icon={SearchIcon}
+      >
         {Array.isArray(result) && (
           <ChainOfThoughtSearchResults>
             {result.map((item) => (
@@ -224,7 +742,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "image_search") {
+  } else if (kind === "image_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedImages;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchForRelatedImagesFor(args.query);
@@ -240,7 +758,11 @@ function ToolCall({
       }
     )?.results;
     return (
-      <ChainOfThoughtStep key={id} label={label} icon={SearchIcon}>
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(label)}
+        icon={SearchIcon}
+      >
         {Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {Array.isArray(results) &&
@@ -268,7 +790,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "web_fetch") {
+  } else if (kind === "web_fetch") {
     const url = (args as { url: string })?.url;
     let title = url;
     if (typeof result === "string") {
@@ -280,7 +802,7 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={t.toolCalls.viewWebPage}
+        label={resolveLabel(t.toolCalls.viewWebPage)}
         icon={GlobeIcon}
       >
         <ChainOfThoughtSearchResult>
@@ -297,7 +819,7 @@ function ToolCall({
         </ChainOfThoughtSearchResult>
       </ChainOfThoughtStep>
     );
-  } else if (name === "ls") {
+  } else if (kind === "ls") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -305,64 +827,10 @@ function ToolCall({
     }
     const path: string | undefined = (args as { path: string })?.path;
     return (
-      <ChainOfThoughtStep key={id} label={description} icon={FolderOpenIcon}>
-        {path && (
-          <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
-          </ChainOfThoughtSearchResult>
-        )}
-      </ChainOfThoughtStep>
-    );
-  } else if (name === "read_file") {
-    let description: string | undefined = (args as { description: string })
-      ?.description;
-    if (!description) {
-      description = t.toolCalls.readFile;
-    }
-    const { path } = args as { path: string; content: string };
-    return (
-      <ChainOfThoughtStep key={id} label={description} icon={BookOpenTextIcon}>
-        {path && (
-          <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
-          </ChainOfThoughtSearchResult>
-        )}
-      </ChainOfThoughtStep>
-    );
-  } else if (name === "write_file" || name === "str_replace") {
-    let description: string | undefined = (args as { description: string })
-      ?.description;
-    if (!description) {
-      description = t.toolCalls.writeFile;
-    }
-    const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path) {
-      setTimeout(() => {
-        const url = new URL(
-          `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-        ).toString();
-        if (selectedArtifact === url) {
-          return;
-        }
-        select(url, true);
-        setOpen(true);
-      }, 100);
-    }
-
-    return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
-        label={description}
-        icon={NotebookPenIcon}
-        onClick={() => {
-          select(
-            new URL(
-              `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-            ).toString(),
-          );
-          setOpen(true);
-        }}
+        label={resolveLabel(description)}
+        icon={FolderOpenIcon}
       >
         {path && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
@@ -371,17 +839,71 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "bash") {
+  } else if (kind === "read_file") {
+    let description: string | undefined = (args as { description: string })
+      ?.description;
+    if (!description) {
+      description = t.toolCalls.readFile;
+    }
+    const { path } = args as { path: string; content: string };
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(description)}
+        icon={BookOpenTextIcon}
+      >
+        {path && (
+          <ChainOfThoughtSearchResult className="cursor-pointer">
+            {path}
+          </ChainOfThoughtSearchResult>
+        )}
+      </ChainOfThoughtStep>
+    );
+  } else if (kind === "write_file" || kind === "str_replace") {
+    let description: string | undefined = (args as { description: string })
+      ?.description;
+    if (!description) {
+      description = t.toolCalls.writeFile;
+    }
+
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        className={writeFileArtifactUrl ? "cursor-pointer" : undefined}
+        label={resolveLabel(description)}
+        icon={NotebookPenIcon}
+        onClick={() => {
+          if (!writeFileArtifactUrl) {
+            return;
+          }
+          select(writeFileArtifactUrl);
+          setOpen(true);
+        }}
+      >
+        {writeFilePath && (
+          <ChainOfThoughtSearchResult className="cursor-pointer">
+            {writeFilePath}
+          </ChainOfThoughtSearchResult>
+        )}
+      </ChainOfThoughtStep>
+    );
+  } else if (kind === "bash") {
     const description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
-      return t.toolCalls.executeCommand;
+      return (
+        <ChainOfThoughtStep
+          key={id}
+          label={resolveLabel(t.toolCalls.executeCommand)}
+          icon={SquareTerminalIcon}
+        />
+      );
     }
     const command: string | undefined = (args as { command: string })?.command;
     return (
       <ChainOfThoughtStep
         key={id}
-        label={description}
+        label={resolveLabel(description)}
         icon={SquareTerminalIcon}
       >
         {command && (
@@ -394,19 +916,19 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "ask_clarification") {
+  } else if (kind === "ask_clarification") {
     return (
       <ChainOfThoughtStep
         key={id}
-        label={t.toolCalls.needYourHelp}
+        label={resolveLabel(t.toolCalls.needYourHelp)}
         icon={MessageCircleQuestionMarkIcon}
       ></ChainOfThoughtStep>
     );
-  } else if (name === "write_todos") {
+  } else if (kind === "write_todos") {
     return (
       <ChainOfThoughtStep
         key={id}
-        label={t.toolCalls.writeTodos}
+        label={resolveLabel(t.toolCalls.writeTodos)}
         icon={ListTodoIcon}
       ></ChainOfThoughtStep>
     );
@@ -416,9 +938,18 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={description ?? t.toolCalls.useTool(name)}
+        label={resolveLabel(description ?? t.toolCalls.useTool(name))}
         icon={WrenchIcon}
-      ></ChainOfThoughtStep>
+      >
+        {showDetails && (
+          <ToolCallDetails
+            name={name}
+            callId={id}
+            args={args}
+            resultMessage={resultMessage}
+          />
+        )}
+      </ChainOfThoughtStep>
     );
   }
 }
@@ -437,23 +968,85 @@ interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
   result?: string;
+  resultMessage?: Extract<Message, { type: "tool" }>;
+  browserView?: BrowserViewMeta;
 }
 
-type CoTStep = CoTReasoningStep | CoTToolCallStep;
+interface CoTAssistantTextStep extends GenericCoTStep<"assistantText"> {
+  content: string;
+}
+
+type CoTStep = CoTAssistantTextStep | CoTReasoningStep | CoTToolCallStep;
+
+interface BrowserViewMeta {
+  screenshot: string;
+  url?: string;
+  title?: string;
+}
+
+function indexToolCallData(messages: Message[]) {
+  const toolCallResults = new Map<string, string>();
+  const browserViews = new Map<string, BrowserViewMeta>();
+  const resultMessages = new Map<string, Extract<Message, { type: "tool" }>>();
+
+  for (const message of messages) {
+    if (message.type !== "tool" || !message.tool_call_id) {
+      continue;
+    }
+
+    const toolCallId = message.tool_call_id;
+    if (!resultMessages.has(toolCallId))
+      resultMessages.set(toolCallId, message);
+    if (!toolCallResults.has(toolCallId)) {
+      const result = extractTextFromMessage(message);
+      if (result) {
+        toolCallResults.set(toolCallId, result);
+        resultMessages.set(toolCallId, message);
+      }
+    }
+
+    if (!browserViews.has(toolCallId)) {
+      const browserView = (
+        message.additional_kwargs as
+          | { browser_view?: BrowserViewMeta }
+          | undefined
+      )?.browser_view;
+      if (browserView && typeof browserView.screenshot === "string") {
+        browserViews.set(toolCallId, browserView);
+      }
+    }
+  }
+
+  return { browserViews, toolCallResults, resultMessages };
+}
 
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
-  for (const message of messages) {
+  const { browserViews, toolCallResults, resultMessages } =
+    indexToolCallData(messages);
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
+      // Reasoning precedes the answer text it produced, so it is pushed first:
+      // step order is what the group renders in, and a message carrying both
+      // would otherwise paint its answer above its own thinking (#4576).
       const reasoning = extractReasoningContentFromMessage(message);
       if (reasoning) {
         const step: CoTReasoningStep = {
           id: message.id,
           messageId: message.id,
           type: "reasoning",
-          reasoning: extractReasoningContentFromMessage(message),
+          reasoning,
         };
         steps.push(step);
+      }
+      const content = extractContentFromMessage(message);
+      if (content) {
+        steps.push({
+          id: `${message.id ?? `ai-${messageIndex}`}-content`,
+          messageId: message.id,
+          type: "assistantText",
+          content,
+        });
       }
       for (const tool_call of message.tool_calls ?? []) {
         if (tool_call.name === "task") {
@@ -468,8 +1061,10 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
-          const toolCallResult = findToolCallResult(toolCallId, messages);
-          if (toolCallResult) {
+          const toolCallResult = toolCallResults.get(toolCallId);
+          step.resultMessage = resultMessages.get(toolCallId);
+          // Generic details preserve received text; specialized tools retain their parsing.
+          if (toolCallResult && getToolCallKind(tool_call.name) !== "generic") {
             try {
               const json = JSON.parse(toolCallResult);
               step.result = json;
@@ -477,6 +1072,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
               step.result = toolCallResult;
             }
           }
+          step.browserView = browserViews.get(toolCallId);
         }
         steps.push(step);
       }

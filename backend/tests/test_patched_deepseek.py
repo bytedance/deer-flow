@@ -18,7 +18,7 @@ def _make_model(**kwargs):
     from deerflow.models.patched_deepseek import PatchedChatDeepSeek
 
     return PatchedChatDeepSeek(
-        model="deepseek-reasoner",
+        model="deepseek-v4-pro",
         api_key="test-key",
         **kwargs,
     )
@@ -53,7 +53,7 @@ def test_to_json_produces_constructor_type():
 def test_to_json_kwargs_contains_model():
     model = _make_model()
     result = model.to_json()
-    assert result["kwargs"]["model_name"] == "deepseek-reasoner"
+    assert result["kwargs"]["model_name"] == "deepseek-v4-pro"
     assert result["kwargs"]["api_base"] == "https://api.deepseek.com/v1"
 
 

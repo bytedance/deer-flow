@@ -25,6 +25,15 @@ const meta: MetaRecord = {
   blog: {
     type: "page",
   },
+  posts: {
+    type: "page",
+  },
+  login: {
+    type: "page",
+  },
+  setup: {
+    type: "page",
+  },
 };
 
 export default meta;

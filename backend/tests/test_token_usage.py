@@ -147,6 +147,7 @@ def _mock_app_config():
     model.model_dump.return_value = {"name": "test-model", "use": "langchain_openai:ChatOpenAI"}
     config = MagicMock()
     config.models = [model]
+    config.database.checkpoint_delta.snapshot_frequency = 10
     return config
 
 

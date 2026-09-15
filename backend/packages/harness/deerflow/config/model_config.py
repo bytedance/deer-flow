@@ -1,10 +1,21 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class RequestAdmissionConfig(BaseModel):
+    """Optional per-process pacing of model requests, shared by quota group."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    requests_per_minute: int = Field(gt=0, strict=True)
+    group: str | None = Field(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    max_wait_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
+    max_queue_size: int = Field(default=256, gt=0, strict=True)
+
+
 class ModelConfig(BaseModel):
     """Config section for a model"""
 
     name: str = Field(..., description="Unique name for the model")
+    request_admission: RequestAdmissionConfig | None = Field(default=None, description="Opt-in process-local RPM pacing. Changing an active group's policy requires a process restart.")
     display_name: str | None = Field(..., default_factory=lambda: None, description="Display name for the model")
     description: str | None = Field(..., default_factory=lambda: None, description="Description for the model")
     use: str = Field(
@@ -32,6 +43,28 @@ class ModelConfig(BaseModel):
         description="Extra settings to be passed to the model when thinking is disabled",
     )
     supports_vision: bool = Field(default_factory=lambda: False, description="Whether the model supports vision/image inputs")
+    context_window: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Positive total context window size in tokens (prompt + completion). Used to compute the real-time "
+            "context usage percentage displayed in the chat UI, and attached to the model's langchain profile "
+            "(`max_input_tokens`) so fraction-based summarization triggers can resolve their thresholds for "
+            "third-party OpenAI-compatible models that carry no built-in profile. Distinct from `max_tokens`, "
+            "which is the per-call output cap passed to the provider. Leave unset if unknown; the UI will hide "
+            "the percentage and fraction summarization clauses will degrade with a warning."
+        ),
+    )
+    stream_chunk_timeout: float | None = Field(
+        default=None,
+        description=(
+            "Maximum seconds to wait between successive streaming chunks before "
+            "langchain-openai raises StreamChunkTimeoutError. None means use the "
+            "factory default (240s for OpenAI-compatible clients). Tune higher for "
+            "reasoning models with long thinking pauses; lower for latency-sensitive "
+            "interactive endpoints. Has no effect on non-OpenAI-compatible providers."
+        ),
+    )
     thinking: dict | None = Field(
         default_factory=lambda: None,
         description=(

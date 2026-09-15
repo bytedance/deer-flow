@@ -1,0 +1,256 @@
+---
+title: 中间件
+description: 每次 Lead Agent 调用 LLM 时，都会先后执行一条**中间件链**。中间件可以读取和修改 Agent 的状态、向系统提示注入内容、拦截工具调用，并对模型输出做出反应。
+---
+
+import { Callout } from "nextra/components";
+
+# 中间件
+
+<Callout type="info" emoji="🔌">
+  中间件包裹 Lead Agent 中的每次 LLM
+  调用。它们是添加跨领域行为（如记忆、摘要压缩、澄清和 token
+  追踪）的主要扩展点。
+</Callout>
+
+每次 Lead Agent 调用 LLM 时，都会先后执行一条**中间件链**。中间件可以读取和修改 Agent 的状态、向系统提示注入内容、拦截工具调用，并对模型输出做出反应。
+
+这种设计使 Agent 核心保持简单稳定，同时允许丰富的可组合行为分层叠加。
+
+<Callout type="info">
+  每个子 Agent 运行各自的 Agent 循环，并拥有自己的中间件链。下方的循环检测、token 预算和摘要压缩防护已镜像到子 Agent 链（#3875）；记忆、标题生成和澄清等其他 Lead Agent 专属中间件不会在子 Agent 链中运行。参见[子 Agent → 失控行为防护](/docs/harness/subagents#失控行为防护)。
+</Callout>
+
+## 链的工作方式
+
+中间件链在每次 Agent 调用时根据当前配置和请求参数构建一次。中间件按定义的顺序运行：
+
+1. 运行时中间件（`InputSanitizationMiddleware` 输入清理 → `ToolOutputBudgetMiddleware` 输出预算截断 → `ToolResultSanitizationMiddleware` 工具结果清理，随后是线程数据、上传、沙箱、悬空工具调用修补和 LLM 错误处理；工具回执（如启用）、授权/guardrail（如启用）、沙箱审计、读前写后（如启用）、工具进度（如启用）和工具错误处理随后执行）
+2. `DynamicContextMiddleware` — 当前日期和可选记忆上下文
+3. `SkillActivationMiddleware` — slash skill 激活
+4. `SkillToolPolicyMiddleware` — 将技能工具限制为当前激活的技能
+5. `DurableContextMiddleware` — 捕获持久摘要、委托和技能引用状态
+6. `SummarizationMiddleware` — 上下文压缩（如果启用）
+7. `TodoMiddleware` — 任务列表管理（仅计划模式）
+8. `TokenUsageMiddleware` — token 追踪（如果启用）
+9. `TitleMiddleware` — 自动生成线程标题
+10. `MemoryMiddleware` — 跨会话记忆注入和队列
+11. `ViewImageMiddleware` — 图像细节注入（如果模型支持视觉）
+12. `DeferredToolFilterMiddleware` — 隐藏延迟工具 schema（如果启用工具搜索）
+13. `SystemMessageCoalescingMiddleware` — 合并面向 provider 的 system messages
+14. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
+15. `LoopDetectionMiddleware` — 打破重复工具调用循环
+16. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
+17. 自定义中间件（如有）
+18. 配置的扩展中间件（如有）
+19. `TerminalResponseMiddleware` — 重试一次空的最终响应
+20. `ModelLengthFinishReasonMiddleware` — 记录受长度限制的完成
+21. `SafetyFinishReasonMiddleware` — provider 安全终止后抑制工具执行（如果启用）
+22. `ClarificationMiddleware` — 拦截澄清请求（始终最后）
+
+顺序很重要。Durable context 会在摘要压缩之前捕获已委托任务的派发状态、终态结果和已加载的技能引用，确保它们不会随原始 transcript 压缩而丢失。澄清总是最后运行，这样它可以在所有其他中间件完成后拦截。
+
+## 中间件参考
+
+### ClarificationMiddleware
+
+拦截澄清工具调用，并将其转换为面向用户的信息请求。当模型决定在继续之前需要询问用户某事时，此中间件会将该请求呈现出来。
+
+**配置**：由 `guardrails.clarification` 设置控制。
+
+---
+
+### LoopDetectionMiddleware
+
+检测 Agent 是否在没有取得进展的情况下重复进行相同的工具调用。检测到循环时，中间件会介入打破循环，防止 Agent 无限消耗轮次。
+
+Warning 介入会按 thread 和 run 排队，并在下一次模型调用时合并为一条隐藏的 `HumanMessage(name="loop_warning")`，追加到已有工具结果之后。这样不会破坏 provider 对 tool-call/tool-message 配对的校验。Run 开始和结束时会清理过期或未送达的 warning；达到 hard stop 时仍会清空 tool calls 并强制生成最终文本回复。
+
+此中间件同样挂载到子 Agent 链——子 Agent 不允许调用 `task`，因此这里只会触发工具循环启发式判定，退化的子 Agent 循环会被同样地打破。
+
+**配置**：内置，无需用户配置。
+
+---
+
+### MemoryMiddleware
+
+在每次对话开始时读取持久化记忆事实并将其注入到系统提示中。对话结束后，将后台更新排队，以将新信息纳入记忆存储。
+
+**配置**：参见[记忆系统](/docs/harness/memory)页面和 `config.yaml` 中的 `memory:` 部分。
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  max_injection_tokens: 2000
+  debounce_seconds: 30
+```
+
+---
+
+### SubagentLimitMiddleware
+
+限制 Agent 在单次轮次中可以进行的并行子 Agent 任务调用数量，也限制一次 Lead Agent run 内的子 Agent 委派总数。这防止 Agent 在重复规划 checkpoint 中持续启动无边界批次。
+
+**配置**：每次请求配置中的 `subagent_enabled`、`max_concurrent_subagents`，以及可选的 `max_total_subagents`。总量上限默认使用 `config.yaml` 中的 `subagents.max_total_per_run`。
+
+---
+
+### TitleMiddleware
+
+在第一次交互后自动为线程生成标题。默认从用户的第一条消息生成快速本地 fallback 标题；只有设置 `title.model_name` 时，才启用可选的 LLM 标题路径。
+
+**配置**：`config.yaml` 中的 `title:` 部分。
+
+```yaml
+title:
+  enabled: true
+  max_words: 6
+  max_chars: 60
+  model_name: null # 本地 fallback；填模型名才启用 LLM 标题
+```
+
+---
+
+### TodoMiddleware
+
+当计划模式激活时，维护一个对用户可见的结构化任务列表。Agent 使用 `write_todos` 工具，随着完成复杂目标，将任务标记为 `pending`、`in_progress` 或 `completed`。
+
+**激活**：在请求配置中设置 `is_plan_mode: true` 时自动启用。不需要 `config.yaml` 条目。
+
+---
+
+### TokenUsageMiddleware
+
+追踪每次模型调用的 LLM token 消耗，并以 `info` 级别记录。对于监控成本和了解长时序任务中 token 的使用位置很有帮助。
+
+**配置**：`config.yaml` 中的 `token_usage:` 部分。
+
+```yaml
+token_usage:
+  enabled: true
+```
+
+---
+
+### DurableContextMiddleware
+
+在摘要压缩原始 transcript 之前，将长期运行事实捕获到明确的线程状态 channel 中。它记录压缩摘要、已委托任务的状态/结果，以及已加载的 `SKILL.md` 引用，并在后续模型调用中作为隐藏 durable context 数据投影进去。
+
+后端会在 durable context 捕获之前写入有界的结构化 task 结果和技能读取元数据。前端 task card 读取结构化 task status/result 字段；task 结果文本只作为展示内容，不再作为 wire protocol 解析。
+
+**配置**：内置。`summarization.skill_file_read_tool_names` 控制哪些读取工具会被视为技能引用读取；设为 `[]` 可关闭 durable 技能引用捕获。
+
+---
+
+### SummarizationMiddleware
+
+当对话变长时，对旧消息进行摘要以减少上下文大小。生成的摘要存入线程状态，并在后续模型调用中作为隐藏的 durable context 数据投影进去，在不把旧消息继续留在活跃 transcript 中的情况下保留含义。
+
+同一个中间件与同一个 `summarization.enabled` 开关也会压缩子 Agent transcript，使一份配置同时覆盖 Lead Agent 与子 Agent 两条链（#3875）。
+
+**配置**：`config.yaml` 中的 `summarization:` 部分。详见下方详细配置。
+
+---
+
+### ViewImageMiddleware
+
+当当前模型支持视觉（`supports_vision: true`）时，此中间件拦截 `view_image` 工具调用，并将图像内容直接注入到模型的上下文中以便分析。
+
+**激活**：当解析的模型具有 `supports_vision: true` 时自动启用。
+
+---
+
+### DeferredToolFilterMiddleware
+
+当工具搜索启用时，此中间件从模型上下文中隐藏延迟工具 schema。工具通过 `tool_search` 工具按需发现，而不是预先全部列出，从而减少上下文使用。
+
+**配置**：`config.yaml` 中的 `tool_search.enabled: true`。
+
+对于 `create_deerflow_agent`，`@Next` 或 `@Prev` 锚点必须指向这个较小链中实际存在的中间件；否则使用完整中间件列表中的锚点会解析失败。
+
+## 摘要压缩配置详解
+
+`SummarizationMiddleware` 是长时序任务中影响最大的中间件之一。完整配置参考如下：
+
+```yaml
+summarization:
+  enabled: true
+
+  # 摘要使用的模型（null = 使用默认模型）
+  # 推荐使用轻量级、经济的模型，如 "gpt-4o-mini"
+  model_name: null
+
+  # 触发条件——满足任意一个条件时运行摘要
+  trigger:
+    - type: tokens # 当上下文超过 N 个 token 时触发
+      value: 32000
+    # - type: messages  # 当消息数超过 N 时触发
+    #   value: 50
+    # - type: fraction  # 当上下文达到模型最大输入的 X% 时触发
+    #   value: 0.8
+
+  # 摘要后保留多少最近历史
+  keep:
+    type: messages
+    value: 10 # 保留最近 10 条消息
+    # 或者按 token 保留：
+    # type: tokens
+    # value: 3000
+
+  # 为摘要器准备消息时要裁剪的最大 token 数
+  trim_tokens_to_summarize: 15564
+
+  # 自定义摘要提示词（null = 使用默认 LangChain 提示词）
+  summary_prompt: null
+```
+
+**触发类型**：
+
+- `tokens`：当对话中总 token 数超过 `value` 时触发。
+- `messages`：当消息数超过 `value` 时触发。
+- `fraction`：当上下文达到模型最大输入 token 限制的 `value` 比例时触发。
+
+**保留类型**：
+
+- `messages`：摘要后保留最后 `value` 条消息。
+- `tokens`：保留最近 `value` 个 token 的历史。
+- `fraction`：保留模型最大输入 token 限制的 `value` 比例的最近历史。
+
+## 编写自定义中间件
+
+自定义中间件可以注入到链中用于专业用途。中间件必须实现 `langchain.agents.middleware` 中的 `AgentMiddleware` 接口：
+
+```python
+from langchain.agents import AgentState
+from langchain.agents.middleware import AgentMiddleware
+from langgraph.runtime import Runtime
+
+class MyMiddleware(AgentMiddleware[AgentState]):
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        print(f"模型输入包含 {len(state.get('messages', []))} 条消息")
+        return None
+
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        messages = state.get("messages", [])
+        last_message = messages[-1] if messages else None
+        print(f"最后一条消息类型：{type(last_message).__name__ if last_message else 'none'}")
+        return None
+```
+
+生命周期钩子可以返回状态更新字典，LangChain 会将其合并到 Agent 状态中；仅观察时返回 `None`。
+
+对于运维配置的部署，请通过导入路径注册类。字符串条目使用零参数构造；`{class, kwargs}` 会把 `kwargs` 传给构造函数。`kwargs` 的值必须是 JSON 类型（对象、数组、字符串、数字、布尔或 null）；YAML 日期和时间戳会转成 ISO 字符串，与 JSON 保持一致：
+
+```yaml
+extensions:
+  middlewares:
+    - my_company.deerflow_middlewares:MyMiddleware
+    - class: my_company.deerflow_middlewares:MyMiddleware
+      kwargs:
+        max_tool_calls: 5
+```
+
+配置的中间件会在内置中间件及可选的循环/token 保护之后加载。对于主 Agent 链，它位于终态响应、模型长度、安全和澄清尾部之前；子 Agent 链没有终态响应、模型长度或澄清阶段，因此配置中间件之后会继续执行可选的安全防护、`DurableContextMiddleware`、可选的 `SummarizationMiddleware`，随后是 `SubagentDateContextMiddleware` 和 `SystemMessageCoalescingMiddleware`。中间件路径会执行 Python 代码，因此应视为可信配置。嵌入式调用方也可以使用 `DeerFlowClient(middlewares=[...])`；它构建完整的主 Agent 链，并将中间件放在其终态响应、模型长度、安全和澄清尾部之前。`create_deerflow_agent(extra_middleware=[...])` 则构建较小的按功能组装的主 Agent 链；未锚定的额外中间件会紧接在 `ClarificationMiddleware` 之前放置（锚定中间件遵循其 `@Next`/`@Prev` 位置）。两个 API 均不会将中间件转发给子 Agent。
+
+应根据配置的所有者和插入位置选择注册方式。固定槽位（并未弃用）`extensions.middlewares` 可写在 `config.yaml` 或 `extensions_config.json` 中（前者优先），并同时作用于主 Agent 和子 Agent。通过顶层 `plugins:` 注册的打包扩展可在语义化扩展点贡献中间件。若贡献代码需要可提交、可编程且仅作用于主 Agent 的接线，请使用 `build_middlewares(..., custom_middlewares=[MyMiddleware()])`。

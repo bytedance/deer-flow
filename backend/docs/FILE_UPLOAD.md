@@ -2,14 +2,14 @@
 
 ## 概述
 
-DeerFlow 后端提供了完整的文件上传功能，支持多文件上传，并自动将 Office 文档和 PDF 转换为 Markdown 格式。
+DeerFlow 后端提供了完整的文件上传功能，支持多文件上传，并可选地将 Office 文档和 PDF 转换为 Markdown 格式。
 
 ## 功能特性
 
 - ✅ 支持多文件同时上传
-- ✅ 自动转换文档为 Markdown（PDF、PPT、Excel、Word）
+- ✅ 可选地转换文档为 Markdown（PDF、PPT、Excel、Word）
 - ✅ 文件存储在线程隔离的目录中
-- ✅ Agent 自动感知已上传的文件
+- ✅ Agent 自动感知当前消息中附带的文件
 - ✅ 支持文件列表查询和删除
 
 ## API 端点
@@ -21,6 +21,8 @@ POST /api/threads/{thread_id}/uploads
 
 **请求体：** `multipart/form-data`
 - `files`: 一个或多个文件
+
+网关会在应用层限制上传规模，默认最多 10 个文件、单文件 50 MiB、单次请求总计 100 MiB。可通过 `config.yaml` 的 `uploads.max_files`、`uploads.max_file_size`、`uploads.max_total_size` 调整；前端会读取同一组限制并在选择文件时提示，超过限制时后端返回 `413 Payload Too Large`。
 
 **响应：**
 ```json
@@ -48,7 +50,23 @@ POST /api/threads/{thread_id}/uploads
 - `virtual_path`: Agent 在沙箱中使用的虚拟路径
 - `artifact_url`: 前端通过 HTTP 访问文件的 URL
 
-### 2. 列出已上传文件
+### 2. 查询上传限制
+```
+GET /api/threads/{thread_id}/uploads/limits
+```
+
+返回网关当前生效的上传限制，供前端在用户选择文件前提示和拦截。
+
+**响应：**
+```json
+{
+  "max_files": 10,
+  "max_file_size": 52428800,
+  "max_total_size": 104857600
+}
+```
+
+### 3. 列出已上传文件
 ```
 GET /api/threads/{thread_id}/uploads/list
 ```
@@ -71,7 +89,7 @@ GET /api/threads/{thread_id}/uploads/list
 }
 ```
 
-### 3. 删除文件
+### 4. 删除文件
 ```
 DELETE /api/threads/{thread_id}/uploads/{filename}
 ```
@@ -86,7 +104,7 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 
 ## 支持的文档格式
 
-以下格式会自动转换为 Markdown：
+以下格式在显式启用 `uploads.auto_convert_documents: true` 时会自动转换为 Markdown：
 - PDF (`.pdf`)
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
@@ -94,25 +112,34 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 
 转换后的 Markdown 文件会保存在同一目录下，文件名为原文件名 + `.md` 扩展名。
 
+默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
+
 ## Agent 集成
 
-### 自动文件列举
+### 当前消息中的文件上下文
 
-Agent 在每次请求时会自动收到已上传文件的列表，格式如下：
+发送消息时，前端会把该消息附带的上传文件元数据放入
+`HumanMessage.additional_kwargs.files`。`UploadsMiddleware` 只把当前消息中的文件
+注入 Agent 上下文，格式如下：
 
 ```xml
-<uploaded_files>
-The following files have been uploaded and are available for use:
+<current_uploads>
+The following files were uploaded in this message:
 
 - document.pdf (1.2 MB)
   Path: /mnt/user-data/uploads/document.pdf
 
-- document.md (45.3 KB)
-  Path: /mnt/user-data/uploads/document.md
-
-You can read these files using the `read_file` tool with the paths shown above.
-</uploaded_files>
+To work with these files:
+- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.
+- Use `grep` to search for keywords when you are not sure which section to look at.
+- Use `glob` to find files by name pattern.
+</current_uploads>
 ```
+
+以前轮次上传的文件不会在每次请求中重复注入。Agent 可按需调用
+`list_uploaded_files` 查询历史上传（可选 `query` 按文件名子串过滤、
+`extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。如果已知文件名，也可直接使用
+`read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
 
 ### 使用上传的文件
 
@@ -134,7 +161,9 @@ read_file(path="/mnt/user-data/uploads/document.md")
 上传流程采用“线程目录优先”策略：
 - 先写入 `backend/.deer-flow/threads/{thread_id}/user-data/uploads/` 作为权威存储
 - 本地沙箱（`sandbox_id=local`）直接使用线程目录内容
-- 非本地沙箱会额外同步到 `/mnt/user-data/uploads/*`，确保运行时可见
+- 默认情况下，非本地沙箱通过 `acquire_async` 获取后，再额外同步到 `/mnt/user-data/uploads/*`，确保运行时可见
+- 如果 Gateway 与远端沙箱保证挂载同一份线程 user-data（例如正确对齐的共享 PVC、NFS 或 hostPath），可设置 `sandbox.thread_data_mounts: true`；上传路由会跳过 sandbox acquire 和逐文件同步
+- 不确定挂载关系时应省略该配置并保留自动检测。错误地设为 `true` 会导致文件只存在于 Gateway 存储、沙箱内不可见
 
 ## 测试示例
 
@@ -207,6 +236,7 @@ backend/.deer-flow/threads/
 - 最大文件大小：100MB（可在 nginx.conf 中配置 `client_max_body_size`）
 - 文件名安全性：系统会自动验证文件路径，防止目录遍历攻击
 - 线程隔离：每个线程的上传文件相互隔离，无法跨线程访问
+- 自动文档转换默认关闭；如需启用，需在 `config.yaml` 中显式设置 `uploads.auto_convert_documents: true`
 
 ## 技术实现
 
@@ -217,8 +247,9 @@ backend/.deer-flow/threads/
    - 使用 markitdown 转换文档
 
 2. **Uploads Middleware** (`packages/harness/deerflow/agents/middlewares/uploads_middleware.py`)
-   - 在每次 Agent 请求前注入文件列表
-   - 自动生成格式化的文件列表消息
+   - 读取当前消息的 `additional_kwargs.files`
+   - 在 Agent 请求前生成并注入 `<current_uploads>` 文件上下文
+   - 历史上传由 `list_uploaded_files` 按需查询（可按文件名/扩展名过滤后再截断），不会每轮自动注入
 
 3. **Nginx 配置** (`nginx.conf`)
    - 路由上传请求到 Gateway API

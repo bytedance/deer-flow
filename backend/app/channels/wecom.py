@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from app.channels.base import Channel
+from app.channels.commands import is_known_channel_command
+from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
+    InboundMessage,
     InboundMessageType,
     MessageBus,
     OutboundMessage,
@@ -18,6 +22,75 @@ from app.channels.message_bus import (
 logger = logging.getLogger(__name__)
 
 
+def _file_md5(path: str) -> str:
+    md5_hasher = hashlib.md5()
+    with open(path, "rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            md5_hasher.update(chunk)
+    return md5_hasher.hexdigest()
+
+
+def _open_binary(path: str):
+    return open(path, "rb")
+
+
+# The WeCom bot protocol caps message content at 20480 UTF-8 bytes, for both
+# passive stream replies and active markdown pushes.
+_WECOM_MAX_CONTENT_BYTES = 20480
+_TRUNCATION_MARKER = "\n\n... (truncated)"
+# One push must not flood the chat with an unbounded run of messages: keep the
+# first few chunks and collapse the rest into one truncated tail.
+_WECOM_MAX_CHUNK_BATCH = 10
+
+
+def _clip_to_byte_limit(text: str, limit: int) -> str:
+    """Clip text to a UTF-8 byte budget, never splitting a character."""
+    if len(text.encode("utf-8")) <= limit:
+        return text
+    budget = limit - len(_TRUNCATION_MARKER.encode("utf-8"))
+    clipped = text.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+    return clipped + _TRUNCATION_MARKER
+
+
+def _split_for_byte_limit(text: str, limit: int) -> list[str]:
+    """Split text into chunks within the UTF-8 byte limit.
+
+    Prefers newline boundaries so markdown structure survives the split.
+    The batch cap applies inside the loop, so a pathological text is never
+    fully split just to be discarded.
+    """
+    if len(text.encode("utf-8")) <= limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining.encode("utf-8")) > limit:
+        if len(chunks) >= _WECOM_MAX_CHUNK_BATCH - 1:
+            logger.warning(
+                "WeCom push of %d bytes exceeds %d messages, capping the batch",
+                len(text.encode("utf-8")),
+                _WECOM_MAX_CHUNK_BATCH,
+            )
+            chunks.append(_clip_to_byte_limit(remaining, limit))
+            return chunks
+        window = remaining.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+        cut = window.rfind("\n")
+        if cut <= 0:
+            cut = len(window)
+        else:
+            # Keep the delimiter on this chunk's tail: the sequential messages
+            # must round-trip to the original text exactly.
+            cut += 1
+        if cut == 0:
+            # limit is narrower than one whole character; take it anyway so
+            # the loop always advances.
+            cut = 1
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
 class WeComChannel(Channel):
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="wecom", bus=bus, config=config)
@@ -25,9 +98,18 @@ class WeComChannel(Channel):
         self._bot_secret: str | None = None
         self._ws_client = None
         self._ws_task: asyncio.Task | None = None
+        self._ws_shutdown_task: asyncio.Future[Any] | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
+        self._ws_send_locks: dict[str, asyncio.Lock] = {}
+        self._ws_send_lock_users: dict[str, int] = {}
+        self._ws_send_locks_guard = asyncio.Lock()
         self._working_message = "Working on it..."
+
+    @property
+    def supports_streaming(self) -> bool:
+        return True
 
     def _clear_ws_context(self, thread_ts: str | None) -> None:
         if not thread_ts:
@@ -48,56 +130,123 @@ class WeComChannel(Channel):
         return await send_reply_async(req_id, body, cmd)
 
     async def start(self) -> None:
-        if self._running:
+        async with self._lifecycle_lock:
+            if self._running:
+                return
+
+            bot_id = self.config.get("bot_id")
+            bot_secret = self.config.get("bot_secret")
+            working_message = self.config.get("working_message")
+
+            self._bot_id = bot_id if isinstance(bot_id, str) and bot_id else None
+            self._bot_secret = bot_secret if isinstance(bot_secret, str) and bot_secret else None
+            self._working_message = working_message if isinstance(working_message, str) and working_message else "Working on it..."
+
+            if not self._bot_id or not self._bot_secret:
+                logger.error("WeCom channel requires bot_id and bot_secret")
+                return
+
+            try:
+                from aibot import WSClient, WSClientOptions
+            except ImportError:
+                logger.error("wecom-aibot-python-sdk is not installed. Install it with: uv add wecom-aibot-python-sdk")
+                return
+            else:
+                self._ws_client = WSClient(WSClientOptions(bot_id=self._bot_id, secret=self._bot_secret, logger=logger))
+                self._ws_client.on("message.text", self._on_ws_text)
+                self._ws_client.on("message.mixed", self._on_ws_mixed)
+                self._ws_client.on("message.image", self._on_ws_image)
+                self._ws_client.on("message.file", self._on_ws_file)
+                self._ws_client.on("error", self._on_ws_error)
+                self._ws_client.on("disconnected", self._on_ws_disconnected)
+                self._ws_task = asyncio.create_task(self._ws_client.connect())
+                self._ws_task.add_done_callback(self._on_ws_task_done)
+
+                self._running = True
+                self.bus.subscribe_outbound(self._on_outbound)
+            logger.info("WeCom channel started")
+
+    def _on_ws_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
             return
-
-        bot_id = self.config.get("bot_id")
-        bot_secret = self.config.get("bot_secret")
-        working_message = self.config.get("working_message")
-
-        self._bot_id = bot_id if isinstance(bot_id, str) and bot_id else None
-        self._bot_secret = bot_secret if isinstance(bot_secret, str) and bot_secret else None
-        self._working_message = working_message if isinstance(working_message, str) and working_message else "Working on it..."
-
-        if not self._bot_id or not self._bot_secret:
-            logger.error("WeCom channel requires bot_id and bot_secret")
+        exc = task.exception()
+        if exc is None:
             return
+        logger.error(
+            "WeCom WebSocket connection task failed: %s. Check that the network/proxy allows wss://openws.work.weixin.qq.com and that bot_id/bot_secret are valid.",
+            exc,
+        )
+
+    def _on_ws_error(self, error: Any) -> None:
+        logger.error("WeCom WebSocket error: %s", error)
+
+    def _on_ws_disconnected(self, *args: Any) -> None:
+        detail = f" ({args[0]})" if args else ""
+        logger.warning("WeCom WebSocket disconnected%s; SDK will attempt to reconnect", detail)
+
+    def _begin_ws_shutdown(self, ws_client: Any) -> asyncio.Future[Any] | None:
+        ws_manager = getattr(ws_client, "_ws_manager", None)
+        async_disconnect = getattr(ws_manager, "_async_disconnect", None)
+        stop_heartbeat = getattr(ws_manager, "_stop_heartbeat", None)
+        clear_pending_messages = getattr(ws_manager, "_clear_pending_messages", None)
+
+        if inspect.iscoroutinefunction(async_disconnect) and callable(stop_heartbeat) and callable(clear_pending_messages):
+            # wecom-aibot-python-sdk 1.0.2 makes disconnect() synchronous and
+            # discards the task created for _async_disconnect(). Perform its
+            # synchronous bookkeeping here so DeerFlow can own and await the
+            # actual SDK shutdown operation without scheduling a duplicate.
+            try:
+                if hasattr(ws_client, "_started"):
+                    ws_client._started = False
+                ws_manager._is_manual_close = True
+                stop_heartbeat()
+                clear_pending_messages("Connection manually closed")
+            except Exception:
+                logger.exception("Failed to prepare WeCom WebSocket shutdown")
+            return asyncio.create_task(async_disconnect())
 
         try:
-            from aibot import WSClient, WSClientOptions
-        except ImportError:
-            logger.error("wecom-aibot-python-sdk is not installed. Install it with: uv add wecom-aibot-python-sdk")
-            return
-        else:
-            self._ws_client = WSClient(WSClientOptions(bot_id=self._bot_id, secret=self._bot_secret, logger=logger))
-            self._ws_client.on("message.text", self._on_ws_text)
-            self._ws_client.on("message.mixed", self._on_ws_mixed)
-            self._ws_client.on("message.image", self._on_ws_image)
-            self._ws_client.on("message.file", self._on_ws_file)
-            self._ws_task = asyncio.create_task(self._ws_client.connect())
-
-            self._running = True
-            self.bus.subscribe_outbound(self._on_outbound)
-        logger.info("WeCom channel started")
+            result = ws_client.disconnect()
+        except Exception:
+            logger.exception("Failed to request WeCom WebSocket disconnect")
+            return None
+        if inspect.isawaitable(result):
+            return asyncio.ensure_future(result)
+        return None
 
     async def stop(self) -> None:
-        self._running = False
-        self.bus.unsubscribe_outbound(self._on_outbound)
-        if self._ws_task:
+        async with self._lifecycle_lock:
+            self._running = False
+            self.bus.unsubscribe_outbound(self._on_outbound)
+            ws_client = self._ws_client
+            ws_task = self._ws_task
+            if ws_task and not ws_task.done():
+                ws_task.cancel()
+
+            shutdown_task = None
             try:
-                self._ws_task.cancel()
-            except Exception:
-                pass
-            self._ws_task = None
-        if self._ws_client:
-            try:
-                self._ws_client.disconnect()
-            except Exception:
-                pass
-        self._ws_client = None
-        self._ws_frames.clear()
-        self._ws_stream_ids.clear()
-        logger.info("WeCom channel stopped")
+                shutdown_task = self._begin_ws_shutdown(ws_client) if ws_client else None
+                self._ws_shutdown_task = shutdown_task
+                tasks = [task for task in (ws_task, shutdown_task) if task is not None]
+                drain_future = asyncio.gather(*tasks, return_exceptions=True) if tasks else None
+                if drain_future is not None:
+                    try:
+                        await asyncio.shield(drain_future)
+                    except asyncio.CancelledError:
+                        # Caller cancellation still propagates, but only after
+                        # the channel-owned tasks have completed their cleanup.
+                        await drain_future
+                        raise
+            finally:
+                if self._ws_task is ws_task:
+                    self._ws_task = None
+                if self._ws_client is ws_client:
+                    self._ws_client = None
+                if self._ws_shutdown_task is shutdown_task:
+                    self._ws_shutdown_task = None
+                self._ws_frames.clear()
+                self._ws_stream_ids.clear()
+            logger.info("WeCom channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
         if self._ws_client:
@@ -171,7 +320,7 @@ class WeComChannel(Channel):
     async def _on_ws_text(self, frame: dict[str, Any]) -> None:
         body = frame.get("body", {}) or {}
         text = ((body.get("text") or {}).get("content") or "").strip()
-        quote = body.get("quote", {}).get("text", {}).get("content", "").strip()
+        quote = (((body.get("quote") or {}).get("text") or {}).get("content") or "").strip()
         if not text and not quote:
             return
         await self._publish_ws_inbound(frame, text + (f"\nQuote message: {quote}" if quote else ""))
@@ -266,7 +415,17 @@ class WeComChannel(Channel):
 
         user_id = (body.get("from") or {}).get("userid")
 
-        inbound_type = InboundMessageType.COMMAND if text.startswith("/") else InboundMessageType.CHAT
+        connect_code = self._pending_connect_code(text)
+        if connect_code:
+            handled = await self._bind_connection_from_connect_code(
+                frame=frame,
+                user_id=str(user_id or ""),
+                code=connect_code,
+            )
+            if handled:
+                return
+
+        inbound_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
         inbound = self._make_inbound(
             chat_id=user_id,  # keep user's conversation in memory
             user_id=user_id,
@@ -274,7 +433,11 @@ class WeComChannel(Channel):
             msg_type=inbound_type,
             thread_ts=msg_id,
             files=files or [],
-            metadata={"aibotid": body.get("aibotid"), "chattype": body.get("chattype")},
+            metadata={
+                "aibotid": body.get("aibotid"),
+                "chattype": body.get("chattype"),
+                "message_id": msg_id,
+            },
         )
         inbound.topic_id = user_id  # keep the same thread
 
@@ -282,12 +445,64 @@ class WeComChannel(Channel):
         self._ws_frames[msg_id] = frame
         self._ws_stream_ids[msg_id] = stream_id
 
+        reservation = self._reserve_inbound(inbound)
+        if reservation is None:
+            self._ws_frames.pop(msg_id, None)
+            self._ws_stream_ids.pop(msg_id, None)
+            return
         try:
-            await self._ws_client.reply_stream(frame, stream_id, self._working_message, False)
-        except Exception:
-            pass
+            try:
+                await self._ws_client.reply_stream(frame, stream_id, self._working_message, False)
+            except Exception:
+                pass
 
-        await self.bus.publish_inbound(inbound)
+            inbound = await self._attach_connection_identity(inbound)
+            self._commit_reserved_inbound(reservation, inbound)
+        finally:
+            reservation.release()
+
+    async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="wecom",
+            workspace_id=str(inbound.metadata.get("aibotid") or "") or None,
+            fallback_without_workspace=True,
+        )
+
+    async def _bind_connection_from_connect_code(self, *, frame: dict[str, Any], user_id: str, code: str) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="wecom", state=code)
+        if state is None:
+            await self._send_connection_reply(frame, "WeCom connection code is invalid or expired.")
+            return True
+
+        if not user_id:
+            await self._send_connection_reply(frame, "WeCom connection could not be completed from this message.")
+            return True
+
+        body = frame.get("body", {}) or {}
+        workspace_id = str(body.get("aibotid") or "") or None
+        await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="wecom",
+            external_account_id=user_id,
+            workspace_id=workspace_id,
+            metadata={
+                "aibotid": workspace_id,
+                "chattype": body.get("chattype"),
+            },
+            status="connected",
+        )
+        await self._send_connection_reply(frame, "WeCom connected to DeerFlow.")
+        return True
+
+    async def _send_connection_reply(self, frame: dict[str, Any], text: str) -> None:
+        if not self._ws_client:
+            return
+        await self._ws_client.reply(frame, {"msgtype": "text", "text": {"content": text}})
 
     async def _send_ws(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
         if not self._ws_client:
@@ -306,30 +521,41 @@ class WeComChannel(Channel):
             if not stream_id:
                 return
 
-            last_exc: Exception | None = None
-            for attempt in range(_max_retries):
-                try:
-                    await self._ws_client.reply_stream(frame, stream_id, msg.text, bool(msg.is_final))
-                    return
-                except Exception as exc:
-                    last_exc = exc
-                    if attempt < _max_retries - 1:
-                        await asyncio.sleep(2**attempt)
-            if last_exc:
-                raise last_exc
+            await self._send_with_retry(
+                lambda: self._ws_client.reply_stream(frame, stream_id, _clip_to_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES), bool(msg.is_final)),
+                max_retries=_max_retries,
+                log_prefix="[WeCom]",
+                operation_name="stream send",
+            )
+            return
 
-        body = {"msgtype": "markdown", "markdown": {"content": msg.text}}
-        last_exc = None
-        for attempt in range(_max_retries):
-            try:
-                await self._ws_client.send_message(msg.chat_id, body)
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    await asyncio.sleep(2**attempt)
-        if last_exc:
-            raise last_exc
+        # No replyable frame (e.g. a scheduled-task push): a stream reply is one
+        # stream per reply and cannot split mid-way, but this path can, so the
+        # full text goes out as sequential markdown messages. Each send awaits,
+        # so hold a per-chat lock across the whole batch: manager workers run
+        # concurrently, and two long pushes to the same chat would otherwise
+        # interleave chunks (A1, B1, A2, B2) and break the sequential contract.
+        async with self._ws_send_locks_guard:
+            lock = self._ws_send_locks.setdefault(msg.chat_id, asyncio.Lock())
+            self._ws_send_lock_users[msg.chat_id] = self._ws_send_lock_users.get(msg.chat_id, 0) + 1
+        try:
+            async with lock:
+                for chunk in _split_for_byte_limit(msg.text, _WECOM_MAX_CONTENT_BYTES):
+                    body = {"msgtype": "markdown", "markdown": {"content": chunk}}
+                    await self._send_with_retry(
+                        lambda body=body: self._ws_client.send_message(msg.chat_id, body),
+                        max_retries=_max_retries,
+                        log_prefix="[WeCom]",
+                    )
+        finally:
+            async with self._ws_send_locks_guard:
+                self._ws_send_lock_users[msg.chat_id] -= 1
+                # Reclaim only while nobody else is queued on this chat's lock;
+                # the guard serializes the check so a waiter can never end up
+                # holding a fresh lock for a chat whose batch is mid-flight.
+                if self._ws_send_lock_users[msg.chat_id] == 0:
+                    self._ws_send_lock_users.pop(msg.chat_id, None)
+                    self._ws_send_locks.pop(msg.chat_id, None)
 
     async def _upload_media_ws(
         self,
@@ -352,11 +578,7 @@ class WeComChannel(Channel):
             logger.warning("[WeCom] invalid total_chunks=%d for %s", total_chunks, filename)
             return None
 
-        md5_hasher = hashlib.md5()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                md5_hasher.update(chunk)
-        md5 = md5_hasher.hexdigest()
+        md5 = await asyncio.to_thread(_file_md5, path)
 
         init_req_id = generate_req_id("aibot_upload_media_init")
         init_body = {
@@ -372,9 +594,10 @@ class WeComChannel(Channel):
             logger.warning("[WeCom] upload init returned no upload_id: %s", init_ack)
             return None
 
-        with open(path, "rb") as f:
+        file_obj = await asyncio.to_thread(_open_binary, path)
+        try:
             for idx in range(total_chunks):
-                data = f.read(chunk_size)
+                data = await asyncio.to_thread(file_obj.read, chunk_size)
                 if not data:
                     break
                 chunk_req_id = generate_req_id("aibot_upload_media_chunk")
@@ -384,6 +607,8 @@ class WeComChannel(Channel):
                     "base64_data": base64.b64encode(data).decode("utf-8"),
                 }
                 await self._send_ws_upload_command(chunk_req_id, chunk_body, "aibot_upload_media_chunk")
+        finally:
+            await asyncio.to_thread(file_obj.close)
 
         finish_req_id = generate_req_id("aibot_upload_media_finish")
         finish_ack = await self._send_ws_upload_command(finish_req_id, {"upload_id": upload_id}, "aibot_upload_media_finish")

@@ -1,0 +1,247 @@
+"""Regression coverage for the Gateway-owned LangGraph API runtime."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _read(path: str) -> str:
+    return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+
+def _extract_nginx_location_block(content: str, location: str) -> str:
+    needle = f"location {location} {{"
+    start = content.find(needle)
+    assert start != -1, f"missing nginx {needle}"
+
+    brace_start = content.find("{", start)
+    assert brace_start != -1, f"missing nginx block opener for {needle}"
+
+    depth = 0
+    for index in range(brace_start, len(content)):
+        char = content[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return content[start : index + 1]
+
+    raise AssertionError(f"missing nginx block closer for {needle}")
+
+
+def _assert_frontend_upgrade_header_is_conditional(content: str) -> None:
+    frontend_block = _extract_nginx_location_block(content, "/")
+
+    assert "map $http_upgrade $connection_upgrade" in content
+    assert "proxy_set_header Upgrade $http_upgrade;" in frontend_block
+    assert "proxy_set_header Connection $connection_upgrade;" in frontend_block
+    assert "proxy_set_header Connection 'upgrade';" not in frontend_block
+
+
+def test_root_makefile_no_longer_exposes_transition_gateway_targets():
+    makefile = _read("Makefile")
+
+    assert "dev-pro" not in makefile
+    assert "start-pro" not in makefile
+    assert "dev-daemon-pro" not in makefile
+    assert "start-daemon-pro" not in makefile
+    assert "docker-start-pro" not in makefile
+    assert "up-pro" not in makefile
+    assert not re.search(r"serve\.sh .*--gateway", makefile)
+    assert "docker.sh start --gateway" not in makefile
+    assert "deploy.sh --gateway" not in makefile
+
+
+def test_service_launchers_always_use_gateway_runtime():
+    operational_files = {
+        "scripts/serve.sh": _read("scripts/serve.sh"),
+        "scripts/docker.sh": _read("scripts/docker.sh"),
+        "scripts/deploy.sh": _read("scripts/deploy.sh"),
+        "docker/docker-compose-dev.yaml": _read("docker/docker-compose-dev.yaml"),
+        "docker/docker-compose.yaml": _read("docker/docker-compose.yaml"),
+    }
+
+    for path, content in operational_files.items():
+        assert "start --gateway" not in content, path
+        assert "deploy.sh --gateway" not in content, path
+        assert "langgraph dev" not in content, path
+        assert "LANGGRAPH_UPSTREAM" not in content, path
+        assert "LANGGRAPH_REWRITE" not in content, path
+
+
+def test_docker_dev_mounts_mutable_configs_through_project_directory():
+    compose = _read("docker/docker-compose-dev.yaml")
+
+    assert re.search(r"^\s*-\s*\.\./:/app/project(?:\:\S+)?\s*$", compose, re.M)
+    assert not re.search(r"^\s*-\s*[^\n#]*config\.yaml\s*:\s*[^\n#]*$", compose, re.M)
+    assert not re.search(r"^\s*-\s*[^\n#]*extensions_config\.json\s*:\s*[^\n#]*$", compose, re.M)
+    assert "DEER_FLOW_CONFIG_PATH=/app/project/config.yaml" in compose
+    assert "DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/project/extensions_config.json" in compose
+
+
+def test_local_dev_gateway_reload_excludes_runtime_state_with_absolute_dirs():
+    serve_sh = _read("scripts/serve.sh")
+
+    assert 'export DEER_FLOW_PROJECT_ROOT="$REPO_ROOT"' in serve_sh
+    assert 'BACKEND_RUNTIME_HOME="$REPO_ROOT/backend/.deer-flow"' in serve_sh
+    assert 'export DEER_FLOW_HOME="$BACKEND_RUNTIME_HOME"' in serve_sh
+    # Every absolute reload-exclude must be pre-created, including backend/sandbox
+    # (#3459 / #3454) — see test_uvicorn_reload_exclude.py for the mechanism.
+    assert 'mkdir -p "$DEER_FLOW_HOME" "$BACKEND_RUNTIME_HOME" "$REPO_ROOT/backend/sandbox"' in serve_sh
+    assert "--reload-exclude='$DEER_FLOW_HOME'" in serve_sh
+    assert "--reload-exclude='$BACKEND_RUNTIME_HOME'" in serve_sh
+    assert "--reload-exclude='sandbox/'" not in serve_sh
+    assert "--reload-exclude='.deer-flow/'" not in serve_sh
+
+
+def test_backend_make_dev_gateway_reload_excludes_runtime_state_with_absolute_dirs():
+    makefile = _read("backend/Makefile")
+
+    assert "DEER_FLOW_HOME ?= $(CURDIR)/.deer-flow" in makefile
+    assert "DEER_FLOW_HOME := $(abspath $(DEER_FLOW_HOME))" in makefile
+    assert "BACKEND_SANDBOX_HOME := $(abspath $(CURDIR)/sandbox)" in makefile
+    assert 'mkdir -p "$(DEER_FLOW_HOME)" "$(BACKEND_SANDBOX_HOME)"' in makefile
+    # The launch line may carry runtime-only uv flags (`--locked` pins the
+    # extension lock); what this guards is that DEER_FLOW_HOME is exported on it,
+    # so the reload-excludes below resolve to the same absolute directories.
+    assert re.search(r'DEER_FLOW_HOME="\$\(DEER_FLOW_HOME\)" uv run(?: --(?:locked|no-sync))? uvicorn', makefile)
+    assert '--reload-exclude="$(DEER_FLOW_HOME)"' in makefile
+    assert '--reload-exclude="$(BACKEND_SANDBOX_HOME)"' in makefile
+
+
+def test_backend_container_only_exposes_gateway_port():
+    dockerfile = _read("backend/Dockerfile")
+
+    assert not re.search(r"^EXPOSE\s+.*\b2024\b", dockerfile, re.M)
+    assert "langgraph: 2024" not in dockerfile
+    assert re.search(r"^EXPOSE\s+8001\b", dockerfile, re.M)
+
+
+def test_root_makefile_clean_does_not_reference_langgraph_server_cache():
+    makefile = _read("Makefile")
+
+    assert ".langgraph_api" not in makefile
+
+
+def test_nginx_routes_official_langgraph_prefix_to_gateway_api():
+    for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
+        content = _read(path)
+
+        assert "/api/langgraph-compat" not in content
+        assert "proxy_pass http://langgraph" not in content
+        assert "rewrite ^/api/langgraph/(.*) /api/$1 break;" in content
+        assert "proxy_pass http://gateway" in content or "proxy_pass http://$gateway_upstream" in content
+
+
+def test_nginx_defers_cors_to_gateway_allowlist():
+    for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
+        content = _read(path)
+
+        assert "Access-Control-Allow-Origin" not in content
+        assert "Access-Control-Allow-Methods" not in content
+        assert "Access-Control-Allow-Headers" not in content
+        assert "Access-Control-Allow-Credentials" not in content
+        assert "proxy_hide_header 'Access-Control-Allow-" not in content
+        assert "if ($request_method = 'OPTIONS')" not in content
+
+
+def test_nginx_frontend_upgrade_header_is_conditional():
+    for path in ("docker/nginx/nginx.local.conf", "docker/nginx/nginx.conf"):
+        content = _read(path)
+
+        _assert_frontend_upgrade_header_is_conditional(content)
+
+
+def test_nginx_frontend_upgrade_check_allows_dedicated_websocket_locations():
+    content = """
+http {
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      '';
+    }
+
+    server {
+        location /api/threads/123/browser/stream {
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection 'upgrade';
+        }
+
+        location / {
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+        }
+    }
+}
+"""
+
+    _assert_frontend_upgrade_header_is_conditional(content)
+
+
+def test_gateway_cors_configuration_uses_gateway_allowlist():
+    gateway_config = _read("backend/app/gateway/config.py")
+    gateway_app = _read("backend/app/gateway/app.py")
+    csrf_middleware = _read("backend/app/gateway/csrf_middleware.py")
+
+    assert not re.search(r"(?<!GATEWAY_)[\"']CORS_ORIGINS[\"']", gateway_config)
+    assert "cors_origins" not in gateway_config
+    assert "get_configured_cors_origins" in gateway_app
+    assert "GATEWAY_CORS_ORIGINS" in csrf_middleware
+
+
+def test_frontend_rewrites_langgraph_prefix_to_gateway():
+    next_config = _read("frontend/next.config.js")
+    api_client = _read("frontend/src/core/api/api-client.ts")
+
+    assert "DEER_FLOW_INTERNAL_LANGGRAPH_BASE_URL" not in next_config
+    assert "http://127.0.0.1:2024" not in next_config
+    assert "langgraph-compat" not in api_client
+
+
+def test_smoke_test_docs_do_not_expect_standalone_langgraph_server():
+    smoke_files = {
+        ".agent/skills/smoke-test/SKILL.md": _read(".agent/skills/smoke-test/SKILL.md"),
+        ".agent/skills/smoke-test/references/SOP.md": _read(".agent/skills/smoke-test/references/SOP.md"),
+        ".agent/skills/smoke-test/references/troubleshooting.md": _read(".agent/skills/smoke-test/references/troubleshooting.md"),
+        ".agent/skills/smoke-test/scripts/check_local_env.sh": _read(".agent/skills/smoke-test/scripts/check_local_env.sh"),
+        ".agent/skills/smoke-test/scripts/deploy_local.sh": _read(".agent/skills/smoke-test/scripts/deploy_local.sh"),
+        ".agent/skills/smoke-test/scripts/health_check.sh": _read(".agent/skills/smoke-test/scripts/health_check.sh"),
+        ".agent/skills/smoke-test/templates/report.local.template.md": _read(".agent/skills/smoke-test/templates/report.local.template.md"),
+        ".agent/skills/smoke-test/templates/report.docker.template.md": _read(".agent/skills/smoke-test/templates/report.docker.template.md"),
+    }
+
+    for path, content in smoke_files.items():
+        assert "localhost:2024" not in content, path
+        assert "127.0.0.1:2024" not in content, path
+        assert "deer-flow-langgraph" not in content, path
+        assert "langgraph.log" not in content, path
+        assert "LangGraph service" not in content, path
+        assert "langgraph dev" not in content, path
+
+
+def test_gateway_runtime_docs_do_not_reference_transition_modes():
+    docs = {
+        "backend/docs/AUTH_UPGRADE.md": _read("backend/docs/AUTH_UPGRADE.md"),
+        "backend/docs/AUTH_TEST_DOCKER_GAP.md": _read("backend/docs/AUTH_TEST_DOCKER_GAP.md"),
+        "docs/CODE_CHANGE_SUMMARY_BY_FILE.md": _read("docs/CODE_CHANGE_SUMMARY_BY_FILE.md"),
+    }
+
+    for path, content in docs.items():
+        assert "make dev-pro" not in content, path
+        assert "./scripts/deploy.sh --gateway" not in content, path
+        assert "docker compose --profile gateway" not in content, path
+        assert "`/api/langgraph/*` → LangGraph" not in content, path
+
+
+def test_agent_instruction_docs_do_not_reference_standalone_langgraph_server():
+    """Agent/Copilot instruction docs must describe only the Gateway-embedded
+    runtime — no standalone LangGraph service, port 2024, or langgraph.log."""
+    content = _read(".github/copilot-instructions.md")
+
+    assert "langgraph.log" not in content
+    assert "localhost:2024" not in content
+    assert "127.0.0.1:2024" not in content
+    assert "Starts LangGraph" not in content

@@ -13,6 +13,12 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
 #### Prerequisites
 
 - Docker Desktop or Docker Engine
+- Docker Compose **v2.24 or newer** (check with `docker compose version`). The dev
+  Compose file marks its `env_file` entries optional using the long-form
+  `path`/`required` syntax; older clients reject it with
+  `services.gateway.env_file.0 must be a string`. `make docker-start` verifies the
+  version and tells you to upgrade — direct `docker compose` callers get that raw
+  message instead.
 - pnpm (for caching optimization)
 
 #### Setup Steps
@@ -43,15 +49,39 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    ```
    `make docker-start` reads `config.yaml` and starts `provisioner` only for provisioner/Kubernetes sandbox mode.
 
+   Prefer this wrapper over invoking Compose yourself: it checks your Compose
+   version, creates the missing `.env` files, and exports `DEER_FLOW_ROOT`.
+
+   If you do run Compose directly, run it **from the repository root** and set
+   `DEER_FLOW_ROOT` to the absolute path of your checkout. Compose interpolates
+   that variable into host-side paths (`DEER_FLOW_HOST_BASE_DIR`,
+   `THREADS_HOST_PATH`) that the AIO and provisioner sandbox modes bind-mount;
+   leaving it unset renders them as `/backend/.deer-flow`, so those mounts
+   silently miss your checkout instead of failing:
+
+   ```bash
+   # macOS / Linux
+   DEER_FLOW_ROOT="$PWD" docker compose -f docker/docker-compose-dev.yaml up --build
+   ```
+
+   ```powershell
+   # Windows PowerShell
+   $env:DEER_FLOW_ROOT = (Get-Location).Path
+   docker compose -f docker/docker-compose-dev.yaml up --build
+   ```
+
+   Do not reuse that `-f` path from inside `docker/` — it resolves to
+   `docker/docker/docker-compose-dev.yaml` and fails with a file-not-found error.
+
    All services will start with hot-reload enabled:
    - Frontend changes are automatically reloaded
    - Backend changes trigger automatic restart
-   - LangGraph server supports hot-reload
+   - Gateway-hosted LangGraph-compatible runtime supports hot-reload
 
 4. **Access the application**:
    - Web Interface: http://localhost:2026
    - API Gateway: http://localhost:2026/api/*
-   - LangGraph: http://localhost:2026/api/langgraph/*
+   - LangGraph-compatible API: http://localhost:2026/api/langgraph/*
 
 #### Docker Commands
 
@@ -94,7 +124,7 @@ Use these as practical starting points for development and review environments:
 If `make docker-init`, `make docker-start`, or `make docker-stop` fails on Linux with an error like below, your current user likely does not have permission to access the Docker daemon socket:
 
 ```text
-unable to get image 'deer-flow-dev-langgraph': permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock
+unable to get image 'deer-flow-gateway': permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock
 ```
 
 Recommended fix: add your current user to the `docker` group so Docker commands work without `sudo`.
@@ -131,9 +161,8 @@ Host Machine
 Docker Compose (deer-flow-dev)
   ├→ nginx (port 2026) ← Reverse proxy
   ├→ web (port 3000) ← Frontend with hot-reload
-  ├→ api (port 8001) ← Gateway API with hot-reload
-   ├→ langgraph (port 2024) ← LangGraph server with hot-reload
-   └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
+  ├→ gateway (port 8001) ← Gateway API + LangGraph-compatible runtime with hot-reload
+  └→ provisioner (optional, port 8002) ← Started only in provisioner/K8s sandbox mode
 ```
 
 **Benefits of Docker Development**:
@@ -166,7 +195,7 @@ Required tools:
 
 1. **Configure the application** (same as Docker setup above)
 
-2. **Install dependencies**:
+2. **Install dependencies** (this also sets up pre-commit hooks):
    ```bash
    make install
    ```
@@ -184,26 +213,23 @@ Required tools:
 
 If you need to start services individually:
 
-1. **Start backend services**:
+1. **Start backend service**:
    ```bash
-   # Terminal 1: Start LangGraph Server (port 2024)
+   # Terminal 1: Start Gateway API + embedded agent runtime (port 8001)
    cd backend
    make dev
 
-   # Terminal 2: Start Gateway API (port 8001)
-   cd backend
-   make gateway
-
-   # Terminal 3: Start Frontend (port 3000)
+   # Terminal 2: Start Frontend (port 3000)
    cd frontend
    pnpm dev
    ```
 
-2. **Start nginx**:
+2. **Start nginx** (run from the repo root):
    ```bash
    make nginx
-   # or directly: nginx -c $(pwd)/docker/nginx/nginx.local.conf -g 'daemon off;'
    ```
+
+   This runs `scripts/nginx.sh`, which launches nginx in the foreground the same way `scripts/serve.sh` (used by `make dev` / `make start`) does: it pre-creates the `logs/` and `temp/` directories and uses the local dev config at `docker/nginx/nginx.local.conf`.
 
 3. **Access the application**:
    - Web Interface: http://localhost:2026
@@ -212,10 +238,10 @@ If you need to start services individually:
 
 The nginx configuration provides:
 - Unified entry point on port 2026
-- Routes `/api/langgraph/*` to LangGraph Server (2024)
+- Rewrites `/api/langgraph/*` to Gateway's LangGraph-compatible API (8001)
 - Routes other `/api/*` endpoints to Gateway API (8001)
 - Routes non-API requests to Frontend (3000)
-- Centralized CORS handling
+- Same-origin API routing; split-origin or port-forwarded browser clients should use the Gateway `GATEWAY_CORS_ORIGINS` allowlist
 - SSE/streaming support for real-time agent responses
 - Optimized timeouts for long-running operations
 
@@ -234,12 +260,11 @@ deer-flow/
 │       ├── nginx.conf      # Nginx config for Docker
 │       └── nginx.local.conf # Nginx config for local dev
 ├── backend/                 # Backend application
-│   ├── src/
-│   │   ├── gateway/        # Gateway API (port 8001)
-│   │   ├── agents/         # LangGraph agents (port 2024)
-│   │   ├── mcp/            # Model Context Protocol integration
-│   │   ├── skills/         # Skills system
-│   │   └── sandbox/        # Sandbox execution
+│   ├── packages/harness/   # deerflow-harness package (import: deerflow.*)
+│   │   └── deerflow/       # Agents, tools, sandbox, MCP, skills, config
+│   ├── app/                # FastAPI Gateway + IM channels (import: app.*)
+│   │   ├── gateway/        # Gateway API and LangGraph-compatible runtime (port 8001)
+│   │   └── channels/       # IM channel integrations
 │   ├── docs/               # Backend documentation
 │   └── Makefile            # Backend commands
 ├── frontend/               # Frontend application
@@ -256,8 +281,7 @@ Browser
   ↓
 Nginx (port 2026) ← Unified entry point
   ├→ Frontend (port 3000) ← / (non-API requests)
-  ├→ Gateway API (port 8001) ← /api/models, /api/mcp, /api/skills, /api/threads/*/artifacts
-  └→ LangGraph Server (port 2024) ← /api/langgraph/* (agent interactions)
+  └→ Gateway API (port 8001) ← /api/* and /api/langgraph/* (LangGraph-compatible agent interactions)
 ```
 
 ## Development Workflow
@@ -293,17 +317,48 @@ Nginx (port 2026) ← Unified entry point
    git push origin feature/your-feature-name
    ```
 
+## AI assistance disclosure
+
+DeerFlow is an AI project and we welcome AI-assisted contributions. To help
+reviewers calibrate how closely to read a change, **every pull request must
+complete the "AI assistance" section of the
+[PR template](.github/pull_request_template.md)**:
+
+- which tool(s) you used (or `none`),
+- how you used them, and
+- a confirmation that a human has read, understands, and takes responsibility
+  for the change.
+
+Please don't delete the section. PRs that ignore it may be asked to fill it in
+before review.
+
 ## Testing
 
 ```bash
-# Backend tests
+# Default backend tests (excludes live and blocking-I/O tests)
 cd backend
 make test
 
-# Frontend tests
+# Strict blocking-I/O tests
+make test-blocking-io
+
+# Live DeerFlowClient integration tests (explicit opt-in)
+# Requires a valid root config.yaml and API credentials.
+make test-live
+
+# Frontend unit tests
 cd frontend
 make test
+
+# Frontend E2E tests (requires Chromium; builds and auto-starts the Next.js production server)
+cd frontend
+make test-e2e
 ```
+
+`make test-live` calls real external APIs and may incur API costs or create
+local sandboxes, artifacts, and files. It is never run by the default backend
+test command or CI. Direct pytest invocations of `tests/test_client_live.py`
+must also set `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 ### PR Regression Checks
 
@@ -311,6 +366,7 @@ Every pull request triggers the following CI workflows:
 
 - **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
+- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
 
 ## Code Style
 
@@ -323,6 +379,38 @@ Every pull request triggers the following CI workflows:
 - [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration
 - [Architecture Overview](backend/CLAUDE.md) - Technical architecture
 - [MCP Setup Guide](backend/docs/MCP_SERVER.md) - Model Context Protocol configuration
+
+## Troubleshooting Bundle
+
+For setup, configuration, sandbox, or runtime issues, generate a redacted support
+summary before filing:
+
+```bash
+make support-bundle
+```
+
+The command prints reporter next steps, writes a `*-issue-summary.md` file that
+you can paste into the issue, writes a `*-issue-draft.md` file for AI-assisted
+issue filing, and writes an optional evidence zip under
+`.deer-flow/support-bundles/`. The zip includes toolchain versions, sanitized
+`config.yaml` and `extensions_config.json` summaries, enabled tool/skill/MCP
+structure, git metadata, and redacted `make doctor` output.
+
+When filing the issue, paste the generated `*-issue-summary.md` into the issue
+body. If an AI assistant files the issue, start from `*-issue-draft.md` and
+replace every REQUIRED placeholder before filing; the draft intentionally does
+not invent reproduction steps, expected behavior, or a problem summary. Attach
+the zip only if a maintainer asks for the evidence bundle, or if the summary
+alone is not enough to diagnose the issue. Maintainers and AI-assisted triage
+should start with `triage.json`, which contains stable signals such as
+`config_missing`, `node_version_too_old`, `doctor_failed`, and suggested next
+steps. The other JSON files are evidence for follow-up inspection.
+
+It intentionally does **not** include `.env`, raw conversation messages, or the
+contents of files in thread workspaces/uploads/outputs. If you need to include a
+thread, run `cd backend && uv run python ../scripts/support_bundle.py --thread-id
+<thread-id> --include-doctor`; this adds file manifests only. Please still review
+the generated zip before attaching it to a public issue.
 
 ## Need Help?
 

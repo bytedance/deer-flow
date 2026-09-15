@@ -4,26 +4,66 @@ Pure business logic — no FastAPI/HTTP dependencies.
 Both Gateway and Client delegate to these functions.
 """
 
+import asyncio
+import concurrent.futures
 import logging
+import os
 import posixpath
 import shutil
 import stat
-import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from deerflow.skills.loader import get_skills_root_path
-from deerflow.skills.validation import _validate_skill_frontmatter
+from deerflow.skills.package_files import is_code_path, is_executable_binary_prefix
+from deerflow.skills.permissions import make_skill_tree_sandbox_readable
+from deerflow.skills.security_scanner import scan_skill_content
+from deerflow.skills.security_static_scanner import (
+    StaticFinding,
+    StaticScanBlockedError,
+    StaticScannerError,
+    enforce_static_scan,
+    scan_archive_preflight,
+    skill_scan_enabled,
+)
 
 logger = logging.getLogger(__name__)
+
+_PROMPT_INPUT_DIRS = {"references", "templates"}
+_PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
 
 
 class SkillAlreadyExistsError(ValueError):
     """Raised when a skill with the same name is already installed."""
 
 
+class SkillSecurityScanError(ValueError):
+    """Raised when a skill archive fails security scanning."""
+
+    findings: list[StaticFinding]
+    skill_name: str | None
+
+    def __init__(self, message: str, *, findings: list[StaticFinding] | None = None, skill_name: str | None = None) -> None:
+        super().__init__(message)
+        self.findings = [dict(finding) for finding in (findings or [])]
+        self.skill_name = skill_name
+
+
 def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
-    """Return True if the zip member path is absolute or attempts directory traversal."""
+    """Return True if the zip member path is absolute, attempts directory
+    traversal, or contains a colon.
+
+    A colon has no legitimate use in a relative archive member path — zip
+    entries always use ``/`` separators, and a real Windows drive prefix
+    (``C:\\...``) is already rejected above as absolute. But on Windows/NTFS,
+    a colon anywhere else in a path (e.g. ``scripts/run.sh:hidden.txt``)
+    addresses an Alternate Data Stream on the preceding path component
+    instead of creating a new file: it silently attaches extra content to
+    ``scripts/run.sh`` rather than creating a sibling file. That stream is
+    invisible to ``Path.rglob()`` / ``os.walk()``-based listing, so it would
+    let an archive smuggle content past directory-based security scanning
+    while the content still lands on disk. Reject outright rather than
+    trying to allow-list "safe" colon positions.
+    """
     name = info.filename
     if not name:
         return False
@@ -36,6 +76,8 @@ def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
     if PureWindowsPath(name).is_absolute():
         return True
     if ".." in path.parts:
+        return True
+    if ":" in name:
         return True
     return False
 
@@ -74,6 +116,7 @@ def safe_extract_skill_archive(
     zip_ref: zipfile.ZipFile,
     dest_path: Path,
     max_total_size: int = 512 * 1024 * 1024,
+    max_entries: int = 4096,
 ) -> None:
     """Safely extract a skill archive with security protections.
 
@@ -81,14 +124,28 @@ def safe_extract_skill_archive(
     - Reject absolute paths and directory traversal (..).
     - Skip symlink entries instead of materialising them.
     - Enforce a hard limit on total uncompressed size (zip bomb defence).
+    - Enforce a hard limit on member count (zip bomb defence by entry count —
+      a huge number of tiny/empty members can be cheap to store yet still
+      slow to extract, independent of total size).
+    - Reject executable binaries (ELF/PE/Mach-O) by magic bytes.
 
     Raises:
-        ValueError: If unsafe members or size limit exceeded.
+        ValueError: If unsafe members, executable binaries, entry count, or size limit exceeded.
     """
     dest_root = dest_path.resolve()
     total_written = 0
 
-    for info in zip_ref.infolist():
+    infos = zip_ref.infolist()
+    if len(infos) > max_entries:
+        # Early-abort before any per-member work below — mirrors the same
+        # early-abort in skillscan/orchestrator.py::scan_archive_preflight
+        # (its comment: "a huge member count is a bounded DoS vector even
+        # when the total size is small"). That scan is optional
+        # (skill_scan.enabled); this check must hold unconditionally since
+        # it lives in the extraction path every install goes through.
+        raise ValueError(f"Skill archive contains too many entries ({len(infos)} > {max_entries}).")
+
+    for info in infos:
         if is_unsafe_zip_member(info):
             raise ValueError(f"Archive contains unsafe member path: {info.filename!r}")
 
@@ -107,77 +164,166 @@ def safe_extract_skill_archive(
             continue
 
         with zip_ref.open(info) as src, member_path.open("wb") as dst:
+            first_chunk = True
             while chunk := src.read(65536):
+                if first_chunk and is_executable_binary_prefix(chunk):
+                    raise ValueError(f"Archive contains executable binary member: {info.filename!r}")
+                first_chunk = False
                 total_written += len(chunk)
                 if total_written > max_total_size:
                     raise ValueError("Skill archive is too large or appears highly compressed.")
                 dst.write(chunk)
+        if os.name == "posix":
+            member_path.chmod(0o755 if (info.external_attr >> 16) & 0o111 else 0o644)
 
 
-def install_skill_from_archive(
-    zip_path: str | Path,
-    *,
-    skills_root: Path | None = None,
-) -> dict:
-    """Install a skill from a .skill archive (ZIP).
+def _is_script_support_file(rel_path: Path) -> bool:
+    return bool(rel_path.parts) and rel_path.parts[0] == "scripts"
 
-    Args:
-        zip_path: Path to the .skill file.
-        skills_root: Override the skills root directory. If None, uses
-            the default from config.
 
-    Returns:
-        Dict with success, skill_name, message.
+def _should_scan_support_file(rel_path: Path) -> bool:
+    if _is_script_support_file(rel_path):
+        return True
+    return bool(rel_path.parts) and rel_path.parts[0] in _PROMPT_INPUT_DIRS and rel_path.suffix.lower() in _PROMPT_INPUT_SUFFIXES
 
-    Raises:
-        FileNotFoundError: If the file does not exist.
-        ValueError: If the file is invalid (wrong extension, bad ZIP,
-            invalid frontmatter, duplicate name).
+
+def _has_shebang(path: Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            return f.read(2) == b"#!"
+    except OSError:
+        return False
+
+
+async def _is_code_file(path: Path, rel_path: Path) -> bool:
+    """Classify code files anywhere in the tree for the executable scan policy.
+
+    Applies :func:`is_code_file` lazily: name checks are pure and stay on the
+    event loop; only the shebang sniff for extensionless files reads the file
+    and is offloaded.
     """
-    logger.info("Installing skill from %s", zip_path)
-    path = Path(zip_path)
-    if not path.is_file():
-        if not path.exists():
-            raise FileNotFoundError(f"Skill file not found: {zip_path}")
-        raise ValueError(f"Path is not a file: {zip_path}")
-    if path.suffix != ".skill":
-        raise ValueError("File must have .skill extension")
+    if is_code_path(rel_path):
+        return True
+    return not rel_path.suffix and await asyncio.to_thread(_has_shebang, path)
 
-    if skills_root is None:
-        skills_root = get_skills_root_path()
-    custom_dir = skills_root / "custom"
-    custom_dir.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
+def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) -> None:
+    installed = False
+    reserved = False
+    try:
+        target.mkdir(mode=0o700)
+        reserved = True
+        for child in staging_target.iterdir():
+            shutil.move(str(child), target / child.name)
+        make_skill_tree_sandbox_readable(target)
+        installed = True
+    except FileExistsError as e:
+        raise SkillAlreadyExistsError(f"Skill '{target.name}' already exists") from e
+    finally:
+        if reserved and not installed and target.exists():
+            shutil.rmtree(target)
 
-        try:
-            zf = zipfile.ZipFile(path, "r")
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Skill file not found: {zip_path}") from None
-        except (zipfile.BadZipFile, IsADirectoryError):
-            raise ValueError("File is not a valid ZIP archive") from None
 
-        with zf:
-            safe_extract_skill_archive(zf, tmp_path)
+def _findings_for_file(findings: list[StaticFinding], rel_path: str) -> list[StaticFinding]:
+    return [finding for finding in findings if finding.get("file") in {rel_path, None}]
 
-        skill_dir = resolve_skill_dir_from_archive(tmp_path)
 
-        is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
-        if not is_valid:
-            raise ValueError(f"Invalid skill: {message}")
-        if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
-            raise ValueError(f"Invalid skill name: {skill_name}")
+async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, static_findings: list[StaticFinding] | None = None) -> None:
+    rel_path = path.relative_to(skill_dir).as_posix()
+    location = f"{skill_name}/{rel_path}"
+    try:
+        content = await asyncio.to_thread(path.read_text, encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
 
-        target = custom_dir / skill_name
-        if target.exists():
-            raise SkillAlreadyExistsError(f"Skill '{skill_name}' already exists")
+    try:
+        result = await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings or [])
+    except Exception as e:
+        raise SkillSecurityScanError(f"Security scan failed for {location}: {e}") from e
 
-        shutil.copytree(skill_dir, target)
-        logger.info("Skill %r installed to %s", skill_name, target)
+    decision = getattr(result, "decision", None)
+    reason = str(getattr(result, "reason", "") or "No reason provided.")
+    if decision == "block":
+        if rel_path == "SKILL.md":
+            raise SkillSecurityScanError(f"Security scan blocked skill '{skill_name}': {reason}")
+        raise SkillSecurityScanError(f"Security scan blocked {location}: {reason}")
+    if executable and decision != "allow":
+        raise SkillSecurityScanError(f"Security scan rejected executable {location}: {reason}")
+    if decision not in {"allow", "warn"}:
+        raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}")
 
-    return {
-        "success": True,
-        "skill_name": skill_name,
-        "message": f"Skill '{skill_name}' installed successfully",
-    }
+
+def scan_archive_preflight_or_raise(archive_path: Path, *, app_config=None) -> None:
+    if not skill_scan_enabled(app_config):
+        return
+    result = scan_archive_preflight(archive_path)
+    if result["blocked"]:
+        critical = [finding for finding in result["findings"] if finding["severity"] == "CRITICAL"]
+        raise SkillSecurityScanError(
+            f"Static security scan blocked unsafe skill archive: {format_static_archive_findings(critical)}",
+            findings=critical,
+            skill_name=None,
+        )
+
+
+def format_static_archive_findings(findings: list[StaticFinding]) -> str:
+    return "; ".join(f"{finding['rule_id']} ({finding['severity']}) at {finding.get('file') or '<archive>'}: {finding['message']}" for finding in findings)
+
+
+async def _scan_static_skill_archive_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
+    try:
+        return await asyncio.to_thread(enforce_static_scan, skill_dir, skill_name=skill_name, app_config=app_config)
+    except StaticScanBlockedError as e:
+        raise SkillSecurityScanError(str(e), findings=e.findings, skill_name=e.skill_name) from e
+    except StaticScannerError as e:
+        raise SkillSecurityScanError(f"Static security scan failed for skill '{skill_name}': {e}", skill_name=skill_name) from e
+
+
+def _collect_scannable_files(skill_dir: Path) -> list[Path]:
+    """Enumerate archive files for scanning (blocking; run off the event loop)."""
+    return [candidate for candidate in sorted(skill_dir.rglob("*")) if candidate.is_file()]
+
+
+async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
+    """Run the skill security scanner against all installable text and script files."""
+    static_findings = await _scan_static_skill_archive_or_raise(skill_dir, skill_name, app_config=app_config)
+
+    skill_md = skill_dir / "SKILL.md"
+    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, static_findings=_findings_for_file(static_findings, "SKILL.md"))
+
+    for path in await asyncio.to_thread(_collect_scannable_files, skill_dir):
+        rel_path = path.relative_to(skill_dir)
+        if rel_path == Path("SKILL.md"):
+            continue
+        if path.name == "SKILL.md":
+            raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
+        rel_path_posix = rel_path.as_posix()
+        if await _is_code_file(path, rel_path):
+            await _scan_skill_file_or_raise(
+                skill_dir,
+                path,
+                skill_name,
+                executable=True,
+                static_findings=_findings_for_file(static_findings, rel_path_posix),
+            )
+        elif _should_scan_support_file(rel_path):
+            await _scan_skill_file_or_raise(
+                skill_dir,
+                path,
+                skill_name,
+                executable=False,
+                static_findings=_findings_for_file(static_findings, rel_path_posix),
+            )
+    return static_findings
+
+
+def _run_async_install(coro):
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)

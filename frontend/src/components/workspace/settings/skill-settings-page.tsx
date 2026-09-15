@@ -1,8 +1,15 @@
 "use client";
 
-import { SparklesIcon } from "lucide-react";
+import {
+  DownloadIcon,
+  LoaderIcon,
+  SparklesIcon,
+  UploadIcon,
+} from "lucide-react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { type ChangeEvent, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -22,16 +29,32 @@ import {
 } from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
-import { useEnableSkill, useSkills } from "@/core/skills/hooks";
+import {
+  formatSkillSecurityFindings,
+  MAX_SKILL_ARCHIVE_UPLOAD_BYTES,
+  SkillRequestError,
+} from "@/core/skills/api";
+import {
+  useEnableSkill,
+  useSkills,
+  useUploadSkillArchive,
+} from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
 
 import { SettingsSection } from "./settings-section";
 
+const SkillExportDialog = dynamic(() => import("./skill-export-dialog"), {
+  ssr: false,
+});
+
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
   const { skills, isLoading, error } = useSkills();
+  const adminRequired =
+    error instanceof SkillRequestError && error.isAdminRequired;
   return (
     <SettingsSection
       title={t.settings.skills.title}
@@ -39,8 +62,14 @@ export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
     >
       {isLoading ? (
         <div className="text-muted-foreground text-sm">{t.common.loading}</div>
+      ) : adminRequired ? (
+        <div className="text-muted-foreground text-sm">
+          {t.settings.skills.adminRequired}
+        </div>
       ) : error ? (
-        <div>Error: {error.message}</div>
+        <div>
+          {t.common.error} {error.message}
+        </div>
       ) : (
         <SkillSettingsList skills={skills} onClose={onClose} />
       )}
@@ -57,8 +86,16 @@ function SkillSettingsList({
 }) {
   const { t } = useI18n();
   const router = useRouter();
+  const { user } = useAuth();
+  const isAdmin = user?.system_role === "admin";
+  const [exportName, setExportName] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("public");
   const { mutate: enableSkill } = useEnableSkill();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { mutateAsync: uploadSkillArchive, isPending: isUploading } =
+    useUploadSkillArchive();
+  const isArchiveUploadDisabled =
+    isUploading || !isAdmin || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
     [skills, filter],
@@ -67,18 +104,102 @@ function SkillSettingsList({
     onClose?.();
     router.push("/workspace/chats/new?mode=skill");
   };
+  const handleSkillArchive = async (event: ChangeEvent<HTMLInputElement>) => {
+    if (isUploading) {
+      event.target.value = "";
+      return;
+    }
+    const archive = event.target.files?.[0];
+    event.target.value = "";
+    if (!archive) return;
+    if (!archive.name.toLowerCase().endsWith(".skill")) {
+      toast.error(t.settings.skills.invalidArchive);
+      return;
+    }
+    if (archive.size > MAX_SKILL_ARCHIVE_UPLOAD_BYTES) {
+      toast.error(t.settings.skills.archiveTooLarge);
+      return;
+    }
+
+    try {
+      const result = await uploadSkillArchive(archive);
+      if (result.success) {
+        toast.success(result.message);
+        setFilter("custom");
+      } else {
+        toast.error(result.message || t.settings.skills.installFailed);
+      }
+    } catch (error) {
+      if (error instanceof SkillRequestError && error.isAdminRequired) {
+        toast.error(t.settings.skills.installAdminRequired);
+      } else if (error instanceof SkillRequestError && error.status === 413) {
+        toast.error(t.settings.skills.archiveTooLarge);
+      } else if (
+        error instanceof SkillRequestError &&
+        error.findings.length > 0
+      ) {
+        toast.error(error.message, {
+          description: (
+            <span className="whitespace-pre-line">
+              {formatSkillSecurityFindings(error.findings)}
+            </span>
+          ),
+        });
+      } else {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : t.settings.skills.installFailed,
+        );
+      }
+    }
+  };
   return (
     <div className="flex w-full flex-col gap-4">
+      {exportName &&
+        isAdmin &&
+        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+          <SkillExportDialog
+            key={`${user.id}:${exportName}`}
+            name={exportName}
+            onClose={() => setExportName(null)}
+          />
+        )}
       <header className="flex justify-between">
         <div className="flex gap-2">
-          <Tabs defaultValue="public" onValueChange={setFilter}>
+          <Tabs value={filter} onValueChange={setFilter}>
             <TabsList variant="line">
               <TabsTrigger value="public">{t.common.public}</TabsTrigger>
               <TabsTrigger value="custom">{t.common.custom}</TabsTrigger>
             </TabsList>
           </Tabs>
         </div>
-        <div>
+        <div className="flex gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".skill"
+            disabled={isArchiveUploadDisabled}
+            className="sr-only"
+            onChange={handleSkillArchive}
+          />
+          {isAdmin && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={isArchiveUploadDisabled}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {isUploading ? (
+                <LoaderIcon className="size-4 animate-spin" />
+              ) : (
+                <UploadIcon className="size-4" />
+              )}
+              {isUploading
+                ? t.settings.skills.installingArchive
+                : t.settings.skills.installFromFile}
+            </Button>
+          )}
           <Button size="sm" onClick={handleCreateSkill}>
             <SparklesIcon className="size-4" />
             {t.settings.skills.createSkill}
@@ -100,9 +221,23 @@ function SkillSettingsList({
               </ItemDescription>
             </ItemContent>
             <ItemActions>
+              {isAdmin && skill.category === "custom" && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                  onClick={() => setExportName(skill.name)}
+                  aria-label={`${t.settings.skills.exportSkill} ${skill.name}`}
+                >
+                  <DownloadIcon className="size-4" />
+                  {t.settings.skills.exportSkill}
+                </Button>
+              )}
               <Switch
                 checked={skill.enabled}
-                disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                disabled={
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" || !isAdmin
+                }
                 onCheckedChange={(checked) =>
                   enableSkill({ skillName: skill.name, enabled: checked })
                 }

@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 
-import { DEFAULT_LOCALE, normalizeLocale, type Locale } from "./locale";
-import { translations } from "./translations";
+import { normalizeLocale, type Locale } from "./locale";
+import { loadTranslations } from "./translations";
 
 export async function detectLocaleServer(): Promise<Locale> {
   const cookieStore = await cookies();
@@ -33,7 +33,7 @@ export async function getI18n(localeOverride?: string | Locale) {
   const locale = localeOverride
     ? normalizeLocale(localeOverride)
     : await detectLocaleServer();
-  const t = translations[locale] ?? translations[DEFAULT_LOCALE];
+  const t = await loadTranslations(locale);
   return {
     locale,
     t,
