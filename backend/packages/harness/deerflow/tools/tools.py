@@ -106,6 +106,13 @@ def get_available_tools(
     if not include_conversation_reader:
         tool_configs = [tool for tool in tool_configs if tool.use != CONVERSATION_TOOL_USE]
 
+    # Knowledge tools are opt-in as a group. Provider connection and retrieval
+    # settings live on each tool entry; the generic capability flag controls
+    # whether the group is exposed at all.
+    knowledge_base_config = getattr(config, "knowledge_base", None)
+    if not getattr(knowledge_base_config, "enabled", False):
+        tool_configs = [tool for tool in tool_configs if tool.group != "knowledge"]
+
     # Do not expose host bash by default when LocalSandboxProvider is active.
     if not is_host_bash_allowed(config):
         tool_configs = [tool for tool in tool_configs if not _is_host_bash_tool(tool)]

@@ -104,6 +104,7 @@ export type MockAPIOptions = {
     agentsApiEnabled?: boolean;
     browserControlEnabled?: boolean;
     mcpTasksEnabled?: boolean;
+    knowledgeScopeSelectionEnabled?: boolean;
   };
   runStreamHandler?: (route: Route) => Promise<void>;
 };
@@ -324,6 +325,8 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
     mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
+    knowledgeScopeSelectionEnabled:
+      options?.features?.knowledgeScopeSelectionEnabled ?? false,
   };
 
   const upsertThread = (thread: MockThread) => {
@@ -1401,6 +1404,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           agents_api: { enabled: featureFlags.agentsApiEnabled },
           browser_control: { enabled: featureFlags.browserControlEnabled },
           mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
+          knowledge_base: {
+            scope_selection_enabled:
+              featureFlags.knowledgeScopeSelectionEnabled,
+          },
         }),
       });
     }

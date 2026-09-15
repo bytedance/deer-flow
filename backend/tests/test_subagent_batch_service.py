@@ -43,6 +43,11 @@ def _request(**overrides) -> BatchSubmitRequest:
                 "system_prompt": "Work carefully.",
             },
             "parent_model": "model-a",
+            "knowledge_scope": {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": ["dataset-1"],
+            },
         },
     }
     values.update(overrides)
@@ -142,6 +147,11 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
     assert repository.finalized["succeeded"] is True
     assert repository.finalized["result"] == "done"
     assert executor_kwargs["execution_capacity"] is execution_capacity
+    assert executor_kwargs["knowledge_scope"] == {
+        "version": 1,
+        "mode": "selected",
+        "dataset_ids": ["dataset-1"],
+    }
 
 
 @pytest.mark.asyncio

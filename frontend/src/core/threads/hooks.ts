@@ -81,6 +81,13 @@ import {
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
+  /**
+   * Assistant identity sent to the Gateway for run admission and execution.
+   * Default-chat and sidecar callers use the lead agent; custom-agent pages
+   * pass their stable agent name so server-side capability checks see the same
+   * assistant that the runtime loads from the request context.
+   */
+  assistantId?: string;
   context: LocalSettings["context"];
   isMock?: boolean;
   onSend?: (threadId: string) => void;
@@ -1666,6 +1673,7 @@ function isThreadMissingError(error: unknown): boolean {
 export function useThreadStream({
   threadId,
   displayThreadId,
+  assistantId = "lead_agent",
   context,
   isMock,
   onSend,
@@ -1788,7 +1796,7 @@ export function useThreadStream({
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
-    assistantId: "lead_agent",
+    assistantId,
     threadId: onStreamThreadId,
     reconnectOnMount: true,
     fetchStateHistory: { limit: 1 },
@@ -2608,6 +2616,7 @@ export function useThreadStream({
       threadId: string,
       humanMessageId: string,
       replacementText: string,
+      additionalKwargs?: Record<string, unknown>,
     ) => {
       if (!humanMessageId) {
         return false;
@@ -2634,7 +2643,25 @@ export function useThreadStream({
           if (!response.ok) {
             throw new Error(await readResponseErrorMessage(response));
           }
-          return (await response.json()) as EditRegeneratePrepareResponse;
+          const prepared =
+            (await response.json()) as EditRegeneratePrepareResponse;
+          if (!additionalKwargs || !Array.isArray(prepared.input.messages)) {
+            return prepared;
+          }
+          const messages = [...prepared.input.messages];
+          for (let index = messages.length - 1; index >= 0; index -= 1) {
+            const message = messages[index];
+            if (message?.type !== "human") continue;
+            messages[index] = {
+              ...message,
+              additional_kwargs: {
+                ...message.additional_kwargs,
+                ...additionalKwargs,
+              },
+            };
+            break;
+          }
+          return { ...prepared, input: { ...prepared.input, messages } };
         },
         getSupersededMessageIds: (prepared) => prepared.source_message_ids,
         getOptimisticMessages: (prepared) => prepared.input.messages ?? [],

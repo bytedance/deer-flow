@@ -320,6 +320,43 @@ export const zhCN: Translations = {
     scheduledTasks: "定时任务",
     agentsDisabledTooltip: "功能未启用",
   },
+
+  // 自定义智能体聊天中的知识库范围
+  knowledge: {
+    scope: {
+      title: "知识库范围",
+      description: "选择该智能体本轮可以检索的知识库和文件。",
+      buttonAll: "知识库 · 全部",
+      buttonDisabled: "知识库 · 关闭",
+      buttonDatasets: (datasets) => `知识库 · ${datasets}库`,
+      buttonDatasetsAndDocuments: (datasets, documents) =>
+        `知识库 · ${datasets}库 · ${documents}文件`,
+      allDatasets: "全部允许知识库",
+      selectedDatasets: "指定知识库",
+      disabled: "关闭",
+      allDocuments: "全部可检索文件",
+      selectedDocuments: "指定文件",
+      searchDatasets: "搜索知识库",
+      searchDocuments: "搜索文件",
+      selectedCount: (count) => `已选择 ${count} 个知识库`,
+      files: "文件",
+      notSearchable: "不可检索",
+      loadFailed: "目录加载失败，当前选择未改变。",
+      selectionInvalid: "当前选择超出支持的数量或大小限制。",
+      previous: "上一页",
+      next: "下一页",
+      pageOnlyNotice: "选择仅在当前页面保留，刷新后恢复全部允许知识库。",
+      sharedNotice: "知识库由当前部署共享；此处选择只限制当前对话的检索范围。",
+      agentUnavailable: "当前智能体未允许 knowledge 工具组。",
+      apply: "应用",
+      historyAll: "知识库：全部允许库",
+      historyDisabled: "知识库：关闭",
+      historySelected: (datasets, documents) =>
+        documents > 0
+          ? `知识库：${datasets}库 · ${documents}文件`
+          : `知识库：${datasets}库`,
+    },
+  },
   // Sidebar projects section
   projects: {
     title: "项目",

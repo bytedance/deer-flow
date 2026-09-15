@@ -11,6 +11,9 @@ export interface FeaturesResponse {
     worker_running?: boolean;
     max_running?: number;
   };
+  knowledge_base?: {
+    scope_selection_enabled?: boolean;
+  };
 }
 
 export interface SubagentBatchesCapability {
@@ -46,5 +49,14 @@ export async function fetchSubagentBatchesCapability(): Promise<SubagentBatchesC
     repositoryAvailable: feature?.repository_available ?? legacyEnabled,
     workerRunning: feature?.worker_running ?? legacyEnabled,
     maxRunning: feature?.max_running ?? 0,
+  };
+}
+
+export async function fetchKnowledgeBaseFeature(): Promise<{
+  scopeSelectionEnabled: boolean;
+}> {
+  const feature = (await fetchFeatures()).knowledge_base;
+  return {
+    scopeSelectionEnabled: feature?.scope_selection_enabled ?? false,
   };
 }
