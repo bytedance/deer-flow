@@ -167,11 +167,9 @@ export function getMatchingSkillSuggestions(
   builtinCommands: SlashSuggestion[],
 ): SlashSuggestion[] {
   const normalizedQuery = query.toLowerCase();
-  // A name the slash parsers refuse must not be offered here either. Both
-  // parsers drop `RESERVED_SLASH_SKILL_NAMES` (the shared contract), and the
-  // builtin commands own their own names in the composer, so a skill carrying
-  // either one is unreachable: submitting it either runs the command or
-  // reaches the model as literal text with nothing activated.
+  // A name the slash parser refuses must not be offered here either. Builtin
+  // names remain unavailable, while `context` is only reserved for the exact
+  // `/context compact` alias and can therefore still be a skill suggestion.
   const reservedNames = new Set([
     ...RESERVED_SLASH_SKILL_NAMES,
     ...builtinCommands.map(({ name }) => name.toLowerCase()),
@@ -197,7 +195,7 @@ export function getMatchingSkillSuggestions(
       if (!skill.enabled) {
         return false;
       }
-      if (reservedNames.has(name)) {
+      if (reservedNames.has(name) && name !== "context") {
         return false;
       }
       return !normalizedQuery || name.includes(normalizedQuery);
