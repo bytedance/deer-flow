@@ -195,6 +195,29 @@ def test_docker_desktop_detection_uses_daemon_operating_system(monkeypatch, oper
         _docker_server_is_desktop.cache_clear()
 
 
+def test_docker_desktop_detection_retries_after_transient_failure(monkeypatch):
+    """A transient probe failure is not cached; subsequent call can detect Desktop."""
+    attempts = 0
+
+    def fake_run(cmd, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return SimpleNamespace(stdout="", stderr="daemon starting", returncode=1)
+        return SimpleNamespace(stdout='"Docker Desktop"', stderr="", returncode=0)
+
+    _docker_server_is_desktop.cache_clear()
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    try:
+        assert _docker_server_is_desktop() is False
+        assert _docker_server_is_desktop() is True
+        assert _docker_server_is_desktop() is True
+        assert attempts == 2
+    finally:
+        _docker_server_is_desktop.cache_clear()
+
+
 def test_darwin_open_keeps_docker_to_reconcile_restricted_sandbox(monkeypatch):
     commands: list[list[str]] = []
 

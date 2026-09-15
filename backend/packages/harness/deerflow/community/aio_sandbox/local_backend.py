@@ -21,7 +21,6 @@ import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 
 from deerflow.utils.network import get_free_port, release_port
@@ -274,9 +273,14 @@ def _docker_bridge_gateway_ip() -> str | None:
     return candidate
 
 
-@lru_cache(maxsize=1)
+_DOCKER_SERVER_IS_DESKTOP: bool | None = None
+
+
 def _docker_server_is_desktop() -> bool:
     """Detect Desktop from the daemon, including a Linux DooD Gateway."""
+    global _DOCKER_SERVER_IS_DESKTOP
+    if _DOCKER_SERVER_IS_DESKTOP is not None:
+        return _DOCKER_SERVER_IS_DESKTOP
     try:
         result = subprocess.run(
             ["docker", "info", "--format", "{{json .OperatingSystem}}"],
@@ -295,7 +299,17 @@ def _docker_server_is_desktop() -> bool:
         operating_system = json.loads(raw)
     except json.JSONDecodeError:
         operating_system = raw
-    return isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
+    is_desktop = isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
+    _DOCKER_SERVER_IS_DESKTOP = is_desktop
+    return is_desktop
+
+
+def _clear_docker_desktop_cache() -> None:
+    global _DOCKER_SERVER_IS_DESKTOP
+    _DOCKER_SERVER_IS_DESKTOP = None
+
+
+_docker_server_is_desktop.cache_clear = _clear_docker_desktop_cache  # type: ignore[attr-defined]
 
 
 def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | None = None) -> str:
