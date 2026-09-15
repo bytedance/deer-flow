@@ -79,7 +79,7 @@ def find_config_file() -> Path | None:
 _SECTION_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*$")
 _INDENTED_SECTION_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*$")
 _KEY_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*(\S.*?)\s*$")
-_LIST_ITEM_NAME_RE = re.compile(r"^\s*-\s+name\s*:\s*(\S.*?)\s*$")
+_LIST_ITEM_KEY_RE = re.compile(r"^(\s*)-\s+([A-Za-z_][\w-]*)\s*:\s*(.*?)\s*$")
 # `use:` on a models list item, whether it is the first key (`- use: X`) or a
 # later one (`  use: X`). Leading whitespace is optional because
 # `yaml.safe_dump` (the setup wizard, config-upgrade.sh) writes list items
@@ -244,6 +244,8 @@ def nested_section_value(lines: list[str], section_path: str, key: str) -> str |
 def tools_include_name(lines: list[str], tool_name: str) -> bool:
     """Return True when the top-level tools list has an active item name."""
     inside = False
+    list_indent: int | None = None
+    field_indent: int | None = None
     for raw in lines:
         line = _strip_comment(raw)
         if not line.strip():
@@ -251,19 +253,33 @@ def tools_include_name(lines: list[str], tool_name: str) -> bool:
         sect_match = _SECTION_RE.match(line)
         if sect_match:
             inside = sect_match.group(1) == "tools"
+            list_indent = None
+            field_indent = None
             continue
         if not inside:
             continue
-        name_match = _LIST_ITEM_NAME_RE.match(line)
-        if name_match:
-            if _unquote(name_match.group(1).strip()) == tool_name:
-                return True
-            continue
         stripped = line.lstrip()
         indent = len(line) - len(stripped)
-        if indent == 0:
+        item_match = _LIST_ITEM_KEY_RE.match(line)
+        if item_match:
+            if list_indent is None:
+                list_indent = indent
+            if indent != list_indent:
+                continue
+            # The first mapping key need not be name. Its column determines
+            # which continuation keys belong to the tool rather than options.
+            field_indent = item_match.start(2)
+            key, value = item_match.group(2, 3)
+        elif indent == 0:
             inside = False
             continue
+        else:
+            key_match = _KEY_RE.match(line)
+            if indent != field_indent or key_match is None:
+                continue
+            key, value = key_match.group(1, 2)
+        if key == "name" and _unquote(value.strip()) == tool_name:
+            return True
     return False
 
 

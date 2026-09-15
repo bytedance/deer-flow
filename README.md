@@ -1458,6 +1458,9 @@ This is the difference between a chatbot with tool access and an agent with an a
 
 ### Agentic Browser Control
 
+Browser dependency auto-detection accepts `name`, `group`, and `use` in any
+order within a tool entry, with either indented or indentless YAML lists.
+
 Reading a page is not the same as *using* one. Alongside the read-only `web_fetch` and `web_capture` tools, DeerFlow ships an optional agentic browser tool group that keeps a live, per-conversation browser session so the agent can actually operate a page — navigate, read the interactive elements, click, type, submit forms, and follow multi-step flows on JavaScript-heavy sites.
 
 Each action returns a fresh snapshot of the page's interactive elements, each addressed by a stable `[ref]` number, so the agent acts on what it just observed instead of guessing selectors. Outbound URLs are SSRF-screened by default. It is powered by Playwright and shipped as an optional extra so the core install stays lean:
