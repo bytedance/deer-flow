@@ -30,11 +30,11 @@ import asyncio
 import json
 import logging
 import re
+import weakref
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from weakref import WeakValueDictionary
 
 from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import RunEventStore, match_ai_message_run_id, normalize_message_ids
@@ -52,7 +52,7 @@ class JsonlRunEventStore(RunEventStore):
         self._seq_counters: dict[str, int] = {}  # thread_id -> current max seq
         # Weak ownership avoids leaking one lock per historical thread without
         # splitting a live lock generation while a holder/waiter still owns it.
-        self._write_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
         lock = self._write_locks.get(thread_id)
@@ -424,6 +424,8 @@ class JsonlRunEventStore(RunEventStore):
             count = len(all_events)
             await asyncio.to_thread(self._delete_thread_files, thread_id)
             self._seq_counters.pop(thread_id, None)
+            # Mutations already queued on this lock resume after deletion; with
+            # files and the counter cleared, they recreate the thread at seq 1.
             return count
 
         return await self._run_mutation(thread_id, mutate)
