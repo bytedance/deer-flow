@@ -14,9 +14,10 @@ import {
 
 import type { Skill } from "@/core/skills/type";
 
-const builtin: Record<
-  string,
-  { title: string; description: string; icon: LucideIcon }
+// Curated card summaries, not copies of the runtime skill descriptions.
+// Keep keys aligned with skills/public; the catalog contract test checks this.
+export const builtinSkillPresentation: Readonly<
+  Record<string, { title: string; description: string; icon: LucideIcon }>
 > = {
   "deep-research": {
     title: "深度研究",
@@ -72,8 +73,9 @@ const builtin: Record<
 
 export function presentSkill(skill: Skill, locale: string) {
   const presentation =
-    skill.category === "public" && Object.hasOwn(builtin, skill.name)
-      ? builtin[skill.name]
+    skill.category === "public" &&
+    Object.hasOwn(builtinSkillPresentation, skill.name)
+      ? builtinSkillPresentation[skill.name]
       : undefined;
   return {
     title: locale === "zh-CN" && presentation ? presentation.title : skill.name,

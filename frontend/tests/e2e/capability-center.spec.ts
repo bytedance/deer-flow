@@ -193,3 +193,70 @@ test("MCP access errors preserve the independently available Lark integration", 
     page.getByRole("button", { name: "Add MCP plugin" }),
   ).toHaveCount(0);
 });
+
+test("Community search gives feedback and clearing it restores import guidance", async ({
+  page,
+}) => {
+  await mockCatalog(page);
+  await page.goto("/workspace/capabilities?tab=skills");
+  await expect(page.locator("article")).toHaveCount(9);
+  const search = page.getByRole("textbox", {
+    name: "Search skills by name or purpose",
+  });
+  await search.fill("nonexistent-query");
+  await expect(
+    page.getByText("No matches found", { exact: true }),
+  ).toBeVisible();
+  await page.getByRole("tab", { name: "Community", exact: true }).click();
+  await expect(search).toHaveValue("nonexistent-query");
+  await expect(
+    page.getByText("No matches found", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Bring a skill from the community", { exact: true }),
+  ).toHaveCount(0);
+  await search.fill("   ");
+  await expect(
+    page.getByText("Bring a skill from the community", { exact: true }),
+  ).toBeVisible();
+  await search.fill("");
+  await page.getByRole("tab", { name: "Built-in", exact: true }).click();
+  await expect(page.locator("article")).toHaveCount(9);
+});
+
+test("plugin filters remain usable after an MCP refetch fails", async ({
+  page,
+}) => {
+  await mockCatalog(page);
+  let failRead = false;
+  await page.route("**/api/mcp/config", async (route) => {
+    if (route.request().method() === "PATCH") {
+      failRead = true;
+      return route.fulfill({ json: { mcp_servers: {} } });
+    }
+    if (failRead)
+      return route.fulfill({ status: 403, json: { detail: "Admin only" } });
+    return route.fallback();
+  });
+  await page.goto("/workspace/capabilities");
+  await expect(page.locator("article")).toHaveCount(6);
+  const installed = page.getByRole("tab", { name: "Installed", exact: true });
+  await installed.click();
+  await expect(page.locator("article")).toHaveCount(5);
+  await page
+    .getByRole("switch", { name: "Enabled GitHub", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(installed).toHaveAttribute("aria-selected", "true");
+  await expect(
+    page.getByRole("button", { name: "Add MCP plugin" }),
+  ).toHaveCount(0);
+  await page.getByRole("tab", { name: "All plugins", exact: true }).click();
+  await expect(
+    page.locator("article").filter({ hasText: "Lark / Feishu" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Configure Lark / Feishu", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+});

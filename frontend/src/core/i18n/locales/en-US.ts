@@ -1008,11 +1008,8 @@ export const enUS: Translations = {
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
-      integrations: "Integrations",
       memory: "Memory",
-      tools: "Tools",
       subagents: "Subagents",
-      skills: "Skills",
       notification: "Notification",
       about: "About",
     },
@@ -1109,8 +1106,6 @@ export const enUS: Translations = {
       languageDescription: "Switch between languages.",
     },
     tools: {
-      title: "Tools",
-      description: "Manage the configuration and enabled status of MCP tools.",
       adminRequired: "Admin privileges are required to manage MCP tools.",
       empty: "No MCP tools configured.",
       addServer: "Add server",
@@ -1468,9 +1463,6 @@ export const enUS: Translations = {
       exportLimit: "The package exceeds an export limit.",
       exportNotFound:
         "This custom skill no longer exists. Refresh the skill list.",
-      title: "Agent Skills",
-      description:
-        "Manage the configuration and enabled status of the agent skills.",
       createSkill: "Create skill",
       emptyTitle: "No agent skill yet",
       emptyDescription:

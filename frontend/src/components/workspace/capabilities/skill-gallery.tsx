@@ -231,7 +231,12 @@ function SkillList({ skills, query }: { skills: Skill[]; query: string }) {
           </Button>
         </div>
       </header>
-      {filter === "community" ? (
+      {query.trim() &&
+      (filter === "community" || filteredSkills.length === 0) ? (
+        <div className="text-muted-foreground py-20 text-center text-sm">
+          {t.capabilities.noResults}
+        </div>
+      ) : filter === "community" ? (
         <Empty className="mt-5 rounded-2xl border border-dashed py-20">
           <EmptyHeader>
             <EmptyMedia variant="icon">
@@ -256,13 +261,7 @@ function SkillList({ skills, query }: { skills: Skill[]; query: string }) {
           )}
         </Empty>
       ) : filteredSkills.length === 0 ? (
-        query ? (
-          <div className="text-muted-foreground py-20 text-center text-sm">
-            {t.capabilities.noResults}
-          </div>
-        ) : (
-          <EmptySkill onCreateSkill={handleCreateSkill} />
-        )
+        <EmptySkill onCreateSkill={handleCreateSkill} />
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {filteredSkills.map((skill) => {

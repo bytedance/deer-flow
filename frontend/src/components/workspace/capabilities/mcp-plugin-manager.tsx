@@ -43,6 +43,7 @@ export function MCPPluginManager(props: MCPPluginManagerProps) {
   if (isLoading || error) {
     return (
       <div className="space-y-4">
+        {props.toolbar}
         {isLoading ? (
           <p role="status" className="text-muted-foreground text-sm">
             {t.common.loading}

@@ -46,8 +46,6 @@ rs.mock("@/core/i18n/hooks", () => ({
       },
       settings: {
         tools: {
-          title: "Tools",
-          description: "Manage MCP tools",
           adminRequired: "Admin required",
           empty: "No tools",
           addServer: "Add server",
@@ -140,19 +138,20 @@ afterEach(() => {
 
 describe("MCPPluginManager MCP switches", () => {
   it.each(["loading", "error"])(
-    "preserves other plugins during an MCP %s",
+    "preserves plugin filters and other plugins during an MCP %s",
     (state) => {
       mcpMockState.isLoading = state === "loading";
       mcpMockState.error =
         state === "error" ? new Error("request failed") : null;
       render(
-        <MCPPluginManager>
+        <MCPPluginManager toolbar={<button>All plugins</button>}>
           <button>Configure Lark</button>
         </MCPPluginManager>,
       );
       expect(
         screen.getByRole("button", { name: "Configure Lark" }),
       ).toBeDefined();
+      expect(screen.getByRole("button", { name: "All plugins" })).toBeDefined();
       expect(screen.queryByRole("button", { name: "Add server" })).toBeNull();
     },
   );

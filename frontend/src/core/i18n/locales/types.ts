@@ -857,11 +857,8 @@ export interface Translations {
       account: string;
       appearance: string;
       channels: string;
-      integrations: string;
       memory: string;
-      tools: string;
       subagents: string;
-      skills: string;
       notification: string;
       about: string;
     };
@@ -951,8 +948,6 @@ export interface Translations {
       languageDescription: string;
     };
     tools: {
-      title: string;
-      description: string;
       adminRequired: string;
       empty: string;
       addServer: string;
@@ -1162,8 +1157,6 @@ export interface Translations {
       exportTimeout: string;
       exportLimit: string;
       exportNotFound: string;
-      title: string;
-      description: string;
       createSkill: string;
       emptyTitle: string;
       emptyDescription: string;
