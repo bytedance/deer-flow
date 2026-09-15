@@ -10,6 +10,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 from deerflow.config.token_budget_config import TokenBudgetConfig
+from deerflow.models.claude_provider import ClaudeChatModel
 
 
 def _make_runtime(thread_id="test-thread", run_id="test-run"):
@@ -219,6 +220,23 @@ class TestTokenBudgetHardStop:
         assert "Thinking" in msgs[0].content
         assert "TOKEN BUDGET EXCEEDED" in msgs[0].content
 
+    def test_hard_stop_drops_provider_tool_call_content_blocks(self):
+        # Anthropic keeps tool_use blocks in content; one left behind without a
+        # tool_result makes every later request on the thread fail with a 400.
+        config = TokenBudgetConfig(max_tokens=100000, hard_stop_threshold=1.0, enabled=True)
+        mw = TokenBudgetMiddleware.from_config(config)
+        tool_calls = [{"name": "bash", "args": {"command": "ls"}, "id": "toolu_1"}]
+        content = [
+            {"type": "text", "text": "Listing"},
+            {"type": "tool_use", "id": "toolu_1", "name": "bash", "input": {"command": "ls"}},
+        ]
+
+        res = mw._apply(_make_state_with_usage(total=105000, tool_calls=tool_calls, content=content), _make_runtime())
+
+        stopped = res["messages"][0]
+        assert [block["type"] for block in stopped.content] == ["text", "text"]
+        assert "TOKEN BUDGET EXCEEDED" in stopped.content[-1]["text"]
+
     def test_hard_stop_stamps_token_capped_stop_reason_consumed_once(self):
         """#3875 Phase 2: a hard-stop stamps ``token_capped`` on a per-run
         accessor the executor reads post-run. It pops on read so a second read
@@ -349,6 +367,42 @@ class TestTokenBudgetAgentGraph:
         # A later user run still starts with a fresh budget.
         graph.invoke({"messages": [HumanMessage("next question")]}, config=config, context={"thread_id": "goal-thread", "run_id": "run-2"})
         assert executed == ["a", "b", "d"]
+
+    def test_checkpointed_hard_stop_leaves_next_anthropic_turn_well_formed(self):
+        """The stopped message is checkpointed and replayed; its tool_use must not reach the next request unpaired."""
+        executed: list[str] = []
+
+        @as_tool
+        def bash(command: str) -> str:
+            """Run a fake shell command."""
+            executed.append(command)
+            return "ok"
+
+        over_budget_call = AIMessage(
+            content=[
+                {"type": "text", "text": "Listing files."},
+                {"type": "tool_use", "id": "toolu_ls", "name": "bash", "input": {"command": "ls"}},
+            ],
+            id="ai-over-budget",
+            tool_calls=[{"name": "bash", "id": "toolu_ls", "args": {"command": "ls"}}],
+            usage_metadata={"input_tokens": 12_000, "output_tokens": 0, "total_tokens": 12_000},
+        )
+        answer = AIMessage(content="second answer", id="ai-answer", usage_metadata={"input_tokens": 100, "output_tokens": 0, "total_tokens": 100})
+        model = _RecordingToolCallingFakeModel(responses=[over_budget_call, answer])
+        mw = TokenBudgetMiddleware(TokenBudgetConfig(enabled=True, max_tokens=10_000))
+        graph = create_agent(model=model, tools=[bash], middleware=[mw], checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "stopped-thread"}}
+
+        graph.invoke({"messages": [HumanMessage("list files")]}, config=config, context={"thread_id": "stopped-thread", "run_id": "run-1"})
+        graph.invoke({"messages": [HumanMessage("continue")]}, config=config, context={"thread_id": "stopped-thread", "run_id": "run-2"})
+
+        assert executed == []
+        payload = ClaudeChatModel(model="claude-sonnet-4-5", anthropic_api_key="sk-ant-offline")._get_request_payload(model.requests[1])
+        turns = [turn["content"] if isinstance(turn["content"], list) else [] for turn in payload["messages"]]
+        for index, blocks in enumerate(turns):
+            tool_use_ids = {block["id"] for block in blocks if block["type"] == "tool_use"}
+            following = turns[index + 1] if index + 1 < len(turns) else []
+            assert tool_use_ids <= {block["tool_use_id"] for block in following if block["type"] == "tool_result"}
 
     @pytest.mark.parametrize("context", [{"thread_id": "no-run-id"}, {"thread_id": "no-run-id", "run_id": None}])
     def test_invocation_without_run_id_keeps_one_budget_across_graph_nodes(self, context):

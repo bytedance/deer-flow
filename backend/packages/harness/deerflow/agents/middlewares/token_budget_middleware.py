@@ -9,7 +9,8 @@ Detection strategy:
      history.
   2. If the highest fraction (input, output, or total) >= warn_threshold,
      queue a warning.
-  3. If the highest fraction >= hard_stop_threshold, strip tool_calls.
+  3. If the highest fraction >= hard_stop_threshold, strip tool calls from
+     every provider surface (structured, raw, and content blocks).
 Warning injection uses the deferred pattern:
   - after_model queues the warning (does NOT mutate state).
   - wrap_model_call injects it as a HumanMessage at the next model call.
@@ -55,6 +56,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
+from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.config.token_budget_config import TokenBudgetConfig
 
 logger = logging.getLogger(__name__)
@@ -235,19 +237,7 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
 
     def _build_hard_stop_update(self, msg: AIMessage, stop_msg: str) -> dict[str, Any]:
         """Build the state update dictionary for a hard stop."""
-        updated_content = self._append_text(msg.content, stop_msg)
-        kwargs = dict(msg.additional_kwargs) if msg.additional_kwargs else {}
-        if "tool_calls" in kwargs:
-            del kwargs["tool_calls"]
-        if "function_call" in kwargs:
-            del kwargs["function_call"]
-
-        response_metadata = dict(getattr(msg, "response_metadata", {}) or {})
-
-        if response_metadata.get("finish_reason") == "tool_calls":
-            response_metadata["finish_reason"] = "stop"
-
-        stopped_msg = msg.model_copy(update={"content": updated_content, "tool_calls": [], "additional_kwargs": kwargs, "response_metadata": response_metadata})
+        stopped_msg = clone_ai_message_with_tool_calls(msg, [], content=self._append_text(msg.content, stop_msg))
         return {"messages": [stopped_msg]}
 
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
