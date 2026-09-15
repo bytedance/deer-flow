@@ -344,6 +344,25 @@ links in pasted documents, tool results, or previous messages grant no access.
 The server supplies source IDs to the model as background user-role data and
 binds the reader to this run's references and authenticated identity.
 
+Clients that cannot add top-level fields to a run request (the LangGraph JS SDK
+builds a fixed body and drops unknown keys) may send the same list as
+`context.conversation_references`:
+
+```json
+{
+  "input": {"messages": [{"role": "user", "content": "Use the requirements agreed in the referenced conversation."}]},
+  "context": {"conversation_references": ["https://deerflow.example/workspace/chats/source-thread"]}
+}
+```
+
+The Gateway lifts the key out of `context` before the run context is assembled,
+so it has the same bounds and error locations as the top-level field, is
+recorded on the run in the same way, and never reaches the merged run context
+or the checkpointed `configurable`. Sending the top-level field and the context
+key together returns 422. `GET /api/features` reports
+`conversation_references.enabled` (the tool is configured) and `max_references`,
+so a client can hide its entry point on deployments without the tool.
+
 The request requires `runs:read` as well as the normal run-creation permission.
 The tool rechecks source ownership on each read; foreign, deleted and unowned
 legacy threads are unavailable. `read_conversation(thread_id, cursor?, limit?)`

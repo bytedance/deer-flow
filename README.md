@@ -1497,7 +1497,9 @@ agent has already read stays in the destination conversation after access
 expires or the source is deleted. A message too long for one read carries a
 continuation, so the agent can read the rest; it asks for the missing part only
 if that read is unavailable.
-This API-only feature adds no frontend selector or automatic history search. See
+SDK clients that cannot add top-level request fields may send the same list as
+`context.conversation_references`, and `GET /api/features` reports whether the
+tool is enabled. There is no frontend selector or automatic history search. See
 [configuration](backend/docs/CONFIGURATION.md#reading-referenced-conversations)
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 
