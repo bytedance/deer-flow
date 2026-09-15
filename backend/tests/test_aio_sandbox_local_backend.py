@@ -11,6 +11,7 @@ import pytest
 from deerflow.community.aio_sandbox.local_backend import (
     LocalContainerBackend,
     _ContainerInspection,
+    _docker_server_is_desktop,
     _format_container_command_for_log,
     _format_container_mount,
     _NetworkInspection,
@@ -185,9 +186,36 @@ def test_docker_desktop_detection_uses_daemon_operating_system(monkeypatch, oper
         assert cmd == ["docker", "info", "--format", "{{json .OperatingSystem}}"]
         return SimpleNamespace(stdout=operating_system, stderr="", returncode=0)
 
+    _docker_server_is_desktop.cache_clear()
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    assert backend._docker_server_is_desktop() is expected
+    try:
+        assert backend._docker_server_is_desktop() is expected
+    finally:
+        _docker_server_is_desktop.cache_clear()
+
+
+def test_docker_desktop_detection_retries_after_transient_failure(monkeypatch):
+    """A transient probe failure is not cached; subsequent call can detect Desktop."""
+    attempts = 0
+
+    def fake_run(cmd, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return SimpleNamespace(stdout="", stderr="daemon starting", returncode=1)
+        return SimpleNamespace(stdout='"Docker Desktop"', stderr="", returncode=0)
+
+    _docker_server_is_desktop.cache_clear()
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    try:
+        assert _docker_server_is_desktop() is False
+        assert _docker_server_is_desktop() is True
+        assert _docker_server_is_desktop() is True
+        assert attempts == 2
+    finally:
+        _docker_server_is_desktop.cache_clear()
 
 
 def test_darwin_open_keeps_docker_to_reconcile_restricted_sandbox(monkeypatch):
@@ -652,6 +680,10 @@ def test_resolve_docker_bind_host_follows_host_gateway_mapping_for_dood(monkeypa
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
     monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
+    monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: "192.168.64.1",
     )
@@ -659,10 +691,42 @@ def test_resolve_docker_bind_host_follows_host_gateway_mapping_for_dood(monkeypa
     assert _resolve_docker_bind_host() == "192.168.64.1"
 
 
+def test_resolve_docker_bind_host_uses_loopback_on_docker_desktop(monkeypatch):
+    """Docker Desktop cannot bind to internal VM gateway IPs, so default to 127.0.0.1."""
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: "192.168.65.254",
+    )
+
+    assert _resolve_docker_bind_host() == "127.0.0.1"
+
+
+def test_resolve_docker_bind_host_explicit_override_precedes_desktop_detection(monkeypatch):
+    """Explicit DEER_FLOW_SANDBOX_BIND_HOST takes precedence even on Docker Desktop."""
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "192.0.2.10")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: True,
+    )
+
+    assert _resolve_docker_bind_host() == "192.0.2.10"
+
+
 def test_resolve_docker_bind_host_brackets_ipv6_host_gateway(monkeypatch):
     """An IPv6 host-gateway mapping binds the bracketed IPv6 address."""
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: "[fd00::1]",
@@ -716,6 +780,10 @@ def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_when_resolution
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
     monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
+    monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: None,
     )
@@ -730,6 +798,10 @@ def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_when_resolution
 def test_resolve_docker_bind_host_falls_back_to_static_bridge_gateway(monkeypatch):
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: None,

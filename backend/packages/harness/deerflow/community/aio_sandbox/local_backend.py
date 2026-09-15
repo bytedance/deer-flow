@@ -273,6 +273,45 @@ def _docker_bridge_gateway_ip() -> str | None:
     return candidate
 
 
+_DOCKER_SERVER_IS_DESKTOP: bool | None = None
+
+
+def _docker_server_is_desktop() -> bool:
+    """Detect Desktop from the daemon, including a Linux DooD Gateway."""
+    global _DOCKER_SERVER_IS_DESKTOP
+    if _DOCKER_SERVER_IS_DESKTOP is not None:
+        return _DOCKER_SERVER_IS_DESKTOP
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{json .OperatingSystem}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("Could not identify the Docker server platform; assuming non-Desktop: %s", exc)
+        return False
+    if result.returncode != 0:
+        logger.warning("Could not identify the Docker server platform; assuming non-Desktop: %s", (result.stderr or "").strip())
+        return False
+    raw = (result.stdout or "").strip()
+    try:
+        operating_system = json.loads(raw)
+    except json.JSONDecodeError:
+        operating_system = raw
+    is_desktop = isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
+    _DOCKER_SERVER_IS_DESKTOP = is_desktop
+    return is_desktop
+
+
+def _clear_docker_desktop_cache() -> None:
+    global _DOCKER_SERVER_IS_DESKTOP
+    _DOCKER_SERVER_IS_DESKTOP = None
+
+
+_docker_server_is_desktop.cache_clear = _clear_docker_desktop_cache  # type: ignore[attr-defined]
+
+
 def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | None = None) -> str:
     """Choose the host interface for legacy Docker ``-p`` sandbox publishing.
 
@@ -287,15 +326,19 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
     the address the sandbox host itself resolves to: ``host.docker.internal``
     follows the daemon's ``host-gateway-ip`` mapping (customizable, possibly
     IPv6), so resolving it yields exactly where the gateway will connect —
-    the published port and the advertised sandbox URL always match. Only
-    when resolution fails does the default bridge gateway serve as a
-    best-effort fallback (with a warning). Operators that genuinely need the
-    old broad bind (e.g. remote clients connecting to the sandbox API
-    directly) can restore it with ``DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0`` —
-    that re-exposes an unauthenticated shell endpoint and should be paired
-    with an external firewall. When operators choose an IPv6 loopback
-    sandbox host, bind Docker to IPv6 loopback as well so the advertised
-    sandbox URL and published socket use the same address family.
+    the published port and the advertised sandbox URL always match. On
+    Docker Desktop, resolving ``host.docker.internal`` yields an internal VM
+    gateway address that the host OS cannot bind, so Desktop daemons default
+    to host loopback (127.0.0.1); Desktop forwards ``host.docker.internal``
+    to host loopback automatically. Only when resolution fails does the
+    default bridge gateway serve as a best-effort fallback (with a warning).
+    Operators that genuinely need the old broad bind (e.g. remote clients
+    connecting to the sandbox API directly) can restore it with
+    ``DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0`` — that re-exposes an
+    unauthenticated shell endpoint and should be paired with an external
+    firewall. When operators choose an IPv6 loopback sandbox host, bind
+    Docker to IPv6 loopback as well so the advertised sandbox URL and
+    published socket use the same address family.
     """
     explicit_bind = bind_host if bind_host is not None else os.environ.get("DEER_FLOW_SANDBOX_BIND_HOST", "").strip()
     if explicit_bind:
@@ -323,6 +366,10 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
         return "[::1]"
     if _is_loopback_sandbox_host(host):
         logger.debug("Docker sandbox bind: 127.0.0.1 (loopback default)")
+        return "127.0.0.1"
+
+    if _docker_server_is_desktop():
+        logger.debug("Docker sandbox bind: 127.0.0.1 (Docker Desktop host loopback)")
         return "127.0.0.1"
 
     resolved = _resolve_sandbox_host_address(host)
@@ -730,25 +777,7 @@ class LocalContainerBackend(SandboxBackend):
 
     def _docker_server_is_desktop(self) -> bool:
         """Detect Desktop from the daemon, including a Linux DooD Gateway."""
-        try:
-            result = subprocess.run(
-                ["docker", "info", "--format", "{{json .OperatingSystem}}"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            logger.warning("Could not identify the Docker server platform; Desktop synthetic DNS answers remain disabled: %s", exc)
-            return False
-        if result.returncode != 0:
-            logger.warning("Could not identify the Docker server platform; Desktop synthetic DNS answers remain disabled: %s", (result.stderr or "").strip())
-            return False
-        raw = (result.stdout or "").strip()
-        try:
-            operating_system = json.loads(raw)
-        except json.JSONDecodeError:
-            operating_system = raw
-        return isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
+        return _docker_server_is_desktop()
 
     def _docker_has_managed_sandboxes(self) -> bool:
         """Keep using Docker while this prefix still has managed sandboxes.
