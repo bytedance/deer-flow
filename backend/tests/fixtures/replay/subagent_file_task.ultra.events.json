@@ -1,0 +1,220 @@
+{
+  "scenario": "subagent_file_task",
+  "mode": "ultra",
+  "events": [
+    {
+      "event": "metadata",
+      "keys": [
+        "run_id",
+        "thread_id"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "title",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "title",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "title",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "custom",
+      "keys": [
+        "description",
+        "model_name",
+        "task_id",
+        "type"
+      ]
+    },
+    {
+      "event": "custom",
+      "keys": [
+        "message",
+        "message_index",
+        "model_name",
+        "task_id",
+        "total_messages",
+        "type",
+        "usage"
+      ]
+    },
+    {
+      "event": "custom",
+      "keys": [
+        "message",
+        "message_index",
+        "model_name",
+        "task_id",
+        "total_messages",
+        "type",
+        "usage"
+      ]
+    },
+    {
+      "event": "custom",
+      "keys": [
+        "message",
+        "message_index",
+        "model_name",
+        "task_id",
+        "total_messages",
+        "type",
+        "usage"
+      ]
+    },
+    {
+      "event": "custom",
+      "keys": [
+        "model_name",
+        "result",
+        "task_id",
+        "type",
+        "usage"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "title",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "title",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "title",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "title",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "end",
+      "keys": null
+    }
+  ]
+}
