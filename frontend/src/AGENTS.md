@@ -145,6 +145,18 @@ Array previews coalesce consecutive generated markers only at the end into one o
 
 ### Interaction Ownership
 
+- `src/components/workspace/model-picker-content.tsx` owns the compact model
+  list, favorite grouping, and the anchored non-modal picker shared by the main
+  composer and Side Chat. Each row keeps model selection and its inline
+  favorite star as sibling buttons. The picker deliberately follows the
+  pre-favorites two-line row density and does not add a search field. Favorites
+  are stored by
+  `core/models/favorites-store.ts` under a user-scoped browser key and only
+  reorder derived display arrays: never sort `useModels().models`, promote a
+  favorite to the default model, prune a temporarily unavailable favorite, or
+  merge the main and Side Chat selection callbacks. Keep favorite buttons out
+  of model-selection buttons; the two call sites continue to own their triggers
+  and their distinct mode/reasoning-effort transitions.
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns branch-from-turn submission and navigation; sidecar `MessageList` instances do not receive the branch action.
 - `core/threads/thread-branch-tree.ts` projects only loaded, same-pin branch lineage into Recent chats. Missing, malformed, cross-pin, self, or cyclic parents stay top-level; unpinned groups follow their freshest descendant while pinned root order stays stable. `recent-chat-list.tsx` caps visual indentation without changing the recursive order.

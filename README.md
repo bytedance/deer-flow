@@ -154,6 +154,13 @@ It is disabled by default; see the linked guide to enable it.
    DeerFlow disables Console cost estimates when currencies are mixed rather
    than presenting an invalid aggregate.
 
+   When several models are configured, open either model picker and use the
+   star beside a model to favorite it. Favorites appear first in both the main
+   chat and Side Chat pickers without changing either chat's selected or
+   default model. They are stored for the signed-in user in the current browser,
+   so they do not sync to another browser or device and do not require a startup
+   setting.
+
    <details>
    <summary>Manual model configuration examples</summary>
 

@@ -134,6 +134,15 @@ export interface Translations {
     downloadFailed: string;
   };
 
+  modelPicker: {
+    title: string;
+    favorites: string;
+    otherModels: string;
+    noModels: string;
+    favoriteModel: (displayName: string, name: string) => string;
+    sessionOnly: string;
+  };
+
   // Citations
   citations: {
     sourcesSummary: (count: number) => string;
@@ -205,7 +214,6 @@ export interface Translations {
     reasoningEffortMediumDescription: string;
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
-    searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
     followupLoading: string;

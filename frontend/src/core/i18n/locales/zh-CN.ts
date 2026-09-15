@@ -155,6 +155,15 @@ export const zhCN: Translations = {
     downloadFailed: "文件压缩包下载失败。",
   },
 
+  modelPicker: {
+    title: "选择模型",
+    favorites: "收藏",
+    otherModels: "其他模型",
+    noModels: "暂无可用模型",
+    favoriteModel: (displayName, name) => `收藏 ${displayName}（${name}）`,
+    sessionOnly: "收藏仅在本次会话中保留。",
+  },
+
   // Citations
   citations: {
     sourcesSummary: (count) => `使用了 ${count} 个来源`,
@@ -231,7 +240,6 @@ export const zhCN: Translations = {
     reasoningEffortMediumDescription: "多层逻辑分析 + 基础验证",
     reasoningEffortHigh: "高",
     reasoningEffortHighDescription: "全维度逻辑推演 + 多路径验证 + 反推校验",
-    searchModels: "搜索模型...",
     surpriseMe: "小惊喜",
     surpriseMePrompt: "给我一个小惊喜吧",
     followupLoading: "正在生成可能的后续问题...",
