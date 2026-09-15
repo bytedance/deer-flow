@@ -97,6 +97,41 @@ resume, (c) branch from an older visible turn, and (d) orphan row counts.
   `scripts/benchmark/checkpoint/bench_channels.py` (per-thread rows/bytes,
   SQLite and Postgres) plus the contract test suite passing.
 
+## History fast-path interaction (wiring requirement)
+
+The trailing duration-only leaf is also the carrier of the run-history
+metadata cache: `persist_run_history_metadata` accumulates `run_durations`
+and `run_message_ids` in the leaf's metadata, and
+`app/gateway/routers/threads.py::get_thread_history` reads that map from the
+latest checkpoint (`_checkpoint_run_durations` /
+`_checkpoint_run_message_ids`, gated on `is_latest_checkpoint`) to answer
+every known turn's duration and message-to-run attribution without scanning
+the event store. The parent checkpoint the leaf clones does **not** carry
+that map.
+
+Deleting the leaf (scenario E1) therefore removes the fast-path cache: the
+next history read sees no durations, falls back to event-store + run-manager
+scans, and `_persist_run_history_metadata_background` re-writes a fresh
+duration-only leaf — which the next retention pass deletes again. Net effect
+without sequencing: the reclaimed row comes straight back, plus recurring
+store scans and an extra write per read.
+
+The wiring PR that introduces the production trigger must therefore either:
+
+1. **Sequence retention away from history reads** — e.g. run retention on a
+   schedule whose next pass re-reclaims the re-created leaf, or run it when
+   the thread is not being read; or
+2. **Adopt a policy that spares cache-carrying leaves** — e.g. a
+   `RetentionPolicy` flag that keeps any trailing duration-only leaf whose
+   metadata still carries `run_durations` / `run_message_ids` (same spirit
+   as the strict pending-writes guard), at the cost of not reclaiming that
+   leaf's rows.
+
+Without either, E1 pruning and history reads churn against each other. This
+decision belongs to the wiring PR, not to the storage-level service: the
+service cannot tell a cache-carrying leaf from a payload-free one on the
+alist path without re-implementing the writer's merge semantics.
+
 ## Item 4 note (large tool results)
 
 `ToolOutputBudgetMiddleware` externalizes oversized tool outputs before they
